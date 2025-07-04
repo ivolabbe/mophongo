@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from photutils.psf import matching
-
+from photutils.psf.matching import TukeyWindow
 
 def _moffat_psf(
     size: int | tuple[int, int], fwhm_x: float, fwhm_y: float, beta: float, theta: float = 0.0
@@ -136,6 +136,13 @@ def moffat_psf(
     return PSF.moffat(size, fwhm_x, fwhm_y, beta, theta).array
 
 
+def pad_to_shape(arr: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Pad array with zeros to center it in the target shape."""
+    py = (shape[0] - arr.shape[0]) // 2
+    px = (shape[1] - arr.shape[1]) // 2
+    return np.pad(arr, ((py, shape[0] - arr.shape[0] - py), (px, shape[1] - arr.shape[1] - px)))
+
+
 def psf_matching_kernel(
     psf_hi: np.ndarray, psf_lo: np.ndarray, *, window: object | None = None
 ) -> np.ndarray:
@@ -152,7 +159,7 @@ def psf_matching_kernel(
         High- and low-resolution PSF arrays normalized to unit sum. They may
         have different shapes.
     window : optional
-        Window function passed to ``create_matching_kernel``.
+        Window function passed to ``create_matching_kernel``. Defaults to TukeyWindow(alpha=0.5).
 
     Returns
     -------
@@ -162,14 +169,12 @@ def psf_matching_kernel(
     if psf_hi.shape != psf_lo.shape:
         ny = max(psf_hi.shape[0], psf_lo.shape[0])
         nx = max(psf_hi.shape[1], psf_lo.shape[1])
+        shape = (ny, nx)
+        psf_hi = pad_to_shape(psf_hi, shape)
+        psf_lo = pad_to_shape(psf_lo, shape)
 
-        def _pad(arr: np.ndarray) -> np.ndarray:
-            py = (ny - arr.shape[0]) // 2
-            px = (nx - arr.shape[1]) // 2
-            return np.pad(arr, ((py, ny - arr.shape[0] - py), (px, nx - arr.shape[1] - px)))
-
-        psf_hi = _pad(psf_hi)
-        psf_lo = _pad(psf_lo)
+    if window is None:
+        window = TukeyWindow(alpha=0.4)
 
     kernel = matching.create_matching_kernel(psf_hi, psf_lo, window=window)
     return np.asarray(kernel)

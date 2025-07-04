@@ -9,6 +9,8 @@ from mophongo.psf import PSF
 from mophongo.templates import Templates
 from utils import make_simple_data, save_fit_diagnostic
 
+def test_flux_recovery(tmp_path):
+    images, segmap, catalog, psfs, truth = make_simple_data()
 
 def test_flux_recovery(tmp_path):
     images, segmap, catalog, psfs, truth, truth_img = make_simple_data()
@@ -16,6 +18,7 @@ def test_flux_recovery(tmp_path):
     psf_hi = PSF.from_array(psfs[0])
     psf_lo = PSF.from_array(psfs[1])
     kernel = psf_hi.matching_kernel(psf_lo)
+
 
     tmpls = Templates.from_image(
         images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel
@@ -29,6 +32,7 @@ def test_flux_recovery(tmp_path):
     model = fitter.model_image()
     fname = tmp_path / "fit.png"
     save_fit_diagnostic(fname, images[1], model, fitter.residual())
+
     assert fname.exists()
 
 

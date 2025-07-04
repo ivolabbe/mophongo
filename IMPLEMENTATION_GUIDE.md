@@ -3,7 +3,7 @@
 This document provides guidelines for developing the Standalone Photometry Pipeline.
 
 ## General Rules
-- use poetry to maintain environment, keep pyproject.toml current
+- use poetry to maintain environment, keep pyproject.toml current, never directly edit poetry.lock
 - Prefer using **numpy**, **scipy**, and **astropy** for numerical and astronomical operations.
 - always consult implementation_guide and checklist for consistency.
 - Organize code under the `mophongo` package with clear module boundaries.

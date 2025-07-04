@@ -35,7 +35,7 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
   - Load or receive arrays for the images, catalog, and PSFs.
   - Call template builder, construct sparse system, solve for fluxes, and return a table of measurements plus residuals.
  - [x] **Simulation utilities for tests** (`tests/utils.py`)
-  - Create fake catalogs and images with Moffat sources of varying size and ellipticity. positions are ra,dec
+  - [x] Create fake catalogs and images with Moffat sources of varying size and ellipticity. positions are ra,dec
   - Produce matching high‑res and low‑res PSFs, with low res PSF at least 5x high res PSF.
   - max 20 sources, max 400 x 400 pixel high resolution image
   - Convolve with a kernel derived from different PSFs to obtain the low‑resolution image and add Gaussian noise.

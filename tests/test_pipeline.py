@@ -12,7 +12,7 @@ from utils import make_simple_data, save_diagnostic_image
 
 
 def test_pipeline_flux_recovery(tmp_path):
-    images, segmap, catalog, psfs, truth = make_simple_data()
+    images, segmap, catalog, psfs, truth, truth_img = make_simple_data()
     table, resid = run_photometry(images, segmap, catalog, psfs)
 
     for idx in range(len(psfs)):
@@ -22,5 +22,5 @@ def test_pipeline_flux_recovery(tmp_path):
 
     model = images[1] - resid[1]
     fname = tmp_path / "diagnostic.png"
-    save_diagnostic_image(fname, images[0], images[1], model, resid[1])
+    save_diagnostic_image(fname, truth_img, images[0], images[1], model, resid[1])
     assert fname.exists()

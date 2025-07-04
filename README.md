@@ -2,6 +2,20 @@
 
 A lightweight photometry pipeline.
 
+## Installation
+
+Install the project dependencies using [Poetry](https://python-poetry.org/) before running the code or tests:
+
+```bash
+poetry install
+```
+
+Alternatively, you can install in editable mode with pip:
+
+```bash
+pip install -e .
+```
+
 ## Usage
 
 ```python

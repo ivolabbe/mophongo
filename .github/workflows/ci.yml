@@ -15,14 +15,16 @@ jobs:
 
       - name: Install Poetry
         run: |
+          export POETRY_HOME="$HOME/poetry"
           curl -sSL https://install.python-poetry.org | python - -y
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          echo "$POETRY_HOME/bin" >> $GITHUB_PATH
 
       - name: Debug Poetry path
         run: |
           echo "PATH=$PATH"
-          which poetry
-          ls -l ~/.local/bin/poetry
+          echo "$POETRY_HOME/bin"
+          ls -l "$POETRY_HOME/bin"
+	  which poetry
 
       - name: Install dependencies
         run: poetry install --sync --no-interaction

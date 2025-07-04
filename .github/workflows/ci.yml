@@ -24,7 +24,6 @@ jobs:
           echo "PATH=$PATH"
           echo "$POETRY_HOME/bin"
           ls -l "$POETRY_HOME/bin"
-	  which poetry
 
       - name: Install dependencies
         run: poetry install --sync --no-interaction

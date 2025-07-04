@@ -9,7 +9,6 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 
 ## Dependencies
 - [x] Add `numpy`, `scipy`, and `astropy` to project dependencies
-- [ ] Add `scikit-image` for segmentation utilities
 - [x] Run `poetry install` to install all dependencies
 
 ## assumptions input data

@@ -1,4 +1,5 @@
-from .fit import Template, FitConfig, SparseFitter
+from .templates import Template
+from .fit import FitConfig, SparseFitter
 
 __all__ = [
     "Template",

@@ -3,6 +3,7 @@ from astropy.table import Table
 
 from mophongo.psf import PSF
 from mophongo.templates import _convolve2d
+import matplotlib.pyplot as plt
 
 
 def make_simple_data():
@@ -30,3 +31,24 @@ def make_simple_data():
     catalog = Table({'y': [p[0] for p in yx], 'x': [p[1] for p in yx]})
 
     return [hires, lowres], segmap, catalog, [psf_hi.array, psf_lo.array], fluxes
+
+
+def save_diagnostic_image(
+    filename: str,
+    hires: np.ndarray,
+    lowres: np.ndarray,
+    model: np.ndarray,
+    residual: np.ndarray,
+) -> None:
+    """Save 2x2 diagnostic plot with grayscale images."""
+    fig, axes = plt.subplots(2, 2, figsize=(6, 6))
+    data = [hires, lowres, model, residual]
+    titles = ["hires", "lowres", "model", "residual"]
+    for ax, img, title in zip(axes.ravel(), data, titles):
+        ax.imshow(img, cmap="gray", origin="lower")
+        ax.set_title(title)
+        ax.set_xticks([])
+        ax.set_yticks([])
+    plt.tight_layout()
+    fig.savefig(filename, dpi=150)
+    plt.close(fig)

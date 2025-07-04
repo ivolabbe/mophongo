@@ -2,7 +2,7 @@ import numpy as np
 from astropy.table import Table
 
 
-from mophongo.psf import PSF, _gaussian_psf
+from mophongo.psf import PSF
 from mophongo.templates import _convolve2d, Template
 import matplotlib.pyplot as plt
 

@@ -16,6 +16,6 @@ jobs:
           python-version: '3.12'
           cache: 'poetry'   
 
-      - run: poetry install --sync --no-interaction
+      - run: poetry sync --no-interaction
 
       - run: poetry run pytest -q tests/

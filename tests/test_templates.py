@@ -1,5 +1,5 @@
 import numpy as np
-from mophongo.templates import extract_templates
+from mophongo.templates import Templates
 
 
 def test_extract_templates_sizes_and_norm():
@@ -20,7 +20,8 @@ def test_extract_templates_sizes_and_norm():
     kernel /= kernel.sum()
 
     positions = [(3, 3), (5.5, 5.5)]
-    templates = extract_templates(hires, segmap, positions, kernel)
+    tmpl = Templates()
+    templates = tmpl.extract_templates(hires, segmap, positions, kernel)
 
     # check two templates
     assert len(templates) == 2

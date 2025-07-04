@@ -30,12 +30,12 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
   - Build sparse normal matrix AᵀA and vector Aᵀb using the templates and low‑res image (weights from inverse variance).
   - Solve for fluxes with scipy.sparse.linalg.cg (plus optional positivity and residual regularization).
   - Create the modeled low‑res image and residual map.
-- [ ] **Pipeline orchestrator** (`src/mophongo/pipeline.py`)
+ - [x] **Pipeline orchestrator** (`src/mophongo/pipeline.py`)
   - `run_photometry` to tie all pieces together
   - don't implement source detection just yet: assume detection + segmentation image + catalog are available.
   - Load or receive arrays for the images, catalog, and PSFs.
   - Call template builder, construct sparse system, solve for fluxes, and return a table of measurements plus residuals.
-- [ ] **Simulation utilities for tests** (`tests/utils.py`)
+ - [x] **Simulation utilities for tests** (`tests/utils.py`)
   - Create fake catalogs and images with Moffat sources of varying size and ellipticity. positions are ra,dec
   - Produce matching high‑res and low‑res PSFs, with low res PSF at least 5x high res PSF.
   - max 20 sources, max 400 x 400 pixel high resolution image
@@ -45,7 +45,7 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
   - Test failure modes (e.g., negative flux regularization) on a subset of sources.
     
 ## Testing
-- [ ] Add simulated data utilities in `tests/utils.py`
-- [ ] Create end-to-end tests in `tests/test_pipeline.py`
+ - [x] Add simulated data utilities in `tests/utils.py`
+ - [x] Create end-to-end tests in `tests/test_pipeline.py`
 - [x] Run `pytest` to ensure all tests pass
 

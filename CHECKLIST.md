@@ -45,6 +45,7 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
     
 ## Testing
  - [x] Add simulated data utilities in `tests/utils.py`
- - [x] Create end-to-end tests in `tests/test_pipeline.py`
+- [x] Create end-to-end tests in `tests/test_pipeline.py`
 - [x] Run `pytest` to ensure all tests pass
+- [x] Save diagnostic plot during pipeline test
 

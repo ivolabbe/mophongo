@@ -25,11 +25,9 @@ def make_simple_data(
     nsrc = 10
 
     hi_fwhm = 2.0
-    lo_fwhm = 5.0 * hi_fwhm
-
-    # use generous grids so PSF tails are fully contained
-    psf_hi = PSF.gaussian(13, hi_fwhm, hi_fwhm)
-    psf_lo = PSF.gaussian(41, lo_fwhm, lo_fwhm)
+    lo_fwhm = 4.0 * hi_fwhm
+    psf_hi = PSF.gaussian(9, hi_fwhm, hi_fwhm)
+    psf_lo = PSF.gaussian(31, lo_fwhm, lo_fwhm)
 
     # Expand PSFs to common grid for kernel computation
     size = (
@@ -77,6 +75,7 @@ def save_diagnostic_image(
     residual: np.ndarray,
 ) -> None:
     """Save 2x2 diagnostic plot with grayscale images."""
+    print('Saving diagnostic image to:', filename)
     fig, axes = plt.subplots(2, 2, figsize=(6, 6))
     data = [hires, lowres, model, residual]
     titles = ["hires", "lowres", "model", "residual"]

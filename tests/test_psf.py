@@ -10,7 +10,6 @@ from mophongo.psf import PSF
 from mophongo.templates import _convolve2d
 from utils import make_simple_data, save_psf_diagnostic
 
-
 def test_moffat_psf_shape_and_normalization():
     psf = PSF.moffat(11, fwhm_x=3.0, fwhm_y=3.0, beta=2.5)
     assert psf.array.shape == (11, 11)
@@ -22,7 +21,6 @@ def test_psf_matching_kernel_properties(tmp_path):
 
     psf_hi = PSF.from_array(psfs[0])
     psf_lo = PSF.from_array(psfs[1])
-
     kernel = psf_hi.matching_kernel(psf_lo)
     assert kernel.shape == psf_lo.array.shape
 

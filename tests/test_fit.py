@@ -5,38 +5,44 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import numpy as np
 from mophongo.fit import FitConfig, SparseFitter
-from mophongo.templates import Template
+from mophongo.psf import PSF
+from mophongo.templates import Templates
+from utils import make_simple_data, save_fit_diagnostic
 
 
-def test_flux_recovery():
-    img = np.zeros((4, 4), dtype=float)
-    weights = np.ones_like(img)
+def test_flux_recovery(tmp_path):
+    images, segmap, catalog, psfs, truth, truth_img = make_simple_data()
 
-    flux1, flux2 = 1.5, 2.5
-    img[1, 1] = flux1
-    img[2, 2] = flux2
+    psf_hi = PSF.from_array(psfs[0])
+    psf_lo = PSF.from_array(psfs[1])
+    kernel = psf_hi.matching_kernel(psf_lo)
 
-    t1 = Template(array=np.array([[1.0]]), bbox=(1, 2, 1, 2))
-    t2 = Template(array=np.array([[1.0]]), bbox=(2, 3, 2, 3))
-
-    fitter = SparseFitter([t1, t2], img, weights, config=FitConfig())
+    tmpls = Templates.from_image(
+        images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel
+    )
+    fitter = SparseFitter(list(tmpls), images[1], np.ones_like(images[1]), FitConfig())
     fitter.build_normal_matrix()
     x, info = fitter.solve()
 
     assert info == 0
-    assert np.allclose(x, [flux1, flux2])
+    assert np.allclose(x, truth, rtol=2e-2)
     model = fitter.model_image()
-    assert np.allclose(model, img)
+    fname = tmp_path / "fit.png"
+    save_fit_diagnostic(fname, images[1], model, fitter.residual())
+    assert fname.exists()
 
 
 def test_ata_symmetry():
-    img = np.zeros((3, 3), dtype=float)
-    weights = np.ones_like(img)
+    images, segmap, catalog, psfs, _, _ = make_simple_data()
 
-    t1 = Template(array=np.ones((2, 2)), bbox=(0, 2, 0, 2))
-    t2 = Template(array=np.ones((2, 2)), bbox=(1, 3, 1, 3))
+    psf_hi = PSF.from_array(psfs[0])
+    psf_lo = PSF.from_array(psfs[1])
+    kernel = psf_hi.matching_kernel(psf_lo)
 
-    fitter = SparseFitter([t1, t2], img, weights, config=FitConfig())
+    tmpls = Templates.from_image(
+        images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel
+    )
+    fitter = SparseFitter(list(tmpls), images[1], np.ones_like(images[1]), FitConfig())
     fitter.build_normal_matrix()
     ata = fitter.ata.toarray()
     assert np.allclose(ata, ata.T)

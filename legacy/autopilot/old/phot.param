@@ -1,0 +1,103 @@
+# general bookkeeping
+#det = '../image/HST/GOODS-S_F125W_F140W_F160W_rebin3_sci.fits'
+#detw = '../image/HST/GOODS-S_F125W_F140W_F160W_rebin3_wht.fits'
+
+det =  '../image/HST/hlf_goodss_f160w_180mas_v1.0_sci.fits'
+detw = '../image/HST/hlf_goodss_f160w_180mas_v1.0_wht.fits'
+
+d='../image/'
+phot = d+['K/CDFS_Kstot_sci.fits','IRAC/GREATS/GREATS_GOODS-S_CH'+['1','2','3','4']+'_v1.2_sci.fits']   ; photometry images
+photw = d+['K/CDFS_Kstot_wht.fits','IRAC/GREATS/GREATS_GOODS-S_CH'+['1','2','3','4']+'_v1.2_exp.fits']  ; phot weight images
+
+zpab = [26.23, 25.0, 23.087, 23.087, 23.087, 23.087]  ; image zeropoints
+gencat_header=['JHK','K','1','2','3','4']
+tile_size=[10, 10, 24, 24, 24, 24]        ; size [arsec] of psf tiles in [det, phot1, phot2...]
+psf_snrlim = [400,200,200,100,100,100]  ; SNR limit for [detection, photometry1, photometry2, ..etc]
+shiftmap_snrlim = [40, 20, 20, 20, 20, 20]       ; minimum SNR for objects to include in shift calculation
+
+cat  = 'GOODSS_masterLBG_phot_v7.0.cat'
+outdir = 'run6/'                         ; directory for results
+version = '3'                    ; output version
+
+# output catalog
+# F125W,F140W,F160W zp : 26.23,26.45,25.94
+# take 26.23 for pseudo jh zeropoint
+zpcat = 31.4                     ; units of catalogs. E.g. nanoJy = 31.4 AB
+
+# mapping and removing shifts in photometry image
+shiftmap_plim = 0.97       ; reject 2% extremes of the shift distribution
+shiftmap_dim = 1           ; polynomial degree for fit
+shiftmap_box = 2.         ; center within box [arcsec]
+
+# skysubtraction and registration
+skysub_scale = 4           ; subtract sky on scales that are multiples of kernel tile size
+skysub_nsig = 2            ; clip skysub_nsig * rms outliers
+reg_dim = 3                ; polynomial degree for wcs mapping (2 or 3)
+skysub_det  = 0            ; 1 = skysub on detection image
+skysub_phot  = 0           ; 1 = skysub on phot image
+imdir = 'img/'                                         ; directory for images
+
+# sextractor detection and crossmatching
+# can be more aggressive with smaller filter
+detect_thresh = 1.3
+filter_name = 'gauss_1.5_3x3.conv'      ; check ./setup/sex for available filters
+detect_deblend_mincont = 0.0001
+
+# finding stars / point sources in detection image
+star_prh   = 0.03          ; determine half light radius from prh percentile brightest objects
+star_rhlim = 0.15            ; accept fractional difference from mode of half light radii
+star_axratio = 0.8         ; only keep lightweighted axis ratios greater than
+star_rhlim_abs = 5.
+
+# building psf map with klpsf param
+psfdir = 'psf/'                                        ; directory for psfs
+maxshift = 1.5                ; maximum shift when recentering
+# lists of point sources to use for PSF. Default: use detection map star list
+# psf_cat =  replicate([file_basename(det,'.fits')+'_star.xy'],psf.length)
+psf_max_basis = AUTO         ; maximum number KL basis functions (AUTO)
+
+
+# building psf map with klpsf param
+## shouldn't touch below unless necessary
+root=psfdir+'psf_'   ; prefix for output names
+r_center = AUTO     ; aper radius to center  (AUTO) r=[tile_size/r_center]
+r_bg =     AUTO     ; background aper (+second pass normalize aper) in r=[tile_size/2-r_bg]
+bgthresh = 3.5        ; reject threshold in sigma for background estimate
+mthresh = 4.5        ; reject threshold in sigma for neighbor masking
+grow = 1.            ; number of pixels to grow rejection mask
+niter = 1           ; number of iterations for rejection
+gclim = 0.2         ; reject stars whose growth curves deviate by more than gclim
+ngrid = AUTO          ; psf is interpolated or fit on grid x grid map
+average = 1          ; do KL decompose relative to average rather than median
+magbuf = 0.0         ; also reject stars that are magbuf fainter than saturated stars
+peakthresh = 1.0     ; reject sources with peak flux gt 0.8 x peak of brightest source
+klpsf_checkplots = 1
+psf_max_basis = 10
+
+
+# make kernel (on the fly from PSF maps)
+#  psflo - (psfhi x kernel) OR a relative improvement 1/20. of that
+klim = 1e-3         ; maximum absolute deviation of growthcurve
+maxiter = 20         ; maximum number of deconvolution iterations
+
+# deblending + photometry
+# imtmpl2 = ''           ; second template at other wavelength. e.g. optical
+subphot_trial  = 0    ; if set to a number N > 0 then only do photometry on the first N objects
+subphot_maxshift = 0.3     ; maximum shift arcsec when recentering -> should derive globally
+subphot_raper = [0.9]       ; photometry is done in aperture of this radius
+subphot_sys_err  = 0.05
+subphot_savefits = 1    ; only do this for
+native='/Volumes/Data/PROG/idl/ifl/lib/libifl.dylib'   ; library with native routines
+tmpl_snrlo = 15.0        ; below this threshold templates profiles are assumed to be point sources
+subphot_snrhi=200        ; if high snr then fit source with extra point source
+subphot_snrlo=3         ; do not fit below this snr threshold. Always fit if snrlo = -1
+tmpl2_snrlo=subphot_snrhi    ; SNR limit for using a second template. if imtmpl2 not specified, add point source
+subphot_maskhi=0         ; mask cores of sources with SNR > subphot_snrhi (cosmetic only for diagnostic image)
+# subphot_photbin = 0.3   ; display
+subphot_display = 0
+subphot_nsigma = 3.
+subphot_bg = 'constant'
+
+
+# crossmatching catalogs
+prepcat_rlim = 0.6     ; max distance for cross match. if not found add circular segment or rlim/2

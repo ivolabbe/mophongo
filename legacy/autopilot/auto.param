@@ -1,0 +1,10 @@
+dir_image = ['/Users/ivo/Astro/FIELDS/HUDF/XDF/','/Users/ivo/Astro/FIELDS/GREATS/']
+
+detect_band  = ['f160w','f125w']
+phot_band = ['_f*_','*CH1*']
+
+prefix = ['60mas','GOODS-S']
+postfix = ['*.fits*']
+
+
+# psf_max_basis = 0   ; @@@ lots of freedom in basis functions goes wrong near outskirts

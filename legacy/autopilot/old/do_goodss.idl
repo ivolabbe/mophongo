@@ -1,0 +1,54 @@
+; improvements:
+; - "latest" keyword will make a link to the latest "run/" 
+; -  can run for all objects in catalog in one go, or one at a time 
+; -  one at a time good if few objects, or when tweaking sttings.
+; -  gencat is much improved, now outputs 2 catalogs:
+;    + GOODSS_masterLBG_phot_v7.0_mophongo_full_output_v3.cat - all raw measurements
+;    + GOODSS_masterLBG_phot_v7.0_v3.cat                      - cleaned up catalog
+; - cleaned up catalog now includes a simple "use" = 1/0 flag per band
+
+resolve_all, resolve_procedure='dophot'
+dophot_shiftmap 
+dophot_reg, /force
+dophot_sex
+dophot_star 
+dophot_mkpsf
+dophot_mkkern
+dophot_mkkern_aor
+dophot_prepcat
+dophot_starcat, /force
+dophot_doall               ; run entire catalog in one go
+
+
+; or read and process separately  
+rcat,'GOODSS_masterLBG_phot_v7.0.cat',/unpack
+for i=0,n_elements(id)-1 do dophot_doall, single=id[i]
+
+
+; can run with separate alternative parameters without editing phot.param
+; every parameter specified in the "extra" block will overwrite the parameter
+; in the config file
+;
+; good for easy checking parameters, or running with a extra filter
+; ---------------- K seperately, different tile size
+extra = {phot: '../image/K/CDFS_Kstot_sci.fits', $
+         photw: '../image/K/CDFS_Kstot_wht.fits', tile_size: 10., $
+         psf_snrlim: [400,100]}
+dophot_shiftmap, _extra=extra
+dophot_reg, _extra=extra
+dophot_mkpsf, _extra=extra
+dophot_mkkern, _extra=extra
+dophot_starcat, _extra=extra, /force 
+dophot_doall, _extra=extra, /force
+
+
+
+readparam, 'phot.param'
+d= '../../GOODS-S/image/K/CDFS_Kstot'
+extra = {phot: [phot, d+'_sci.fits'], photw: [photw,d+'_wht.fits'], zpab:[zpab,25.0]}
+dophot_gencat, /latest, _extra=extra
+
+
+
+;find latest/ -type f -exec sed -i 's/-/ \-/g' {} +  
+;sed -i -- 's/-/ \-/g' latest/

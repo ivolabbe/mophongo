@@ -15,7 +15,9 @@ def _pad_to(array: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     return np.pad(array, ((py, ty - ny - py), (px, tx - nx - px)))
 
 
-def make_simple_data(seed: int = 0) -> tuple[list[np.ndarray], np.ndarray, Table, list[np.ndarray], list[float]]:
+def make_simple_data(
+    seed: int = 0,
+) -> tuple[list[np.ndarray], np.ndarray, Table, list[np.ndarray], list[float]]:
     """Create a synthetic dataset with 10 well-separated sources."""
     rng = np.random.default_rng(seed)
 
@@ -24,7 +26,6 @@ def make_simple_data(seed: int = 0) -> tuple[list[np.ndarray], np.ndarray, Table
 
     hi_fwhm = 2.0
     lo_fwhm = 4.0 * hi_fwhm
-
     psf_hi = PSF.gaussian(9, hi_fwhm, hi_fwhm)
     psf_lo = PSF.gaussian(31, lo_fwhm, lo_fwhm)
 

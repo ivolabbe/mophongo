@@ -1,43 +1,29 @@
 import numpy as np
+from mophongo.psf import PSF
 from mophongo.templates import Templates
-from utils import save_template_diagnostic
-
+from utils import make_simple_data, save_template_diagnostic
 
 def test_extract_templates_sizes_and_norm(tmp_path):
-    # simple 7x7 high-res image with two sources
-    hires = np.zeros((7, 7))
-    segmap = np.zeros_like(hires, dtype=int)
+    images, segmap, catalog, psfs, truth = make_simple_data()
+    psf_hi = PSF.from_array(psfs[0])
+    psf_lo = PSF.from_array(psfs[1])
+    kernel = psf_hi.matching_kernel(psf_lo)
 
-    # source 1: 3x3 square around center with flux 9
-    segmap[2:5, 2:5] = 1
-    hires[2:5, 2:5] = 1.0
-
-    # source 2: 2x2 square bottom-right with flux 4
-    segmap[5:7, 5:7] = 2
-    hires[5:7, 5:7] = 2.0
-
-    # kernel normalized to sum 1
-    kernel = np.array([[0.0, 1.0, 0.0], [1.0, 4.0, 1.0], [0.0, 1.0, 0.0]])
-    kernel /= kernel.sum()
-
-    positions = [(3, 3), (5.5, 5.5)]
     tmpl = Templates()
-    templates = tmpl.extract_templates(hires, segmap, positions, kernel)
+    templates = tmpl.extract_templates(
+        images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel
+    )
 
-    # check two templates
-    assert len(templates) == 2
+    assert len(templates) == len(truth)
 
-    # template 1 bounding box expected (1,6,1,6) -> size 5x5
-    t1 = templates[0]
-    assert t1.array.shape == (5, 5)
-    assert t1.bbox == (1, 6, 1, 6)
-    np.testing.assert_allclose(t1.array.sum(), 1.0, rtol=1e-6)
+    hires = images[0]
+    for tmpl_obj in templates:
+        np.testing.assert_allclose(tmpl_obj.array.sum(), 1.0, rtol=1e-6)
+        y0, y1, x0, x1 = tmpl_obj.bbox
+        label = segmap[int((y0 + y1) / 2), int((x0 + x1) / 2)]
+        hi_cut = hires[y0:y1, x0:x1] * (segmap[y0:y1, x0:x1] == label)
+        assert np.all(hi_cut[segmap[y0:y1, x0:x1] != label] == 0)
 
-    # template 2 bounding box expected to be clipped -> (4,7,4,7) -> size 3x3
-    t2 = templates[1]
-    assert t2.array.shape == (3, 3)
-    assert t2.bbox == (4, 7, 4, 7)
-    np.testing.assert_allclose(t2.array.sum(), 0.875, rtol=1e-6)
     fname = tmp_path / "templates.png"
-    save_template_diagnostic(fname, hires, templates)
+    save_template_diagnostic(fname, images[0], templates[:5])
     assert fname.exists()

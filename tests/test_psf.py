@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mophongo.psf import PSF
 from mophongo.templates import _convolve2d
+from utils import save_psf_diagnostic
 
 
 def test_moffat_psf_shape_and_normalization():
@@ -16,7 +17,7 @@ def test_moffat_psf_shape_and_normalization():
     np.testing.assert_allclose(psf.array.sum(), 1.0, rtol=1e-6)
 
 
-def test_psf_matching_kernel_properties():
+def test_psf_matching_kernel_properties(tmp_path):
     size = 15
     psf_hi = PSF.moffat(size, 2.0, 2.0, beta=2.5)
     psf_lo = PSF.moffat(size, 3.0, 3.0, beta=2.5)
@@ -25,6 +26,9 @@ def test_psf_matching_kernel_properties():
     conv = _convolve2d(psf_hi.array, kernel)
     # kernel should transform psf_hi approximately into psf_lo
     np.testing.assert_allclose(conv, psf_lo.array, rtol=1e-2, atol=5e-4)
+    fname = tmp_path / "psf_kernel.png"
+    save_psf_diagnostic(fname, psf_hi.array, psf_lo.array, kernel)
+    assert fname.exists()
 
 
 def test_psf_matching_kernel_different_sizes():

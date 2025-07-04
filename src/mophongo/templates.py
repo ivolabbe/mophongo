@@ -39,6 +39,23 @@ class Templates:
     def __iter__(self) -> Iterator[Template]:  # pragma: no cover - trivial
         return iter(self._templates)
 
+    @classmethod
+    def from_image(
+        cls,
+        hires_image: np.ndarray,
+        segmap: np.ndarray,
+        positions: Iterable[Tuple[float, float]],
+        kernel: np.ndarray,
+    ) -> "Templates":
+        """Create a :class:`Templates` instance and extract cutouts."""
+        obj = cls()
+        obj.extract_templates(hires_image, segmap, positions, kernel)
+        return obj
+
+    @property
+    def templates(self) -> List[Template]:
+        """Return the list of templates."""
+        return self._templates
     def extract_templates(
         self,
         hires_image: np.ndarray,

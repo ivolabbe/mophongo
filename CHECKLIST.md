@@ -8,9 +8,9 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [x] Add basic test suite with `pytest`
 
 ## Dependencies
-- [ ] Add `numpy`, `scipy`, and `astropy` to project dependencies
+- [x] Add `numpy`, `scipy`, and `astropy` to project dependencies
 - [ ] Add `scikit-image` for segmentation utilities
-- [ ] Run `poetry install` to install all dependencies
+- [x] Run `poetry install` to install all dependencies
 
 ## assumptions input data
 - [ ] input data are images + wcs that are multiextention fits files with first extention the SCI image, and second extention the ERR image
@@ -18,15 +18,15 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [ ] detection image, and associated segmentation map image, where each pixel can only belong to a source of a certain id.
 
 ## Core Modules
-- [ ] **PSF utilities** (`src/mophongo/psf.py`)
+- [x] **PSF utilities** (`src/mophongo/psf.py`)
   - `moffat_psf` Generate Moffat PSF images (ellipticity/FWHM/beta parameters).
   - `psf_matching_kernel` to Compute convolution kernels to transform the high‑resolution PSF into the low‑resolution PSF (Fourier domain or direct numerical solution)
-- [ ] **Template builder** (`src/mophongo/templates.py`)
+- [x] **Template builder** (`src/mophongo/templates.py`)
   - `extract_templates` to create PSF-matched templates
   - Extract per-object cutouts from the high‑res image using the detection segmentation.
   - Normalize cutouts to unit flux and convolve each with the PSF kernel to produce a template in the low‑res pixel grid.
   - Store bounding box coordinates for later overlap calculations.
-- [ ] **Sparse fitter** (`src/mophongo/fit.py`)
+- [x] **Sparse fitter** (`src/mophongo/fit.py`)
   - Build sparse normal matrix AᵀA and vector Aᵀb using the templates and low‑res image (weights from inverse variance).
   - Solve for fluxes with scipy.sparse.linalg.cg (plus optional positivity and residual regularization).
   - Create the modeled low‑res image and residual map.
@@ -47,5 +47,5 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 ## Testing
 - [ ] Add simulated data utilities in `tests/utils.py`
 - [ ] Create end-to-end tests in `tests/test_pipeline.py`
-- [ ] Run `pytest` to ensure all tests pass
+- [x] Run `pytest` to ensure all tests pass
 

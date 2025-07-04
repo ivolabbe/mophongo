@@ -7,13 +7,7 @@ import numpy as np
 from scipy.sparse import lil_matrix, eye
 from scipy.sparse.linalg import cg
 
-
-@dataclass
-class Template:
-    """PSF-matched template cutout and its bounding box."""
-
-    data: np.ndarray
-    bbox: Tuple[slice, slice]
+from .templates import Template
 
 
 @dataclass
@@ -47,14 +41,20 @@ class SparseFitter:
 
     @staticmethod
     def _intersection(
-        a: Tuple[slice, slice], b: Tuple[slice, slice]
-    ) -> Tuple[slice, slice] | None:
-        y0 = max(a[0].start, b[0].start)
-        y1 = min(a[0].stop, b[0].stop)
-        x0 = max(a[1].start, b[1].start)
-        x1 = min(a[1].stop, b[1].stop)
+        a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]
+    ) -> Tuple[int, int, int, int] | None:
+        y0 = max(a[0], b[0])
+        y1 = min(a[1], b[1])
+        x0 = max(a[2], b[2])
+        x1 = min(a[3], b[3])
         if y0 >= y1 or x0 >= x1:
             return None
+        return y0, y1, x0, x1
+
+    @staticmethod
+    def _bbox_to_slices(bbox: Tuple[int, int, int, int]) -> Tuple[slice, slice]:
+        """Convert integer bounding box to slices for array indexing."""
+        y0, y1, x0, x1 = bbox
         return slice(y0, y1), slice(x0, x1)
 
     def build_normal_matrix(self) -> None:
@@ -64,39 +64,31 @@ class SparseFitter:
         atb = np.zeros(n)
 
         for i, tmpl_i in enumerate(self.templates):
-            sl_i = tmpl_i.bbox
+            sl_i = self._bbox_to_slices(tmpl_i.bbox)
             w_i = self.weights[sl_i]
             img_i = self.image[sl_i]
-            temp_i = tmpl_i.data
+            temp_i = tmpl_i.array
             atb[i] = np.sum(temp_i * w_i * img_i)
 
             ata[i, i] = np.sum(temp_i * w_i * temp_i)
 
             for j in range(i + 1, n):
                 tmpl_j = self.templates[j]
-                inter = self._intersection(sl_i, tmpl_j.bbox)
+                inter = self._intersection(tmpl_i.bbox, tmpl_j.bbox)
                 if inter is None:
                     continue
+                y0, y1, x0, x1 = inter
+                sl_inter = self._bbox_to_slices(inter)
                 sl_i_local = (
-                    slice(
-                        inter[0].start - sl_i[0].start, inter[0].stop - sl_i[0].start
-                    ),
-                    slice(
-                        inter[1].start - sl_i[1].start, inter[1].stop - sl_i[1].start
-                    ),
+                    slice(y0 - tmpl_i.bbox[0], y1 - tmpl_i.bbox[0]),
+                    slice(x0 - tmpl_i.bbox[2], x1 - tmpl_i.bbox[2]),
                 )
                 sl_j_local = (
-                    slice(
-                        inter[0].start - tmpl_j.bbox[0].start,
-                        inter[0].stop - tmpl_j.bbox[0].start,
-                    ),
-                    slice(
-                        inter[1].start - tmpl_j.bbox[1].start,
-                        inter[1].stop - tmpl_j.bbox[1].start,
-                    ),
+                    slice(y0 - tmpl_j.bbox[0], y1 - tmpl_j.bbox[0]),
+                    slice(x0 - tmpl_j.bbox[2], x1 - tmpl_j.bbox[2]),
                 )
-                w = self.weights[inter]
-                val = np.sum(tmpl_i.data[sl_i_local] * tmpl_j.data[sl_j_local] * w)
+                w = self.weights[sl_inter]
+                val = np.sum(tmpl_i.array[sl_i_local] * tmpl_j.array[sl_j_local] * w)
                 if val != 0.0:
                     ata[i, j] = val
                     ata[j, i] = val
@@ -136,9 +128,23 @@ class SparseFitter:
             raise ValueError("Solve system first")
         model = np.zeros_like(self.image, dtype=float)
         for coeff, tmpl in zip(self.solution, self.templates):
-            sl = tmpl.bbox
-            model[sl] += coeff * tmpl.data
+            sl = self._bbox_to_slices(tmpl.bbox)
+            model[sl] += coeff * tmpl.array
         return model
 
     def residual(self) -> np.ndarray:
         return self.image - self.model_image()
+
+    @classmethod
+    def fit(
+        cls,
+        templates: List[Template],
+        image: np.ndarray,
+        weights: np.ndarray | None = None,
+        config: FitConfig | None = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Convenience method to solve for fluxes and return residuals."""
+        fitter = cls(templates, image, weights, config)
+        fluxes, _ = fitter.solve()
+        resid = fitter.residual()
+        return fluxes, resid

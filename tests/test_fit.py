@@ -4,7 +4,8 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import numpy as np
-from mophongo.fit import Template, FitConfig, SparseFitter
+from mophongo.fit import FitConfig, SparseFitter
+from mophongo.templates import Template
 
 
 def test_flux_recovery():
@@ -15,8 +16,8 @@ def test_flux_recovery():
     img[1, 1] = flux1
     img[2, 2] = flux2
 
-    t1 = Template(data=np.array([[1.0]]), bbox=(slice(1, 2), slice(1, 2)))
-    t2 = Template(data=np.array([[1.0]]), bbox=(slice(2, 3), slice(2, 3)))
+    t1 = Template(array=np.array([[1.0]]), bbox=(1, 2, 1, 2))
+    t2 = Template(array=np.array([[1.0]]), bbox=(2, 3, 2, 3))
 
     fitter = SparseFitter([t1, t2], img, weights, config=FitConfig())
     fitter.build_normal_matrix()
@@ -32,8 +33,8 @@ def test_ata_symmetry():
     img = np.zeros((3, 3), dtype=float)
     weights = np.ones_like(img)
 
-    t1 = Template(data=np.ones((2, 2)), bbox=(slice(0, 2), slice(0, 2)))
-    t2 = Template(data=np.ones((2, 2)), bbox=(slice(1, 3), slice(1, 3)))
+    t1 = Template(array=np.ones((2, 2)), bbox=(0, 2, 0, 2))
+    t2 = Template(array=np.ones((2, 2)), bbox=(1, 3, 1, 3))
 
     fitter = SparseFitter([t1, t2], img, weights, config=FitConfig())
     fitter.build_normal_matrix()

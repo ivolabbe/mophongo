@@ -7,6 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mophongo.psf import PSF
+from mophongo.templates import _convolve2d
 
 
 def test_moffat_psf_shape_and_normalization():
@@ -21,6 +22,23 @@ def test_psf_matching_kernel_properties():
     psf_lo = PSF.moffat(size, 3.0, 3.0, beta=2.5)
     kernel = psf_hi.matching_kernel(psf_lo)
     assert kernel.shape == psf_hi.array.shape
-    conv = np.fft.ifft2(np.fft.fft2(psf_hi.array) * np.fft.fft2(kernel)).real
+    conv = _convolve2d(psf_hi.array, kernel)
     # kernel should transform psf_hi approximately into psf_lo
     np.testing.assert_allclose(conv, psf_lo.array, rtol=1e-2, atol=5e-4)
+
+
+def test_psf_matching_kernel_different_sizes():
+    psf_hi = PSF.moffat(9, 2.0, 2.0, beta=2.5)
+    psf_lo = PSF.moffat(21, 10.0, 10.0, beta=2.5)
+    kernel = psf_hi.matching_kernel(psf_lo)
+    assert kernel.shape == (21, 21)
+
+    def pad(arr, shape):
+        py = (shape[0] - arr.shape[0]) // 2
+        px = (shape[1] - arr.shape[1]) // 2
+        return np.pad(arr, ((py, shape[0] - arr.shape[0] - py), (px, shape[1] - arr.shape[1] - px)))
+
+    hi_pad = pad(psf_hi.array, kernel.shape)
+    lo_pad = pad(psf_lo.array, kernel.shape)
+    conv = _convolve2d(hi_pad, kernel)
+    np.testing.assert_allclose(conv, lo_pad, rtol=1e-2, atol=5e-4)

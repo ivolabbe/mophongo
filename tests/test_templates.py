@@ -32,8 +32,8 @@ def test_extract_templates_sizes_and_norm():
     assert t1.bbox == (1, 6, 1, 6)
     np.testing.assert_allclose(t1.array.sum(), 1.0, rtol=1e-6)
 
-    # template 2 bounding box expected (4,8,4,8) -> size 4x4 (extends beyond image)
+    # template 2 bounding box expected to be clipped -> (4,7,4,7) -> size 3x3
     t2 = templates[1]
-    assert t2.array.shape == (4, 4)
-    assert t2.bbox == (4, 8, 4, 8)
-    np.testing.assert_allclose(t2.array.sum(), 1.0, rtol=1e-6)
+    assert t2.array.shape == (3, 3)
+    assert t2.bbox == (4, 7, 4, 7)
+    np.testing.assert_allclose(t2.array.sum(), 0.875, rtol=1e-6)

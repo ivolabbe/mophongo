@@ -97,6 +97,12 @@ class Templates:
             x0_ext = bbox.ixmin - pad_x
             x1_ext = bbox.ixmax + pad_x
 
+            ny, nx = hires_image.shape
+            y0_ext = max(0, y0_ext)
+            y1_ext = min(ny, y1_ext)
+            x0_ext = max(0, x0_ext)
+            x1_ext = min(nx, x1_ext)
+
             height = y1_ext - y0_ext
             width = x1_ext - x0_ext
             center = ((x0_ext + x1_ext) / 2.0, (y0_ext + y1_ext) / 2.0)

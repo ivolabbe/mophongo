@@ -9,7 +9,6 @@ from mophongo.psf import PSF
 from mophongo.templates import Templates
 from utils import make_simple_data, save_fit_diagnostic
 
-
 def test_flux_recovery(tmp_path):
     images, segmap, catalog, psfs, truth = make_simple_data()
 
@@ -27,8 +26,10 @@ def test_flux_recovery(tmp_path):
     assert info == 0
     assert np.allclose(x, truth, rtol=2e-2)
     model = fitter.model_image()
+
+    assert np.allclose(model, img)
     fname = tmp_path / "fit.png"
-    save_fit_diagnostic(fname, images[1], model, fitter.residual())
+    save_fit_diagnostic(fname, img, model, fitter.residual())
     assert fname.exists()
 
 

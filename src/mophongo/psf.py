@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from photutils.psf import matching
 
 
 def _moffat_psf(
@@ -115,9 +116,9 @@ class PSF:
         """Create a PSF from an arbitrary pixel array."""
         return cls(array)
 
-    def matching_kernel(self, other: "PSF", reg: float = 1e-3) -> np.ndarray:
+    def matching_kernel(self, other: "PSF", window: object | None = None) -> np.ndarray:
         """Return the convolution kernel that matches ``self`` to ``other``."""
-        return psf_matching_kernel(self.array, other.array, reg)
+        return psf_matching_kernel(self.array, other.array, window=window)
 
 
 def moffat_psf(
@@ -135,31 +136,40 @@ def moffat_psf(
     return PSF.moffat(size, fwhm_x, fwhm_y, beta, theta).array
 
 
-def psf_matching_kernel(psf_hi: np.ndarray, psf_lo: np.ndarray, reg: float = 1e-3) -> np.ndarray:
+def psf_matching_kernel(
+    psf_hi: np.ndarray, psf_lo: np.ndarray, *, window: object | None = None
+) -> np.ndarray:
     """Compute a convolution kernel matching ``psf_hi`` to ``psf_lo``.
 
     The kernel ``k`` is defined such that ``psf_hi * k \approx psf_lo`` when
-    convolved. The computation is done in the Fourier domain with a small
-    regularization term to avoid division by zero.
+    convolved. ``photutils.psf.matching.create_matching_kernel`` is used under
+    the hood. If the two PSFs have different shapes they are zero padded to a
+    common grid before computing the kernel.
 
     Parameters
     ----------
     psf_hi, psf_lo:
-        High- and low-resolution PSF arrays of identical shape. They must be
-        normalized to unit sum.
-    reg:
-        Regularization parameter added to the denominator in Fourier space.
+        High- and low-resolution PSF arrays normalized to unit sum. They may
+        have different shapes.
+    window : optional
+        Window function passed to ``create_matching_kernel``.
 
     Returns
     -------
     kernel: ``np.ndarray``
-        Convolution kernel with the same shape as the input PSFs.
+        Convolution kernel with shape equal to the larger of the two input PSFs.
     """
     if psf_hi.shape != psf_lo.shape:
-        raise ValueError("Input PSFs must have the same shape")
+        ny = max(psf_hi.shape[0], psf_lo.shape[0])
+        nx = max(psf_hi.shape[1], psf_lo.shape[1])
 
-    f_hi = np.fft.fft2(psf_hi)
-    f_lo = np.fft.fft2(psf_lo)
-    kernel_freq = f_lo / (f_hi + reg)
-    kernel = np.fft.ifft2(kernel_freq).real
-    return kernel
+        def _pad(arr: np.ndarray) -> np.ndarray:
+            py = (ny - arr.shape[0]) // 2
+            px = (nx - arr.shape[1]) // 2
+            return np.pad(arr, ((py, ny - arr.shape[0] - py), (px, nx - arr.shape[1] - px)))
+
+        psf_hi = _pad(psf_hi)
+        psf_lo = _pad(psf_lo)
+
+    kernel = matching.create_matching_kernel(psf_hi, psf_lo, window=window)
+    return np.asarray(kernel)

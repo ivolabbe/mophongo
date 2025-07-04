@@ -28,32 +28,51 @@ def run_photometry(
     Parameters
     ----------
     images
-        Sequence of image arrays to be fit.
+        Sequence of image arrays. The first image defines the high-resolution
+        detection plane used to build templates.
     segmap
         Segmentation map aligned with the images.
     catalog
-        Source catalog. New flux columns will be added to a copy of this table.
+        Source catalog. Must provide ``y`` and ``x`` columns giving pixel
+        positions. New flux columns will be added to a copy of this table.
     psfs
         Point-spread functions matching each image.
 
     Returns
     -------
     Table
-        Table containing the input catalog columns plus measured fluxes.
+        Table containing the input catalog columns plus measured fluxes for
+        each image.
     ndarray
-        Residual image after subtracting the model from the data.
+        Stack of residual images after subtracting the model from each input
+        image. The array has shape ``(n_images, ny, nx)``.
     """
 
     if len(images) != len(psfs):
         raise ValueError("Number of images and PSFs must match")
 
-    # Lazy imports so this module can be imported without the heavy dependencies
-    from . import templates, fit
+    from .psf import PSF
+    from .templates import Templates
+    from .fit import SparseFitter
 
-    # Build PSF-matched templates for each object
-    templates_list = templates.extract_templates(images, segmap, catalog, psfs)
+    catalog = catalog.copy()
+    positions = list(zip(catalog["y"], catalog["x"]))
 
-    # Solve for object fluxes using a sparse linear solver
-    flux_table, residual = fit.sparse_fit(images, templates_list, catalog, psfs)
+    hires_image = images[0]
+    hires_psf = PSF.from_array(psfs[0])
 
-    return flux_table, residual
+    residuals = []
+    for idx, (image, psf_arr) in enumerate(zip(images, psfs)):
+        psf = PSF.from_array(psf_arr)
+        if idx == 0:
+            kernel = np.zeros_like(psf_arr)
+            cy, cx = psf_arr.shape[0] // 2, psf_arr.shape[1] // 2
+            kernel[cy, cx] = 1.0
+        else:
+            kernel = hires_psf.matching_kernel(psf)
+        tmpls = Templates.from_image(hires_image, segmap, positions, kernel)
+        fluxes, resid = SparseFitter.fit(list(tmpls), image)
+        catalog[f"flux_{idx}"] = fluxes
+        residuals.append(resid)
+
+    return catalog, np.stack(residuals)

@@ -18,6 +18,12 @@ jobs:
           curl -sSL https://install.python-poetry.org | python - -y
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
+      - name: Debug Poetry path
+        run: |
+          echo "PATH=$PATH"
+          which poetry
+          ls -l ~/.local/bin/poetry
+
       - name: Install dependencies
         run: poetry install --sync --no-interaction
 

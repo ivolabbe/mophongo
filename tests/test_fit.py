@@ -6,9 +6,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import numpy as np
 from mophongo.fit import FitConfig, SparseFitter
 from mophongo.templates import Template
+from utils import save_fit_diagnostic
 
 
-def test_flux_recovery():
+def test_flux_recovery(tmp_path):
     img = np.zeros((4, 4), dtype=float)
     weights = np.ones_like(img)
 
@@ -27,6 +28,9 @@ def test_flux_recovery():
     assert np.allclose(x, [flux1, flux2])
     model = fitter.model_image()
     assert np.allclose(model, img)
+    fname = tmp_path / "fit.png"
+    save_fit_diagnostic(fname, img, model, fitter.residual())
+    assert fname.exists()
 
 
 def test_ata_symmetry():

@@ -1,7 +1,8 @@
 import numpy as np
 from astropy.table import Table
 
-from mophongo.psf import PSF, _gaussian_psf
+
+from mophongo.psf import PSF
 from mophongo.templates import _convolve2d, Template
 import matplotlib.pyplot as plt
 
@@ -26,17 +27,17 @@ def make_simple_data(
     ellipses of varying size. It is convolved with the high-resolution PSF
     before resampling to the low-resolution grid.
     """
+
     rng = np.random.default_rng(seed)
 
     ny = nx = 101
     nsrc = 10
 
-    hi_fwhm = 2.0
-    lo_fwhm = 5.0 * hi_fwhm
 
-    # use generous grids so PSF tails are fully contained
-    psf_hi = PSF.moffat(13, hi_fwhm, hi_fwhm, beta=2.5)
-    psf_lo = PSF.moffat(41, lo_fwhm, lo_fwhm, beta=2.5)
+    hi_fwhm = 2.5
+    lo_fwhm = 4.0 * hi_fwhm
+    psf_hi = PSF.gaussian(11, hi_fwhm, hi_fwhm)
+    psf_lo = PSF.gaussian(41, lo_fwhm, lo_fwhm)
 
     # Expand PSFs to common grid for kernel computation
     size = (
@@ -98,6 +99,7 @@ def save_diagnostic_image(
     std = residual.std()
     vlim = 5 * std
     for ax, img, title in zip(axes.ravel()[:5], data, titles):
+
         if title == "residual":
             ax.imshow(img, cmap="gray", origin="lower", vmin=-vlim, vmax=vlim)
         else:
@@ -106,6 +108,7 @@ def save_diagnostic_image(
         ax.set_xticks([])
         ax.set_yticks([])
     axes.ravel()[5].axis("off")
+
     plt.tight_layout()
     fig.savefig(filename, dpi=150)
     plt.close(fig)
@@ -148,6 +151,54 @@ def save_psf_diagnostic(
     ax_ratio.plot(r_lo, ratio)
     ax_ratio.set_xlabel("radius (pix)")
     ax_ratio.set_ylabel("lo/conv")
+    plt.tight_layout()
+    fig.savefig(filename, dpi=150)
+    plt.close(fig)
+
+
+def save_fit_diagnostic(
+    filename: str,
+    image: np.ndarray,
+    model: np.ndarray,
+    residual: np.ndarray,
+) -> None:
+    """Visualize SparseFitter results."""
+    fig, axes = plt.subplots(1, 3, figsize=(9, 3))
+    std = residual.std()
+    vlim = 5 * std
+    data = [image, model, residual]
+    titles = ["image", "model", "residual"]
+    for ax, img, title in zip(axes, data, titles):
+        if title == "residual":
+            ax.imshow(img, cmap="gray", origin="lower", vmin=-vlim, vmax=vlim)
+        else:
+            ax.imshow(img, cmap="gray", origin="lower")
+        ax.set_title(title)
+        ax.set_xticks([])
+        ax.set_yticks([])
+    plt.tight_layout()
+    fig.savefig(filename, dpi=150)
+    plt.close(fig)
+
+
+def save_template_diagnostic(
+    filename: str,
+    hires: np.ndarray,
+    templates: list[Template],
+) -> None:
+    """Show hires image and extracted templates."""
+    n = len(templates)
+    fig, axes = plt.subplots(1, n + 1, figsize=(3 * (n + 1), 3))
+    axes = np.atleast_1d(axes)
+    axes[0].imshow(hires, cmap="gray", origin="lower")
+    axes[0].set_title("hires")
+    axes[0].set_xticks([])
+    axes[0].set_yticks([])
+    for i, tmpl in enumerate(templates, start=1):
+        axes[i].imshow(tmpl.array, cmap="gray", origin="lower")
+        axes[i].set_title(f"tmpl {i}")
+        axes[i].set_xticks([])
+        axes[i].set_yticks([])
     plt.tight_layout()
     fig.savefig(filename, dpi=150)
     plt.close(fig)

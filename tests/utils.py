@@ -41,6 +41,7 @@ def save_diagnostic_image(
     residual: np.ndarray,
 ) -> None:
     """Save 2x2 diagnostic plot with grayscale images."""
+    print('Saving diagnostic image to:', filename)
     fig, axes = plt.subplots(2, 2, figsize=(6, 6))
     data = [hires, lowres, model, residual]
     titles = ["hires", "lowres", "model", "residual"]

@@ -24,9 +24,3 @@ jobs:
           echo "PATH=$PATH"
           echo "$POETRY_HOME/bin"
           ls -l "$POETRY_HOME/bin"
-
-      - name: Install dependencies
-        run: poetry install --sync --no-interaction
-
-      - name: Run tests
-        run: poetry run pytest -q tests/

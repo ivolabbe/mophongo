@@ -1,0 +1,20 @@
+name: test
+on: [push, pull_request]
+
+jobs:
+  macos:
+    runs-on: macos-latest                # ⇠ Apple Silicon or Intel, auto-chosen by GitHub
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5    # pre-installs and caches Python
+        with:
+          python-version: '3.12'
+          cache: 'poetry'                # enables built-in venv+wheel cache
+
+      - name: Install Poetry             # same method you use locally
+        run: curl -sSL https://install.python-poetry.org | python - -y
+      - run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - run: poetry install --sync --no-interaction
+      - run: poetry run pytest -q tests/   # replace with your test command

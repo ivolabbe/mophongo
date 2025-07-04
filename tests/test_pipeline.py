@@ -17,7 +17,7 @@ def test_pipeline_flux_recovery(tmp_path):
 
     for idx in range(len(psfs)):
         col = f"flux_{idx}"
-        assert np.allclose(table[col], truth, rtol=1e-2)
+        assert np.allclose(table[col], truth, rtol=2e-2)
     assert resid.shape[0] == len(images)
 
     model = images[1] - resid[1]

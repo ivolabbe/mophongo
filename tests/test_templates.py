@@ -1,8 +1,9 @@
 import numpy as np
 from mophongo.templates import Templates
+from utils import save_template_diagnostic
 
 
-def test_extract_templates_sizes_and_norm():
+def test_extract_templates_sizes_and_norm(tmp_path):
     # simple 7x7 high-res image with two sources
     hires = np.zeros((7, 7))
     segmap = np.zeros_like(hires, dtype=int)
@@ -37,3 +38,6 @@ def test_extract_templates_sizes_and_norm():
     assert t2.array.shape == (3, 3)
     assert t2.bbox == (4, 7, 4, 7)
     np.testing.assert_allclose(t2.array.sum(), 0.875, rtol=1e-6)
+    fname = tmp_path / "templates.png"
+    save_template_diagnostic(fname, hires, templates)
+    assert fname.exists()

@@ -20,6 +20,7 @@ packages = [{include = "mophongo", from = "src"}]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.4.1"
+matplotlib = "^3.10.3"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

@@ -24,10 +24,10 @@ def make_simple_data(
     ny = nx = 101
     nsrc = 10
 
-    hi_fwhm = 2.0
+    hi_fwhm = 2.5
     lo_fwhm = 4.0 * hi_fwhm
-    psf_hi = PSF.gaussian(9, hi_fwhm, hi_fwhm)
-    psf_lo = PSF.gaussian(31, lo_fwhm, lo_fwhm)
+    psf_hi = PSF.gaussian(11, hi_fwhm, hi_fwhm)
+    psf_lo = PSF.gaussian(41, lo_fwhm, lo_fwhm)
 
     # Expand PSFs to common grid for kernel computation
     size = (

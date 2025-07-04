@@ -3,20 +3,23 @@ on: [push, pull_request]
 
 jobs:
   macos:
-    runs-on: macos-latest                # ⇠ Apple Silicon or Intel, auto-chosen by GitHub
+    runs-on: macos-latest
+
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5    # pre-installs and caches Python
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'poetry'                # enables built-in venv+wheel cache
+          cache: 'poetry'
 
       - name: Install Poetry
-        run: curl -sSL https://install.python-poetry.org | python - -y
+        run: |
+          curl -sSL https://install.python-poetry.org | python - -y
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Install dependencies
-        run: ~/.local/bin/poetry install --sync --no-interaction
+        run: poetry install --sync --no-interaction
 
       - name: Run tests
-        run: ~/.local/bin/poetry run pytest -q tests/
+        run: poetry run pytest -q tests/

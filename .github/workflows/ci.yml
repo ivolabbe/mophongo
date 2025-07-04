@@ -12,9 +12,11 @@ jobs:
           python-version: '3.12'
           cache: 'poetry'                # enables built-in venv+wheel cache
 
-      - name: Install Poetry             # same method you use locally
+      - name: Install Poetry
         run: curl -sSL https://install.python-poetry.org | python - -y
-      - run: echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      - run: poetry install --sync --no-interaction
-      - run: poetry run pytest -q tests/   # replace with your test command
+      - name: Install dependencies
+        run: ~/.local/bin/poetry install --sync --no-interaction
+
+      - name: Run tests
+        run: ~/.local/bin/poetry run pytest -q tests/

@@ -66,7 +66,7 @@ def make_simple_data(
         g_fwhm_y = rng.uniform(2.0, 4.0)
         theta = rng.uniform(0, np.pi)
         g_size = 13
-        gauss = PSF.gaussian(g_size, g_fwhm_x, g_fwhm_y, theta)
+        gauss = PSF.gaussian(g_size, g_fwhm_x, g_fwhm_y, theta).array
         r = g_size // 2
         yy = slice(y - r, y + r + 1)
         xx = slice(x - r, x + r + 1)

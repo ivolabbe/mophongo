@@ -14,13 +14,10 @@ jobs:
           cache: 'poetry'
 
       - name: Install Poetry
-        run: |
-          export POETRY_HOME="$HOME/poetry"
-          curl -sSL https://install.python-poetry.org | python - -y
-          echo "$POETRY_HOME/bin" >> $GITHUB_PATH
+	run: pipx install poetry
 
-      - name: Debug Poetry path
-        run: |
-          echo "PATH=$PATH"
-          echo "$POETRY_HOME/bin"
-          ls -l "$POETRY_HOME/bin"
+      - name: Install dependencies
+        run: poetry install --sync --no-interaction
+
+      - name: Run tests
+        run: pytest -q tests/

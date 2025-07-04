@@ -23,10 +23,10 @@ def make_simple_data(seed: int = 0) -> tuple[list[np.ndarray], np.ndarray, Table
     nsrc = 10
 
     hi_fwhm = 2.0
-    lo_fwhm = 5.0 * hi_fwhm
+    lo_fwhm = 4.0 * hi_fwhm
 
     psf_hi = PSF.gaussian(9, hi_fwhm, hi_fwhm)
-    psf_lo = PSF.gaussian(41, lo_fwhm, lo_fwhm)
+    psf_lo = PSF.gaussian(31, lo_fwhm, lo_fwhm)
 
     # Expand PSFs to common grid for kernel computation
     size = (

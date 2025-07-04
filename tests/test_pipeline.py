@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from tests.utils import moffat_psf, simulate_image, fit_fluxes
+from tests.utils import moffat_psf, simulate_image
+from mophongo import run_photometry
 
 
 def test_pipeline_recovers_fluxes_and_noise(tmp_path):
@@ -25,7 +26,10 @@ def test_pipeline_recovers_fluxes_and_noise(tmp_path):
     img_hi = simulate_image(shape, positions, fluxes_true, psf_hi, noise_std, rng)
     img_lo = simulate_image(shape, positions, fluxes_true, psf_lo, noise_std, rng)
 
-    fluxes_rec, model, residual = fit_fluxes(img_lo, positions, psf_lo)
+    result = run_photometry(img_lo, positions, psf_lo)
+    fluxes_rec = result.fluxes
+    model = result.model
+    residual = result.residual
 
     assert np.allclose(fluxes_rec, fluxes_true, rtol=0.05)
     assert np.isclose(np.std(residual), noise_std, rtol=0.3)

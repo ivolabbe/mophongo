@@ -17,7 +17,7 @@ def test_moffat_psf_shape_and_normalization():
 
 
 def test_psf_matching_kernel_properties(tmp_path):
-    _, _, _, psfs, _ = make_simple_data()
+    _, _, _, psfs, _, _ = make_simple_data()
     psf_hi = PSF.from_array(psfs[0])
     psf_lo = PSF.from_array(psfs[1])
     kernel = psf_hi.matching_kernel(psf_lo)

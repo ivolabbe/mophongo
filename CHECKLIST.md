@@ -34,6 +34,7 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
   - don't implement source detection just yet: assume detection + segmentation image + catalog are available.
   - Load or receive arrays for the images, catalog, and PSFs.
   - Call template builder, construct sparse system, solve for fluxes, and return a table of measurements plus residuals.
+  - [x] Propagate RMS images as weights to compute flux uncertainties
  - [x] **Simulation utilities for tests** (`tests/utils.py`)
   - [x] Create fake catalogs and images with Moffat sources of varying size and ellipticity. positions are ra,dec
   - Produce matching high‑res and low‑res PSFs, with low res PSF at least 5x high res PSF.
@@ -49,4 +50,5 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [x] Run `pytest` to ensure all tests pass
 - [x] Save diagnostic plot during pipeline test
 - [x] Save diagnostic plots for PSF, fitter and template tests
+- [x] Save output catalog to disk during pipeline test
 

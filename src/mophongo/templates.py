@@ -125,6 +125,9 @@ class Templates:
 
             cutout_norm = cutout / flux
             conv = _convolve2d(cutout_norm, kernel)
+            s = conv.sum()
+            if s != 0:
+                conv = conv / s
             self._templates.append(Template(conv, (y0_ext, y1_ext, x0_ext, x1_ext)))
 
         return self._templates

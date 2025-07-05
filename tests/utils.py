@@ -19,7 +19,7 @@ def make_simple_data(
     seed: int = 1001,
     nsrc: int = 15,
 ) -> tuple[
-    list[np.ndarray], np.ndarray, Table, list[np.ndarray], np.ndarray
+    list[np.ndarray], np.ndarray, Table, list[np.ndarray], np.ndarray, list[np.ndarray]
 ]:
     """Create a synthetic dataset with ``nsrc`` sources.
 
@@ -78,6 +78,8 @@ def make_simple_data(
     noise_std = amp_min / 50.0
     hires += rng.normal(scale=noise_std, size=hires.shape)
     lowres += rng.normal(scale=noise_std, size=lowres.shape)
+    rms_hi = np.ones_like(hires) * noise_std
+    rms_lo = np.ones_like(lowres) * noise_std
 
     threshold = noise_std * 5.0
     seg_detect = detect_sources(hires, threshold, npixels=5)
@@ -110,7 +112,14 @@ def make_simple_data(
         "flux_true": flux_true,
     })
 
-    return [hires, lowres], segmap, catalog, [psf_hi.array, psf_lo.array], truth
+    return (
+        [hires, lowres],
+        segmap,
+        catalog,
+        [psf_hi.array, psf_lo.array],
+        truth,
+        [rms_hi, rms_lo],
+    )
 
 
 def save_diagnostic_image(

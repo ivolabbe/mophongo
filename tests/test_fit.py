@@ -11,7 +11,7 @@ from utils import make_simple_data, save_fit_diagnostic
 
 
 def test_flux_recovery(tmp_path):
-    images, segmap, catalog, psfs, truth_img = make_simple_data()
+    images, segmap, catalog, psfs, truth_img, rms = make_simple_data()
 
     psf_hi = PSF.from_array(psfs[0])
     psf_lo = PSF.from_array(psfs[1])
@@ -20,7 +20,7 @@ def test_flux_recovery(tmp_path):
     tmpls = Templates.from_image(
         images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel
     )
-    fitter = SparseFitter(list(tmpls), images[1], np.ones_like(images[1]), FitConfig())
+    fitter = SparseFitter(list(tmpls), images[1], 1.0 / rms[1] ** 2, FitConfig())
     fitter.build_normal_matrix()
     x, info = fitter.solve()
 
@@ -34,7 +34,7 @@ def test_flux_recovery(tmp_path):
 
 
 def test_ata_symmetry():
-    images, segmap, catalog, psfs, _ = make_simple_data()
+    images, segmap, catalog, psfs, _, rms = make_simple_data()
 
     psf_hi = PSF.from_array(psfs[0])
     psf_lo = PSF.from_array(psfs[1])
@@ -43,7 +43,7 @@ def test_ata_symmetry():
     tmpls = Templates.from_image(
         images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel
     )
-    fitter = SparseFitter(list(tmpls), images[1], np.ones_like(images[1]), FitConfig())
+    fitter = SparseFitter(list(tmpls), images[1], 1.0 / rms[1] ** 2, FitConfig())
     fitter.build_normal_matrix()
     ata = fitter.ata.toarray()
     assert np.allclose(ata, ata.T)

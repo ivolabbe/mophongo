@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 from scipy.sparse import lil_matrix, eye
-from scipy.sparse.linalg import cg
+from scipy.sparse.linalg import cg, splu
 
 from .templates import Template
 
@@ -134,6 +134,31 @@ class SparseFitter:
 
     def residual(self) -> np.ndarray:
         return self.image - self.model_image()
+
+    def predicted_errors(self) -> np.ndarray:
+        """Return per-source uncertainties ignoring template covariance."""
+        pred = np.empty(len(self.templates), dtype=float)
+        for i, tmpl in enumerate(self.templates):
+            sl = self._bbox_to_slices(tmpl.bbox)
+            w = self.weights[sl]
+            pred[i] = 1.0 / np.sqrt(np.sum(w * tmpl.array ** 2))
+        return pred
+
+    def flux_errors(self) -> np.ndarray:
+        """Return 1-sigma uncertainties for the fitted fluxes."""
+        if self.solution is None:
+            raise ValueError("Solve system first")
+        ata = self.ata.tocsc()
+        solver = splu(ata)
+        n = ata.shape[0]
+        diag = np.empty(n, dtype=float)
+        e = np.zeros(n, dtype=float)
+        for i in range(n):
+            e[:] = 0.0
+            e[i] = 1.0
+            x = solver.solve(e)
+            diag[i] = x[i]
+        return np.sqrt(diag)
 
     @classmethod
     def fit(

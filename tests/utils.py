@@ -1,6 +1,6 @@
 import numpy as np
 from astropy.table import Table
-
+from astropy.visualization import AsinhStretch, ImageNormalize
 
 from mophongo.psf import PSF
 from mophongo.templates import _convolve2d, Template
@@ -8,6 +8,11 @@ import matplotlib.pyplot as plt
 from astropy.modeling.models import Gaussian2D
 from photutils.datasets import make_model_params, make_model_image
 from photutils.segmentation import detect_sources, deblend_sources
+
+
+def lupton_norm(img):
+    vmin, vmax = img.min(), np.percentile(img, 90)
+    return ImageNormalize(vmin=vmin, vmax=vmax, stretch=AsinhStretch())
 
 
 def make_simple_data(
@@ -41,11 +46,11 @@ def make_simple_data(
         x_name="x_mean",
         y_name="y_mean",
         min_separation=int(hi_fwhm * 4),
-        border_size=10,
+        border_size=psf_lo.array.shape[0] // 2,
         seed=rng,
-        amplitude=(1.0, 5.0),
-        x_stddev=(1.0, 3.0),
-        y_stddev=(1.0, 3.0),
+        amplitude=(1.0, 10.0),
+        x_stddev=(1.0, 4.0),
+        y_stddev=(1.0, 4.0),
         theta=(0, np.pi),
     )
 
@@ -70,7 +75,7 @@ def make_simple_data(
     )
 
     amp_min = float(params["amplitude"].min())
-    noise_std = amp_min / 200.0
+    noise_std = amp_min / 50.0
     hires += rng.normal(scale=noise_std, size=hires.shape)
     lowres += rng.normal(scale=noise_std, size=lowres.shape)
 
@@ -80,7 +85,8 @@ def make_simple_data(
         hires,
         seg_detect,
         npixels=5,
-        contrast=0.0,
+        nlevels=32, 
+        contrast=0.0001,
         progress_bar=False,
     )
     segdata = segm.data
@@ -116,32 +122,31 @@ def save_diagnostic_image(
     residual: np.ndarray,
     segmap: np.ndarray = None,
 ) -> None:
-    """Save diagnostic plot with truth, model, residual, and optionally segmentation map."""
-    n_panels = 6 if segmap is not None else 5
-    fig, axes = plt.subplots(2, 3, figsize=(9, 6))
-    data = [truth, hires, lowres, model, residual]
-    titles = ["truth", "hires", "lowres", "model", "residual"]
-
-    for ax, img, title in zip(axes.ravel()[:5], data, titles):
+    fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+    panels = [
+        (0, 0, truth,   "truth",   "gray",   lupton_norm(truth)),
+        (0, 1, hires,   "hires",   "gray",   lupton_norm(hires)),
+        (0, 2, segmap,  "segmap",  "nipy_spectral", None),
+        (1, 0, lowres,  "lowres",  "gray",   lupton_norm(lowres)),
+        (1, 1, model,   "model",   "gray",   lupton_norm(model)),
+        (1, 2, residual,"residual","gray",   None),
+    ]
+    for row, col, img, title, cmap, norm in panels:
+        ax = axes[row, col]
+        if img is None:
+            ax.axis("off")
+            continue
         if title == "residual":
             std = residual.std()
             vlim = 5 * std
-            ax.imshow(img, cmap="gray", origin="lower", vmin=-vlim, vmax=vlim)
+            ax.imshow(img, cmap=cmap, origin="lower", vmin=-vlim, vmax=vlim)
+        elif norm is not None:
+            ax.imshow(img, cmap=cmap, origin="lower", norm=norm)
         else:
-            ax.imshow(img, cmap="gray", origin="lower")
+            ax.imshow(img, cmap=cmap, origin="lower")
         ax.set_title(title)
         ax.set_xticks([])
         ax.set_yticks([])
-
-    if segmap is not None:
-        ax = axes.ravel()[5]
-        ax.imshow(segmap, cmap="nipy_spectral", origin="lower")
-        ax.set_title("segmap")
-        ax.set_xticks([])
-        ax.set_yticks([])
-    else:
-        axes.ravel()[5].axis("off")
-
     plt.tight_layout()
     fig.savefig(filename, dpi=150)
     plt.close(fig)
@@ -199,7 +204,6 @@ def save_fit_diagnostic(
     model: np.ndarray,
     residual: np.ndarray,
 ) -> None:
-    """Visualize SparseFitter results."""
     fig, axes = plt.subplots(1, 3, figsize=(9, 3))
     std = residual.std()
     vlim = 5 * std
@@ -209,7 +213,7 @@ def save_fit_diagnostic(
         if title == "residual":
             ax.imshow(img, cmap="gray", origin="lower", vmin=-vlim, vmax=vlim)
         else:
-            ax.imshow(img, cmap="gray", origin="lower")
+            ax.imshow(img, cmap="gray", origin="lower", norm=lupton_norm(img))
         ax.set_title(title)
         ax.set_xticks([])
         ax.set_yticks([])
@@ -223,16 +227,15 @@ def save_template_diagnostic(
     hires: np.ndarray,
     templates: list[Template],
 ) -> None:
-    """Show hires image and extracted templates."""
     n = len(templates)
     fig, axes = plt.subplots(1, n + 1, figsize=(3 * (n + 1), 3))
     axes = np.atleast_1d(axes)
-    axes[0].imshow(hires, cmap="gray", origin="lower")
+    axes[0].imshow(hires, cmap="gray", origin="lower", norm=lupton_norm(hires))
     axes[0].set_title("hires")
     axes[0].set_xticks([])
     axes[0].set_yticks([])
     for i, tmpl in enumerate(templates, start=1):
-        axes[i].imshow(tmpl.array, cmap="gray", origin="lower")
+        axes[i].imshow(tmpl.array, cmap="gray", origin="lower", norm=lupton_norm(tmpl.array))
         axes[i].set_title(f"tmpl {i}")
         axes[i].set_xticks([])
         axes[i].set_yticks([])
@@ -246,6 +249,8 @@ def save_flux_vs_truth_plot(
     truth: np.ndarray,
     recovered: np.ndarray,
     label: str = "Recovered Flux",
+    xlabel: str = "True Flux",
+    ylabel: str = "Recovered Flux",
 ) -> None:
     """Plot recovered flux vs truth and recovered/true vs truth, save to file."""
     import matplotlib.pyplot as plt
@@ -256,16 +261,16 @@ def save_flux_vs_truth_plot(
     minval = min(truth.min(), recovered.min())
     maxval = max(truth.max(), recovered.max())
     axes[0].plot([minval, maxval], [minval, maxval], "k--", label="y=x")
-    axes[0].set_xlabel("True Flux")
-    axes[0].set_ylabel(label)
-    axes[0].set_title("Recovered vs True Flux")
+    axes[0].set_xlabel(xlabel)
+    axes[0].set_ylabel(ylabel)
+    axes[0].set_title(label)
     axes[0].legend()
 
     # Panel 2: Ratio vs True
     ratio = np.array(recovered) / np.array(truth)
     axes[1].scatter(truth, ratio, s=30)
     axes[1].axhline(1.0, color="k", linestyle="--", label="ratio=1")
-    axes[1].set_xlabel("True Flux")
+    axes[1].set_xlabel(xlabel)
     axes[1].set_ylabel("Recovered / True")
     axes[1].set_title("Flux Ratio vs True")
     axes[1].set_ylim(0.8, 1.2)

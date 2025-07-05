@@ -5,6 +5,9 @@ from astropy.table import Table
 from mophongo.psf import PSF
 from mophongo.templates import _convolve2d, Template
 import matplotlib.pyplot as plt
+from astropy.modeling.models import Gaussian2D
+from photutils.datasets import make_model_params, make_model_image
+from photutils.segmentation import detect_sources, deblend_sources
 
 
 def make_simple_data(
@@ -13,11 +16,15 @@ def make_simple_data(
 ) -> tuple[
     list[np.ndarray], np.ndarray, Table, list[np.ndarray], np.ndarray
 ]:
-    """Create a synthetic dataset with nsrc well-separated sources.
+    """Create a synthetic dataset with ``nsrc`` sources.
 
-    The underlying truth image is composed of randomly oriented Gaussian
-    ellipses of varying size. It is convolved with the high-resolution PSF
-    before resampling to the low-resolution grid.
+    A truth image with randomly positioned Gaussian sources is generated
+    using ``photutils.datasets``. The truth image is convolved with the
+    high- and low-resolution PSFs to create matching images with Gaussian
+    noise. A segmentation map is created from the high-resolution image by
+    running ``detect_sources`` followed by ``deblend_sources``. The returned
+    segmentation IDs correspond to the input catalog order, with any missing
+    detections represented by a single labeled pixel at the source position.
     """
 
     rng = np.random.default_rng(seed)
@@ -28,76 +35,73 @@ def make_simple_data(
     psf_hi = PSF.gaussian(11, hi_fwhm, hi_fwhm)
     psf_lo = PSF.gaussian(41, lo_fwhm, lo_fwhm)
 
-    kernel = psf_hi.matching_kernel(psf_lo)
+    params = make_model_params(
+        (ny, nx),
+        nsrc,
+        x_name="x_mean",
+        y_name="y_mean",
+        min_separation=int(hi_fwhm * 4),
+        border_size=10,
+        seed=rng,
+        amplitude=(1.0, 5.0),
+        x_stddev=(1.0, 3.0),
+        y_stddev=(1.0, 3.0),
+        theta=(0, np.pi),
+    )
 
-    margin = kernel.shape[0] // 2 + 1
-    segmap = np.zeros((ny, nx), dtype=int)
-    segimg = np.zeros((ny, nx), dtype=float)  # to track current image values for segmentation
-    positions = []
-    while len(positions) < nsrc:
-        y = rng.integers(margin, ny - margin)
-        x = rng.integers(margin, nx - margin)
-        if all(np.hypot(y - py, x - px) > psf_hi.array.shape[0] / 2 for py, px in positions):
-            positions.append((y, x))
-
-    fluxes = rng.uniform(1.0, 5.0, size=nsrc)
-    g_fwhm_xs = []
-    g_fwhm_ys = []
-    thetas = []
-    g_sizes = []
-    truth = np.zeros((ny, nx))
-    for i, ((y, x), f) in enumerate(zip(positions, fluxes), start=1):
-        g_fwhm_x = rng.uniform(2.0, 6.0)
-        g_fwhm_y = rng.uniform(2.0, 6.0)
-        theta = rng.uniform(0, np.pi)
-        # Expand g_size to fit the largest FWHM, with margin for orientation
-        max_fwhm = max(g_fwhm_x, g_fwhm_y)
-        g_size = int(np.ceil(6 * max_fwhm)) | 1  # ensure odd size
-        gauss = PSF.gaussian(g_size, g_fwhm_x, g_fwhm_y, theta).array
-        peak = gauss.max()
-        mask = gauss > (peak / 1000.0)
-        r = g_size // 2
-        yy = slice(y - r, y + r + 1)
-        xx = slice(x - r, x + r + 1)
-        # Only assign segmap where new pixels are brighter than existing segimg
-        seg_slice = (slice(max(0, y - r), min(ny, y + r + 1)),
-                     slice(max(0, x - r), min(nx, x + r + 1)))
-        gauss_crop = gauss[
-            max(0, r - y):g_size - max(0, y + r + 1 - ny),
-            max(0, r - x):g_size - max(0, x + r + 1 - nx)
-        ]
-        mask_crop = mask[
-            max(0, r - y):g_size - max(0, y + r + 1 - ny),
-            max(0, r - x):g_size - max(0, x + r + 1 - nx)
-        ]
-        segimg_crop = segimg[seg_slice]
-        segmap_crop = segmap[seg_slice]
-        brighter = (gauss_crop * f > segimg_crop) & mask_crop
-        segimg_crop[brighter] = gauss_crop[brighter] * f
-        segmap_crop[brighter] = i
-        segimg[seg_slice] = segimg_crop
-        segmap[seg_slice] = segmap_crop
-        # Add to truth image
-        truth[yy, xx] += f * gauss
-        g_fwhm_xs.append(g_fwhm_x)
-        g_fwhm_ys.append(g_fwhm_y)
-        thetas.append(theta)
-        g_sizes.append(g_size)
+    truth = make_model_image(
+        (ny, nx),
+        Gaussian2D(),
+        params,
+        bbox_factor=6.0,
+        x_name="x_mean",
+        y_name="y_mean",
+    )
 
     hires = _convolve2d(truth, psf_hi.array)
-    lowres = _convolve2d(hires, kernel)
-    # add small Gaussian noise to the low resolution image to mimic
-    # more realistic data used in the pipeline tests
-    lowres += rng.normal(scale=0.001, size=lowres.shape)
+    lowres = _convolve2d(truth, psf_lo.array)
+
+    flux_true = (
+        params["amplitude"]
+        * 2
+        * np.pi
+        * params["x_stddev"]
+        * params["y_stddev"]
+    )
+
+    amp_min = float(params["amplitude"].min())
+    noise_std = amp_min / 200.0
+    hires += rng.normal(scale=noise_std, size=hires.shape)
+    lowres += rng.normal(scale=noise_std, size=lowres.shape)
+
+    threshold = noise_std * 5.0
+    seg_detect = detect_sources(hires, threshold, npixels=5)
+    segm = deblend_sources(
+        hires,
+        seg_detect,
+        npixels=5,
+        contrast=0.0,
+        progress_bar=False,
+    )
+    segdata = segm.data
+    segmap = np.zeros_like(segdata, dtype=int)
+    used = set()
+    for idx, (y, x) in enumerate(zip(params["y_mean"], params["x_mean"]), start=1):
+        iy = int(round(y))
+        ix = int(round(x))
+        if iy < 0 or iy >= ny or ix < 0 or ix >= nx:
+            continue
+        label = segdata[iy, ix]
+        if label != 0 and label not in used:
+            segmap[segdata == label] = idx
+            used.add(label)
+        else:
+            segmap[iy, ix] = idx
 
     catalog = Table({
-        'y': [p[0] for p in positions],
-        'x': [p[1] for p in positions],
-        'g_size': g_sizes,
-        'g_fwhm_x': g_fwhm_xs,
-        'g_fwhm_y': g_fwhm_ys,
-        'theta': thetas,
-        'flux_true': fluxes,
+        "y": params["y_mean"],
+        "x": params["x_mean"],
+        "flux_true": flux_true,
     })
 
     return [hires, lowres], segmap, catalog, [psf_hi.array, psf_lo.array], truth

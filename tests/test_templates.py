@@ -4,7 +4,7 @@ from mophongo.templates import Templates
 from utils import make_simple_data, save_template_diagnostic
 
 def test_extract_templates_sizes_and_norm(tmp_path):
-    images, segmap, catalog, psfs, truth_img = make_simple_data()
+    images, segmap, catalog, psfs, truth_img, _ = make_simple_data()
     psf_hi = PSF.from_array(psfs[0])
     psf_lo = PSF.from_array(psfs[1])
     kernel = psf_hi.matching_kernel(psf_lo)

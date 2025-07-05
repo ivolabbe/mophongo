@@ -22,6 +22,7 @@ def run_photometry(
     segmap: np.ndarray,
     catalog: Table,
     psfs: Sequence[np.ndarray],
+    rms_images: Sequence[np.ndarray] | None = None,
 ) -> tuple[Table, np.ndarray]:
     """Run photometry on a set of images.
 
@@ -50,6 +51,8 @@ def run_photometry(
 
     if len(images) != len(psfs):
         raise ValueError("Number of images and PSFs must match")
+    if rms_images is not None and len(rms_images) != len(images):
+        raise ValueError("Number of RMS images must match number of images")
 
     from .psf import PSF
     from .templates import Templates
@@ -71,8 +74,19 @@ def run_photometry(
         else:
             kernel = hires_psf.matching_kernel(psf)
         tmpls = Templates.from_image(hires_image, segmap, positions, kernel)
-        fluxes, resid = SparseFitter.fit(list(tmpls), image)
+        weights = None
+        if rms_images is not None and rms_images[idx] is not None:
+            weights = 1.0 / rms_images[idx] ** 2
+        fitter = SparseFitter(list(tmpls), image, weights)
+        fluxes, _ = fitter.solve()
+        resid = fitter.residual()
+        errs = fitter.flux_errors()
+        pred = None
+        if weights is not None:
+            pred = fitter.predicted_errors()
+            catalog[f"err_pred_{idx}"] = pred
         catalog[f"flux_{idx}"] = fluxes
+        catalog[f"err_{idx}"] = errs
         residuals.append(resid)
 
     return catalog, np.stack(residuals)

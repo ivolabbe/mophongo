@@ -29,6 +29,7 @@ def test_pipeline_flux_recovery(tmp_path):
         flux_hi_plot,
         table["flux_true"],
         table["flux_0"],
+        error=table["err_0"],  # Add error column
         label="Flux (hires)",
         xlabel="True Flux",
         ylabel="Recovered Flux (hires)"
@@ -41,18 +42,22 @@ def test_pipeline_flux_recovery(tmp_path):
         flux_lo_plot,
         table["flux_true"],
         table["flux_1"],
+        error=table["err_1"],  # Add error column
         label="Flux (lowres)",
         xlabel="True Flux",
         ylabel="Recovered Flux (lowres)"
     )
     assert flux_lo_plot.exists()
 
-    # Plot for flux_lo vs flux_hi
+    # Plot for flux_lo vs flux_hi with error propagation
     flux_lo_hi_plot = tmp_path / "flux_lo_vs_hi.png"
+    # Calculate combined error for hires vs lowres comparison
+    combined_error = np.sqrt(table["err_0"]**2 + table["err_1"]**2)
     save_flux_vs_truth_plot(
         flux_lo_hi_plot,
         table["flux_0"],
         table["flux_1"],
+        error=combined_error,
         label="Flux (lowres) vs (hires)",
         xlabel="Recovered Flux (hires)",
         ylabel="Recovered Flux (lowres)"
@@ -61,11 +66,10 @@ def test_pipeline_flux_recovery(tmp_path):
 
     model = images[1] - resid[1]
     fname = tmp_path / "diagnostic.png"
-    save_diagnostic_image(fname, truth_img, images[0], images[1], model, resid[1], segmap=segmap)
+    save_diagnostic_image(fname, truth_img, images[0], images[1], model, resid[1], segmap=segmap, catalog=catalog)
     assert fname.exists()
 
     # Report statistics for flux recovery
-    import numpy as np
     for idx in range(len(psfs)):
         col = f"flux_{idx}"
         ratio = np.array(table[col]) / np.array(table["flux_true"])
@@ -81,11 +85,15 @@ def test_pipeline_flux_recovery(tmp_path):
     kernel = psf_hi.matching_kernel(psf_lo)
     tmpls = Templates.from_image(images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel)
     noise_std = rms[1][0, 0]
-    err_pred = np.array([noise_std / np.sqrt((t.array**2).sum()) for t in tmpls])
+    err_pred = np.array([noise_std / np.sqrt((t.array**2).sum()) for t in tmpls.templates])
     ratio_err = table["err_1"] / err_pred
     assert np.allclose(np.mean(ratio_err), 1.0, atol=0.2)
 
-    table["err_pred"] = err_pred
+    # Write catalog with all columns formatted to 3 digits after the decimal
+    for col in table.colnames:
+        if table[col].dtype.kind in "fc":  # float or complex
+            table[col].info.format = ".3f"
+
     cat_file = tmp_path / "photometry.cat"
     table.write(cat_file, format="ascii.commented_header")
     assert cat_file.exists()

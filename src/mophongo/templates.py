@@ -13,7 +13,6 @@ def _convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     pad_before = (pad_y, pad_x)
     pad_after = (ky - 1 - pad_y, kx - 1 - pad_x)
     padded = np.pad(image, (pad_before, pad_after), mode="constant")
-    # Use sliding windows for convolution
     from numpy.lib.stride_tricks import sliding_window_view
     windows = sliding_window_view(padded, kernel.shape)
     return np.einsum("ijkl,kl->ij", windows, kernel)
@@ -24,19 +23,20 @@ class Template:
     array: np.ndarray
     bbox: Tuple[int, int, int, int]
 
+
 class Templates:
-    """Container for PSF-matched source templates."""
+    """Container for source templates."""
 
     def __init__(self) -> None:
         self._templates: List[Template] = []
 
-    def __len__(self) -> int:  # pragma: no cover - trivial
+    def __len__(self) -> int:
         return len(self._templates)
 
-    def __getitem__(self, idx: int) -> Template:  # pragma: no cover - trivial
+    def __getitem__(self, idx: int) -> Template:
         return self._templates[idx]
 
-    def __iter__(self) -> Iterator[Template]:  # pragma: no cover - trivial
+    def __iter__(self) -> Iterator[Template]:
         return iter(self._templates)
 
     @classmethod
@@ -47,7 +47,6 @@ class Templates:
         positions: Iterable[Tuple[float, float]],
         kernel: np.ndarray,
     ) -> "Templates":
-        """Create a :class:`Templates` instance and extract cutouts."""
         obj = cls()
         obj.extract_templates(hires_image, segmap, positions, kernel)
         return obj
@@ -56,6 +55,7 @@ class Templates:
     def templates(self) -> List[Template]:
         """Return the list of templates."""
         return self._templates
+    
     def extract_templates(
         self,
         hires_image: np.ndarray,
@@ -68,7 +68,9 @@ class Templates:
         if hires_image.shape != segmap.shape:
             raise ValueError("hires_image and segmap must have the same shape")
 
+        self.hires_shape = hires_image.shape
         self._templates = []
+        self._templates_hires = []
         kernel = kernel / kernel.sum()
 
         segm = SegmentationImage(segmap)
@@ -88,6 +90,12 @@ class Templates:
 
             idx = segm.get_index(label)
             bbox = segm.bbox[idx]
+            slices = segm.slices[idx]
+
+            # use cutout2d to extract just the bbox area without expanding kernel size
+            cuthi = hires_image[slices]
+            maskhi = (segm.data == label).astype(hires_image.dtype)[slices]
+            self._templates_hires.append(Template(cuthi * maskhi, (bbox.iymin, bbox.iymax, bbox.ixmin, bbox.ixmax)))
 
             ky, kx = kernel.shape
             pad_y, pad_x = ky // 2, kx // 2

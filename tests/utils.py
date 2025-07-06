@@ -6,18 +6,17 @@ from mophongo.psf import PSF
 from mophongo.templates import _convolve2d, Template
 import matplotlib.pyplot as plt
 from astropy.modeling.models import Gaussian2D
-from photutils.datasets import make_model_params, make_model_image
 from photutils.segmentation import detect_sources, deblend_sources
-
+from photutils.datasets import make_model_image, make_model_params
 
 def lupton_norm(img):
-    vmin, vmax = img.min(), np.percentile(img, 90)
+    vmin, vmax = img.min(), np.percentile(img, 99)
     return ImageNormalize(vmin=vmin, vmax=vmax, stretch=AsinhStretch())
 
 
 def make_simple_data(
-    seed: int = 1001,
-    nsrc: int = 15,
+    seed: int = 5,
+    nsrc: int = 20,
 ) -> tuple[
     list[np.ndarray], np.ndarray, Table, list[np.ndarray], np.ndarray, list[np.ndarray]
 ]:
@@ -35,10 +34,14 @@ def make_simple_data(
     rng = np.random.default_rng(seed)
     ny = nx = 101
 
-    hi_fwhm = 2.5
-    lo_fwhm = 4.0 * hi_fwhm
-    psf_hi = PSF.gaussian(11, hi_fwhm, hi_fwhm)
-    psf_lo = PSF.gaussian(41, lo_fwhm, lo_fwhm)
+    hi_fwhm = 2.0
+    lo_fwhm = 5.0 * hi_fwhm
+    
+    # Use Moffat PSFs instead of Gaussian
+    psf_hi = PSF.moffat(11, hi_fwhm, hi_fwhm, beta=3.0)  # Typical ground-based seeing
+    psf_lo = PSF.moffat(41, lo_fwhm, lo_fwhm, beta=2.5)  # Broader wings for low-res
+#    psf_hi = PSF.gaussian(11, hi_fwhm, hi_fwhm)
+#    psf_lo = PSF.gaussian(41, lo_fwhm, lo_fwhm)
 
     params = make_model_params(
         (ny, nx),
@@ -46,11 +49,11 @@ def make_simple_data(
         x_name="x_mean",
         y_name="y_mean",
         min_separation=int(hi_fwhm * 4),
-        border_size=psf_lo.array.shape[0] // 2,
+        border_size=psf_lo.array.shape[0] // 4,
         seed=rng,
-        amplitude=(1.0, 10.0),
-        x_stddev=(1.0, 4.0),
-        y_stddev=(1.0, 4.0),
+        amplitude=(1.0, 50),
+        x_stddev=(0.5, 4.0),
+        y_stddev=(0.5, 4.0),
         theta=(0, np.pi),
     )
 
@@ -73,28 +76,26 @@ def make_simple_data(
         * params["x_stddev"]
         * params["y_stddev"]
     )
-
+    # Add noise
     amp_min = float(params["amplitude"].min())
-    noise_std = amp_min / 50.0
+    noise_std = amp_min / 5.0
     hires += rng.normal(scale=noise_std, size=hires.shape)
     lowres += rng.normal(scale=noise_std, size=lowres.shape)
     rms_hi = np.ones_like(hires) * noise_std
     rms_lo = np.ones_like(lowres) * noise_std
 
-    threshold = noise_std * 5.0
-    seg_detect = detect_sources(hires, threshold, npixels=5)
+    # Segmentation map from hires image
+    # Use Gaussian PSF for detection (keeping this as Gaussian for now)
+    psf_det = PSF.gaussian(5, 1.5, 1.5)
+    detimg = _convolve2d(hires, psf_det.array)
+    seg = detect_sources(detimg, threshold=2 * noise_std, npixels=5)
     segm = deblend_sources(
-        hires,
-        seg_detect,
-        npixels=5,
-        nlevels=32, 
-        contrast=0.0001,
-        progress_bar=False,
+        detimg, seg, npixels=5, nlevels=64, contrast=0.000001, progress_bar=False,
     )
     segdata = segm.data
     segmap = np.zeros_like(segdata, dtype=int)
     used = set()
-    for idx, (y, x) in enumerate(zip(params["y_mean"], params["x_mean"]), start=1):
+    for (idx, y, x) in zip(params["id"], params["y_mean"], params["x_mean"]):
         iy = int(round(y))
         ix = int(round(x))
         if iy < 0 or iy >= ny or ix < 0 or ix >= nx:
@@ -104,9 +105,15 @@ def make_simple_data(
             segmap[segdata == label] = idx
             used.add(label)
         else:
-            segmap[iy, ix] = idx
+            # Create a 3x3 pixel segment for undetected sources
+            y_min = max(0, iy - 1)
+            y_max = min(ny, iy + 2)  # +2 because range is exclusive
+            x_min = max(0, ix - 1)
+            x_max = min(nx, ix + 2)
+            segmap[y_min:y_max, x_min:x_max] = idx
 
     catalog = Table({
+        "id": params["id"],
         "y": params["y_mean"],
         "x": params["x_mean"],
         "flux_true": flux_true,
@@ -130,8 +137,33 @@ def save_diagnostic_image(
     model: np.ndarray,
     residual: np.ndarray,
     segmap: np.ndarray = None,
+    catalog: Table = None,
+    fitter=None,
 ) -> None:
-    fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+    # Compute covariance matrix if fitter is provided
+    if fitter is not None:
+        # Get the full covariance matrix (inverse of ATA)
+        try:
+            from scipy.sparse.linalg import spsolve
+            from scipy.sparse import eye
+            n = fitter.ata.shape[0]
+            cov_matrix = spsolve(fitter.ata, eye(n).tocsc()).toarray()
+        except:
+            # Fallback: convert to dense and use numpy
+            ata_dense = fitter.ata.toarray()
+            try:
+                cov_matrix = np.linalg.inv(ata_dense)
+            except np.linalg.LinAlgError:
+                # Use pseudo-inverse if matrix is singular
+                cov_matrix = np.linalg.pinv(ata_dense)
+        
+        # Use the actual covariance matrix
+        cov_img = cov_matrix
+    else:
+        # Create a dummy matrix if no fitter provided
+        n_sources = len(np.unique(segmap[segmap > 0])) if segmap is not None else 5
+        cov_img = np.eye(n_sources) * 0.1  # Identity matrix with small values
+
     panels = [
         (0, 0, truth,   "truth",   "gray",   lupton_norm(truth)),
         (0, 1, hires,   "hires",   "gray",   lupton_norm(hires)),
@@ -140,6 +172,8 @@ def save_diagnostic_image(
         (1, 1, model,   "model",   "gray",   lupton_norm(model)),
         (1, 2, residual,"residual","gray",   None),
     ]
+
+    fig, axes = plt.subplots(2, 4, figsize=(16, 8))
     for row, col, img, title, cmap, norm in panels:
         ax = axes[row, col]
         if img is None:
@@ -149,6 +183,9 @@ def save_diagnostic_image(
             std = residual.std()
             vlim = 5 * std
             ax.imshow(img, cmap=cmap, origin="lower", vmin=-vlim, vmax=vlim)
+        elif title == "segmap":
+            ax.imshow(img, cmap=cmap, origin="lower")
+            label_segmap(ax, segmap, catalog)
         elif norm is not None:
             ax.imshow(img, cmap=cmap, origin="lower", norm=norm)
         else:
@@ -156,6 +193,24 @@ def save_diagnostic_image(
         ax.set_title(title)
         ax.set_xticks([])
         ax.set_yticks([])
+
+    # Covariance panel with proper scaling
+    ax_cov = axes[1, 3]
+    # Use symmetric colormap for covariance (can have positive and negative values)
+    vmax = np.abs(cov_img).max()
+    if vmax > 0:
+        im = ax_cov.imshow(cov_img, cmap="RdBu_r", origin="lower", vmin=-vmax, vmax=vmax)
+    else:
+        im = ax_cov.imshow(cov_img, cmap="gray", origin="lower")
+    
+    ax_cov.set_title(f"Covariance Matrix ({cov_img.shape[0]}×{cov_img.shape[1]})")
+    ax_cov.set_xlabel("Source Index")
+    ax_cov.set_ylabel("Source Index")
+    
+    # Add colorbar with better formatting
+    cbar = fig.colorbar(im, ax=ax_cov, fraction=0.046, pad=0.04)
+    cbar.set_label("Covariance", rotation=270, labelpad=15)
+
     plt.tight_layout()
     fig.savefig(filename, dpi=150)
     plt.close(fig)
@@ -233,21 +288,42 @@ def save_fit_diagnostic(
 
 def save_template_diagnostic(
     filename: str,
-    hires: np.ndarray,
-    templates: list[Template],
+    templates: list,
+    templates_conv: list,
+    segmap: np.ndarray,
+    catalog=None,
 ) -> None:
     n = len(templates)
-    fig, axes = plt.subplots(1, n + 1, figsize=(3 * (n + 1), 3))
-    axes = np.atleast_1d(axes)
-    axes[0].imshow(hires, cmap="gray", origin="lower", norm=lupton_norm(hires))
-    axes[0].set_title("hires")
-    axes[0].set_xticks([])
-    axes[0].set_yticks([])
-    for i, tmpl in enumerate(templates, start=1):
-        axes[i].imshow(tmpl.array, cmap="gray", origin="lower", norm=lupton_norm(tmpl.array))
-        axes[i].set_title(f"tmpl {i}")
-        axes[i].set_xticks([])
-        axes[i].set_yticks([])
+    fig, axes = plt.subplots(3, n, figsize=(3 * n, 9))
+    axes = np.atleast_2d(axes)
+
+    # Row 1: Original templates
+    for i, tmpl in enumerate(templates):
+        axes[0, i].imshow(tmpl.array, cmap="gray", origin="lower", norm=lupton_norm(tmpl.array))
+        axes[0, i].set_title(f"tmpl {i+1}")
+        axes[0, i].set_xticks([]); axes[0, i].set_yticks([])
+
+    # Row 2: Convolved templates
+    for i, tmpl in enumerate(templates_conv):
+        axes[1, i].imshow(tmpl.array, cmap="gray", origin="lower", norm=lupton_norm(tmpl.array))
+        axes[1, i].set_title(f"conv {i+1}")
+        axes[1, i].set_xticks([]); axes[1, i].set_yticks([])
+
+    # Row 3: Segmentation map with labels for each template's bbox
+    for i, tmpl in enumerate(templates):
+        y0, y1, x0, x1 = tmpl.bbox
+        seg = segmap[y0:y1, x0:x1]
+        axes[2, i].imshow(seg, cmap="nipy_spectral", origin="lower")
+        if catalog is not None:
+            # Find the catalog index corresponding to this template
+            idx = i + 1  # assuming 1-based segmap labels
+            # Find the center of the bbox for label placement
+            cy = (y1 - y0) // 2
+            cx = (x1 - x0) // 2
+            axes[2, i].text(cx, cy, str(idx), color="white", fontsize=12, ha="center", va="center", weight="bold")
+        axes[2, i].set_title(f"seg {i+1}")
+        axes[2, i].set_xticks([]); axes[2, i].set_yticks([])
+
     plt.tight_layout()
     fig.savefig(filename, dpi=150)
     plt.close(fig)
@@ -257,13 +333,14 @@ def save_flux_vs_truth_plot(
     filename: str,
     truth: np.ndarray,
     recovered: np.ndarray,
+    error: np.ndarray = None,
     label: str = "Recovered Flux",
     xlabel: str = "True Flux",
     ylabel: str = "Recovered Flux",
 ) -> None:
     """Plot recovered flux vs truth and recovered/true vs truth, save to file."""
     import matplotlib.pyplot as plt
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    fig, axes = plt.subplots(1, 3 if error is not None else 2, figsize=(15 if error is not None else 10, 4))
 
     # Panel 1: Recovered vs True
     axes[0].scatter(truth, recovered, s=30)
@@ -285,6 +362,27 @@ def save_flux_vs_truth_plot(
     axes[1].set_ylim(0.8, 1.2)
     axes[1].legend()
 
+    # Panel 3: Residuals / Error
+    if error is not None:
+        residuals_over_error = (recovered - truth) / error
+        axes[2].scatter(truth, residuals_over_error, s=30)
+        axes[2].axhline(0, color="k", linestyle="--", label="residual=0")
+        axes[2].axhline(1, color="gray", linestyle=":", alpha=0.7, label="±1σ")
+        axes[2].axhline(-1, color="gray", linestyle=":", alpha=0.7)
+        axes[2].set_xlabel(xlabel)
+        axes[2].set_ylabel("(Recovered - True) / Error")
+        axes[2].set_title("Residuals / Error")
+        axes[2].legend()
+        # Set reasonable y-limits for the residuals/error plot
+        ylim = max(3, np.abs(residuals_over_error).max() * 1.1)
+        axes[2].set_ylim(-ylim, ylim)
+
     plt.tight_layout()
     plt.savefig(filename, dpi=150)
     plt.close(fig)
+
+
+def label_segmap(ax, segmap, catalog):
+    for idx, (y, x) in enumerate(zip(catalog["y"], catalog["x"]), start=1):
+        ax.text(x, y, str(idx), color="white", fontsize=10, ha="center", va="center", weight="bold")
+

@@ -73,15 +73,19 @@ def run_photometry(
             kernel[cy, cx] = 1.0
         else:
             kernel = hires_psf.matching_kernel(psf)
+     
         tmpls = Templates.from_image(hires_image, segmap, positions, kernel)
+
         weights = None
         if rms_images is not None and rms_images[idx] is not None:
             weights = 1.0 / rms_images[idx] ** 2
-        fitter = SparseFitter(list(tmpls), image, weights)
+
+        fitter = SparseFitter(tmpls.templates, image, weights)
         fluxes, _ = fitter.solve()
         resid = fitter.residual()
         errs = fitter.flux_errors()
-        pred = None
+#        errs = fitter.predicted_errors()
+
         if weights is not None:
             pred = fitter.predicted_errors()
             catalog[f"err_pred_{idx}"] = pred

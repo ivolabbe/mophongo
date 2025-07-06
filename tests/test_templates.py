@@ -9,10 +9,10 @@ def test_extract_templates_sizes_and_norm(tmp_path):
     psf_lo = PSF.from_array(psfs[1])
     kernel = psf_hi.matching_kernel(psf_lo)
 
-    tmpl = Templates()
-    templates = tmpl.extract_templates(
+    tmpl = Templates.from_image(
         images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel
     )
+    templates = tmpl.templates
 
     assert len(templates) == len(catalog['flux_true'])
 
@@ -26,5 +26,6 @@ def test_extract_templates_sizes_and_norm(tmp_path):
         assert np.all(hi_cut[segmap[y0:y1, x0:x1] != label] == 0)
 
     fname = tmp_path / "templates.png"
-    save_template_diagnostic(fname, images[0], templates[:5])
+    # Since templates are already PSF-matched, pass them as both arguments
+    save_template_diagnostic(fname, tmpl._templates_hires[:5], templates[:5], segmap=segmap, catalog=catalog)
     assert fname.exists()

@@ -8,15 +8,29 @@ import matplotlib.pyplot as plt
 from astropy.modeling.models import Gaussian2D
 from photutils.segmentation import detect_sources, deblend_sources
 from photutils.datasets import make_model_image, make_model_params
+from skimage.morphology import dilation, disk
 
 def lupton_norm(img):
     vmin, vmax = img.min(), np.percentile(img, 99)
-    return ImageNormalize(vmin=vmin, vmax=vmax, stretch=AsinhStretch())
+    return ImageNormalize(vmin=vmin, vmax=vmax, stretch=AsinhStretch(0.01))
 
+def safe_dilate_segmentation(segmap, selem=disk(1)):
+    result = np.zeros_like(segmap)
+    for seg_id in np.unique(segmap):
+        if seg_id == 0:
+            continue  # skip background
+        mask = segmap == seg_id
+        dilated = dilation(mask, selem)
+        # Only allow dilation into background
+        dilated = np.logical_and(dilated, segmap == 0)
+        result[dilated] = seg_id
+        result[mask] = seg_id  # retain original
+    return result
 
 def make_simple_data(
     seed: int = 5,
     nsrc: int = 20,
+    ndilate: int = 3,
 ) -> tuple[
     list[np.ndarray], np.ndarray, Table, list[np.ndarray], np.ndarray, list[np.ndarray]
 ]:
@@ -39,6 +53,9 @@ def make_simple_data(
     
     # Use Moffat PSFs instead of Gaussian
     psf_hi = PSF.moffat(11, hi_fwhm, hi_fwhm, beta=3.0)  # Typical ground-based seeing
+    # delta function
+#    psf_hi.array = np.pad([[1]], ((2,), (2,)))
+    
     psf_lo = PSF.moffat(41, lo_fwhm, lo_fwhm, beta=2.5)  # Broader wings for low-res
 #    psf_hi = PSF.gaussian(11, hi_fwhm, hi_fwhm)
 #    psf_lo = PSF.gaussian(41, lo_fwhm, lo_fwhm)
@@ -78,7 +95,7 @@ def make_simple_data(
     )
     # Add noise
     amp_min = float(params["amplitude"].min())
-    noise_std = amp_min / 5.0
+    noise_std = amp_min / 10.0
     hires += rng.normal(scale=noise_std, size=hires.shape)
     lowres += rng.normal(scale=noise_std, size=lowres.shape)
     rms_hi = np.ones_like(hires) * noise_std
@@ -86,9 +103,10 @@ def make_simple_data(
 
     # Segmentation map from hires image
     # Use Gaussian PSF for detection (keeping this as Gaussian for now)
-    psf_det = PSF.gaussian(5, 1.5, 1.5)
+    psf_det = PSF.gaussian(5, 0.5, 0.5)
     detimg = _convolve2d(hires, psf_det.array)
     seg = detect_sources(detimg, threshold=2 * noise_std, npixels=5)
+    seg.data = safe_dilate_segmentation(seg.data, selem=disk(ndilate))
     segm = deblend_sources(
         detimg, seg, npixels=5, nlevels=64, contrast=0.000001, progress_bar=False,
     )
@@ -246,9 +264,10 @@ def save_psf_diagnostic(
     titles = ["psf_hi", "kernel", "hi*kernel", "psf_lo", "residual"]
     for ax, img, title in zip(axes.ravel()[:5], imgs, titles):
         if title == "residual":
-            ax.imshow(img, cmap="gray", origin="lower", vmin=-0.1 * psf_lo.max(), vmax=0.1 * psf_lo.max())
+            ax.imshow(img, cmap="gray", origin="lower", vmin=-0.01*psf_lo.max(), vmax=0.01*psf_lo.max())
         else:
-            ax.imshow(img, cmap="gray", origin="lower")
+            ax.imshow(img, cmap="gray", origin="lower", norm=lupton_norm(img))
+
         ax.set_title(title)
         ax.set_xticks([])
         ax.set_yticks([])

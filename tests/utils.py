@@ -407,6 +407,26 @@ def save_flux_vs_truth_plot(
     plt.close(fig)
 
 
+def save_psf_fit_diagnostic(filename: str, psf: np.ndarray, model: np.ndarray) -> None:
+    """Save diagnostic image comparing PSF data with a fitted model."""
+    resid = psf - model
+    fig, axes = plt.subplots(1, 3, figsize=(9, 3))
+    images = [psf, model, resid]
+    titles = ["psf", "model", "resid"]
+    for ax, img, title in zip(axes, images, titles):
+        if title == "resid":
+            v = np.max(np.abs(resid))
+            ax.imshow(img, cmap="gray", origin="lower", vmin=-v, vmax=v)
+        else:
+            ax.imshow(img, cmap="gray", origin="lower", norm=lupton_norm(psf))
+        ax.set_title(title)
+        ax.set_xticks([])
+        ax.set_yticks([])
+    plt.tight_layout()
+    fig.savefig(filename, dpi=150)
+    plt.close(fig)
+
+
 def label_segmap(ax, segmap, catalog):
     for idx, (y, x) in enumerate(zip(catalog["y"], catalog["x"]), start=1):
         ax.text(x, y, str(idx), color="white", fontsize=10, ha="center", va="center", weight="bold")

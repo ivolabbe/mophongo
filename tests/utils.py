@@ -11,7 +11,8 @@ from photutils.datasets import make_model_image, make_model_params
 from skimage.morphology import dilation, disk
 
 def lupton_norm(img):
-    vmin, vmax = img.min(), np.percentile(img, 99)
+    p = np.percentile(img, [1,99])
+    vmin, vmax = -p[1]/20, p[1]
     return ImageNormalize(vmin=vmin, vmax=vmax, stretch=AsinhStretch(0.01))
 
 def safe_dilate_segmentation(segmap, selem=disk(1)):
@@ -30,7 +31,9 @@ def safe_dilate_segmentation(segmap, selem=disk(1)):
 def make_simple_data(
     seed: int = 5,
     nsrc: int = 20,
-    ndilate: int = 3,
+    det_fwhm: float = 0,
+    sigthresh: float = 3.0,
+    ndilate: int = 0,
 ) -> tuple[
     list[np.ndarray], np.ndarray, Table, list[np.ndarray], np.ndarray, list[np.ndarray]
 ]:
@@ -52,13 +55,11 @@ def make_simple_data(
     lo_fwhm = 5.0 * hi_fwhm
     
     # Use Moffat PSFs instead of Gaussian
-    psf_hi = PSF.moffat(11, hi_fwhm, hi_fwhm, beta=3.0)  # Typical ground-based seeing
+    psf_hi = PSF.moffat(41, hi_fwhm, hi_fwhm, beta=3.0)  # Typical ground-based seeing
     # delta function
-#    psf_hi.array = np.pad([[1]], ((2,), (2,)))
+#    psf_hi = PSF.gaussian(5,0.1,0.1).array.round() 
     
     psf_lo = PSF.moffat(41, lo_fwhm, lo_fwhm, beta=2.5)  # Broader wings for low-res
-#    psf_hi = PSF.gaussian(11, hi_fwhm, hi_fwhm)
-#    psf_lo = PSF.gaussian(41, lo_fwhm, lo_fwhm)
 
     params = make_model_params(
         (ny, nx),
@@ -103,10 +104,15 @@ def make_simple_data(
 
     # Segmentation map from hires image
     # Use Gaussian PSF for detection (keeping this as Gaussian for now)
-    psf_det = PSF.gaussian(5, 0.5, 0.5)
-    detimg = _convolve2d(hires, psf_det.array)
-    seg = detect_sources(detimg, threshold=2 * noise_std, npixels=5)
-    seg.data = safe_dilate_segmentation(seg.data, selem=disk(ndilate))
+    if det_fwhm>0:
+        psf_det = PSF.gaussian(3,0.01,0.01)   # delta function = no smoothing 
+        detimg = _convolve2d(hires, psf_det.array)
+    else:
+        detimg = hires
+
+    seg = detect_sources(detimg, threshold=sigthresh * noise_std, npixels=5)
+    if ndilate > 0:
+        seg.data = safe_dilate_segmentation(seg.data, selem=disk(ndilate))
     segm = deblend_sources(
         detimg, seg, npixels=5, nlevels=64, contrast=0.000001, progress_bar=False,
     )

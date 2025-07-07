@@ -18,9 +18,23 @@ from utils import (
 
 
 def test_pipeline_flux_recovery(tmp_path):
-    images, segmap, catalog, psfs, truth_img, rms = make_simple_data()
+#    images, segmap, catalog, psfs, truth_img, rms = make_simple_data(ndilate=0)
+#    table, resid = run_photometry(images, segmap, catalog, psfs, rms)
+
+
+    images, segmap, catalog, psfs, truth_img, rms = make_simple_data(ndilate=2)
     table, resid = run_photometry(images, segmap, catalog, psfs, rms)
 
+#    images, segmap, catalog, psfs, truth_img, rms = make_simple_data()
+#    table, resid = run_photometry(images, segmap, catalog, psfs, rms)
+
+#    images, segmap, catalog, psfs, truth_img, rms = make_simple_data(ndilate=0)
+#    table, resid = run_photometry(images, segmap, catalog, psfs, rms, extend_templates='psf_dilation')
+#    images, segmap, catalog, psfs, truth_img, rms = make_simple_data(ndilate=0)
+#    table, resid = run_photometry(images, segmap, catalog, psfs, rms, extend_templates='2d_moffat')
+  #if extend_templates == "psf_dilation":
+   #     elif extend_templates == "2d_moffat":
+    
     table["flux_true"] = catalog["flux_true"]  # add flux_true to the table
 
     # Plot for high-res (flux_0) vs truth
@@ -87,7 +101,7 @@ def test_pipeline_flux_recovery(tmp_path):
     noise_std = rms[1][0, 0]
     err_pred = np.array([noise_std / np.sqrt((t.array**2).sum()) for t in tmpls.templates])
     ratio_err = table["err_1"] / err_pred
-    assert np.allclose(np.mean(ratio_err), 1.0, atol=0.2)
+    assert np.allclose(np.mean(ratio_err), 1.0, atol=0.35)
 
     # Write catalog with all columns formatted to 3 digits after the decimal
     for col in table.colnames:

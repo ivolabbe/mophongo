@@ -29,11 +29,12 @@ def safe_dilate_segmentation(segmap, selem=disk(1)):
     return result
 
 def make_simple_data(
-    seed: int = 5,
-    nsrc: int = 20,
+    seed: int = 1,
+    nsrc: int = 300,
+    size: int = 501,     
     det_fwhm: float = 0,
-    sigthresh: float = 3.0,
-    ndilate: int = 0,
+    sigthresh: float = 2.0,
+    ndilate: int = 2,
 ) -> tuple[
     list[np.ndarray], np.ndarray, Table, list[np.ndarray], np.ndarray, list[np.ndarray]
 ]:
@@ -49,8 +50,8 @@ def make_simple_data(
     """
 
     rng = np.random.default_rng(seed)
-    ny = nx = 101
-
+  
+    nx = ny = size
     hi_fwhm = 2.0
     lo_fwhm = 5.0 * hi_fwhm
     
@@ -69,9 +70,9 @@ def make_simple_data(
         min_separation=int(hi_fwhm * 4),
         border_size=psf_lo.array.shape[0] // 4,
         seed=rng,
-        amplitude=(1.0, 50),
-        x_stddev=(0.5, 4.0),
-        y_stddev=(0.5, 4.0),
+        amplitude=(1.0, 100),
+        x_stddev=(0.5, 5.0),
+        y_stddev=(0.5, 5.0),
         theta=(0, np.pi),
     )
 
@@ -96,7 +97,7 @@ def make_simple_data(
     )
     # Add noise
     amp_min = float(params["amplitude"].min())
-    noise_std = amp_min / 10.0
+    noise_std = amp_min / 2.0
     hires += rng.normal(scale=noise_std, size=hires.shape)
     lowres += rng.normal(scale=noise_std, size=lowres.shape)
     rms_hi = np.ones_like(hires) * noise_std
@@ -365,42 +366,152 @@ def save_flux_vs_truth_plot(
 ) -> None:
     """Plot recovered flux vs truth and recovered/true vs truth, save to file."""
     import matplotlib.pyplot as plt
-    fig, axes = plt.subplots(1, 3 if error is not None else 2, figsize=(15 if error is not None else 10, 4))
+    from scipy.stats import median_abs_deviation
+    from scipy.optimize import curve_fit
+    from astropy.stats import mad_std
+    
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
-    # Panel 1: Recovered vs True
-    axes[0].scatter(truth, recovered, s=30)
+    # Panel 1 (top-left): Recovered vs True
+    axes[0, 0].scatter(truth, recovered, s=30, alpha=0.6)
     minval = min(truth.min(), recovered.min())
     maxval = max(truth.max(), recovered.max())
-    axes[0].plot([minval, maxval], [minval, maxval], "k--", label="y=x")
-    axes[0].set_xlabel(xlabel)
-    axes[0].set_ylabel(ylabel)
-    axes[0].set_title(label)
-    axes[0].legend()
+    axes[0, 0].plot([minval, maxval], [minval, maxval], "k--", label="y=x")
+    axes[0, 0].set_xlabel(xlabel)
+    axes[0, 0].set_ylabel(ylabel)
+    axes[0, 0].set_title(label)
+    axes[0, 0].legend()
 
-    # Panel 2: Ratio vs True
+    # Panel 2 (top-right): Ratio vs True with binned statistics and error envelope
     ratio = np.array(recovered) / np.array(truth)
-    axes[1].scatter(truth, ratio, s=30)
-    axes[1].axhline(1.0, color="k", linestyle="--", label="ratio=1")
-    axes[1].set_xlabel(xlabel)
-    axes[1].set_ylabel("Recovered / True")
-    axes[1].set_title("Flux Ratio vs True")
-    axes[1].set_ylim(0.8, 1.2)
-    axes[1].legend()
+    axes[0, 1].scatter(truth, ratio, s=30, alpha=0.6, label='Data')
+    axes[0, 1].axhline(1.0, color="k", linestyle="--", label="ratio=1")
+    
+    # Add error envelope if provided
+    if error is not None:
+        # Calculate relative error: e_tot = error / recovered
+        e_tot = np.array(error) / np.array(recovered)
+        
+        # Plot upper and lower envelope: 1 ± e_tot
+        axes[0, 1].scatter(truth, 1 + e_tot, s=5, alpha=0.5, color='orange', label='+/- 1σ')
+        axes[0, 1].scatter(truth, 1 - e_tot, s=5, alpha=0.5, color='orange')
+    
+    # Calculate binned statistics
+    # Create logarithmic bins for better coverage
+    truth_log = np.log10(truth)
+    n_bins = 8
+    # make in linear space 
+    bin_edges = np.percentile(truth, np.linspace(0, 100, n_bins + 1))
+    bin_centers = 0.5 * (bin_edges[1:] + bin_edges[:-1])
+    
+    bin_medians = []
+    bin_mad_stds = []
+    bin_counts = []
+    
+    for i in range(n_bins):
+        mask = (truth >= bin_edges[i]) & (truth < bin_edges[i+1])
+        if np.sum(mask) > 2:  # Need at least 3 points for meaningful statistics
+            bin_ratio = ratio[mask]
+            bin_medians.append(np.median(bin_ratio))
+            bin_mad_stds.append(mad_std(bin_ratio))  # Use astropy's mad_std
+            bin_counts.append(np.sum(mask))
+        else:
+            bin_medians.append(np.nan)
+            bin_mad_stds.append(np.nan)
+            bin_counts.append(0)
+    
+    # Plot binned statistics
+    valid_bins = ~np.isnan(bin_medians)
+    if np.any(valid_bins):
+        axes[0, 1].errorbar(bin_centers[valid_bins], 
+                           np.array(bin_medians)[valid_bins], 
+                           yerr=np.array(bin_mad_stds)[valid_bins],
+                           fmt='ko', capsize=5, capthick=2, alpha=0.7,
+                           label=f'Binned median ± MAD', markersize=6)
+    
+    axes[0, 1].set_xlabel(xlabel)
+    axes[0, 1].set_ylabel("Recovered / True")
+    axes[0, 1].set_title("Flux Ratio vs True")
+    axes[0, 1].set_ylim(0.7, 1.3)
+    axes[0, 1].set_xscale('symlog', linthresh=2000)
+    axes[0, 1].set_xlim(truth.min(), truth.max())
+    axes[0, 1].legend()
 
-    # Panel 3: Residuals / Error
+    # Panel 3 (bottom-left): Histogram of Residuals / Error with Gaussian fit
     if error is not None:
         residuals_over_error = (recovered - truth) / error
-        axes[2].scatter(truth, residuals_over_error, s=30)
-        axes[2].axhline(0, color="k", linestyle="--", label="residual=0")
-        axes[2].axhline(1, color="gray", linestyle=":", alpha=0.7, label="±1σ")
-        axes[2].axhline(-1, color="gray", linestyle=":", alpha=0.7)
-        axes[2].set_xlabel(xlabel)
-        axes[2].set_ylabel("(Recovered - True) / Error")
-        axes[2].set_title("Residuals / Error")
-        axes[2].legend()
-        # Set reasonable y-limits for the residuals/error plot
-        ylim = max(3, np.abs(residuals_over_error).max() * 1.1)
-        axes[2].set_ylim(-ylim, ylim)
+        
+        # Create histogram
+        bins = np.linspace(-5, 5, 31)  # 30 bins from -5 to 5 sigma
+        counts, bin_edges, _ = axes[1, 0].hist(residuals_over_error, bins=bins, alpha=0.7, density=True, 
+                                              color='lightblue', edgecolor='black', linewidth=0.5)
+        
+        # Fit Gaussian to the data
+        def gaussian(x, amp, mu, sigma):
+            return amp * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+        
+        # Initial guess
+        x_centers = 0.5 * (bin_edges[1:] + bin_edges[:-1])
+        p0 = [counts.max(), np.mean(residuals_over_error), np.std(residuals_over_error)]
+        
+        try:
+            popt, _ = curve_fit(gaussian, x_centers, counts, p0=p0)
+            amp_fit, mu_fit, sigma_fit = popt
+            
+            # Plot fitted Gaussian
+            x_fit = np.linspace(-10, 10, 100)
+            y_fit = gaussian(x_fit, amp_fit, mu_fit, sigma_fit)
+            axes[1, 0].plot(x_fit, y_fit, 'g-', linewidth=2, 
+                           label=f'Fitted Gaussian\nμ={mu_fit:.3f}, σ={sigma_fit:.3f}')
+        except:
+            mu_fit, sigma_fit = np.mean(residuals_over_error), np.std(residuals_over_error)
+        
+        # Add vertical lines for ±1, ±2, ±3 sigma
+        for sigma in [1, 2, 3]:
+            axes[1, 0].axvline(sigma, color='gray', linestyle='--', alpha=0.5)
+            axes[1, 0].axvline(-sigma, color='gray', linestyle='--', alpha=0.5)
+        
+        # Calculate statistics using astropy's mad_std
+        mean_resid = np.mean(residuals_over_error)
+        median_resid = np.median(residuals_over_error)
+        std_resid = np.std(residuals_over_error)
+        mad_resid = mad_std(residuals_over_error)  # Gaussian-scaled MAD
+        
+        # Add statistics text
+        stats_text = f'Mean: {mean_resid:.3f}\nMedian: {median_resid:.3f}\nStd: {std_resid:.3f}\nMAD: {mad_resid:.3f}'
+        if 'mu_fit' in locals():
+            stats_text += f'\nFit μ: {mu_fit:.3f}\nFit σ: {sigma_fit:.3f}'
+        
+        axes[1, 0].text(0.05, 0.95, stats_text, 
+                       transform=axes[1, 0].transAxes, verticalalignment='top',
+                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        axes[1, 0].set_xlabel("(Recovered - True) / Error")
+        axes[1, 0].set_ylabel("Density")
+        axes[1, 0].set_title("Residuals / Error Distribution")
+        axes[1, 0].set_xlim(-5, 5)
+        axes[1, 0].legend()
+
+        # Panel 4 (bottom-right): (Recovered - True) / Error vs Recovered
+        axes[1, 1].scatter(recovered, residuals_over_error, s=30, alpha=0.6)
+        axes[1, 1].axhline(0, color="k", linestyle="--", label="zero residual")
+        
+        # Add ±1, ±2, ±3 sigma lines
+        for sigma in [1, 3]:
+            axes[1, 1].axhline(sigma, color='gray', linestyle='--', alpha=0.5)
+            axes[1, 1].axhline(-sigma, color='gray', linestyle='--', alpha=0.5, label=f'±{sigma}σ')
+        
+        axes[1, 1].set_xlabel("Recovered Flux")
+        axes[1, 1].set_ylabel("(Recovered - True) / Error")
+        axes[1, 1].set_title("Residuals vs Recovered Flux")
+        axes[1, 1].set_ylim(-10, 10)
+        axes[1, 1].set_xscale('symlog', linthresh=2000)
+        axes[1, 1].set_xlim(recovered.min(), recovered.max())
+        axes[1, 1].legend()
+    else:
+        # If no error provided, hide panels 3 and 4
+        axes[1, 0].axis('off')
+        axes[1, 1].axis('off')
 
     plt.tight_layout()
     plt.savefig(filename, dpi=150)

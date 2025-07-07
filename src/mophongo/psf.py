@@ -9,12 +9,13 @@ array. A method is included to compute a matching kernel between two PSFs.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from scipy.optimize import least_squares
 
 import numpy as np
 from photutils.psf import matching
 from photutils.psf.matching import TukeyWindow
 
-from .utils import elliptical_gaussian, elliptical_moffat
+from .utils import elliptical_gaussian, elliptical_moffat, measure_shape
 
 
 def _moffat_psf(
@@ -71,6 +72,25 @@ def _gaussian_psf(
 
 
 @dataclass
+class MoffatFit:
+    """Parameters describing a fitted Moffat profile."""
+
+    fwhm_x: float
+    fwhm_y: float
+    beta: float
+    theta: float
+
+
+@dataclass
+class GaussianFit:
+    """Parameters describing a fitted Gaussian profile."""
+
+    fwhm_x: float
+    fwhm_y: float
+    theta: float
+
+
+@dataclass
 class PSF:
     """Discrete point spread function."""
 
@@ -114,6 +134,69 @@ class PSF:
     def matching_kernel(self, other: "PSF", window: object | None = None) -> np.ndarray:
         """Return the convolution kernel that matches ``self`` to ``other``."""
         return psf_matching_kernel(self.array, other.array, window=window)
+
+    def fit_moffat(self) -> MoffatFit:
+        """Fit a 2-D Moffat profile to the PSF data."""
+
+        y, x = np.indices(self.array.shape)
+        cy = (self.array.shape[0] - 1) / 2
+        cx = (self.array.shape[1] - 1) / 2
+
+        _, _, sigma_x, sigma_y, theta0 = measure_shape(self.array, np.ones_like(self.array, dtype=bool))
+        theta0 = ((theta0 + np.pi / 2) % np.pi) - np.pi / 2
+        p0 = np.array([2.355 * sigma_x, 2.355 * sigma_y, 2.5, theta0])
+        bounds = ([1e-3, 1e-3, 0.5, -np.pi / 2], [np.inf, np.inf, 20.0, np.pi / 2])
+
+        def residual(p: np.ndarray) -> np.ndarray:
+            fwhm_x, fwhm_y, beta, theta = p
+            model = elliptical_moffat(
+                y,
+                x,
+                1.0,
+                fwhm_x,
+                fwhm_y,
+                beta,
+                theta,
+                cx,
+                cy,
+            )
+            model /= model.sum()
+            return (model - self.array).ravel()
+
+        result = least_squares(residual, p0, bounds=bounds)
+        fwhm_x, fwhm_y, beta, theta = result.x
+        return MoffatFit(float(fwhm_x), float(fwhm_y), float(beta), float(theta))
+
+    def fit_gaussian(self) -> GaussianFit:
+        """Fit a 2-D Gaussian profile to the PSF data."""
+
+        y, x = np.indices(self.array.shape)
+        cy = (self.array.shape[0] - 1) / 2
+        cx = (self.array.shape[1] - 1) / 2
+
+        _, _, sigma_x, sigma_y, theta0 = measure_shape(self.array, np.ones_like(self.array, dtype=bool))
+        theta0 = ((theta0 + np.pi / 2) % np.pi) - np.pi / 2
+        p0 = np.array([2.355 * sigma_x, 2.355 * sigma_y, theta0])
+        bounds = ([1e-3, 1e-3, -np.pi / 2], [np.inf, np.inf, np.pi / 2])
+
+        def residual(p: np.ndarray) -> np.ndarray:
+            fwhm_x, fwhm_y, theta = p
+            model = elliptical_gaussian(
+                y,
+                x,
+                1.0,
+                fwhm_x,
+                fwhm_y,
+                theta,
+                cx,
+                cy,
+            )
+            model /= model.sum()
+            return (model - self.array).ravel()
+
+        result = least_squares(residual, p0, bounds=bounds)
+        fwhm_x, fwhm_y, theta = result.x
+        return GaussianFit(float(fwhm_x), float(fwhm_y), float(theta))
 
 
 def moffat_psf(

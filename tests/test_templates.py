@@ -32,22 +32,43 @@ def test_extract_templates_sizes_and_norm(tmp_path):
     assert fname.exists()
 
 
-def test_template_extension_methods():
+def test_template_extension_methods(tmp_path):
     images, segmap, catalog, psfs, _, _ = make_simple_data()
     psf_hi = PSF.from_array(psfs[0])
     psf_lo = PSF.from_array(psfs[1])
     kernel = psf_hi.matching_kernel(psf_lo)
 
     tmpl = Templates.from_image(images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel)
-    orig_shapes = [t.array.shape for t in tmpl.templates]
+    orig_templates = list(tmpl.templates)
 
     tmpls_moffat = tmpl.extend_with_moffat(kernel, radius_factor=4.0, beta=3.0)
     for t in tmpls_moffat:
         np.testing.assert_allclose(t.array.sum(), 1.0, rtol=1e-5)
 
+    fname_moff = tmp_path / "moffat_extension.png"
+    save_template_diagnostic(
+        fname_moff,
+        orig_templates[:5],
+        tmpls_moffat[:5],
+        segmap=segmap,
+        catalog=catalog,
+    )
+    assert fname_moff.exists()
+
     tmpl.extract_templates(images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel)
+    orig_templates = list(tmpl.templates)
     tmpls_dil = tmpl.extend_with_psf_dilation(psf_hi.array, kernel, iterations=2)
     for t in tmpls_dil:
         np.testing.assert_allclose(t.array.sum(), 1.0, rtol=1e-5)
+
+    fname_dil = tmp_path / "dilation_extension.png"
+    save_template_diagnostic(
+        fname_dil,
+        orig_templates[:5],
+        tmpls_dil[:5],
+        segmap=segmap,
+        catalog=catalog,
+    )
+    assert fname_dil.exists()
 
     assert len(tmpls_moffat) == len(tmpls_dil)

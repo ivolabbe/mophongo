@@ -52,3 +52,4 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [x] Save diagnostic plots for PSF, fitter and template tests
 - [x] Save output catalog to disk during pipeline test
 
+- [x] Implement template extension methods (Moffat fit and PSF dilation)

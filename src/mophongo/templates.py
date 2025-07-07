@@ -4,7 +4,7 @@ from typing import Iterable, Iterator, List, Tuple
 import numpy as np
 from astropy.nddata import Cutout2D
 from photutils.segmentation import SegmentationImage
-from skimage.morphology import binary_erosion, dilation, disk
+from skimage.morphology import binary_erosion, dilation, disk, footprint_rectangle
 
 
 def _convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
@@ -167,7 +167,7 @@ class Templates:
         self,
         kernel: np.ndarray,
         *,
-        radius_factor: float = 3.0,
+        radius_factor: float = 2.0,
         beta: float | None = None,
     ) -> List[Template]:
         """Extend templates by fitting a 2-D Moffat profile."""
@@ -247,11 +247,43 @@ class Templates:
                 cy_global - y0,
             )
 
-            conv = _convolve2d(moffat_ext, kernel)
+            # Create extended template with original data preserved
+            extended_template = np.zeros_like(moffat_ext)
+            
+            # Map original template coordinates to extended template coordinates
+            orig_y0 = tmpl_hi.bbox[0] - y0
+            orig_y1 = tmpl_hi.bbox[1] - y0
+            orig_x0 = tmpl_hi.bbox[2] - x0
+            orig_x1 = tmpl_hi.bbox[3] - x0
+            
+            # Ensure coordinates are within bounds
+            orig_y0 = max(0, orig_y0)
+            orig_y1 = min(ny, orig_y1)
+            orig_x0 = max(0, orig_x0)
+            orig_x1 = min(nx, orig_x1)
+            
+            # Use original data where the segment exists
+            if orig_y1 > orig_y0 and orig_x1 > orig_x0:
+                # Calculate the slice of original data that fits in the extended template
+                data_y0 = max(0, y0 - tmpl_hi.bbox[0])
+                data_y1 = data_y0 + (orig_y1 - orig_y0)
+                data_x0 = max(0, x0 - tmpl_hi.bbox[2])
+                data_x1 = data_x0 + (orig_x1 - orig_x0)
+                
+                extended_template[orig_y0:orig_y1, orig_x0:orig_x1] = data[data_y0:data_y1, data_x0:data_x1]
+                
+                # Use Moffat profile only where original data is zero (outside segment)
+                original_mask = extended_template > 0
+                extended_template[~original_mask] = moffat_ext[~original_mask]
+            else:
+                # If no overlap, use full Moffat profile
+                extended_template = moffat_ext
+
+            conv = _convolve2d(extended_template, kernel)
             if conv.sum() != 0:
                 conv = conv / conv.sum()
             new_templates.append(Template(conv, (y0, y1, x0, x1)))
-            new_templates_hires.append(Template(moffat_ext, (y0, y1, x0, x1)))
+            new_templates_hires.append(Template(extended_template, (y0, y1, x0, x1)))
 
         self._templates = new_templates
         self._templates_hires = new_templates_hires
@@ -279,10 +311,10 @@ class Templates:
         kernel: np.ndarray,
         *,
         iterations: int = 3,
+        selem: np.ndarray = disk(2),
     ) -> List[Template]:
         """Extend templates using PSF-weighted dilation."""
 
-        selem = disk(1)
         psf = psf / psf.sum()
         new_templates: List[Template] = []
         new_templates_hires: List[Template] = []
@@ -314,24 +346,73 @@ class Templates:
             else:
                 scale = prev_flux / psf_sum_prev
 
-            for _ in range(iterations):
+            print(f'\n=== Template {len(new_templates)} Debug ===')
+            print(f'Original flux: {flux:.6f}, Original pixels: {np.count_nonzero(mask)}')
+            print(f'Center: ({y_c:.1f}, {x_c:.1f}), Padded shape: {arr.shape}')
+            print(f'Initial ring: {np.count_nonzero(prev_ring)} pixels')
+            print(f'Ring flux: {prev_flux:.6f}, Mean ring level: {prev_flux/np.count_nonzero(prev_ring) if np.count_nonzero(prev_ring) > 0 else 0:.6f}')
+            print(f'PSF sum at ring: {psf_sum_prev:.6f}, Scale: {scale:.6f}')
+
+            total_added_flux = 0.0
+            total_added_pixels = 0
+
+            for iteration in range(iterations):
                 dilated = dilation(mask_curr, selem)
                 new_ring = dilated & ~mask_curr
                 if not np.any(new_ring):
+                    print(f'Iteration {iteration}: No new pixels to add')
                     break
 
                 coords_new = np.argwhere(new_ring)
                 psf_new = self._sample_psf(psf, coords_new[:, 0] - y_c, coords_new[:, 1] - x_c)
-                arr[coords_new[:, 0], coords_new[:, 1]] = scale * psf_new
+                
+                # Calculate new pixel values
+                new_values = scale * psf_new
+                
+                # Diagnostic: analyze what we're adding
+                n_new_pixels = len(coords_new)
+                new_flux_added = new_values.sum()
+                mean_new_value = new_values.mean() if n_new_pixels > 0 else 0
+                max_new_value = new_values.max() if n_new_pixels > 0 else 0
+                
+                print(f'Iteration {iteration}: Adding {n_new_pixels} pixels')
+                print(f'  New flux added: {new_flux_added:.6f}')
+                print(f'  Mean new pixel value: {mean_new_value:.6f}')
+                print(f'  Max new pixel value: {max_new_value:.6f}')
+                print(f'  PSF values range: [{psf_new.min():.6f}, {psf_new.max():.6f}]')
+                
+                # Set the new pixel values
+                arr[coords_new[:, 0], coords_new[:, 1]] = new_values
                 mask_curr = dilated
-
                 prev_ring = new_ring
                 prev_flux = arr[prev_ring].sum()
                 psf_prev = psf_new
                 psf_sum_prev = psf_prev.sum()
                 if psf_sum_prev == 0:
+                    print(f'  PSF sum became zero, stopping')
                     break
                 scale = prev_flux / psf_sum_prev
+                
+                # Track totals
+                total_added_flux += new_flux_added
+                total_added_pixels += n_new_pixels
+                
+                print(f'  Updated scale for next iteration: {scale:.6f}')
+                print(f'  Cumulative added flux: {total_added_flux:.6f}')
+                print(f'  Cumulative added pixels: {total_added_pixels}')
+
+            # Final diagnostics
+            final_flux = arr[mask_curr].sum()
+            final_pixels = np.count_nonzero(mask_curr)
+            flux_ratio = final_flux / flux if flux > 0 else 0
+            
+            print(f'=== Final Results ===')
+            print(f'Original: {flux:.6f} flux, {np.count_nonzero(mask)} pixels')
+            print(f'Final: {final_flux:.6f} flux, {final_pixels} pixels')
+            print(f'Added: {total_added_flux:.6f} flux, {total_added_pixels} pixels')
+            print(f'Flux ratio (final/original): {flux_ratio:.3f}')
+            print(f'Mean pixel level - original: {flux/np.count_nonzero(mask):.6f}')
+            print(f'Mean pixel level - final: {final_flux/final_pixels:.6f}')
 
             inds = np.argwhere(mask_curr)
             y0 = inds[:, 0].min()

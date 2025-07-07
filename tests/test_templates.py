@@ -41,7 +41,7 @@ def test_template_extension_methods(tmp_path):
     tmpl = Templates.from_image(images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel)
     orig_templates_hi = list(tmpl._templates_hires)
 
-    tmpls_moffat = tmpl.extend_with_moffat(kernel, radius_factor=4.0, beta=3.0)
+    tmpls_moffat = tmpl.extend_with_moffat(kernel, radius_factor=2.0, beta=3.0)
     for t in tmpls_moffat:
         np.testing.assert_allclose(t.array.sum(), 1.0, rtol=1e-5)
 

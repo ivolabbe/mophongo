@@ -10,7 +10,7 @@ This document provides guidelines for developing the Standalone Photometry Pipel
 - Use `@dataclass` for all structured data (e.g. `PSF`, `Template`)
 - use object oriented design where abstraction is appropriate and makes the code easier to maintain / extend (e.g. for PSF)
 - Keep functions pure when reasonable and document expected input shapes.
-- Write unit tests alongside new functionality using `pytest`.
+- Write unit tests alongside new functionality using `pytest` and produce an insightful diagnostic image
 
 ## Recommended Dataclasses
 - `PSF`: parameters such as `size`, `fwhm_x`, `fwhm_y`, `beta`, and `theta`.

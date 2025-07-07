@@ -4,6 +4,7 @@ from typing import Iterable, Iterator, List, Tuple
 import numpy as np
 from astropy.nddata import Cutout2D
 from photutils.segmentation import SegmentationImage
+from skimage.morphology import binary_erosion, dilation, disk
 
 
 def _convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
@@ -139,3 +140,219 @@ class Templates:
             self._templates.append(Template(conv, (y0_ext, y1_ext, x0_ext, x1_ext)))
 
         return self._templates
+
+    @staticmethod
+    def _elliptical_moffat(
+        y: np.ndarray,
+        x: np.ndarray,
+        amplitude: float,
+        fwhm_x: float,
+        fwhm_y: float,
+        beta: float,
+        theta: float,
+        x0: float,
+        y0: float,
+    ) -> np.ndarray:
+        cos_t = np.cos(theta)
+        sin_t = np.sin(theta)
+        xr = (x - x0) * cos_t + (y - y0) * sin_t
+        yr = -(x - x0) * sin_t + (y - y0) * cos_t
+        factor = 2 ** (1 / beta) - 1
+        alpha_x = fwhm_x / (2 * np.sqrt(factor))
+        alpha_y = fwhm_y / (2 * np.sqrt(factor))
+        r2 = (xr / alpha_x) ** 2 + (yr / alpha_y) ** 2
+        return amplitude * (1 + r2) ** (-beta)
+
+    def extend_with_moffat(
+        self,
+        kernel: np.ndarray,
+        *,
+        radius_factor: float = 3.0,
+        beta: float | None = None,
+    ) -> List[Template]:
+        """Extend templates by fitting a 2-D Moffat profile."""
+
+        new_templates: List[Template] = []
+        new_templates_hires: List[Template] = []
+        kernel = kernel / kernel.sum()
+        for tmpl_hi in self._templates_hires:
+            data = tmpl_hi.array
+            mask = data > 0
+            if not np.any(mask):
+                new_templates.append(tmpl_hi)
+                continue
+
+            y_idx, x_idx = np.indices(data.shape)
+            flux = data[mask].sum()
+            y_c = (y_idx[mask] * data[mask]).sum() / flux
+            x_c = (x_idx[mask] * data[mask]).sum() / flux
+
+            y_rel = y_idx - y_c
+            x_rel = x_idx - x_c
+            cov_xx = (data[mask] * x_rel[mask] ** 2).sum() / flux
+            cov_yy = (data[mask] * y_rel[mask] ** 2).sum() / flux
+            cov_xy = (data[mask] * x_rel[mask] * y_rel[mask]).sum() / flux
+            cov = np.array([[cov_xx, cov_xy], [cov_xy, cov_yy]])
+            vals, vecs = np.linalg.eigh(cov)
+            order = np.argsort(vals)[::-1]
+            vals = vals[order]
+            vecs = vecs[:, order]
+            sigma_x = np.sqrt(vals[0])
+            sigma_y = np.sqrt(vals[1])
+            theta = np.arctan2(vecs[1, 0], vecs[0, 0])
+
+            fwhm_x = 2.355 * sigma_x
+            fwhm_y = 2.355 * sigma_y
+            beta_val = beta if beta is not None else 2.5
+
+            moffat_unit = self._elliptical_moffat(
+                y_idx,
+                x_idx,
+                1.0,
+                fwhm_x,
+                fwhm_y,
+                beta_val,
+                theta,
+                x_c,
+                y_c,
+            )
+            amp = flux / moffat_unit[mask].sum()
+
+            rmax = radius_factor * max(fwhm_x, fwhm_y)
+            size = int(np.ceil(2 * rmax)) + 1
+
+            cy_global = tmpl_hi.bbox[0] + y_c
+            cx_global = tmpl_hi.bbox[2] + x_c
+
+            y0 = int(round(cy_global - size / 2))
+            x0 = int(round(cx_global - size / 2))
+            y0 = max(0, y0)
+            x0 = max(0, x0)
+            y1 = min(self.hires_shape[0], y0 + size)
+            x1 = min(self.hires_shape[1], x0 + size)
+
+            ny = y1 - y0
+            nx = x1 - x0
+            y_grid, x_grid = np.indices((ny, nx))
+
+            moffat_ext = self._elliptical_moffat(
+                y_grid,
+                x_grid,
+                amp,
+                fwhm_x,
+                fwhm_y,
+                beta_val,
+                theta,
+                cx_global - x0,
+                cy_global - y0,
+            )
+
+            conv = _convolve2d(moffat_ext, kernel)
+            if conv.sum() != 0:
+                conv = conv / conv.sum()
+            new_templates.append(Template(conv, (y0, y1, x0, x1)))
+            new_templates_hires.append(Template(moffat_ext, (y0, y1, x0, x1)))
+
+        self._templates = new_templates
+        self._templates_hires = new_templates_hires
+        return new_templates
+
+    @staticmethod
+    def _sample_psf(psf: np.ndarray, dy: np.ndarray, dx: np.ndarray) -> np.ndarray:
+        cy = (psf.shape[0] - 1) / 2
+        cx = (psf.shape[1] - 1) / 2
+        iy = np.round(cy + dy).astype(int)
+        ix = np.round(cx + dx).astype(int)
+        valid = (
+            (iy >= 0)
+            & (iy < psf.shape[0])
+            & (ix >= 0)
+            & (ix < psf.shape[1])
+        )
+        vals = np.zeros_like(iy, dtype=float)
+        vals[valid] = psf[iy[valid], ix[valid]]
+        return vals
+
+    def extend_with_psf_dilation(
+        self,
+        psf: np.ndarray,
+        kernel: np.ndarray,
+        *,
+        iterations: int = 3,
+    ) -> List[Template]:
+        """Extend templates using PSF-weighted dilation."""
+
+        selem = disk(1)
+        psf = psf / psf.sum()
+        new_templates: List[Template] = []
+        new_templates_hires: List[Template] = []
+
+        for tmpl_hi in self._templates_hires:
+            data = tmpl_hi.array
+            mask = data > 0
+            if not np.any(mask):
+                new_templates.append(tmpl_hi)
+                continue
+
+            pad = iterations + 1
+            arr = np.pad(data, pad)
+            mask_curr = np.pad(mask, pad)
+
+            y_idx, x_idx = np.indices(arr.shape)
+            flux = arr[mask_curr].sum()
+            y_c = (y_idx[mask_curr] * arr[mask_curr]).sum() / flux
+            x_c = (x_idx[mask_curr] * arr[mask_curr]).sum() / flux
+
+            prev_ring = mask_curr & ~binary_erosion(mask_curr, selem)
+            prev_flux = arr[prev_ring].sum()
+
+            coords_prev = np.argwhere(prev_ring)
+            psf_prev = self._sample_psf(psf, coords_prev[:, 0] - y_c, coords_prev[:, 1] - x_c)
+            psf_sum_prev = psf_prev.sum()
+            if psf_sum_prev == 0:
+                scale = 0.0
+            else:
+                scale = prev_flux / psf_sum_prev
+
+            for _ in range(iterations):
+                dilated = dilation(mask_curr, selem)
+                new_ring = dilated & ~mask_curr
+                if not np.any(new_ring):
+                    break
+
+                coords_new = np.argwhere(new_ring)
+                psf_new = self._sample_psf(psf, coords_new[:, 0] - y_c, coords_new[:, 1] - x_c)
+                arr[coords_new[:, 0], coords_new[:, 1]] = scale * psf_new
+                mask_curr = dilated
+
+                prev_ring = new_ring
+                prev_flux = arr[prev_ring].sum()
+                psf_prev = psf_new
+                psf_sum_prev = psf_prev.sum()
+                if psf_sum_prev == 0:
+                    break
+                scale = prev_flux / psf_sum_prev
+
+            inds = np.argwhere(mask_curr)
+            y0 = inds[:, 0].min()
+            y1 = inds[:, 0].max() + 1
+            x0 = inds[:, 1].min()
+            x1 = inds[:, 1].max() + 1
+            cut = arr[y0:y1, x0:x1]
+
+            conv = _convolve2d(cut / cut.sum(), kernel)
+            if conv.sum() != 0:
+                conv = conv / conv.sum()
+
+            bbox = (
+                tmpl_hi.bbox[0] - pad + y0,
+                tmpl_hi.bbox[0] - pad + y1,
+                tmpl_hi.bbox[2] - pad + x0,
+                tmpl_hi.bbox[2] - pad + x1,
+            )
+            new_templates.append(Template(conv, bbox))
+            new_templates_hires.append(Template(cut, bbox))
+
+        self._templates = new_templates
+        self._templates_hires = new_templates_hires
+        return new_templates

@@ -149,13 +149,18 @@ class Templates:
         kernel: np.ndarray,
         *,
         radius_factor: float = 2.0,
-        beta: float | None = None,
+        beta: float = 3.0,
     ) -> List[Template]:
         """Extend templates by fitting a 2-D Moffat profile."""
 
         new_templates: List[Template] = []
         new_templates_hires: List[Template] = []
         kernel = kernel / kernel.sum()
+        
+        # Get kernel padding
+        ky, kx = kernel.shape
+        pad_y, pad_x = ky // 2, kx // 2
+        
         for tmpl_hi in self._templates_hires:
             data = tmpl_hi.array
             mask = data > 0
@@ -168,7 +173,6 @@ class Templates:
 
             fwhm_x = 2.355 * sigma_x
             fwhm_y = 2.355 * sigma_y
-            beta_val = beta if beta is not None else 2.5
 
             # bounding box size accounting for ellipticity and angle
             a = radius_factor * fwhm_x
@@ -179,18 +183,26 @@ class Templates:
             cy_global = tmpl_hi.bbox[0] + y_c
             cx_global = tmpl_hi.bbox[2] + x_c
 
-            y0 = int(np.floor(cy_global - half_height))
-            x0 = int(np.floor(cx_global - half_width))
-            y1 = int(np.ceil(cy_global + half_height))
-            x1 = int(np.ceil(cx_global + half_width))
+            # Extended bbox for the Moffat profile
+            y0_ext = int(np.floor(cy_global - half_height))
+            x0_ext = int(np.floor(cx_global - half_width))
+            y1_ext = int(np.ceil(cy_global + half_height))
+            x1_ext = int(np.ceil(cx_global + half_width))
 
-            y0 = max(0, y0)
-            x0 = max(0, x0)
-            y1 = min(self.hires_shape[0], y1)
-            x1 = min(self.hires_shape[1], x1)
+            # Further extend for convolution padding
+            y0_padded = y0_ext - pad_y
+            x0_padded = x0_ext - pad_x
+            y1_padded = y1_ext + pad_y
+            x1_padded = x1_ext + pad_x
 
-            ny = y1 - y0
-            nx = x1 - x0
+            # Clip to image boundaries
+            y0_clipped = max(0, y0_padded)
+            x0_clipped = max(0, x0_padded)
+            y1_clipped = min(self.hires_shape[0], y1_padded)
+            x1_clipped = min(self.hires_shape[1], x1_padded)
+
+            ny = y1_clipped - y0_clipped
+            nx = x1_clipped - x0_clipped
             y_grid, x_grid = np.indices((ny, nx))
 
             moffat_unit = elliptical_moffat(
@@ -199,19 +211,28 @@ class Templates:
                 1.0,
                 fwhm_x,
                 fwhm_y,
-                beta_val,
+                beta,
                 theta,
-                cx_global - x0,
-                cy_global - y0,
+                cx_global - x0_clipped,
+                cy_global - y0_clipped,
             )
 
             # map original template region into extended grid
-            orig_y0 = tmpl_hi.bbox[0] - y0
-            orig_x0 = tmpl_hi.bbox[2] - x0
+            orig_y0 = tmpl_hi.bbox[0] - y0_clipped
+            orig_x0 = tmpl_hi.bbox[2] - x0_clipped
             orig_y1 = orig_y0 + data.shape[0]
             orig_x1 = orig_x0 + data.shape[1]
 
-            amp = flux / moffat_unit[orig_y0:orig_y1, orig_x0:orig_x1][mask].sum()
+            # Only use pixels within bounds for amplitude calculation
+            orig_y0 = max(0, orig_y0)
+            orig_y1 = min(ny, orig_y1)
+            orig_x0 = max(0, orig_x0)
+            orig_x1 = min(nx, orig_x1)
+
+            if orig_y1 > orig_y0 and orig_x1 > orig_x0:
+                amp = flux / moffat_unit[orig_y0:orig_y1, orig_x0:orig_x1][mask[:orig_y1-orig_y0, :orig_x1-orig_x0]].sum()
+            else:
+                amp = flux / moffat_unit.sum()
 
             moffat_ext = moffat_unit * amp
 
@@ -219,15 +240,24 @@ class Templates:
             extended_template = moffat_ext.copy()
 
             if orig_y1 > orig_y0 and orig_x1 > orig_x0:
-                data_slice = extended_template[orig_y0:orig_y1, orig_x0:orig_x1]
-                data_slice[mask] = data[mask]
-                extended_template[orig_y0:orig_y1, orig_x0:orig_x1] = data_slice
+                # Get the slice that corresponds to original data
+                data_h, data_w = data.shape
+                slice_h = min(data_h, orig_y1 - orig_y0)
+                slice_w = min(data_w, orig_x1 - orig_x0)
+                
+                data_slice = extended_template[orig_y0:orig_y0+slice_h, orig_x0:orig_x0+slice_w]
+                data_mask = mask[:slice_h, :slice_w]
+                data_slice[data_mask] = data[:slice_h, :slice_w][data_mask]
+                extended_template[orig_y0:orig_y0+slice_h, orig_x0:orig_x0+slice_w] = data_slice
 
-            conv = _convolve2d(extended_template, kernel)
+            # Store high-res template
+            new_templates_hires.append(Template(extended_template, (y0_clipped, y1_clipped, x0_clipped, x1_clipped)))
+
+            # Convolve and normalize
+            conv = _convolve2d(extended_template / extended_template.sum(), kernel)
             if conv.sum() != 0:
                 conv = conv / conv.sum()
-            new_templates.append(Template(conv, (y0, y1, x0, x1)))
-            new_templates_hires.append(Template(extended_template, (y0, y1, x0, x1)))
+            new_templates.append(Template(conv, (y0_clipped, y1_clipped, x0_clipped, x1_clipped)))
 
         self._templates = new_templates
         self._templates_hires = new_templates_hires
@@ -262,6 +292,10 @@ class Templates:
         psf = psf / psf.sum()
         new_templates: List[Template] = []
         new_templates_hires: List[Template] = []
+        
+        # Get kernel padding
+        ky, kx = kernel.shape
+        pad_y, pad_x = ky // 2, kx // 2
 
         for tmpl_hi in self._templates_hires:
             data = tmpl_hi.array
@@ -290,74 +324,27 @@ class Templates:
             else:
                 scale = prev_flux / psf_sum_prev
 
-            print(f'\n=== Template {len(new_templates)} Debug ===')
-            print(f'Original flux: {flux:.6f}, Original pixels: {np.count_nonzero(mask)}')
-            print(f'Center: ({y_c:.1f}, {x_c:.1f}), Padded shape: {arr.shape}')
-            print(f'Initial ring: {np.count_nonzero(prev_ring)} pixels')
-            print(f'Ring flux: {prev_flux:.6f}, Mean ring level: {prev_flux/np.count_nonzero(prev_ring) if np.count_nonzero(prev_ring) > 0 else 0:.6f}')
-            print(f'PSF sum at ring: {psf_sum_prev:.6f}, Scale: {scale:.6f}')
-
-            total_added_flux = 0.0
-            total_added_pixels = 0
-
             for iteration in range(iterations):
                 dilated = dilation(mask_curr, selem)
                 new_ring = dilated & ~mask_curr
                 if not np.any(new_ring):
-                    print(f'Iteration {iteration}: No new pixels to add')
                     break
 
                 coords_new = np.argwhere(new_ring)
                 psf_new = self._sample_psf(psf, coords_new[:, 0] - y_c, coords_new[:, 1] - x_c)
-                
-                # Calculate new pixel values
                 new_values = scale * psf_new
                 
-                # Diagnostic: analyze what we're adding
-                n_new_pixels = len(coords_new)
-                new_flux_added = new_values.sum()
-                mean_new_value = new_values.mean() if n_new_pixels > 0 else 0
-                max_new_value = new_values.max() if n_new_pixels > 0 else 0
-                
-                print(f'Iteration {iteration}: Adding {n_new_pixels} pixels')
-                print(f'  New flux added: {new_flux_added:.6f}')
-                print(f'  Mean new pixel value: {mean_new_value:.6f}')
-                print(f'  Max new pixel value: {max_new_value:.6f}')
-                print(f'  PSF values range: [{psf_new.min():.6f}, {psf_new.max():.6f}]')
-                
-                # Set the new pixel values
-                arr[coords_new[:, 0], coords_new[:, 1]] = new_values.mean()
+                arr[coords_new[:, 0], coords_new[:, 1]] = new_values
                 mask_curr = dilated
                 prev_ring = new_ring
                 prev_flux = arr[prev_ring].sum()
                 psf_prev = psf_new
                 psf_sum_prev = psf_prev.sum()
                 if psf_sum_prev == 0:
-                    print(f'  PSF sum became zero, stopping')
                     break
                 scale = prev_flux / psf_sum_prev
-                
-                # Track totals
-                total_added_flux += new_flux_added
-                total_added_pixels += n_new_pixels
-                
-                print(f'  Updated scale for next iteration: {scale:.6f}')
-                print(f'  Cumulative added flux: {total_added_flux:.6f}')
-                print(f'  Cumulative added pixels: {total_added_pixels}')
 
-            # Final diagnostics
-            final_flux = arr[mask_curr].sum()
-            final_pixels = np.count_nonzero(mask_curr)
-            flux_ratio = final_flux / flux if flux > 0 else 0
-            
-            print(f'=== Final Results ===')
-            print(f'Original: {flux:.6f} flux, {np.count_nonzero(mask)} pixels')
-            print(f'Final: {final_flux:.6f} flux, {final_pixels} pixels')
-            print(f'Added: {total_added_flux:.6f} flux, {total_added_pixels} pixels')
-            print(f'Flux ratio (final/original): {flux_ratio:.3f}')
-            print(f'Mean pixel level - original: {flux/np.count_nonzero(mask):.6f}')
-            print(f'Mean pixel level - final: {final_flux/final_pixels:.6f}')
-
+            # Extract dilated template
             inds = np.argwhere(mask_curr)
             y0 = inds[:, 0].min()
             y1 = inds[:, 0].max() + 1
@@ -365,18 +352,53 @@ class Templates:
             x1 = inds[:, 1].max() + 1
             cut = arr[y0:y1, x0:x1]
 
-            conv = _convolve2d(cut / cut.sum(), kernel)
+            # Calculate global coordinates for dilated template
+            global_y0_dil = tmpl_hi.bbox[0] - pad + y0
+            global_y1_dil = tmpl_hi.bbox[0] - pad + y1
+            global_x0_dil = tmpl_hi.bbox[2] - pad + x0
+            global_x1_dil = tmpl_hi.bbox[2] - pad + x1
+
+            # Extend further for convolution padding
+            global_y0_padded = global_y0_dil - pad_y
+            global_y1_padded = global_y1_dil + pad_y
+            global_x0_padded = global_x0_dil - pad_x
+            global_x1_padded = global_x1_dil + pad_x
+
+            # Clip to image boundaries
+            clipped_y0 = max(0, global_y0_padded)
+            clipped_y1 = min(self.hires_shape[0], global_y1_padded)
+            clipped_x0 = max(0, global_x0_padded)
+            clipped_x1 = min(self.hires_shape[1], global_x1_padded)
+
+            # Create padded array
+            padded_height = clipped_y1 - clipped_y0
+            padded_width = clipped_x1 - clipped_x0
+            padded_template = np.zeros((padded_height, padded_width))
+
+            # Calculate where to place the dilated template in the padded array
+            offset_y = global_y0_dil - clipped_y0
+            offset_x = global_x0_dil - clipped_x0
+            
+            # Ensure offsets are within bounds
+            offset_y = max(0, offset_y)
+            offset_x = max(0, offset_x)
+            
+            # Calculate how much of the cut array fits
+            fit_h = min(cut.shape[0], padded_height - offset_y)
+            fit_w = min(cut.shape[1], padded_width - offset_x)
+            
+            # Place the dilated template
+            if fit_h > 0 and fit_w > 0:
+                padded_template[offset_y:offset_y+fit_h, offset_x:offset_x+fit_w] = cut[:fit_h, :fit_w]
+
+            # Store high-res template
+            new_templates_hires.append(Template(padded_template, (clipped_y0, clipped_y1, clipped_x0, clipped_x1)))
+
+            # Convolve and normalize
+            conv = _convolve2d(padded_template / padded_template.sum(), kernel)
             if conv.sum() != 0:
                 conv = conv / conv.sum()
-
-            bbox = (
-                tmpl_hi.bbox[0] - pad + y0,
-                tmpl_hi.bbox[0] - pad + y1,
-                tmpl_hi.bbox[2] - pad + x0,
-                tmpl_hi.bbox[2] - pad + x1,
-            )
-            new_templates.append(Template(conv, bbox))
-            new_templates_hires.append(Template(cut, bbox))
+            new_templates.append(Template(conv, (clipped_y0, clipped_y1, clipped_x0, clipped_x1)))
 
         self._templates = new_templates
         self._templates_hires = new_templates_hires

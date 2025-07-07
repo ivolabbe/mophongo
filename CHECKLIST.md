@@ -55,3 +55,4 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 
 - [x] Implement template extension methods (Moffat fit and PSF dilation)
 - [x] Added selectable template extension method in `run_photometry` and consolidated analytic profiles
+- [x] Benchmarked key pipeline steps in `tests/test_benchmark.py`

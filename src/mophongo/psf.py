@@ -14,6 +14,9 @@ import numpy as np
 from photutils.psf import matching
 from photutils.psf.matching import TukeyWindow
 
+from .utils import elliptical_gaussian, elliptical_moffat
+
+
 def _moffat_psf(
     size: int | tuple[int, int], fwhm_x: float, fwhm_y: float, beta: float, theta: float = 0.0
 ) -> np.ndarray:
@@ -26,21 +29,17 @@ def _moffat_psf(
     y, x = np.mgrid[:ny, :nx]
     cy = (ny - 1) / 2
     cx = (nx - 1) / 2
-    x = x - cx
-    y = y - cy
-
-    cos_t = np.cos(theta)
-    sin_t = np.sin(theta)
-
-    xr = x * cos_t + y * sin_t
-    yr = -x * sin_t + y * cos_t
-
-    factor = 2 ** (1 / beta) - 1
-    alpha_x = fwhm_x / (2 * np.sqrt(factor))
-    alpha_y = fwhm_y / (2 * np.sqrt(factor))
-
-    r2 = (xr / alpha_x) ** 2 + (yr / alpha_y) ** 2
-    psf = (1 + r2) ** (-beta)
+    psf = elliptical_moffat(
+        y,
+        x,
+        1.0,
+        fwhm_x,
+        fwhm_y,
+        beta,
+        theta,
+        cx,
+        cy,
+    )
     psf /= psf.sum()
     return psf
 
@@ -57,20 +56,16 @@ def _gaussian_psf(
     y, x = np.mgrid[:ny, :nx]
     cy = (ny - 1) / 2
     cx = (nx - 1) / 2
-    x = x - cx
-    y = y - cy
-
-    cos_t = np.cos(theta)
-    sin_t = np.sin(theta)
-
-    xr = x * cos_t + y * sin_t
-    yr = -x * sin_t + y * cos_t
-
-    sigma_x = fwhm_x / (2 * np.sqrt(2 * np.log(2)))
-    sigma_y = fwhm_y / (2 * np.sqrt(2 * np.log(2)))
-
-    r2 = (xr / sigma_x) ** 2 + (yr / sigma_y) ** 2
-    psf = np.exp(-0.5 * r2)
+    psf = elliptical_gaussian(
+        y,
+        x,
+        1.0,
+        fwhm_x,
+        fwhm_y,
+        theta,
+        cx,
+        cy,
+    )
     psf /= psf.sum()
     return psf
 

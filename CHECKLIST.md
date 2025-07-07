@@ -53,3 +53,4 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [x] Save output catalog to disk during pipeline test
 
 - [x] Implement template extension methods (Moffat fit and PSF dilation)
+- [x] Added selectable template extension method in `run_photometry` and consolidated analytic profiles

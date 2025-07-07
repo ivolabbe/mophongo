@@ -23,6 +23,8 @@ def run_photometry(
     catalog: Table,
     psfs: Sequence[np.ndarray],
     rms_images: Sequence[np.ndarray] | None = None,
+    *,
+    extend_templates: str | None = None,
 ) -> tuple[Table, np.ndarray]:
     """Run photometry on a set of images.
 
@@ -75,6 +77,10 @@ def run_photometry(
             kernel = hires_psf.matching_kernel(psf)
      
         tmpls = Templates.from_image(hires_image, segmap, positions, kernel)
+        if extend_templates == "psf_dilation":
+            tmpls.extend_with_psf_dilation(psf.array, kernel)
+        elif extend_templates == "2d_moffat":
+            tmpls.extend_with_moffat(kernel)
 
         weights = None
         if rms_images is not None and rms_images[idx] is not None:

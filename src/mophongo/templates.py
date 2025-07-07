@@ -311,7 +311,7 @@ class Templates:
         kernel: np.ndarray,
         *,
         iterations: int = 3,
-        selem: np.ndarray = disk(2),
+        selem: np.ndarray = np.ones((3,3)),
     ) -> List[Template]:
         """Extend templates using PSF-weighted dilation."""
 
@@ -382,7 +382,7 @@ class Templates:
                 print(f'  PSF values range: [{psf_new.min():.6f}, {psf_new.max():.6f}]')
                 
                 # Set the new pixel values
-                arr[coords_new[:, 0], coords_new[:, 1]] = new_values
+                arr[coords_new[:, 0], coords_new[:, 1]] = new_values.mean()
                 mask_curr = dilated
                 prev_ring = new_ring
                 prev_flux = arr[prev_ring].sum()

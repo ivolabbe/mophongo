@@ -173,6 +173,7 @@ class Templates:
         """Extend templates by fitting a 2-D Moffat profile."""
 
         new_templates: List[Template] = []
+        new_templates_hires: List[Template] = []
         kernel = kernel / kernel.sum()
         for tmpl_hi in self._templates_hires:
             data = tmpl_hi.array
@@ -250,8 +251,10 @@ class Templates:
             if conv.sum() != 0:
                 conv = conv / conv.sum()
             new_templates.append(Template(conv, (y0, y1, x0, x1)))
+            new_templates_hires.append(Template(moffat_ext, (y0, y1, x0, x1)))
 
         self._templates = new_templates
+        self._templates_hires = new_templates_hires
         return new_templates
 
     @staticmethod
@@ -282,6 +285,7 @@ class Templates:
         selem = disk(1)
         psf = psf / psf.sum()
         new_templates: List[Template] = []
+        new_templates_hires: List[Template] = []
 
         for tmpl_hi in self._templates_hires:
             data = tmpl_hi.array
@@ -347,6 +351,8 @@ class Templates:
                 tmpl_hi.bbox[2] - pad + x1,
             )
             new_templates.append(Template(conv, bbox))
+            new_templates_hires.append(Template(cut, bbox))
 
         self._templates = new_templates
+        self._templates_hires = new_templates_hires
         return new_templates

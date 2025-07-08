@@ -106,7 +106,7 @@ class SparseFitter:
         return slice(y0, y1), slice(x0, x1)
 
     def build_normal_matrix_new(self) -> None:
-        """Construct normal matrix using :class:`TemplateNew` objects."""
+        """Construct normal matrix using :class:`Template` objects."""
         n = len(self.templates)
         ata = lil_matrix((n, n))
         atb = np.zeros(n)

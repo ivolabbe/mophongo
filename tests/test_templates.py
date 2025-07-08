@@ -71,4 +71,21 @@ def test_template_extension_methods(tmp_path):
     )
     assert fname_dil.exists()
 
-    assert len(tmpls_moffat) == len(tmpls_dil)
+    # Test simple PSF dilation extension
+    tmpl.extract_templates(images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel)
+    orig_templates_hi = list(tmpl._templates_hires)
+    tmpls_simple = tmpl.extend_with_psf_dilation_simple(psf_hi.array, kernel, radius_factor=2.0)
+#    for t in tmpls_simple:
+#        np.testing.assert_allclose(t.array.sum(), 1.0, rtol=1e-5)
+
+    fname_simple = tmp_path / "simple_dilation_extension.png"
+    save_template_diagnostic(
+        fname_simple,
+        orig_templates_hi[:5],
+        tmpl._templates_hires[:5],
+        segmap=segmap,
+        catalog=catalog,
+    )
+    assert fname_simple.exists()
+
+    assert len(tmpls_moffat) == len(tmpls_dil) == len(tmpls_simple)

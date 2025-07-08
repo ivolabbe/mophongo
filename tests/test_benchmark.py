@@ -12,7 +12,7 @@ from utils import make_simple_data
 
 
 def test_benchmark_pipeline_steps():
-    images, segmap, catalog, psfs, _, _ = make_simple_data()
+    images, segmap, catalog, psfs, _, _ = make_simple_data(nsrc=100, size=201, ndilate=2)
     psf_hi = PSF.from_array(psfs[0])
     psf_lo = PSF.from_array(psfs[1])
     kernel = psf_hi.matching_kernel(psf_lo)

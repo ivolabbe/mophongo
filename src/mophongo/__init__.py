@@ -1,10 +1,10 @@
-from .templates import Template, TemplateNew, extract_templates_new
+from .templates import Template, TemplateOld, extract_templates
 from .fit import FitConfig, SparseFitter
 
 __all__ = [
     "Template",
-    "TemplateNew",
-    "extract_templates_new",
+    "TemplateOld",
+    "extract_templates",
     "FitConfig",
     "SparseFitter",
 ]

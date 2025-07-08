@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import numpy as np
 from mophongo.fit import FitConfig, SparseFitter
 from mophongo.psf import PSF
-from mophongo.templates import Templates, TemplateNew, extract_templates_new
+from mophongo.templates import Templates, Template, extract_templates
 from utils import make_simple_data, save_fit_diagnostic
 
 
@@ -59,7 +59,7 @@ def test_build_normal_matrix_new_equivalence():
     old = Templates.from_image(
         images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel
     )
-    new = extract_templates_new(
+    new = extract_templates(
         images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel
     )
 

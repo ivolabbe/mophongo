@@ -22,13 +22,13 @@ def _convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
 
 
 @dataclass
-class Template:
+class TemplateOld:
     array: np.ndarray
     bbox: Tuple[int, int, int, int]
     position_cutout: Tuple[float, float] | None = None
 
 
-class TemplateNew(Cutout2D):
+class Template(Cutout2D):
     """Cutout-based template storing slice bookkeeping."""
 
     def __init__(
@@ -65,15 +65,15 @@ class Templates:
     """Container for source templates."""
 
     def __init__(self) -> None:
-        self._templates: List[Template] = []
+        self._templates: List[TemplateOld] = []
 
     def __len__(self) -> int:
         return len(self._templates)
 
-    def __getitem__(self, idx: int) -> Template:
+    def __getitem__(self, idx: int) -> TemplateOld:
         return self._templates[idx]
 
-    def __iter__(self) -> Iterator[Template]:
+    def __iter__(self) -> Iterator[TemplateOld]:
         return iter(self._templates)
 
     @classmethod
@@ -85,21 +85,21 @@ class Templates:
         kernel: np.ndarray,
     ) -> "Templates":
         obj = cls()
-        obj.extract_templates(hires_image, segmap, positions, kernel)
+        obj.extract_templates_old(hires_image, segmap, positions, kernel)
         return obj
 
     @property
-    def templates(self) -> List[Template]:
+    def templates(self) -> List[TemplateOld]:
         """Return the list of templates."""
         return self._templates
     
-    def extract_templates(
+    def extract_templates_old(
         self,
         hires_image: np.ndarray,
         segmap: np.ndarray,
         positions: Iterable[Tuple[float, float]],
         kernel: np.ndarray,
-    ) -> List[Template]:
+    ) -> List[TemplateOld]:
         """Extract PSF-matched templates for a list of source positions."""
 
         if hires_image.shape != segmap.shape:
@@ -134,7 +134,7 @@ class Templates:
             maskhi = (segm.data == label)[slices]
             xc, yc, _, _, _ = measure_shape(cuthi, maskhi)
 
-            self._templates_hires.append(Template(cuthi * maskhi.astype(hires_image.dtype), (bbox.iymin, bbox.iymax, bbox.ixmin, bbox.ixmax), (xc, yc)))
+            self._templates_hires.append(TemplateOld(cuthi * maskhi.astype(hires_image.dtype), (bbox.iymin, bbox.iymax, bbox.ixmin, bbox.ixmax), (xc, yc)))
 
             ky, kx = kernel.shape
             pad_y, pad_x = ky // 2, kx // 2
@@ -179,7 +179,7 @@ class Templates:
             s = conv.sum()
             if s != 0:
                 conv = conv / s
-            self._templates.append(Template(conv, (y0_ext, y1_ext, x0_ext, x1_ext), (xc_local_conv, yc_local_conv)))
+            self._templates.append(TemplateOld(conv, (y0_ext, y1_ext, x0_ext, x1_ext), (xc_local_conv, yc_local_conv)))
 
         return self._templates
 
@@ -190,11 +190,11 @@ class Templates:
         *,
         radius_factor: float = 2.0,
         beta: float = 3.0,
-    ) -> List[Template]:
+    ) -> List[TemplateOld]:
         """Extend templates by fitting a 2-D Moffat profile."""
 
-        new_templates: List[Template] = []
-        new_templates_hires: List[Template] = []
+        new_templates: List[TemplateOld] = []
+        new_templates_hires: List[TemplateOld] = []
         kernel = kernel / kernel.sum()
         
         # Get kernel padding
@@ -205,8 +205,8 @@ class Templates:
             data = tmpl_hi.array
             mask = data > 0
             if not np.any(mask):
-                new_templates.append(Template(tmpl_hi.array, tmpl_hi.bbox, tmpl_hi.source_xy))
-                new_templates_hires.append(Template(tmpl_hi.array, tmpl_hi.bbox, tmpl_hi.source_xy))
+                new_templates.append(TemplateOld(tmpl_hi.array, tmpl_hi.bbox, tmpl_hi.source_xy))
+                new_templates_hires.append(TemplateOld(tmpl_hi.array, tmpl_hi.bbox, tmpl_hi.source_xy))
                 continue
 
             flux = data[mask].sum()
@@ -295,14 +295,23 @@ class Templates:
                 data_slice[data_mask] = data[:slice_h, :slice_w][data_mask]
                 extended_template[orig_y0:orig_y0+slice_h, orig_x0:orig_x0+slice_w] = data_slice
 
-            # Store high-res template
-            new_templates_hires.append(Template(extended_template, (y0_clipped, y1_clipped, x0_clipped, x1_clipped), (xc_new, yc_new)))
+            tmpl_hi_ext = TemplateOld(
+                extended_template,
+                (y0_clipped, y1_clipped, x0_clipped, x1_clipped),
+                (xc_new, yc_new),
+            )
+            new_templates_hires.append(tmpl_hi_ext)
 
-            # Convolve and normalize
-            conv = _convolve2d(extended_template / extended_template.sum(), kernel)
+            tmpl_lo = TemplateOld(
+                extended_template.copy(),
+                tmpl_hi_ext.bbox,
+                tmpl_hi_ext.position_cutout,
+            )
+            conv = _convolve2d(tmpl_lo.array / tmpl_lo.array.sum(), kernel)
             if conv.sum() != 0:
                 conv = conv / conv.sum()
-            new_templates.append(Template(conv, (y0_clipped, y1_clipped, x0_clipped, x1_clipped), (xc_new, yc_new)))
+            tmpl_lo.array = conv
+            new_templates.append(tmpl_lo)
 
         self._templates = new_templates
         self._templates_hires = new_templates_hires
@@ -333,12 +342,12 @@ class Templates:
         *,
         iterations: int = 3,
         selem: np.ndarray = np.ones((3,3)),
-    ) -> List[Template]:
+    ) -> List[TemplateOld]:
         """Extend templates using PSF-weighted dilation."""
 
         psf = psf / psf.sum()
-        new_templates: List[Template] = []
-        new_templates_hires: List[Template] = []
+        new_templates: List[TemplateOld] = []
+        new_templates_hires: List[TemplateOld] = []
         
         # Get kernel padding
         ky, kx = kernel.shape
@@ -348,8 +357,8 @@ class Templates:
             data = tmpl_hi.array
             mask = data > 0
             if not np.any(mask):
-                new_templates.append(Template(tmpl_hi.array, tmpl_hi.bbox, tmpl_hi.source_xy))
-                new_templates_hires.append(Template(tmpl_hi.array, tmpl_hi.bbox, tmpl_hi.source_xy))
+                new_templates.append(TemplateOld(tmpl_hi.array, tmpl_hi.bbox, tmpl_hi.source_xy))
+                new_templates_hires.append(TemplateOld(tmpl_hi.array, tmpl_hi.bbox, tmpl_hi.source_xy))
                 continue
 
             pad = iterations + 1
@@ -446,14 +455,23 @@ class Templates:
             if fit_h > 0 and fit_w > 0:
                 padded_template[offset_y:offset_y+fit_h, offset_x:offset_x+fit_w] = cut[:fit_h, :fit_w]
 
-            # Store high-res template
-            new_templates_hires.append(Template(padded_template, (clipped_y0, clipped_y1, clipped_x0, clipped_x1), (xc_final, yc_final)))
+            tmpl_hi_ext = TemplateOld(
+                padded_template,
+                (clipped_y0, clipped_y1, clipped_x0, clipped_x1),
+                (xc_final, yc_final),
+            )
+            new_templates_hires.append(tmpl_hi_ext)
 
-            # Convolve and normalize
-            conv = _convolve2d(padded_template / padded_template.sum(), kernel)
+            tmpl_lo = TemplateOld(
+                padded_template.copy(),
+                tmpl_hi_ext.bbox,
+                tmpl_hi_ext.position_cutout,
+            )
+            conv = _convolve2d(tmpl_lo.array / tmpl_lo.array.sum(), kernel)
             if conv.sum() != 0:
                 conv = conv / conv.sum()
-            new_templates.append(Template(conv, (clipped_y0, clipped_y1, clipped_x0, clipped_x1), (xc_final, yc_final)))
+            tmpl_lo.array = conv
+            new_templates.append(tmpl_lo)
 
         self._templates = new_templates
         self._templates_hires = new_templates_hires
@@ -465,12 +483,12 @@ class Templates:
         kernel: np.ndarray,
         *,
         radius_factor: float = 1.5,
-    ) -> List[Template]:
+    ) -> List[TemplateOld]:
         """Extend templates using PSF scaled to segment flux, placed where template is zero."""
 
         psf = psf / psf.sum()
-        new_templates: List[Template] = []
-        new_templates_hires: List[Template] = []
+        new_templates: List[TemplateOld] = []
+        new_templates_hires: List[TemplateOld] = []
         
         # Get kernel padding
         ky, kx = kernel.shape
@@ -480,8 +498,8 @@ class Templates:
             data = tmpl_hi.array
             mask = data > 0
             if not np.any(mask):
-                new_templates.append(Template(tmpl_hi.array, tmpl_hi.bbox, tmpl_hi.source_xy))
-                new_templates_hires.append(Template(tmpl_hi.array, tmpl_hi.bbox, tmpl_hi.source_xy))
+                new_templates.append(TemplateOld(tmpl_hi.array, tmpl_hi.bbox, tmpl_hi.source_xy))
+                new_templates_hires.append(TemplateOld(tmpl_hi.array, tmpl_hi.bbox, tmpl_hi.source_xy))
                 continue
 
             # Get total flux and centroid in original template coordinates
@@ -591,34 +609,46 @@ class Templates:
             clip_x1 = clip_x0 + (x1_clipped - x0_clipped)
 
             extended_clipped = extended_template[clip_y0:clip_y1, clip_x0:clip_x1]
-            conv_clipped = conv_padded[clip_y0:clip_y1, clip_x0:clip_x1]
-
             # Update source position for clipped coordinates
             xc_clipped = xc_padded - clip_x0
             yc_clipped = yc_padded - clip_y0
 
-            # Store templates
-            new_templates_hires.append(Template(extended_clipped, (y0_clipped, y1_clipped, x0_clipped, x1_clipped), (xc_clipped, yc_clipped)))
-            new_templates.append(Template(conv_clipped, (y0_clipped, y1_clipped, x0_clipped, x1_clipped), (xc_clipped, yc_clipped)))
+            tmpl_hi_ext = TemplateOld(
+                extended_clipped,
+                (y0_clipped, y1_clipped, x0_clipped, x1_clipped),
+                (xc_clipped, yc_clipped),
+            )
+            new_templates_hires.append(tmpl_hi_ext)
+
+            tmpl_lo = TemplateOld(
+                extended_clipped.copy(),
+                tmpl_hi_ext.bbox,
+                tmpl_hi_ext.position_cutout,
+            )
+            conv = _convolve2d(tmpl_lo.array / tmpl_lo.array.sum(), kernel)
+            if conv.sum() != 0:
+                conv = conv / conv.sum()
+            tmpl_lo.array = conv
+            new_templates.append(tmpl_lo)
 
         self._templates = new_templates
         self._templates_hires = new_templates_hires
         return new_templates
 
-def extract_templates_new(
+def extract_templates(
     hires_image: np.ndarray,
     segmap: np.ndarray,
     positions: Iterable[Tuple[float, float]],
     kernel: np.ndarray,
-) -> list[TemplateNew]:
-    """Return PSF-matched templates using :class:`TemplateNew`."""
+) -> list[Template]:
+    """Return PSF-matched templates using :class:`Template`."""
 
     if hires_image.shape != segmap.shape:
         raise ValueError("hires_image and segmap must have the same shape")
 
     kernel = kernel / kernel.sum()
     segm = SegmentationImage(segmap)
-    templates: list[TemplateNew] = []
+    templates: list[Template] = []
 
     ky, kx = kernel.shape
     pad_y, pad_x = ky // 2, kx // 2
@@ -644,7 +674,7 @@ def extract_templates_new(
         width = x1_ext - x0_ext
         center = ((x0_ext + x1_ext) / 2.0, (y0_ext + y1_ext) / 2.0)
 
-        cut = TemplateNew(hires_image, center, (height, width), source_xy=pos)
+        cut = Template(hires_image, center, (height, width), source_xy=pos)
         mask_cut = Cutout2D(
             (segm.data == label).astype(hires_image.dtype),
             center,

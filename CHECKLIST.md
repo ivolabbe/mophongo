@@ -57,3 +57,4 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [x] Added selectable template extension method in `run_photometry` and consolidated analytic profiles
 - [x] Benchmarked key pipeline steps in `tests/test_benchmark.py`
 - [x] Introduced Cutout2D-based template extraction and normal matrix helpers
+- [x] Renamed TemplateNew to Template and updated extraction defaults

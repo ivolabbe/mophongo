@@ -1,6 +1,6 @@
 import numpy as np
 from mophongo.psf import PSF
-from mophongo.templates import Templates, TemplateNew, extract_templates_new
+from mophongo.templates import Templates, Template, extract_templates
 from utils import make_simple_data, save_template_diagnostic
 import pytest
 
@@ -55,7 +55,7 @@ def test_template_extension_methods(tmp_path):
     )
     assert fname_moff.exists()
 
-    tmpl.extract_templates(images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel)
+    tmpl.extract_templates_old(images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel)
     orig_templates_hi = list(tmpl._templates_hires)
     tmpls_dil = tmpl.extend_with_psf_dilation(psf_hi.array, kernel, iterations=2)
     for t in tmpls_dil:
@@ -72,7 +72,7 @@ def test_template_extension_methods(tmp_path):
     assert fname_dil.exists()
 
     # Test simple PSF dilation extension
-    tmpl.extract_templates(images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel)
+    tmpl.extract_templates_old(images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel)
     orig_templates_hi = list(tmpl._templates_hires)
     tmpls_simple = tmpl.extend_with_psf_dilation_simple(psf_hi.array, kernel, radius_factor=2.0)
 #    for t in tmpls_simple:
@@ -100,7 +100,7 @@ def test_extract_templates_new_equivalence():
     old = Templates.from_image(
         images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel
     )
-    new = extract_templates_new(
+    new = extract_templates(
         images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel
     )
 

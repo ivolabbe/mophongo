@@ -79,6 +79,8 @@ def run_photometry(
         tmpls = Templates.from_image(hires_image, segmap, positions, kernel)
         if extend_templates == "psf_dilation":
             tmpls.extend_with_psf_dilation(psf.array, kernel)
+        elif extend_templates == "psf_dilation_simple":
+            tmpls.extend_with_psf_dilation_simple(psf.array, kernel)
         elif extend_templates == "2d_moffat":
             tmpls.extend_with_moffat(kernel)
 
@@ -99,4 +101,4 @@ def run_photometry(
         catalog[f"err_{idx}"] = errs
         residuals.append(resid)
 
-    return catalog, np.stack(residuals)
+    return catalog, np.stack(residuals), tmpls

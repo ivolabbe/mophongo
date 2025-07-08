@@ -95,6 +95,66 @@ class SparseFitter:
         self._ata = ata.tocsr()
         self._atb = atb
 
+    @staticmethod
+    def _slice_intersection(a: tuple[slice, slice], b: tuple[slice, slice]) -> tuple[slice, slice] | None:
+        y0 = max(a[0].start, b[0].start)
+        y1 = min(a[0].stop, b[0].stop)
+        x0 = max(a[1].start, b[1].start)
+        x1 = min(a[1].stop, b[1].stop)
+        if y0 >= y1 or x0 >= x1:
+            return None
+        return slice(y0, y1), slice(x0, x1)
+
+    def build_normal_matrix_new(self) -> None:
+        """Construct normal matrix using :class:`TemplateNew` objects."""
+        n = len(self.templates)
+        ata = lil_matrix((n, n))
+        atb = np.zeros(n)
+
+        for i, tmpl_i in enumerate(self.templates):
+            sl_i = tmpl_i.slices_original
+            data_i = tmpl_i.array[tmpl_i.slices_cutout]
+            w_i = self.weights[sl_i]
+            img_i = self.image[sl_i]
+            atb[i] = np.sum(data_i * w_i * img_i)
+            ata[i, i] = np.sum(data_i * w_i * data_i)
+
+            for j in range(i + 1, n):
+                tmpl_j = self.templates[j]
+                inter = self._slice_intersection(tmpl_i.slices_original, tmpl_j.slices_original)
+                if inter is None:
+                    continue
+                w = self.weights[inter]
+                sl_i_local = (
+                    slice(inter[0].start - sl_i[0].start + tmpl_i.slices_cutout[0].start,
+                          inter[0].stop - sl_i[0].start + tmpl_i.slices_cutout[0].start),
+                    slice(inter[1].start - sl_i[1].start + tmpl_i.slices_cutout[1].start,
+                          inter[1].stop - sl_i[1].start + tmpl_i.slices_cutout[1].start),
+                )
+                sl_j_local = (
+                    slice(inter[0].start - tmpl_j.slices_original[0].start + tmpl_j.slices_cutout[0].start,
+                          inter[0].stop - tmpl_j.slices_original[0].start + tmpl_j.slices_cutout[0].start),
+                    slice(inter[1].start - tmpl_j.slices_original[1].start + tmpl_j.slices_cutout[1].start,
+                          inter[1].stop - tmpl_j.slices_original[1].start + tmpl_j.slices_cutout[1].start),
+                )
+                val = np.sum(
+                    tmpl_i.array[sl_i_local] * tmpl_j.array[sl_j_local] * w
+                )
+                if val != 0.0:
+                    ata[i, j] = val
+                    ata[j, i] = val
+
+        self._ata = ata.tocsr()
+        self._atb = atb
+
+    def model_image_new(self) -> np.ndarray:
+        if self.solution is None:
+            raise ValueError("Solve system first")
+        model = np.zeros_like(self.image, dtype=float)
+        for coeff, tmpl in zip(self.solution, self.templates):
+            model[tmpl.slices_original] += coeff * tmpl.array[tmpl.slices_cutout]
+        return model
+
     @property
     def ata(self):
         if self._ata is None:

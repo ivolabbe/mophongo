@@ -1,6 +1,6 @@
 import numpy as np
 from mophongo.psf import PSF
-from mophongo.templates import Templates
+from mophongo.templates import Templates, TemplateNew, extract_templates_new
 from utils import make_simple_data, save_template_diagnostic
 import pytest
 
@@ -89,3 +89,22 @@ def test_template_extension_methods(tmp_path):
     assert fname_simple.exists()
 
     assert len(tmpls_moffat) == len(tmpls_dil) == len(tmpls_simple)
+
+
+def test_extract_templates_new_equivalence():
+    images, segmap, catalog, psfs, _, _ = make_simple_data()
+    psf_hi = PSF.from_array(psfs[0])
+    psf_lo = PSF.from_array(psfs[1])
+    kernel = psf_hi.matching_kernel(psf_lo)
+
+    old = Templates.from_image(
+        images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel
+    )
+    new = extract_templates_new(
+        images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel
+    )
+
+    assert len(old.templates) == len(new)
+    for t_old, t_new in zip(old.templates, new):
+        np.testing.assert_allclose(t_old.array, t_new.array[t_new.slices_cutout])
+        assert t_old.bbox == t_new.bbox

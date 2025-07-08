@@ -28,6 +28,39 @@ class Template:
     position_cutout: Tuple[float, float] | None = None
 
 
+class TemplateNew(Cutout2D):
+    """Cutout-based template storing slice bookkeeping."""
+
+    def __init__(
+        self,
+        data: np.ndarray,
+        position: tuple[float, float],
+        size: tuple[int, int],
+        *,
+        source_xy: tuple[float, float] | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            data,
+            position,
+            size,
+            mode="partial",
+            fill_value=0.0,
+            copy=True,
+            **kwargs,
+        )
+        self.source_xy = source_xy
+
+    @property
+    def array(self) -> np.ndarray:  # pragma: no cover - simple alias
+        return self.data
+
+    @property
+    def bbox(self) -> tuple[int, int, int, int]:  # pragma: no cover - simple alias
+        (ymin, ymax), (xmin, xmax) = self.bbox_original
+        return int(ymin), int(ymax) + 1, int(xmin), int(xmax) + 1
+
+
 class Templates:
     """Container for source templates."""
 
@@ -274,6 +307,8 @@ class Templates:
         self._templates = new_templates
         self._templates_hires = new_templates_hires
         return new_templates
+
+
 
     @staticmethod
     def _sample_psf(psf: np.ndarray, dy: np.ndarray, dx: np.ndarray) -> np.ndarray:
@@ -569,3 +604,68 @@ class Templates:
         self._templates = new_templates
         self._templates_hires = new_templates_hires
         return new_templates
+
+def extract_templates_new(
+    hires_image: np.ndarray,
+    segmap: np.ndarray,
+    positions: Iterable[Tuple[float, float]],
+    kernel: np.ndarray,
+) -> list[TemplateNew]:
+    """Return PSF-matched templates using :class:`TemplateNew`."""
+
+    if hires_image.shape != segmap.shape:
+        raise ValueError("hires_image and segmap must have the same shape")
+
+    kernel = kernel / kernel.sum()
+    segm = SegmentationImage(segmap)
+    templates: list[TemplateNew] = []
+
+    ky, kx = kernel.shape
+    pad_y, pad_x = ky // 2, kx // 2
+    ny, nx = hires_image.shape
+
+    for pos in positions:
+        y, x = int(round(pos[0])), int(round(pos[1]))
+        if y < 0 or y >= ny or x < 0 or x >= nx:
+            continue
+        label = segm.data[y, x]
+        if label == 0:
+            continue
+
+        idx = segm.get_index(label)
+        bbox = segm.bbox[idx]
+
+        y0_ext = bbox.iymin - pad_y
+        y1_ext = bbox.iymax + pad_y
+        x0_ext = bbox.ixmin - pad_x
+        x1_ext = bbox.ixmax + pad_x
+
+        height = y1_ext - y0_ext
+        width = x1_ext - x0_ext
+        center = ((x0_ext + x1_ext) / 2.0, (y0_ext + y1_ext) / 2.0)
+
+        cut = TemplateNew(hires_image, center, (height, width), source_xy=pos)
+        mask_cut = Cutout2D(
+            (segm.data == label).astype(hires_image.dtype),
+            center,
+            (height, width),
+            mode="partial",
+            fill_value=0.0,
+        )
+
+        data = cut.data * mask_cut.data
+        flux = float(data.sum())
+        if flux == 0.0:
+            continue
+
+        data_valid = data[cut.slices_cutout] / flux
+        conv = _convolve2d(data_valid, kernel)
+        if conv.sum() != 0:
+            conv = conv / conv.sum()
+        padded = np.zeros_like(data)
+        padded[cut.slices_cutout] = conv
+        cut.data = padded
+        templates.append(cut)
+
+    return templates
+

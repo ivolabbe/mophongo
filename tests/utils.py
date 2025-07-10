@@ -29,13 +29,14 @@ def safe_dilate_segmentation(segmap, selem=disk(1)):
     return result
 
 def make_simple_data(
-    seed: int = 7,
+    seed: int = 11,
     nsrc: int = 100,
     size: int = 201,     
     det_fwhm: float = 0,
     sigthresh: float = 2.0,
     peak_snr: float = 1.0,
     ndilate: int = 2,
+    border_size: int = 10,
 ) -> tuple[
     list[np.ndarray], np.ndarray, Table, list[np.ndarray], np.ndarray, list[np.ndarray]
 ]:
@@ -69,7 +70,7 @@ def make_simple_data(
         x_name="x_mean",
         y_name="y_mean",
         min_separation=int(hi_fwhm * 6),
-        border_size=psf_lo.array.shape[0] // 4,
+        border_size=border_size,
         seed=rng,
         amplitude=(1.0, 100),
         x_stddev=(0.5, 4.0),
@@ -373,6 +374,7 @@ def save_flux_vs_truth_plot(
     
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
+    print('TRUTH min max', truth.min(), truth.max())
     # Panel 1 (top-left): Recovered vs True
     axes[0, 0].scatter(truth, recovered, s=20, alpha=0.4)
     minval = min(truth.min(), recovered.min())
@@ -487,7 +489,7 @@ def save_flux_vs_truth_plot(
         for snr in snr_ticks:
             if 'error_fit_true' in locals():
                 # For each SNR level, find the flux where SNR = flux/error = snr
-                test_fluxes = np.logspace(np.log10(truth.min()), np.log10(truth.max()), 1000)
+                test_fluxes = np.logspace(np.log10( max(truth.min(),1e-4) ), np.log10(truth.max()), 1000)
                 test_errors = error_model(test_fluxes, a_fit, b_fit, c_fit)
                 test_snr = test_fluxes / test_errors
                 

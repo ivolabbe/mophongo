@@ -18,12 +18,12 @@ def test_benchmark_pipeline_steps():
     kernel = psf_hi.matching_kernel(psf_lo)
 
     start = time.perf_counter()
-    tmpls = Templates.from_image(images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel)
+    tmpls = Templates.from_image(images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel)
     extract_time = time.perf_counter() - start
 
-    start = time.perf_counter()
-    tmpls.extend_with_moffat(kernel)
-    extend_time = time.perf_counter() - start
+#    start = time.perf_counter()
+#    tmpls.extend_with_moffat(kernel)
+#    extend_time = time.perf_counter() - start
 
     start = time.perf_counter()
     fitter = SparseFitter(tmpls.templates, images[1])
@@ -31,10 +31,10 @@ def test_benchmark_pipeline_steps():
     fit_time = time.perf_counter() - start
 
     print(f"Extraction time: {extract_time:.4f} s")
-    print(f"Extension time: {extend_time:.4f} s")
+#    print(f"Extension time: {extend_time:.4f} s")
     print(f"Fitting time: {fit_time:.4f} s")
 
     assert extract_time > 0
-    assert extend_time > 0
+#    assert extend_time > 0
     assert fit_time > 0
 

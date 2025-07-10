@@ -57,7 +57,7 @@ class SparseFitter:
         y0, y1, x0, x1 = bbox
         return slice(y0, y1), slice(x0, x1)
 
-    def build_normal_matrix(self) -> None:
+    def build_normal_matrix_old(self) -> None:
         """Construct A^T A and A^T b from templates and image."""
         n = len(self.templates)
         ata = lil_matrix((n, n))
@@ -105,7 +105,7 @@ class SparseFitter:
             return None
         return slice(y0, y1), slice(x0, x1)
 
-    def build_normal_matrix_new(self) -> None:
+    def build_normal_matrix(self) -> None:
         """Construct normal matrix using :class:`Template` objects."""
         n = len(self.templates)
         ata = lil_matrix((n, n))
@@ -147,7 +147,7 @@ class SparseFitter:
         self._ata = ata.tocsr()
         self._atb = atb
 
-    def model_image_new(self) -> np.ndarray:
+    def model_image(self) -> np.ndarray:
         if self.solution is None:
             raise ValueError("Solve system first")
         model = np.zeros_like(self.image, dtype=float)
@@ -183,7 +183,7 @@ class SparseFitter:
         self.solution = x
         return x, info
 
-    def model_image(self) -> np.ndarray:
+    def model_image_old(self) -> np.ndarray:
         if self.solution is None:
             raise ValueError("Solve system first")
         model = np.zeros_like(self.image, dtype=float)
@@ -199,9 +199,8 @@ class SparseFitter:
         """Return per-source uncertainties ignoring template covariance."""
         pred = np.empty(len(self.templates), dtype=float)
         for i, tmpl in enumerate(self.templates):
-            sl = self._bbox_to_slices(tmpl.bbox)
-            w = self.weights[sl]
-            pred[i] = 1.0 / np.sqrt(np.sum(w * tmpl.array ** 2))
+            w = self.weights[tmpl.slices_original]
+            pred[i] = 1.0 / np.sqrt(np.sum(w * tmpl.array[tmpl.slices_cutout] ** 2))
         return pred
 
     def flux_errors(self) -> np.ndarray:

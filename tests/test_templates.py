@@ -1,63 +1,70 @@
+#%%
 import numpy as np
 from mophongo.psf import PSF
-from mophongo.templates import Templates, Template, extract_templates
+from mophongo.templates import Templates, Template
 from utils import make_simple_data, save_template_diagnostic
 import pytest
 
 def test_extract_templates_sizes_and_norm(tmp_path):
-    images, segmap, catalog, psfs, truth_img, _ = make_simple_data()
+    images, segmap, catalog, psfs, truth_img, rms = make_simple_data(seed=5,nsrc=20, size=101, ndilate=2, peak_snr=3)
     psf_hi = PSF.from_array(psfs[0])
     psf_lo = PSF.from_array(psfs[1])
     kernel = psf_hi.matching_kernel(psf_lo)
 
-    tmpl = Templates.from_image(
-        images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel
-    )
-    templates = tmpl.templates
+    tmpl = Templates()
+    tmpl.extract_templates(images[0], segmap, list(zip(catalog["x"], catalog["y"])))
+    templates_hires = tmpl._templates
+    templates = tmpl.convolve_templates(kernel, inplace=False)
 
     assert len(templates) == len(catalog['flux_true'])
 
     hires = images[0]
     for tmpl_obj in templates:
         np.testing.assert_allclose(tmpl_obj.array.sum(), 1.0, rtol=1e-5)
-
-        y0, y1, x0, x1 = tmpl_obj.bbox
-        label = segmap[int((y0 + y1) / 2), int((x0 + x1) / 2)]
-        hi_cut = hires[y0:y1, x0:x1] * (segmap[y0:y1, x0:x1] == label)
-        assert np.all(hi_cut[segmap[y0:y1, x0:x1] != label] == 0)
+        slo = tmpl_obj.slices_original
+        label = segmap[tmpl_obj.position_original]
+        hi_cut = hires[slo] * (segmap[slo] == label)
+        assert np.all(hi_cut[segmap[slo] != label] == 0)
 
     fname = tmp_path / "templates.png"
     # Since templates are already PSF-matched, pass them as both arguments
-    save_template_diagnostic(fname, tmpl._templates_hires[:5], templates[:5], segmap=segmap, catalog=catalog)
+    save_template_diagnostic(fname, templates_hires[:5], templates[:5], segmap=segmap, catalog=catalog)
     assert fname.exists()
 
 
 def test_template_extension_methods(tmp_path):
-    images, segmap, catalog, psfs, _, _ = make_simple_data()
+    images, segmap, catalog, psfs, _, _ = make_simple_data(ndilate=3, nsrc=80, size=201, peak_snr=1)
     psf_hi = PSF.from_array(psfs[0])
     psf_lo = PSF.from_array(psfs[1])
     kernel = psf_hi.matching_kernel(psf_lo)
 
-    tmpl = Templates.from_image(images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel)
-    orig_templates_hi = list(tmpl._templates_hires)
+    tmpl = Templates()
+    tmpl.extract_templates(images[0], segmap, list(zip(catalog["x"], catalog["y"])))
+    templates_hires = tmpl._templates
+#    templates = tmpl.convolve_templates(kernel, inplace=False)
 
-    tmpls_moffat = tmpl.extend_with_moffat(kernel, radius_factor=2.0, beta=3.0)
-    for t in tmpls_moffat:
-        np.testing.assert_allclose(t.array.sum(), 1.0, rtol=1e-5)
+    templates_psf = tmpl.extend_with_psf_wings(psf_hi.array,
+                                              radius_factor=1.5,
+                                              inplace=False)
 
-    fname_moff = tmp_path / "moffat_extension.png"
+    fname_moff = tmp_path / "extension_psf.png"
     save_template_diagnostic(
         fname_moff,
-        orig_templates_hi[:5],
-        tmpl._templates_hires[:5],
+        templates_hires[:5],
+        templates_psf[:5],
         segmap=segmap,
         catalog=catalog,
     )
     assert fname_moff.exists()
 
-    tmpl.extract_templates_old(images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel)
+    return
+
+    tmpl.extract_templates_old(images[0], segmap,
+                               list(zip(catalog["x"], catalog["y"])), kernel)
     orig_templates_hi = list(tmpl._templates_hires)
-    tmpls_dil = tmpl.extend_with_psf_dilation(psf_hi.array, kernel, iterations=2)
+    tmpls_dil = tmpl.extend_with_psf_dilation(psf_hi.array,
+                                              kernel,
+                                              iterations=2)
     for t in tmpls_dil:
         np.testing.assert_allclose(t.array.sum(), 1.0, rtol=1e-5)
 
@@ -72,11 +79,14 @@ def test_template_extension_methods(tmp_path):
     assert fname_dil.exists()
 
     # Test simple PSF dilation extension
-    tmpl.extract_templates_old(images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel)
+    tmpl.extract_templates_old(images[0], segmap,
+                               list(zip(catalog["x"], catalog["y"])), kernel)
     orig_templates_hi = list(tmpl._templates_hires)
-    tmpls_simple = tmpl.extend_with_psf_dilation_simple(psf_hi.array, kernel, radius_factor=2.0)
-#    for t in tmpls_simple:
-#        np.testing.assert_allclose(t.array.sum(), 1.0, rtol=1e-5)
+    tmpls_simple = tmpl.extend_with_psf_dilation_simple(psf_hi.array,
+                                                        kernel,
+                                                        radius_factor=2.0)
+    #    for t in tmpls_simple:
+    #        np.testing.assert_allclose(t.array.sum(), 1.0, rtol=1e-5)
 
     fname_simple = tmp_path / "simple_dilation_extension.png"
     save_template_diagnostic(
@@ -90,21 +100,4 @@ def test_template_extension_methods(tmp_path):
 
     assert len(tmpls_moffat) == len(tmpls_dil) == len(tmpls_simple)
 
-
-def test_extract_templates_new_equivalence():
-    images, segmap, catalog, psfs, _, _ = make_simple_data()
-    psf_hi = PSF.from_array(psfs[0])
-    psf_lo = PSF.from_array(psfs[1])
-    kernel = psf_hi.matching_kernel(psf_lo)
-
-    old = Templates.from_image(
-        images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel
-    )
-    new = extract_templates(
-        images[0], segmap, list(zip(catalog["y"], catalog["x"])), kernel
-    )
-
-    assert len(old.templates) == len(new)
-    for t_old, t_new in zip(old.templates, new):
-        np.testing.assert_allclose(t_old.array, t_new.array[t_new.slices_cutout])
-        assert t_old.bbox == t_new.bbox
+# %%

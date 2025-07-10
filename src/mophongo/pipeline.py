@@ -61,7 +61,7 @@ def run_photometry(
     from .fit import SparseFitter
 
     catalog = catalog.copy()
-    positions = list(zip(catalog["y"], catalog["x"]))
+    positions = list(zip(catalog["x"], catalog["y"]))
 
     hires_image = images[0]
     hires_psf = PSF.from_array(psfs[0])
@@ -76,13 +76,7 @@ def run_photometry(
         else:
             kernel = hires_psf.matching_kernel(psf)
      
-        tmpls = Templates.from_image(hires_image, segmap, positions, kernel)
-        if extend_templates == "psf_dilation":
-            tmpls.extend_with_psf_dilation(psf.array, kernel)
-        elif extend_templates == "psf_dilation_simple":
-            tmpls.extend_with_psf_dilation_simple(psf.array, kernel)
-        elif extend_templates == "2d_moffat":
-            tmpls.extend_with_moffat(kernel)
+        tmpls = Templates.from_image(hires_image, segmap, positions, kernel, extension=hires_psf.array if extend_templates == 'psf' else None)
 
         weights = None
         if rms_images is not None and rms_images[idx] is not None:

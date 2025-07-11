@@ -21,6 +21,7 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
   - `moffat_psf` Generate Moffat PSF images (ellipticity/FWHM/beta parameters).
   - `psf_matching_kernel` to Compute convolution kernels to transform the high‑resolution PSF into the low‑resolution PSF (Fourier domain or direct numerical solution)
   - [x] Add methods to fit Moffat and Gaussian profiles to existing PSF arrays
+  - [x] Added `PSF.delta` for symmetric delta-function PSFs
 - [x] **Template builder** (`src/mophongo/templates.py`)
   - `extract_templates` to create PSF-matched templates
   - Extract per-object cutouts from the high‑res image using the detection segmentation.

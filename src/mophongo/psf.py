@@ -78,6 +78,28 @@ class PSF:
         return cls(gaussian_psf(size, fwhm_x, fwhm_y, theta))
 
     @classmethod
+    def delta(cls, size: int = 3) -> "PSF":
+        """Create a symmetric delta function PSF.
+
+        Parameters
+        ----------
+        size : int, optional
+            Length of each side of the square PSF array. ``size`` should be odd
+            to center the delta pixel. Defaults to ``3``.
+
+        Returns
+        -------
+        PSF
+            PSF instance containing a single central pixel with unit flux.
+        """
+
+        array = np.zeros((size, size), dtype=float)
+        cy = size // 2
+        cx = size // 2
+        array[cy, cx] = 1.0
+        return cls(array)
+
+    @classmethod
     def from_array(cls, array: np.ndarray) -> "PSF":
         """Create a PSF from an arbitrary pixel array."""
         return cls(array)

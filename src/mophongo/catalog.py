@@ -14,6 +14,7 @@ from photutils.background import MADStdBackgroundRMS
 from astropy.stats import SigmaClip
 from photutils.segmentation import SourceCatalog, detect_sources, deblend_sources
 from skimage.morphology import binary_dilation, disk
+from astropy.nddata import block_reduce, block_replicate
 
 __all__ = ["CatalogBuilder"]
 
@@ -34,36 +35,16 @@ class CatalogBuilder:
     segmap: np.ndarray | None = None
     catalog: Table | None = None
 
-    @staticmethod
-    def _bin_reduce(data: np.ndarray, factor: int) -> np.ndarray:
-        ny, nx = data.shape
-        nyb = ny // factor
-        nxb = nx // factor
-        trimmed = data[: nyb * factor, : nxb * factor]
-        return trimmed.reshape(nyb, factor, nxb, factor).mean(axis=(1, 3))
-
-    @staticmethod
-    def _expand(data: np.ndarray, factor: int, shape: Tuple[int, int]) -> np.ndarray:
-        expanded = np.repeat(np.repeat(data, factor, axis=0), factor, axis=1)
-        ny, nx = expanded.shape
-        if ny < shape[0]:
-            pad_y = shape[0] - ny
-            expanded = np.pad(expanded, ((0, pad_y), (0, 0)), mode="edge")
-        if nx < shape[1]:
-            pad_x = shape[1] - nx
-            expanded = np.pad(expanded, ((0, 0), (0, pad_x)), mode="edge")
-        return expanded[: shape[0], : shape[1]]
-
     def _estimate_background(self) -> float:
-        binned = self._bin_reduce(self.sci, self.nbin)
+        binned = block_reduce(self.sci, (self.nbin, self.nbin), func=np.mean)
         sc = SigmaClip(sigma=3.0)
         clipped = sc(binned)
         return float(np.median(clipped))
 
     def _calibrate_wht(self) -> np.ndarray:
         sci_sub = self.sci - self.background
-        sci_bin = self._bin_reduce(sci_sub, self.nbin)
-        wht_bin = self._bin_reduce(self.wht, self.nbin)
+        sci_bin = block_reduce(sci_sub, (self.nbin, self.nbin), func=np.mean)
+        wht_bin = block_reduce(self.wht, (self.nbin, self.nbin), func=np.mean)
         det_bin = sci_bin * np.sqrt(wht_bin)
         sc = SigmaClip(sigma=3.0)
         clipped = sc(det_bin)
@@ -73,7 +54,14 @@ class CatalogBuilder:
         std = MADStdBackgroundRMS()(det_bin[~mask])
         sqrt_wht = np.sqrt(wht_bin) / std
         wht_bin_cal = sqrt_wht ** 2
-        wht_full = self._expand(wht_bin_cal, self.nbin, self.sci.shape) / (self.nbin ** 2)
+        expanded = block_replicate(wht_bin_cal, (self.nbin, self.nbin), conserve_sum=False)
+        ny, nx = self.sci.shape
+        if expanded.shape[0] < ny or expanded.shape[1] < nx:
+            pad_y = ny - expanded.shape[0]
+            pad_x = nx - expanded.shape[1]
+            expanded = np.pad(expanded, ((0, pad_y), (0, pad_x)), mode="edge")
+        wht_full = expanded[:ny, :nx] / (self.nbin ** 2)
+
         return wht_full
 
     def _detect(self) -> None:
@@ -87,7 +75,7 @@ class CatalogBuilder:
         catalog = SourceCatalog(self.sci, seg, error=np.sqrt(1.0 / self.ivar))
         self.catalog = catalog.to_table()
 
-    def run(self, ivar_outfile: str | Path | None = None) -> None:
+    def run(self, ivar_outfile: str | Path | None = None, header: fits.Header | None = None) -> None:
         if self.estimate_background:
             self.background = self._estimate_background()
             self.sci = self.sci - self.background
@@ -96,7 +84,12 @@ class CatalogBuilder:
         else:
             self.ivar = self.wht
         if ivar_outfile is not None:
-            fits.writeto(ivar_outfile, self.ivar.astype(np.float32), overwrite=True)
+            fits.writeto(
+                ivar_outfile,
+                self.ivar.astype(np.float32),
+                header=header,
+                overwrite=True,
+            )
         self._detect()
 
     @classmethod
@@ -110,6 +103,7 @@ class CatalogBuilder:
     ) -> "CatalogBuilder":
         sci = fits.getdata(sci_file)
         wht = fits.getdata(wht_file)
+        header = fits.getheader(sci_file)
         obj = cls(np.asarray(sci, dtype=float), np.asarray(wht, dtype=float), **kwargs)
-        obj.run(ivar_outfile=ivar_outfile)
+        obj.run(ivar_outfile=ivar_outfile, header=header)
         return obj

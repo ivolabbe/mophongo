@@ -1,5 +1,6 @@
 import numpy as np
 from pathlib import Path
+from astropy.io import fits
 
 from mophongo.catalog import CatalogBuilder
 
@@ -15,4 +16,6 @@ def test_catalog_builder(tmp_path):
     assert len(cat.catalog) > 0
     assert np.all(np.isfinite(cat.ivar))
     assert out.exists()
+    hdr = fits.getheader(out)
+    assert 'CRPIX1' in hdr
 

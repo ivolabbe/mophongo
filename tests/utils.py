@@ -10,6 +10,12 @@ from photutils.segmentation import detect_sources, deblend_sources
 from photutils.datasets import make_model_image, make_model_params
 from skimage.morphology import dilation, disk
 
+from astropy.io import fits
+from astropy.wcs import WCS
+from astropy.nddata import Cutout2D
+from reproject import reproject_interp
+
+
 def lupton_norm(img):
     p = np.percentile(img, [1,99])
     vmin, vmax = -p[1]/20, p[1]
@@ -31,7 +37,7 @@ def safe_dilate_segmentation(segmap, selem=disk(1)):
 def make_simple_data(
     seed: int = 11,
     nsrc: int = 100,
-    size: int = 201,     
+    size: int = 201,
     det_fwhm: float = 0,
     sigthresh: float = 2.0,
     peak_snr: float = 1.0,
@@ -52,16 +58,16 @@ def make_simple_data(
     """
 
     rng = np.random.default_rng(seed)
-  
+
     nx = ny = size
     hi_fwhm = 2.0
     lo_fwhm = 5.0 * hi_fwhm
-    
+
     # Use Moffat PSFs instead of Gaussian
     psf_hi = PSF.moffat(41, hi_fwhm, hi_fwhm, beta=3.0)  # Typical ground-based seeing
     # delta function
-#    psf_hi = PSF.gaussian(5,0.1,0.1).array.round() 
-    
+    #    psf_hi = PSF.gaussian(5,0.1,0.1).array.round()
+
     psf_lo = PSF.moffat(41, lo_fwhm, lo_fwhm, beta=2.5)  # Broader wings for low-res
 
     params = make_model_params(
@@ -102,13 +108,13 @@ def make_simple_data(
     noise_std = amp_min / peak_snr
     hires += rng.normal(scale=noise_std, size=hires.shape)
     lowres += rng.normal(scale=noise_std, size=lowres.shape)
-    rms_hi = np.ones_like(hires) * noise_std
-    rms_lo = np.ones_like(lowres) * noise_std
+    wht_hi = np.ones_like(hires) * 1.0/noise_std**2
+    wht_lo = np.ones_like(lowres) * 1.0/noise_std**2
 
     # Segmentation map from hires image
     # Use Gaussian PSF for detection (keeping this as Gaussian for now)
     if det_fwhm>0:
-        psf_det = PSF.gaussian(3,0.01,0.01)   # delta function = no smoothing 
+        psf_det = PSF.gaussian(3,0.01,0.01)   # delta function = no smoothing
         detimg = _convolve2d(hires, psf_det.array)
     else:
         detimg = hires
@@ -152,7 +158,7 @@ def make_simple_data(
         catalog,
         [psf_hi.array, psf_lo.array],
         truth,
-        [rms_hi, rms_lo],
+        [wht_hi, wht_lo],
     )
 
 
@@ -183,7 +189,7 @@ def save_diagnostic_image(
             except np.linalg.LinAlgError:
                 # Use pseudo-inverse if matrix is singular
                 cov_matrix = np.linalg.pinv(ata_dense)
-        
+
         # Use the actual covariance matrix
         cov_img = cov_matrix
     else:
@@ -229,11 +235,11 @@ def save_diagnostic_image(
         im = ax_cov.imshow(cov_img, cmap="RdBu_r", origin="lower", vmin=-vmax, vmax=vmax)
     else:
         im = ax_cov.imshow(cov_img, cmap="gray", origin="lower")
-    
+
     ax_cov.set_title(f"Covariance Matrix ({cov_img.shape[0]}×{cov_img.shape[1]})")
     ax_cov.set_xlabel("Source Index")
     ax_cov.set_ylabel("Source Index")
-    
+
     # Add colorbar with better formatting
     cbar = fig.colorbar(im, ax=ax_cov, fraction=0.046, pad=0.04)
     cbar.set_label("Covariance", rotation=270, labelpad=15)
@@ -327,13 +333,13 @@ def save_template_diagnostic(
 
     # Row 1: Original templates
     for i, tmpl in enumerate(templates):
-        axes[0, i].imshow(tmpl.array, cmap="gray", origin="lower", norm=lupton_norm(tmpl.array))
+        axes[0, i].imshow(tmpl.data, cmap="gray", origin="lower", norm=lupton_norm(tmpl.data))
         axes[0, i].set_title(f"tmpl {i+1}")
         axes[0, i].set_xticks([]); axes[0, i].set_yticks([])
 
     # Row 2: Convolved templates
     for i, tmpl in enumerate(templates_conv):
-        axes[1, i].imshow(tmpl.array, cmap="gray", origin="lower", norm=lupton_norm(tmpl.array))
+        axes[1, i].imshow(tmpl.data, cmap="gray", origin="lower", norm=lupton_norm(tmpl.data))
         axes[1, i].set_title(f"conv {i+1}")
         axes[1, i].set_xticks([]); axes[1, i].set_yticks([])
 
@@ -371,7 +377,7 @@ def save_flux_vs_truth_plot(
     from scipy.stats import median_abs_deviation
     from scipy.optimize import curve_fit
     from astropy.stats import mad_std
-    
+
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
     print('TRUTH min max', truth.min(), truth.max())
@@ -389,42 +395,42 @@ def save_flux_vs_truth_plot(
     ratio = np.array(recovered) / np.array(truth)
     axes[0, 1].scatter(truth, ratio, s=20, alpha=0.4, label='Data')
     axes[0, 1].axhline(1.0, color="k", linestyle="--", label="ratio=1")
-    
+
     # Fit flux vs error relationship if errors provided
     if error is not None:
         # Fit error as function of recovered flux: error = a * flux^b + c
         def error_model(flux, a, b, c):
             return a * flux**b + c
-        
+
         # Filter out invalid data for fitting
         valid_mask = (recovered > 0) & (error > 0) & np.isfinite(recovered) & np.isfinite(error)
         if np.sum(valid_mask) > 10:  # Need enough points for fitting
             try:
                 # Initial guess: linear relationship with small offset
                 p0 = [error[valid_mask].mean() / recovered[valid_mask].mean(), 1.0, error[valid_mask].min()]
-                popt, _ = curve_fit(error_model, recovered[valid_mask], error[valid_mask], 
+                popt, _ = curve_fit(error_model, recovered[valid_mask], error[valid_mask],
                                   p0=p0, maxfev=1000)
                 a_fit, b_fit, c_fit = popt
-                
+
                 # Calculate fitted errors for all flux values
                 error_fit = error_model(recovered, a_fit, b_fit, c_fit)
-                
+
                 # Calculate fitted errors for true flux values
                 error_fit_true = error_model(truth, a_fit, b_fit, c_fit)
-                
+
                 # Calculate relative error envelope: 1 ± error_fit/truth
                 rel_error_fit = error_fit_true / truth
-                
+
                 # Plot fitted error envelope
                 flux_sorted_idx = np.argsort(truth)
                 truth_sorted = truth[flux_sorted_idx]
                 upper_envelope = (1 + rel_error_fit)[flux_sorted_idx]
                 lower_envelope = (1 - rel_error_fit)[flux_sorted_idx]
-                
-                axes[0, 1].plot(truth_sorted, upper_envelope, 'orange', linewidth=2, 
+
+                axes[0, 1].plot(truth_sorted, upper_envelope, 'orange', linewidth=2,
                                label=f'Fitted ±1σ envelope\nσ = {a_fit:.2e}×F^{b_fit:.2f}+{c_fit:.2e}')
                 axes[0, 1].plot(truth_sorted, lower_envelope, 'orange', linewidth=2)
-                
+
             except Exception as e:
                 print(f"Error fitting flux-error relationship: {e}")
                 # Fallback to simple error envelope
@@ -438,17 +444,17 @@ def save_flux_vs_truth_plot(
             axes[0, 1].scatter(truth, 1 + e_tot, s=5, alpha=0.4, color='orange', label='+/- 1σ')
             axes[0, 1].scatter(truth, 1 - e_tot, s=5, alpha=0.4, color='orange')
             error_fit = error
-    
+
     # Calculate binned statistics
     truth_log = np.log10(truth)
     n_bins = 8
     bin_edges = np.percentile(truth, np.linspace(0, 100, n_bins + 1))
     bin_centers = 0.5 * (bin_edges[1:] + bin_edges[:-1])
-    
+
     bin_medians = []
     bin_mad_stds = []
     bin_counts = []
-    
+
     for i in range(n_bins):
         mask = (truth >= bin_edges[i]) & (truth < bin_edges[i+1])
         if np.sum(mask) > 2:
@@ -460,16 +466,16 @@ def save_flux_vs_truth_plot(
             bin_medians.append(np.nan)
             bin_mad_stds.append(np.nan)
             bin_counts.append(0)
-    
+
     # Plot binned statistics
     valid_bins = ~np.isnan(bin_medians)
     if np.any(valid_bins):
-        axes[0, 1].errorbar(bin_centers[valid_bins], 
-                           np.array(bin_medians)[valid_bins], 
+        axes[0, 1].errorbar(bin_centers[valid_bins],
+                           np.array(bin_medians)[valid_bins],
                            yerr=np.array(bin_mad_stds)[valid_bins],
                            fmt='ko', capsize=5, capthick=2, alpha=0.5,
                            label=f'Binned median ± MAD', markersize=6)
-    
+
     axes[0, 1].set_xlabel(xlabel)
     axes[0, 1].set_ylabel("Recovered / True")
     axes[0, 1].set_title("Flux Ratio vs True")
@@ -477,22 +483,22 @@ def save_flux_vs_truth_plot(
     axes[0, 1].set_xscale('function', functions=(np.sqrt, lambda x: x**2))  # Square root scaling
     axes[0, 1].set_xlim(truth.min(), truth.max())
     axes[0, 1].legend()
-    
+
     # Add SNR axis if errors are available
     if error is not None:
         ax2 = axes[0, 1].twiny()
-        
+
         # Create SNR tick positions based on true flux values
         snr_ticks = [1, 3, 5, 10, 20, 50, 100]
         flux_ticks = []
-        
+
         for snr in snr_ticks:
             if 'error_fit_true' in locals():
                 # For each SNR level, find the flux where SNR = flux/error = snr
                 test_fluxes = np.logspace(np.log10( max(truth.min(),1e-4) ), np.log10(truth.max()), 1000)
                 test_errors = error_model(test_fluxes, a_fit, b_fit, c_fit)
                 test_snr = test_fluxes / test_errors
-                
+
                 # Find flux closest to target SNR
                 closest_idx = np.argmin(np.abs(test_snr - snr))
                 flux_ticks.append(test_fluxes[closest_idx])
@@ -501,18 +507,18 @@ def save_flux_vs_truth_plot(
                 snr_values = truth / error
                 closest_idx = np.argmin(np.abs(snr_values - snr))
                 flux_ticks.append(truth[closest_idx])
-        
+
         # Filter ticks within plot range and apply sqrt scaling
         xlim = axes[0, 1].get_xlim()
-        valid_ticks = [(flux, snr) for flux, snr in zip(flux_ticks, snr_ticks) 
+        valid_ticks = [(flux, snr) for flux, snr in zip(flux_ticks, snr_ticks)
                       if xlim[0] <= flux <= xlim[1]]
-        
+
         if valid_ticks:
             flux_tick_pos, snr_tick_labels = zip(*valid_ticks)
-            
+
             # Apply square root transformation to match the bottom axis scaling
             flux_tick_pos_sqrt = [np.sqrt(flux) for flux in flux_tick_pos]
-            
+
             # Set the SNR axis limits to match the transformed bottom axis
             ax2.set_xlim([np.sqrt(xlim[0]), np.sqrt(xlim[1])])
             ax2.set_xticks(flux_tick_pos_sqrt)
@@ -522,55 +528,55 @@ def save_flux_vs_truth_plot(
     # Panel 3 (bottom-left): Histogram of Residuals / Error with Gaussian fit
     if error is not None:
         residuals_over_error = (recovered - truth) / error
-        
+
         # Create histogram
         bins = np.linspace(-5, 5, 31)
-        counts, bin_edges, _ = axes[1, 0].hist(residuals_over_error, bins=bins, alpha=0.5, density=True, 
+        counts, bin_edges, _ = axes[1, 0].hist(residuals_over_error, bins=bins, alpha=0.5, density=True,
                                               color='lightblue', edgecolor='black', linewidth=0.5)
-        
+
         # Add zero residual line
         axes[1, 0].axvline(0, color='black', linestyle='-', linewidth=2, alpha=0.8, label='zero residual')
-        
+
         # Fit Gaussian to the data
         def gaussian(x, amp, mu, sigma):
             return amp * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
-        
+
         # Initial guess
         x_centers = 0.5 * (bin_edges[1:] + bin_edges[:-1])
         p0 = [counts.max(), np.mean(residuals_over_error), np.std(residuals_over_error)]
-        
+
         try:
             popt, _ = curve_fit(gaussian, x_centers, counts, p0=p0)
             amp_fit, mu_fit, sigma_fit = popt
-            
+
             # Plot fitted Gaussian
             x_fit = np.linspace(-10, 10, 100)
             y_fit = gaussian(x_fit, amp_fit, mu_fit, sigma_fit)
-            axes[1, 0].plot(x_fit, y_fit, 'g-', linewidth=2, 
+            axes[1, 0].plot(x_fit, y_fit, 'g-', linewidth=2,
                            label=f'Fitted Gaussian\nμ={mu_fit:.3f}, σ={sigma_fit:.3f}')
         except:
             mu_fit, sigma_fit = np.mean(residuals_over_error), np.std(residuals_over_error)
-        
+
         # Add vertical lines for ±1, ±3 sigma
         for sigma in [1, 3]:
             axes[1, 0].axvline(sigma, color='gray', linestyle='--', alpha=0.5)
             axes[1, 0].axvline(-sigma, color='gray', linestyle='--', alpha=0.5)
-        
+
         # Calculate statistics
         mean_resid = np.mean(residuals_over_error)
         median_resid = np.median(residuals_over_error)
         std_resid = np.std(residuals_over_error)
         mad_resid = mad_std(residuals_over_error)
-        
+
         # Add statistics text
         stats_text = f'Mean: {mean_resid:.3f}\nMedian: {median_resid:.3f}\nStd: {std_resid:.3f}\nMAD: {mad_resid:.3f}'
         if 'mu_fit' in locals():
             stats_text += f'\nFit μ: {mu_fit:.3f}\nFit σ: {sigma_fit:.3f}'
-        
-        axes[1, 0].text(0.05, 0.95, stats_text, 
+
+        axes[1, 0].text(0.05, 0.95, stats_text,
                        transform=axes[1, 0].transAxes, verticalalignment='top',
                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
-        
+
         axes[1, 0].set_xlabel("(Recovered - True) / Error")
         axes[1, 0].set_ylabel("Density")
         axes[1, 0].set_title("Residuals / Error Distribution")
@@ -580,12 +586,12 @@ def save_flux_vs_truth_plot(
         # Panel 4 (bottom-right): (Recovered - True) / Error vs Recovered
         axes[1, 1].scatter(recovered, residuals_over_error, s=20, alpha=0.4)
         axes[1, 1].axhline(0, color="k", linestyle="--", label="zero residual")
-        
+
         # Add ±1, ±3 sigma lines
         for sigma in [1, 3]:
             axes[1, 1].axhline(sigma, color='gray', linestyle='--', alpha=0.5)
             axes[1, 1].axhline(-sigma, color='gray', linestyle='--', alpha=0.5, label=f'±{sigma}σ')
-        
+
         axes[1, 1].set_xlabel("Recovered Flux")
         axes[1, 1].set_ylabel("(Recovered - True) / Error")
         axes[1, 1].set_title("Residuals vs Recovered Flux")
@@ -607,10 +613,10 @@ def save_psf_fit_diagnostic(filename: str, psf: np.ndarray, model: np.ndarray) -
     titles = ["psf", "model", "resid"]
     lnorm = lupton_norm(psf)
     for ax, img, title in zip(axes, images, titles):
-#        if title == "resid":
-#            v = np.max(np.abs(resid))
- #           ax.imshow(img, cmap="gray", origin="lower", vmin=-v, vmax=v)
-  #      else:
+        #        if title == "resid":
+        #            v = np.max(np.abs(resid))
+        #           ax.imshow(img, cmap="gray", origin="lower", vmin=-v, vmax=v)
+        #      else:
         ax.imshow(img, cmap="gray", origin="lower", norm=lnorm)
         ax.set_title(title)
         ax.set_xticks([])
@@ -624,3 +630,68 @@ def label_segmap(ax, segmap, catalog):
     for idx, (y, x) in enumerate(zip(catalog["y"], catalog["x"]), start=1):
         ax.text(x, y, str(idx), color="white", fontsize=10, ha="center", va="center", weight="bold")
 
+
+def make_cutouts():
+    """Create cutouts for UDS images based on user-defined parameters."""
+    indir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/test/'
+    outdir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/test/cutout/'
+
+    # --- User parameters from the pasted image ---
+    center_x_40mas = 23243
+    center_y_40mas = 19388
+    size_x_40mas = 1044
+    size_y_40mas = 778
+
+    center = (center_x_40mas, center_y_40mas)
+    size = (size_y_40mas, size_x_40mas)  # Cutout2D expects (ny, nx)
+
+    # --- File lists ---
+    files_40mas = [
+        ("uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_sci_skysubvar.fits",
+         "uds-test-f444w_sci.fits"),
+        ("uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_wht.fits",
+         "uds-test-f444w_wht.fits"),
+        ("LW_f277w-f356w-f444w_SEGMAP.fits", "uds-test-f444w_seg.fits"),
+        ("LW_f277w-f356w-f444w_opterr.fits", "uds-test-f444w_opterr.fits"),
+        ("LW_f277w-f356w-f444w_optavg.fits", "uds-test-f444w_optavg.fits"),
+        ("uds-sbkgsub-0.1-40mas-f770w_drz_sci_test2.fits",
+         "uds-test-f770w_sci.fits"),
+    ]
+
+    # --- Extract cutouts for 40mas images ---
+    for infile, outfile in files_40mas:
+        with fits.open(indir + infile) as hdul:
+            data = hdul[0].data
+            wcs = WCS(hdul[0].header)
+            cutout = Cutout2D(data, position=center, size=size, wcs=wcs)
+            hdu = fits.PrimaryHDU(cutout.data, header=cutout.wcs.to_header())
+            hdu.writeto(outdir+outfile, overwrite=True)
+            print(f"Saved {outdir+outfile}")
+
+    # --- Extract cutout for 80mas image (2x2 binned), reproject to 40mas grid ---
+    infile_80mas = "uds-sbkgsub-v0.3-80mas-f770w_drz_wht.fits"
+    outfile_80mas = "uds-test-f770w_wht.fits"
+
+    # Use the WCS and shape from one of the 40mas cutouts as the target
+    ref_cutout_file = outdir + files_40mas[0][1]
+    with fits.open(ref_cutout_file) as ref_hdul:
+        target_header = ref_hdul[0].header
+        target_wcs = WCS(target_header)
+        target_shape = ref_hdul[0].data.shape
+
+    with fits.open(indir + infile_80mas) as hdul:
+        data = hdul[0].data
+        wcs = WCS(hdul[0].header)
+        # Extract the cutout at the 80mas scale
+        center_80mas = (center_x_40mas / 2, center_y_40mas / 2)
+        size_80mas = (size[0] // 2, size[1] // 2)
+        cutout_80mas = Cutout2D(data, position=center_80mas, size=size_80mas, wcs=wcs)
+        # Reproject to 40mas grid
+        reprojected_data, _ = reproject_interp(
+            (cutout_80mas.data, cutout_80mas.wcs),
+            output_projection=target_wcs,
+            shape_out=target_shape
+        )
+        hdu = fits.PrimaryHDU(reprojected_data.astype(np.float32), header=target_wcs.to_header())
+        hdu.writeto(outdir + outfile_80mas, overwrite=True)
+        print(f"Saved {outdir + outfile_80mas} (registered to 40mas grid)")

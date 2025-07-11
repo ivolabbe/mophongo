@@ -9,6 +9,19 @@ from scipy.sparse.linalg import cg, splu
 
 from .templates import Template
 
+# full weights need to be calcuate like
+#template_var = scipy.signal.fftconvolve(K**2, 1 / wht1, mode='same')  # same shape as template
+# Iterate if needed (since A appears in w(x)):
+# First fit using weights = wht2
+# Compute A (amplitude)
+# Recompute weights using full formula
+# Refit using updated weights if you want accurate errors
+# wht_tot = 1 / (1 / wht2 + A**2 * template_var)
+# Pass wht_tot to your SparseFitter.
+# Multiple templates: you must apply the same logic to each template independently. This means different pixels may have different total weights for each template, depending on each one's amplitude and support.
+# Correlated templates (overlapping) require full covariance accounting; your current implementation approximates this by assuming per-template independence.
+# If template noise is negligible, simplify to: weights = wht2 (as in your current default).
+# Flux-dependent variance (via A^2) introduces mild nonlinearity; it's safe to fix A from initial fit for a single iteration.
 
 @dataclass
 class FitConfig:
@@ -67,7 +80,7 @@ class SparseFitter:
             sl_i = self._bbox_to_slices(tmpl_i.bbox)
             w_i = self.weights[sl_i]
             img_i = self.image[sl_i]
-            temp_i = tmpl_i.array
+            temp_i = tmpl_i.data
             atb[i] = np.sum(temp_i * w_i * img_i)
 
             ata[i, i] = np.sum(temp_i * w_i * temp_i)
@@ -88,7 +101,7 @@ class SparseFitter:
                     slice(x0 - tmpl_j.bbox[2], x1 - tmpl_j.bbox[2]),
                 )
                 w = self.weights[sl_inter]
-                val = np.sum(tmpl_i.array[sl_i_local] * tmpl_j.array[sl_j_local] * w)
+                val = np.sum(tmpl_i.data[sl_i_local] * tmpl_j.data[sl_j_local] * w)
                 if val != 0.0:
                     ata[i, j] = val
                     ata[j, i] = val
@@ -113,7 +126,7 @@ class SparseFitter:
 
         for i, tmpl_i in enumerate(self.templates):
             sl_i = tmpl_i.slices_original
-            data_i = tmpl_i.array[tmpl_i.slices_cutout]
+            data_i = tmpl_i.data[tmpl_i.slices_cutout]
             w_i = self.weights[sl_i]
             img_i = self.image[sl_i]
             atb[i] = np.sum(data_i * w_i * img_i)
@@ -138,7 +151,7 @@ class SparseFitter:
                           inter[1].stop - tmpl_j.slices_original[1].start + tmpl_j.slices_cutout[1].start),
                 )
                 val = np.sum(
-                    tmpl_i.array[sl_i_local] * tmpl_j.array[sl_j_local] * w
+                    tmpl_i.data[sl_i_local] * tmpl_j.data[sl_j_local] * w
                 )
                 if val != 0.0:
                     ata[i, j] = val
@@ -152,7 +165,7 @@ class SparseFitter:
             raise ValueError("Solve system first")
         model = np.zeros_like(self.image, dtype=float)
         for coeff, tmpl in zip(self.solution, self.templates):
-            model[tmpl.slices_original] += coeff * tmpl.array[tmpl.slices_cutout]
+            model[tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
         return model
 
     @property
@@ -183,15 +196,6 @@ class SparseFitter:
         self.solution = x
         return x, info
 
-    def model_image_old(self) -> np.ndarray:
-        if self.solution is None:
-            raise ValueError("Solve system first")
-        model = np.zeros_like(self.image, dtype=float)
-        for coeff, tmpl in zip(self.solution, self.templates):
-            sl = self._bbox_to_slices(tmpl.bbox)
-            model[sl] += coeff * tmpl.array
-        return model
-
     def residual(self) -> np.ndarray:
         return self.image - self.model_image()
 
@@ -200,7 +204,7 @@ class SparseFitter:
         pred = np.empty(len(self.templates), dtype=float)
         for i, tmpl in enumerate(self.templates):
             w = self.weights[tmpl.slices_original]
-            pred[i] = 1.0 / np.sqrt(np.sum(w * tmpl.array[tmpl.slices_cutout] ** 2))
+            pred[i] = 1.0 / np.sqrt(np.sum(w * tmpl.data[tmpl.slices_cutout] ** 2))
         return pred
 
     def flux_errors(self) -> np.ndarray:

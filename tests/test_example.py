@@ -16,8 +16,9 @@ print(sys.path)
 
 # Now import
 from mophongo.psf import PSF
+from mophongo.fit import SparseFitter
 from mophongo.templates import Templates, Template
-from utils import make_simple_data, lupton_norm
+from utils import make_simple_data, lupton_norm, make_cutouts
 from mophongo.pipeline import run_photometry
 from photutils.segmentation import SegmentationImage, SourceCatalog
 
@@ -28,7 +29,7 @@ def test_addition():
 
 
 if __name__ == "__main__":
-    pass
+    exit
     #from mophongo.psf import PSF
     #PSF.gaussian(5,0.1,0.1).array.round()
 
@@ -101,5 +102,33 @@ if __name__ == "__main__":
     # %%
 
 # %%
-images, segmap, catalog, psfs, truth_img, rms = make_simple_data(nsrc=30, size=151, ndilate=0, peak_snr=3)
-segm = SegmentationImage(segmap)
+    images, segmap, catalog, psfs, truth_img, rms = make_simple_data(nsrc=30, size=151, ndilate=0, peak_snr=3)
+    positions = list(zip(catalog["x"], catalog["y"]))
+    segm = SegmentationImage(segmap)
+    kernel = PSF.from_array(psfs[0]).matching_kernel(PSF.from_array(psfs[1]))
+
+    tmpls = Templates.from_image(images[0], segmap, positions, kernel)
+    print(len(tmpls), len(catalog))
+    fitter = SparseFitter(tmpls.templates, images[1], 1.0 / rms[1]**2)
+    fluxes, _ = fitter.solve()
+    pred = fitter.predicted_errors()
+    errs = fitter.flux_errors()
+
+    tmpl_ids = [segmap[tmpl.position_original[::-1]] for tmpl in tmpls.templates]
+    # Map template IDs to their indices in the catalog
+    id_to_index = {id_: i for i, id_ in enumerate(catalog['id'])}
+    # Find catalog indices for each template
+    tmpl_idx = [id_to_index[tid] for tid in tmpl_ids]
+    tmpl_idx = np.arange(len(catalog))
+
+    # array files with fluxes where in segmap and has template, NaN where not
+
+    idx=1
+    catalog[f"flux_{idx}"] = np.nan
+    catalog[f"err_{idx}"] = errs
+    catalog[f"err_pred_{idx}"] = pred
+    
+    tmpls = Templates()
+    tmpls.extract_templates(images[0], segmap, positions)
+
+# %%

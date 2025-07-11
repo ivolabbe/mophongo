@@ -52,3 +52,10 @@ def test_psf_gaussian_fit(tmp_path):
     save_psf_fit_diagnostic(fname, psf.array, psf_fit.array)
     assert fname.exists()
     np.testing.assert_allclose(psf_fit.array, psf.array, rtol=0, atol=5e-2)
+
+
+def test_delta_psf_default():
+    psf = PSF.delta()
+    assert psf.array.shape == (3, 3)
+    assert psf.array[1, 1] == 1.0
+    np.testing.assert_allclose(psf.array.sum(), 1.0)

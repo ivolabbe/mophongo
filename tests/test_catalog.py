@@ -18,4 +18,3 @@ def test_catalog_builder(tmp_path):
     assert out.exists()
     hdr = fits.getheader(out)
     assert 'CRPIX1' in hdr
-

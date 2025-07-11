@@ -20,7 +20,7 @@ def test_extract_templates_sizes_and_norm(tmp_path):
 
     hires = images[0]
     for tmpl_obj in templates:
-        np.testing.assert_allclose(tmpl_obj.array.sum(), 1.0, rtol=1e-5)
+        np.testing.assert_allclose(tmpl_obj.data.sum(), 1.0, rtol=1e-5)
         slo = tmpl_obj.slices_original
         label = segmap[tmpl_obj.position_original]
         hi_cut = hires[slo] * (segmap[slo] == label)

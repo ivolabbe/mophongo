@@ -78,3 +78,75 @@ def measure_shape(data: np.ndarray, mask: np.ndarray) -> tuple[float, float, flo
     theta = float(np.arctan2(vecs[1, 0], vecs[0, 0]))
     return x_c, y_c, sigma_x, sigma_y, theta
 
+
+def moffat(
+    size: int | tuple[int, int],
+    fwhm_x: float,
+    fwhm_y: float,
+    beta: float,
+    theta: float = 0.0,
+    x0: float | None = None,
+    y0: float | None = None,
+) -> np.ndarray:
+    """Return a 2-D elliptical Moffat PSF normalized to unit sum."""
+    if isinstance(size, int):
+        ny = nx = size
+    else:
+        ny, nx = size
+
+    y, x = np.mgrid[:ny, :nx]
+    cy = (ny - 1) / 2
+    cx = (nx - 1) / 2
+    if x0 is None:
+        x0 = cx
+    if y0 is None:
+        y0 = cy
+    psf = elliptical_moffat(
+        y,
+        x,
+        1.0,
+        fwhm_x,
+        fwhm_y,
+        beta,
+        theta,
+        x0,
+        y0,
+    )
+    psf /= psf.sum()
+    return psf
+
+
+def gaussian(
+    size: int | tuple[int, int],
+    fwhm_x: float,
+    fwhm_y: float,
+    theta: float = 0.0,
+    x0: float | None = None,
+    y0: float | None = None,
+) -> np.ndarray:
+    """Return a 2-D elliptical Gaussian PSF normalized to unit sum."""
+    if isinstance(size, int):
+        ny = nx = size
+    else:
+        ny, nx = size
+
+    y, x = np.mgrid[:ny, :nx]
+    cy = (ny - 1) / 2
+    cx = (nx - 1) / 2
+    if x0 is None:
+        x0 = cx
+    if y0 is None:
+        y0 = cy
+    psf = elliptical_gaussian(
+        y,
+        x,
+        1.0,
+        fwhm_x,
+        fwhm_y,
+        theta,
+        x0,
+        y0,
+    )
+    psf /= psf.sum()
+    return psf
+

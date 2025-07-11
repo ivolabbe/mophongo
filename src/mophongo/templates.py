@@ -6,7 +6,7 @@ from astropy.nddata import Cutout2D
 from photutils.segmentation import SegmentationImage, SourceCatalog
 from skimage.morphology import binary_erosion, dilation, disk, footprint_rectangle
 
-from .utils import elliptical_moffat, measure_shape
+from .utils import measure_shape
 
 
 def _convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
@@ -47,10 +47,8 @@ class Template(Cutout2D):
             copy=True,
             **kwargs,
         )
-
-    @property
-    def array(self) -> np.ndarray:  # pragma: no cover - simple alias
-        return self.data
+        # @@@ bug in Cutout2D: shape_input is not set correctly 
+        self.shape_input = data.shape
 
     @property
     def bbox(
@@ -74,7 +72,7 @@ class Template(Cutout2D):
         # Create new Template directly from the original array reference
         # This ensures all coordinates remain consistent with the true original
         new_template = Template(
-            data=np.zeros(original_shape, dtype=self.data.dtype),
+            data=np.zeros(self.shape_input, dtype=self.data.dtype),
             position=self.input_position_original,
             size=(ny + pady, nx + padx),
             wcs=self.wcs,
@@ -144,6 +142,7 @@ class Templates:
         """Return the list of templates."""
         return self._templates
 
+    # put this in PSF class?
     @staticmethod
     def _sample_psf(psf: np.ndarray, position: Tuple[float, float],
                     height: int, width: int) -> np.ndarray:
@@ -185,7 +184,7 @@ class Templates:
         new_templates: list[Template] = []
 
         for i, tmpl in enumerate(self._templates):
-            data = tmpl.array
+            data = tmpl.data
             ny, nx = data.shape
 
             # Measure shape to determine padding needed
@@ -216,7 +215,7 @@ class Templates:
 
             # Add PSF flux only where the template is currently zero
             # if inplace, this will modify the original template
-            new_tmpl.data[~segment_mask] += psf_template[~segment_mask] * psf_scale 
+            new_tmpl.data[~segment_mask] += psf_template[~segment_mask] * psf_scale
 
             # Update the output templates list if not inplace
             if not inplace:
@@ -228,9 +227,9 @@ class Templates:
             flux_added =  flux_after - flux_before
 
             # Print diagnostics
-            print(f"Source flux: {flux_before:.2f}, PSF scale: {psf_scale:.3f}, "
-                  f"Flux before: {flux_before:.2f}, after: {flux_after:.2f}, "
-                  f"added: {flux_added:.2f} ({100*flux_added/flux_before:.1f}%)")
+#            print(f"Source flux: {flux_before:.2f}, PSF scale: {psf_scale:.3f}, "
+#                  f"Flux before: {flux_before:.2f}, after: {flux_after:.2f}, "
+#                  f"added: {flux_added:.2f} ({100*flux_added/flux_before:.1f}%)")
 
         if not inplace:
             return new_templates

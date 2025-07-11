@@ -35,7 +35,6 @@ class CatalogBuilder:
     segmap: np.ndarray | None = None
     catalog: Table | None = None
 
-
     def _estimate_background(self) -> float:
         binned = block_reduce(self.sci, (self.nbin, self.nbin), func=np.mean)
         sc = SigmaClip(sigma=3.0)
@@ -62,6 +61,7 @@ class CatalogBuilder:
             pad_x = nx - expanded.shape[1]
             expanded = np.pad(expanded, ((0, pad_y), (0, pad_x)), mode="edge")
         wht_full = expanded[:ny, :nx] / (self.nbin ** 2)
+
         return wht_full
 
     def _detect(self) -> None:

@@ -74,28 +74,16 @@ def run_photometry(
     if extend_templates == 'psf':
         tmpls.extend_with_psf_wings(tmpl_psf.array, inplace=True)
 
-
-# #            kernel = np.floor(psf_arr/psf_arr.max())  # identity kernel
-#         tmpls = Templates.from_image(
-#             tmpl_image,              segmap,             positions,             kernel,
-#             extension=tmpl_psf.array if extend_templates == 'psf' else None)
-
     residuals = []
     for idx in range(1,len(images)):
 
         # some wave of controlling window goes here
         kernel = tmpl_psf.matching_kernel(psfs[idx])
 
-        # tmpls = Templates.from_image(
-        #     tmpl_image,
-        #     segmap,
-        #     positions,
-        #     kernel,
-        #     extension=tmpl_psf.array if extend_templates == 'psf' else None)
-        # Step 2: Convolve with kernel (includes padding)
         templates = tmpls.convolve_templates(kernel, inplace=False)
 
-        weights = wht_images[idx] + tmpl_wht
+        # assume weights are dominated by photometry image (for proper weights see sparse fitter, needes iteration)
+        weights = wht_images[idx]
         
         fitter = SparseFitter(templates, images[idx], weights)
         fluxes, _ = fitter.solve()

@@ -112,6 +112,17 @@ def test_pipeline_flux_recovery(tmp_path):
                           resid[0],
                           segmap=segmap,
                           catalog=catalog)
+
+    fname = tmp_path / "diagnostic_hires_truemodel.png"
+    model = images[1] - resid_hi[0]
+    save_diagnostic_image(fname,
+                          truth_img,
+                          truth_img,
+                          images[1],
+                          model,
+                          resid_hi[0],
+                          segmap=segmap,
+                          catalog=catalog)
     assert fname.exists()
 
     # Report statistics for flux recovery

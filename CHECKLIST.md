@@ -59,4 +59,4 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [x] Benchmarked key pipeline steps in `tests/test_benchmark.py`
 - [x] Introduced Cutout2D-based template extraction and normal matrix helpers
 - [x] Renamed TemplateNew to Template and updated extraction defaults
-- [x] Implemented basic `CatalogBuilder` for source detection
+- [x] Implemented basic `Catalog` for source detection

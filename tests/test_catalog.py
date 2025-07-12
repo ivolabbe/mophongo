@@ -24,17 +24,32 @@ def test_catalog(tmp_path):
     hdr = fits.getheader(out)
     assert 'CRPIX1' in hdr
 
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.imshow(cat.det_img, origin="lower", cmap="gray", norm=lupton_norm(cat.det_img))
-    ax.imshow(cat.segmap, origin="lower", cmap="nipy_spectral", alpha=0.3)
-    label_segmap(ax, cat.segmap, cat.catalog)
-
     seg = SegmentationImage(cat.segmap)
-    scat = SourceCatalog(cat.sci, seg, error=np.sqrt(1.0 / cat.ivar))
-    for aper in scat.kron_aperture:
-        aper.plot(ax=ax, color="white", lw=0.5)
+    cmap_seg = seg.cmap
+    
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.axis('off')
+    ax.imshow(cat.det_img, origin="lower", cmap="gray", norm=lupton_norm(cat.det_img))
+    ax.imshow(cat.segmap, origin="lower", cmap=cmap_seg, alpha=0.3)
+    if len(cat.catalog) < 50: 
+        label_segmap(ax, cat.segmap, cat.catalog, fontsize=5)
+
+        for aper in cat.catalog.kron_aperture:
+            aper.plot(ax=ax, color="white", lw=0.4, alpha=0.6)
 
     diag = tmp_path / "catalog_diagnostic.png"
     fig.savefig(diag, dpi=150)
     plt.close(fig)
     assert diag.exists()
+
+    # Verify that small unweighted aperture errors reflect the weight map
+    positions = np.column_stack([cat.catalog["x"], cat.catalog["y"]])
+    apertures = CircularAperture(positions, r=4.0)
+    phot = aperture_photometry(cat.sci, apertures, error=np.sqrt(1.0 / cat.ivar))
+    measured_err = phot["aperture_sum_err"].data
+    expected_err = []
+    for mask in apertures.to_mask(method="exact"):
+        cutout = mask.multiply(1.0 / cat.ivar)
+        expected_err.append(np.sqrt(np.sum(cutout[mask.data > 0])))
+    expected_err = np.asarray(expected_err)
+    assert np.allclose(measured_err, expected_err)

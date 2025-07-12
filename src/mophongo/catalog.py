@@ -79,10 +79,10 @@ class Catalog:
         from astropy.convolution import convolve
         smooth = convolve(self.det_img, kernel, normalize_kernel=True)
         seg = detect_sources(smooth, threshold=2.0, npixels=5)
-        seg = deblend_sources(self.det_img, seg, npixels=5, nlevels=32, contrast=1.0e-6, progress_bar=False)
+        seg = deblend_sources(self.det_img, seg, npixels=5, nlevels=32, contrast=1e-4, progress_bar=False)
         self.segmap = seg.data
-        catalog = SourceCatalog(self.sci, seg, error=np.sqrt(1.0 / self.ivar))
-        self.catalog = catalog.to_table()
+        self.catalog = SourceCatalog(self.sci, seg, error=np.sqrt(1.0 / self.ivar))
+        self.table = catalog.to_table()
 
     def run(self, ivar_outfile: str | Path | None = None, header: fits.Header | None = None) -> None:
         if self.estimate_background:

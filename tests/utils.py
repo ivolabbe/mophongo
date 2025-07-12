@@ -626,9 +626,9 @@ def save_psf_fit_diagnostic(filename: str, psf: np.ndarray, model: np.ndarray) -
     plt.close(fig)
 
 
-def label_segmap(ax, segmap, catalog):
+def label_segmap(ax, segmap, catalog, fontsize=10):
     for idx, (y, x) in enumerate(zip(catalog["y"], catalog["x"]), start=1):
-        ax.text(x, y, str(idx), color="white", fontsize=10, ha="center", va="center", weight="bold")
+        ax.text(x, y, str(idx), color="white", fontsize=fontsize, ha="center", va="center", weight="medium", alpha=0.7)
 
 
 def make_cutouts():

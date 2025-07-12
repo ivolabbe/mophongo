@@ -4,6 +4,7 @@ from astropy.io import fits
 
 from mophongo.catalog import Catalog
 from photutils.segmentation import SegmentationImage, SourceCatalog
+from photutils.aperture import CircularAperture, aperture_photometry
 import matplotlib.pyplot as plt
 from utils import lupton_norm, label_segmap
 
@@ -12,9 +13,12 @@ def test_catalog(tmp_path):
     sci = Path('data/uds-test-f444w_sci.fits')
     wht = Path('data/uds-test-f444w_wht.fits')
     out = tmp_path / 'uds-test-f444w_ivar.fits'
-    cat = Catalog.from_fits(sci, wht, ivar_outfile=out)
+    params = {"detect_threshold": 1.5, "detect_npixels": 5}
+    cat = Catalog.from_fits(sci, wht, ivar_outfile=out, params=params)
     cat.catalog["x"] = cat.catalog["xcentroid"]
     cat.catalog["y"] = cat.catalog["ycentroid"]
+
+    assert cat.params["detect_threshold"] == 1.5
 
     assert cat.segmap.shape == cat.sci.shape
     assert cat.ivar.shape == cat.sci.shape

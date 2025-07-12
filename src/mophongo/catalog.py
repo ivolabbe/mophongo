@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Tuple
 
@@ -71,18 +71,47 @@ class Catalog:
     ivar: np.ndarray | None = None
     segmap: np.ndarray | None = None
     catalog: Table | None = None
+    det_catalog: SourceCatalog | None = None
     det_img: np.ndarray | None = None
+    params: dict[str, float | int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        defaults = {
+            "detect_threshold": 2.0,
+            "detect_npixels": 5,
+            "deblend_npixels": 5,
+            "deblend_nlevels": 32,
+            "deblend_contrast": 1e-4,
+        }
+        defaults.update(self.params)
+        self.params = defaults
 
     def _detect(self) -> None:
         self.det_img = (self.sci - self.background) * np.sqrt(self.ivar)
         kernel = Gaussian2DKernel(2.0 / 2.355, x_size=self.kernel_size, y_size=self.kernel_size)
         from astropy.convolution import convolve
         smooth = convolve(self.det_img, kernel, normalize_kernel=True)
-        seg = detect_sources(smooth, threshold=2.0, npixels=5)
-        seg = deblend_sources(self.det_img, seg, npixels=5, nlevels=32, contrast=1e-4, progress_bar=False)
+        npixels = int(self.params["detect_npixels"])
+        seg = detect_sources(
+            smooth,
+            threshold=float(self.params["detect_threshold"]),
+            npixels=npixels,
+        )
+        seg = deblend_sources(
+            self.det_img,
+            seg,
+            npixels=npixels,
+            nlevels=int(self.params["deblend_nlevels"]),
+            contrast=float(self.params["deblend_contrast"]),
+            progress_bar=False,
+        )
         self.segmap = seg.data
-        self.catalog = SourceCatalog(self.sci, seg, error=np.sqrt(1.0 / self.ivar))
-        self.table = catalog.to_table()
+        self.det_catalog = SourceCatalog(
+            self.sci,
+            seg,
+            error=np.sqrt(1.0 / self.ivar),
+        )
+        self.catalog = self.det_catalog.to_table()
 
     def run(self, ivar_outfile: str | Path | None = None, header: fits.Header | None = None) -> None:
         if self.estimate_background:

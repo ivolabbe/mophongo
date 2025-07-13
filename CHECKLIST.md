@@ -63,3 +63,4 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [x] Added configurable detection parameters in `Catalog`
 - [x] Added custom deblending using max-tree and SEP steepest-descent
 - [x] Added colour-aware deblending with chi² detection
+- [x] Implemented symmetry-based deblender

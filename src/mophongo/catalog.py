@@ -139,6 +139,15 @@ def deblend_sources_lutz(
         if submask.sum() == 0:
             continue
 
+        # Check for degenerate dimensions that cause max_tree to fail
+        shape = subimg.shape
+        if min(shape) <= 1 or submask.sum() < 2:
+            print(f"  Skipping degenerate segment: shape={shape}, pixels={submask.sum()}")
+            # Just assign a single label to the whole segment
+            new_seg[slices][submask] = next_label
+            next_label += 1
+            continue
+
         # Calculate total segment flux for absolute threshold
         total_segment_flux = np.sum(subimg[submask])
         flux_threshold = contrast * total_segment_flux
@@ -146,10 +155,21 @@ def deblend_sources_lutz(
         # Max-tree analysis to find local peaks
         minval = float(subimg.min()) - 1.0
         work = np.where(submask, subimg, minval)
-        
-        # Get max-tree
-        parent, tree_order = max_tree(work, connectivity=2)
-        parent = parent.ravel()
+
+        print('work',work.shape, work.min(), work.max())
+        # Ensure work array has no invalid values
+        work = np.nan_to_num(work, nan=minval, posinf=subimg.max(), neginf=minval)
+
+        try:
+            # Get max-tree - connectivity should be 2 for 2D images
+            parent, tree_order = max_tree(work, connectivity=2)
+            parent = parent.ravel()
+        except ValueError as e:
+            print(f"  Max-tree failed for segment {seg_id}: {e}")
+            # Fall back to single label
+            new_seg[slices][submask] = next_label
+            next_label += 1
+            continue
         
         # Calculate tree attributes (area and flux) bottom-up
         n_nodes = parent.size
@@ -238,11 +258,11 @@ def deblend_sources_color(
     sci2: np.ndarray,
     ivar2: np.ndarray,
     *,
-    kernel_size: float = 4.0,
+    kernel_size: float = 3.0,
     detect_threshold: float = 1.0,
     npixels: int = 5,
-    nlevels: int = 32,
-    contrast: float = 1e-3,
+    nlevels: int = 128,
+    contrast: float = 1e-4,
     color_thresh: float = 0.3,
     nsigma: float = 3.0,
 ) -> SegmentationImage:
@@ -269,9 +289,13 @@ def deblend_sources_color(
         seg_det,
         npixels=npixels,
         nlevels=nlevels,
+        mode='exponential',
         contrast=contrast,
         progress_bar=False,
     )
+
+    print(f"Initial detection: {len(seg_det.labels)} sources")
+    print(f"After deblending: {len(seg_deb.labels)} sources")
 
     seg_final = seg_deb.data.copy()
 
@@ -279,9 +303,14 @@ def deblend_sources_color(
         parent_mask = seg_det.data == seg_id
         child_ids = np.unique(seg_deb.data[parent_mask])
         child_ids = child_ids[child_ids != 0]
+        
+        print(f"\nSource {seg_id}: {len(child_ids)} children")
+        
         if len(child_ids) <= 1:
+#            print(f"  No deblending for source {seg_id}")
             continue
 
+        # Parent properties
         f1_p = sci1[parent_mask].sum()
         f2_p = sci2[parent_mask].sum()
         var1_p = (1.0 / ivar1[parent_mask]).sum()
@@ -294,6 +323,13 @@ def deblend_sources_color(
             + (1 / sn2_p**2 if sn2_p > 0 else np.inf)
         )
         chi_p = chi2[parent_mask].sum()
+        
+        if len(child_ids) > 10:        
+            print(f"  Parent: flux1={f1_p:.3f}, flux2={f2_p:.3f}, color={color_p:.3f}, "
+              f"chi2={chi_p:.3f}, sig={sig_p:.3f}")
+
+        children_kept = 0
+        children_rejected = 0
 
         for cid in child_ids:
             mask = seg_deb.data == cid
@@ -302,24 +338,74 @@ def deblend_sources_color(
             var1 = (1.0 / ivar1[mask]).sum()
             var2 = (1.0 / ivar2[mask]).sum()
             chi_c = chi2[mask].sum()
-            color_c = f1 / max(f2, 1e-9)
-            sn1 = f1 / np.sqrt(var1) if var1 > 0 else 0.0
-            sn2 = f2 / np.sqrt(var2) if var2 > 0 else 0.0
+            
+            # Calculate noise thresholds (1-sigma)
+            noise1 = np.sqrt(var1) if var1 > 0 else np.inf
+            noise2 = np.sqrt(var2) if var2 > 0 else np.inf
+            
+            # Apply noise floor to fluxes for color calculation
+            f1_thresh = max(f1, noise1)  # Use 1-sigma if flux < noise
+            f2_thresh = max(f2, noise2)
+            f1_p_thresh = max(f1_p, np.sqrt(var1_p)) if var1_p > 0 else f1_p
+            f2_p_thresh = max(f2_p, np.sqrt(var2_p)) if var2_p > 0 else f2_p
+            
+            # Calculate colors using thresholded fluxes
+            color_c = f1_thresh / f2_thresh
+            color_p = f1_p_thresh / f2_p_thresh
+            
+            # Signal-to-noise ratios with 1-sigma floor for non-detections
+            sn1 = max(f1 / noise1 if noise1 > 0 else 0.0, 1.0)
+            sn2 = max(f2 / noise2 if noise2 > 0 else 0.0, 1.0)
+            sn1_p = max(f1_p / np.sqrt(var1_p) if var1_p > 0 else 0.0, 1.0)
+            sn2_p = max(f2_p / np.sqrt(var2_p) if var2_p > 0 else 0.0, 1.0)
+
+            # Color uncertainties in log10 space using floored S/N
             sig_c = (1 / np.log(10)) * np.sqrt(
-                (1 / sn1**2 if sn1 > 0 else np.inf)
-                + (1 / sn2**2 if sn2 > 0 else np.inf)
+                (1 / sn1**2) + (1 / sn2**2)
             )
+            sig_p = (1 / np.log(10)) * np.sqrt(
+                (1 / sn1_p**2) + (1 / sn2_p**2)
+            )
+            
+            # Color difference in log10 space
             delta = np.abs(np.log10(color_c) - np.log10(color_p))
             sig_delta = np.sqrt(sig_c**2 + sig_p**2)
+            
+            # Check rejection criteria
+            flux_ratio = chi_c / chi_p
+            color_diff = delta
+            color_significance = delta / sig_delta if sig_delta > 0 and np.isfinite(sig_delta) else 0
+            
+            reject_flux = flux_ratio < contrast
+            reject_color_diff = color_diff < color_thresh
+            reject_color_sig = color_significance < nsigma
+            
+            # Additional check: reject if both bands are pure noise
+            both_noise = (sn1 < 1.0 and sn2 < 1.0)
+            if len(child_ids) > 10:
+                print(f"    Child {cid}: flux1={f1:.3f}±{noise1:.3f} (S/N={sn1:.1f}), "
+                    f"flux2={f2:.3f}±{noise2:.3f} (S/N={sn2:.1f})")
+                print(f"      Color: {color_c:.3f} (thresh flux), actual: {f1/max(f2,1e-9):.3f}")
+                print(f"      Chi2 ratio: {flux_ratio:.6f} (thresh={contrast}, reject={reject_flux})")
+                print(f"      Color diff: {color_diff:.3f} (thresh={color_thresh}, reject={reject_color_diff})")
+                print(f"      Color sig:  {color_significance:.3f} (thresh={nsigma}, reject={reject_color_sig})")
+                print(f"      Both noise: {both_noise}")
 
-            if (
-                chi_c / chi_p < contrast
-                or delta < color_thresh
-                or delta / sig_delta < nsigma
-            ):
+            if (reject_flux or reject_color_diff or reject_color_sig or both_noise):
+                if len(child_ids) > 10:
+                    print(f"      -> REJECTED")
                 seg_final[mask] = seg_id
+                children_rejected += 1
+            else:
+                if len(child_ids) > 10:
+                    print(f"      -> KEPT as separate source")
+                children_kept += 1
+        
+        if len(child_ids) > 10:
+            print(f"  Final: {children_kept} children kept, {children_rejected} rejected")
 
-    seg_final = label(seg_final, connectivity=1)
+    seg_final = label(seg_final, connectivity=2)
+    print(f"Final segmentation: {len(np.unique(seg_final))-1} sources")
     return SegmentationImage(seg_final)
 
 

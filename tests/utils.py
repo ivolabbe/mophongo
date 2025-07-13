@@ -642,6 +642,10 @@ def make_cutouts():
          "uds-test-f444w_sci.fits"),
         ("uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_wht.fits",
          "uds-test-f444w_wht.fits"),
+        ("uds-grizli-v8.0-minerva-v1.0-40mas-f115w-clear_drc_sci_skysubvar.fits",
+         "uds-test-f115w_sci.fits"),
+        ("uds-grizli-v8.0-minerva-v1.0-40mas-f115w-clear_drc_wht.fits",
+         "uds-test-f115w_wht.fits"),
         ("LW_f277w-f356w-f444w_SEGMAP.fits", "uds-test-LW_seg.fits"),
         ("LW_f277w-f356w-f444w_opterr.fits", "uds-test-f444w_opterr.fits"),
         ("LW_f277w-f356w-f444w_optavg.fits", "uds-test-f444w_optavg.fits"),
@@ -656,7 +660,7 @@ def make_cutouts():
             wcs = WCS(hdul[0].header)
             cutout = Cutout2D(data, position=center, size=size, wcs=wcs)
             hdu = fits.PrimaryHDU(cutout.data, header=cutout.wcs.to_header())
-            hdu.writeto(outdir+outfile, overwrite=True)
+            hdu.writeto(outdir + outfile, overwrite=True)
             print(f"Saved {outdir+outfile}")
 
     # --- Extract cutout for 80mas image (2x2 binned), reproject to 40mas grid ---
@@ -676,13 +680,16 @@ def make_cutouts():
         # Extract the cutout at the 80mas scale
         center_80mas = (center_x_40mas / 2, center_y_40mas / 2)
         size_80mas = (size[0] // 2, size[1] // 2)
-        cutout_80mas = Cutout2D(data, position=center_80mas, size=size_80mas, wcs=wcs)
+        cutout_80mas = Cutout2D(data,
+                                position=center_80mas,
+                                size=size_80mas,
+                                wcs=wcs)
         # Reproject to 40mas grid
         reprojected_data, _ = reproject_interp(
             (cutout_80mas.data, cutout_80mas.wcs),
             output_projection=target_wcs,
-            shape_out=target_shape
-        )
-        hdu = fits.PrimaryHDU(reprojected_data.astype(np.float32), header=target_wcs.to_header())
+            shape_out=target_shape)
+        hdu = fits.PrimaryHDU(reprojected_data.astype(np.float32),
+                              header=target_wcs.to_header())
         hdu.writeto(outdir + outfile_80mas, overwrite=True)
         print(f"Saved {outdir + outfile_80mas} (registered to 40mas grid)")

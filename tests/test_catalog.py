@@ -91,6 +91,11 @@ def find_local_maxima(image, segmap, min_distance=3, threshold_abs=5, threshold_
     
     return np.array(all_maxima) if all_maxima else np.empty((0, 2)), segment_counts
 
+
+def find_local_maxima_per_segment(image, segmap, min_distance=3, threshold_abs=5, threshold_rel=1e-7):
+    """Compatibility wrapper for legacy test."""
+    return find_local_maxima(image, segmap, min_distance, threshold_abs, threshold_rel)
+
 def test_deblend_sources(tmp_path):
     images, segmap, catalog, psfs, truth, wht = make_simple_data(seed=3,
                                                                  nsrc=50,

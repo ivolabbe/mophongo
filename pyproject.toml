@@ -13,7 +13,8 @@ dependencies = [
     "astropy (>=6.0,<7.0)",
     "photutils (>=1.9,<2.0)",
     "scikit-image (>=0.25.2,<0.26.0)",
-    "reproject (>=0.14.1,<0.15.0)"
+    "reproject (>=0.14.1,<0.15.0)",
+    "sep (>=1.4.1,<2.0.0)"
 ]
 
 [tool.poetry]

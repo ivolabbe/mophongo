@@ -32,6 +32,7 @@ __all__ = [
     "estimate_background",
     "calibrate_wht",
     "deblend_sources_lutz",
+    "deblend_sources_color",
 ]
 
 
@@ -229,6 +230,97 @@ def deblend_sources_lutz(
             next_label += len(final_labels)
 
     return SegmentationImage(new_seg)
+
+
+def deblend_sources_color(
+    sci1: np.ndarray,
+    ivar1: np.ndarray,
+    sci2: np.ndarray,
+    ivar2: np.ndarray,
+    *,
+    kernel_size: float = 4.0,
+    detect_threshold: float = 1.0,
+    npixels: int = 5,
+    nlevels: int = 32,
+    contrast: float = 1e-3,
+    color_thresh: float = 0.3,
+    nsigma: float = 3.0,
+) -> SegmentationImage:
+    """Chi² detection and colour-aware deblending.
+
+    The two input images are combined into a chi² detection image.  Standard
+    :func:`photutils.segmentation.deblend_sources` is applied and the resulting
+    children are kept only if their colour contrast relative to the parent
+    region exceeds ``color_thresh`` with a significance larger than
+    ``nsigma``.
+    """
+
+    from astropy.convolution import convolve
+
+    chi2 = (sci1 * np.sqrt(ivar1)) ** 2 + (sci2 * np.sqrt(ivar2)) ** 2
+
+    kpix = int(2 * kernel_size + 1)
+    kernel = Gaussian2DKernel(kernel_size / 2.355, x_size=kpix, y_size=kpix)
+    chi2_smooth = convolve(chi2, kernel, normalize_kernel=True)
+
+    seg_det = detect_sources(chi2_smooth, detect_threshold, npixels=npixels)
+    seg_deb = deblend_sources(
+        chi2,
+        seg_det,
+        npixels=npixels,
+        nlevels=nlevels,
+        contrast=contrast,
+        progress_bar=False,
+    )
+
+    seg_final = seg_deb.data.copy()
+
+    for seg_id in seg_det.labels:
+        parent_mask = seg_det.data == seg_id
+        child_ids = np.unique(seg_deb.data[parent_mask])
+        child_ids = child_ids[child_ids != 0]
+        if len(child_ids) <= 1:
+            continue
+
+        f1_p = sci1[parent_mask].sum()
+        f2_p = sci2[parent_mask].sum()
+        var1_p = (1.0 / ivar1[parent_mask]).sum()
+        var2_p = (1.0 / ivar2[parent_mask]).sum()
+        color_p = f1_p / max(f2_p, 1e-9)
+        sn1_p = f1_p / np.sqrt(var1_p) if var1_p > 0 else 0.0
+        sn2_p = f2_p / np.sqrt(var2_p) if var2_p > 0 else 0.0
+        sig_p = (1 / np.log(10)) * np.sqrt(
+            (1 / sn1_p**2 if sn1_p > 0 else np.inf)
+            + (1 / sn2_p**2 if sn2_p > 0 else np.inf)
+        )
+        chi_p = chi2[parent_mask].sum()
+
+        for cid in child_ids:
+            mask = seg_deb.data == cid
+            f1 = sci1[mask].sum()
+            f2 = sci2[mask].sum()
+            var1 = (1.0 / ivar1[mask]).sum()
+            var2 = (1.0 / ivar2[mask]).sum()
+            chi_c = chi2[mask].sum()
+            color_c = f1 / max(f2, 1e-9)
+            sn1 = f1 / np.sqrt(var1) if var1 > 0 else 0.0
+            sn2 = f2 / np.sqrt(var2) if var2 > 0 else 0.0
+            sig_c = (1 / np.log(10)) * np.sqrt(
+                (1 / sn1**2 if sn1 > 0 else np.inf)
+                + (1 / sn2**2 if sn2 > 0 else np.inf)
+            )
+            delta = np.abs(np.log10(color_c) - np.log10(color_p))
+            sig_delta = np.sqrt(sig_c**2 + sig_p**2)
+
+            if (
+                chi_c / chi_p < contrast
+                or delta < color_thresh
+                or delta / sig_delta < nsigma
+            ):
+                seg_final[mask] = seg_id
+
+    seg_final = label(seg_final, connectivity=1)
+    return SegmentationImage(seg_final)
 
 
 def estimate_background(sci: np.ndarray, nbin: int = 4) -> float:

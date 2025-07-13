@@ -3,26 +3,52 @@ from pathlib import Path
 from astropy.io import fits
 
 from mophongo.catalog import Catalog, deblend_sources_lutz, safe_dilate_segmentation
-
-from photutils.segmentation import SegmentationImage, SourceCatalog
+from mophongo.psf import PSF
+from mophongo.templates import _convolve2d
+from photutils.segmentation import SegmentationImage, SourceCatalog, detect_sources
 from photutils.aperture import CircularAperture, aperture_photometry
 import matplotlib.pyplot as plt
 from utils import lupton_norm, label_segmap
 from utils import make_simple_data
+from astropy.stats import mad_std
+from skimage.morphology import dilation, disk, max_tree
 
 
 def test_deblend_sources_lutz(tmp_path):
-    images, segmap, catalog, psfs, truth, wht = make_simple_data(
-        seed=3, nsrc=50, size=101, ndilate=2, peak_snr=2
-    )
-    det = images[0]
-    seg = SegmentationImage(segmap)
+    images, segmap, catalog, psfs, truth, wht = make_simple_data(seed=3,
+                                                                 nsrc=50,
+                                                                 size=101,
+                                                                 ndilate=2,
+                                                                 peak_snr=2)
 
-    seg_deb = deblend_sources_lutz(det, seg, npixels=5, contrast=1e-2)
+    psf_det = PSF.gaussian(9, 2, 2)  # delta function = no smoothing
+    detimg = images[0]
+    print('reading detection image')
+    sci = fits.getdata('data/uds-test-f444w_sci.fits')
+    wht = fits.getdata('data/uds-test-f444w_wht.fits')
+    detimg = sci * np.sqrt(wht)
+    print('convolving detection image')
+    detimg = _convolve2d(detimg, psf_det.array)
+    print('mad rms')
+    rms = mad_std(detimg)
+    print('detecing sources')
+    seg = detect_sources(detimg, threshold=1.5 * rms, npixels=5)
+    seg.data = safe_dilate_segmentation(seg.data, selem=disk(52))
+
+    # Debug: Check input data
+    print(f"Original segmap unique IDs: {np.unique(segmap)}")
+    print(f"SegmentationImage unique IDs: {np.unique(seg.data)}")
+    print(
+        f"Detection image stats: min={detimg.min():.3f}, max={detimg.max():.3f}, mean={detimg.mean():.3f}"
+    )
+
+    # Try with very relaxed parameters
+    seg_deb = deblend_sources_lutz(detimg, seg, npixels=5, contrast=0.0001)
+    print("UNIQUE ids in segmap", np.unique(seg_deb.data))
 
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.axis("off")
-    ax.imshow(det, origin="lower", cmap="gray", norm=lupton_norm(det))
+    ax.imshow(detimg, origin="lower", cmap="gray", norm=lupton_norm(detimg))
     ax.imshow(seg_deb.data, origin="lower", cmap=seg_deb.cmap, alpha=0.3)
     if len(catalog) < 50:
         label_segmap(ax, seg_deb.data, catalog, fontsize=5)
@@ -66,7 +92,7 @@ def test_catalog(tmp_path):
     #                                  contrast=cat.params['deblend_contrast'])
     cmap_seg = segmap.cmap
 
-    print("UNIQUE ids in segmap", np.unique(segmap.data))
+    #    print("UNIQUE ids in segmap", np.unique(segmap.data))
 
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.axis("off")

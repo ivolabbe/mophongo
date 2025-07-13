@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 from astropy.modeling.models import Gaussian2D
 from photutils.segmentation import detect_sources, deblend_sources
 from photutils.datasets import make_model_image, make_model_params
+from skimage.morphology import dilation, disk, max_tree
 
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -111,6 +112,7 @@ def make_simple_data(
     seg = detect_sources(detimg, threshold=sigthresh * noise_std, npixels=5)
     if ndilate > 0:
         seg.data = safe_dilate_segmentation(seg.data, selem=disk(ndilate))
+
     segm = deblend_sources(
         detimg, seg, npixels=5, nlevels=64, contrast=0.000001, progress_bar=False,
     )

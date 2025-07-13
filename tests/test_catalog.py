@@ -38,13 +38,13 @@ def test_catalog(tmp_path):
     #    segimage = fits.getdata('data/uds-test-f444w_seg.fits')
     #    seg = SegmentationImage(segimage)
     segmap = cat.segmap
-    segmap = deblend_sources_lutz(cat.det_img,
-                                  segmap,
-                                  npixels=cat.params['detect_npixels'],
-                                  contrast=cat.params['deblend_contrast'])
+#    segmap = deblend_sources_lutz(cat.det_img,
+#                                  segmap,
+#                                  npixels=cat.params['detect_npixels'],
+#                                  contrast=cat.params['deblend_contrast'])
     cmap_seg = segmap.cmap
 
-    print('UNIQUE ids in lutzmap', np.unique(segmap.data))
+    print('UNIQUE ids in segmap', np.unique(segmap.data))
 
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.axis('off')

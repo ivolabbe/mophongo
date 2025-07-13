@@ -20,6 +20,8 @@ from photutils.segmentation import (
     SegmentationImage,
 )
 from skimage.morphology import dilation, disk, max_tree
+from skimage.segmentation import watershed
+from skimage.measure import label
 
 from itertools import product
 
@@ -110,68 +112,121 @@ def _steepest_descent_labels(
 
 def deblend_sources_lutz(
     det_image: np.ndarray,
-    segmap: SegmentationImage | np.ndarray,
+    segmap: SegmentationImage,
     *,
     npixels: int = 5,
     contrast: float = 1e-3,
 ) -> SegmentationImage:
     """Deblend segmentation map using a SEP-like algorithm."""
+    
+    from skimage.measure import label
+    from skimage.segmentation import watershed
+    
+    new_seg = np.zeros_like(segmap.data, dtype=int)
+    next_label = 1
 
-    if isinstance(segmap, SegmentationImage):
-        seg_data = np.array(segmap.data, dtype=int)
-    else:
-        seg_data = np.array(segmap, dtype=int)
-
-    new_seg = np.zeros_like(seg_data, dtype=int)
-    label_offset = 0
-
-    for seg_id in np.unique(seg_data):
-        if seg_id == 0:
+    for segment in segmap.segments:
+        seg_id = segment.label
+        
+        # Extract subimages using the segment's own slices
+        slices = segment.slices
+        subimg = det_image[slices]
+        submask = segment.data != 0
+        
+        print(f"Segment {seg_id}: slices={slices}, mask_pixels={submask.sum()}")
+        
+        if submask.sum() == 0:
             continue
-        mask = seg_data == seg_id
-        if mask.sum() == 0:
-            continue
 
-        y_idx, x_idx = np.nonzero(mask)
-        y0, y1 = y_idx.min(), y_idx.max() + 1
-        x0, x1 = x_idx.min(), x_idx.max() + 1
-
-        subimg = det_image[y0:y1, x0:x1]
-        submask = mask[y0:y1, x0:x1]
-
+        # Calculate total segment flux for absolute threshold
+        total_segment_flux = np.sum(subimg[submask])
+        flux_threshold = contrast * total_segment_flux
+        
+        # Max-tree analysis to find local peaks
         minval = float(subimg.min()) - 1.0
         work = np.where(submask, subimg, minval)
-        parent, order = max_tree(work, connectivity=2)
+        
+        # Get max-tree
+        parent, tree_order = max_tree(work, connectivity=2)
         parent = parent.ravel()
-        order = order.astype(int)
-        flat = work.ravel()
-
-        area = np.ones_like(flat, dtype=int)
-        flux = flat.copy()
-        for idx in order[::-1]:
-            p = parent[idx]
-            if idx == p:
-                continue
-            area[p] += area[idx]
-            flux[p] += flux[idx]
-
-        root = order[0]
-        total_flux = flux[root]
-
-        is_leaf = np.ones_like(flat, dtype=bool)
-        for idx in order[1:]:
-            is_leaf[parent[idx]] = False
-
-        seeds = np.zeros_like(flat, dtype=bool)
-        for idx in np.nonzero(is_leaf)[0]:
-            if area[idx] >= npixels and flux[idx] >= contrast * total_flux:
-                seeds[idx] = True
-
-        seed_mask = seeds.reshape(submask.shape)
-        labels_sub = _steepest_descent_labels(subimg, seed_mask, submask)
-        labels_sub[labels_sub > 0] += label_offset
-        new_seg[y0:y1, x0:x1][labels_sub > 0] = labels_sub[labels_sub > 0]
-        label_offset = new_seg.max()
+        
+        # Calculate tree attributes (area and flux) bottom-up
+        n_nodes = parent.size
+        area = np.ones(n_nodes, dtype=int)
+        flux = work.ravel().copy()
+        
+        # Build tree attributes bottom-up
+        for node_idx in tree_order[::-1]:
+            parent_idx = parent[node_idx]
+            if parent_idx != node_idx:  # Not root
+                area[parent_idx] += area[node_idx]
+                flux[parent_idx] += flux[node_idx]
+        
+        # Find leaves (nodes with no children)
+        has_children = np.zeros(n_nodes, dtype=bool)
+        for node_idx in range(n_nodes):
+            parent_idx = parent[node_idx]
+            if parent_idx != node_idx:  # Not root
+                has_children[parent_idx] = True
+        
+        mask_flat = submask.ravel()
+        leaves = np.where(~has_children & mask_flat)[0]
+        
+        print(f"  Found {len(leaves)} total leaves")
+        print(f"  Total segment flux: {total_segment_flux:.3f}, threshold: {flux_threshold:.6f}")
+        
+        # Apply absolute flux threshold (like photutils)
+        valid_seeds = []
+        for leaf_idx in leaves:
+            leaf_flux = flux[leaf_idx]
+            
+            print(f"    Leaf {leaf_idx}: flux={leaf_flux:.6f}, "
+                  f"fraction={leaf_flux/total_segment_flux:.6f}")
+            
+            # Use absolute flux threshold instead of relative contrast
+            if leaf_flux >= flux_threshold and leaf_flux > 0:
+                valid_seeds.append(leaf_idx)
+        
+        print(f"  Found {len(valid_seeds)} valid seeds after flux threshold filtering")
+        
+        if len(valid_seeds) <= 1:
+            # No deblending needed
+            new_seg[slices][submask] = next_label
+            next_label += 1
+            continue
+        
+        # Create markers for watershed using only surviving leaves
+        markers = np.zeros_like(submask, dtype=int)
+        for i, seed_idx in enumerate(valid_seeds):
+            row, col = np.unravel_index(seed_idx, submask.shape)
+            markers[row, col] = i + 1
+        
+        # Apply watershed
+        labels_sub = watershed(-subimg, markers=markers, mask=submask)
+        
+        # Apply area filtering to the actual watershed regions
+        final_labels = np.unique(labels_sub[labels_sub > 0])
+        print(f"  Before area filtering: {len(final_labels)} regions")
+        
+        for lbl in final_labels:
+            region_mask = labels_sub == lbl
+            region_size = region_mask.sum()
+            if region_size < npixels:
+                print(f"    -> Removing region {lbl} ({region_size} < {npixels} pixels)")
+                labels_sub[region_mask] = 0
+        
+        # Add to final segmentation with consecutive labeling
+        final_labels = np.unique(labels_sub[labels_sub > 0])
+        print(f"  Final: {len(final_labels)} regions after area filtering")
+        
+        if len(final_labels) > 0:
+            for i, lbl in enumerate(final_labels):
+                region_mask = labels_sub == lbl
+                labels_sub[region_mask] = next_label + i
+            
+            valid_mask = labels_sub > 0
+            new_seg[slices][valid_mask] = labels_sub[valid_mask]
+            next_label += len(final_labels)
 
     return SegmentationImage(new_seg)
 

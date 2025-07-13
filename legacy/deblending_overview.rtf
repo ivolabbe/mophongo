@@ -1,0 +1,380 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2761
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\froman\fcharset0 Times-Roman;\f1\froman\fcharset0 Times-Bold;\f2\fnil\fcharset0 LucidaGrande-Bold;
+\f3\froman\fcharset0 Times-Italic;\f4\fnil\fcharset77 ZapfDingbatsITC;\f5\ftech\fcharset77 Symbol;
+\f6\fnil\fcharset0 LucidaGrande;}
+{\colortbl;\red255\green255\blue255;\red0\green0\blue0;\red109\green109\blue109;\red0\green0\blue233;
+}
+{\*\expandedcolortbl;;\cssrgb\c0\c0\c0;\cssrgb\c50196\c50196\c50196;\cssrgb\c0\c0\c93333;
+}
+{\*\listtable{\list\listtemplateid1\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid1\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{circle\}}{\leveltext\leveltemplateid2\'01\uc0\u9702 ;}{\levelnumbers;}\fi-360\li1440\lin1440 }{\listname ;}\listid1}
+{\list\listtemplateid2\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid101\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid2}
+{\list\listtemplateid3\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid201\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid3}
+{\list\listtemplateid4\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid301\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid4}
+{\list\listtemplateid5\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid401\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{circle\}}{\leveltext\leveltemplateid402\'01\uc0\u9702 ;}{\levelnumbers;}\fi-360\li1440\lin1440 }{\listname ;}\listid5}}
+{\*\listoverridetable{\listoverride\listid1\listoverridecount0\ls1}{\listoverride\listid2\listoverridecount0\ls2}{\listoverride\listid3\listoverridecount0\ls3}{\listoverride\listid4\listoverridecount0\ls4}{\listoverride\listid5\listoverridecount0\ls5}}
+\paperw11900\paperh16840\margl1440\margr1440\vieww15360\viewh11400\viewkind0
+\deftab720
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f0\fs24 \cf0 \expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 Below is a pragmatic \'93field guide\'94 to the main families of multiband\uc0\u8208 image\'96segmentation (and closely-related de-blending) techniques now in use across optical\'96IR and radio astronomy. I group the literature by the statistical idea that drives each method, then highlight typical software implementations and what they are best (and worst) at. A compact comparison table follows.\
+\pard\pardeftab720\partightenfactor0
+\cf3 \strokec3 \
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f1\b\fs28 \cf0 \strokec2 1. Classic pixel-threshold & watershed schemes\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\sa240\partightenfactor0
+\ls1\ilvl0
+\fs24 \cf0 \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 \uc0\u967 \'b2 / detection-image approaches
+\f0\b0  \'96 Make a single high-S/N \'93detection\'94 frame (often the \uc0\u967 \'b2 coadd of all bands; Szalay+1999) and run a connected-pixel search.\
+\pard\tx940\tx1440\pardeftab720\li1440\fi-1440\sa240\partightenfactor0
+\ls1\ilvl1
+\f1\b \cf0 \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	
+\f2 \uc0\u9702 
+\f1 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 SExtractor / Source-Extractor
+\f0\b0  (1996-2020) and its Euclid-era rewrite 
+\f1\b SourceXtractor++
+\f0\b0  extend this idea to joint S\'e9rsic or bulge+disk fitting across many images on different grids; multiband information is used only 
+\f3\i after
+\f0\i0  the segmentation mask is built. ({\field{\*\fldinst{HYPERLINK "https://arxiv.org/pdf/2212.02428.pdf"}}{\fldrslt \cf4 \ul \ulc4 \strokec4 arXiv}})\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\sa240\partightenfactor0
+\ls1\ilvl0
+\f1\b \cf0 \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 ProFound
+\f0\b0  (Robotham & Davies 2018) computes a smoothed detection image, grows isophotal \'93segments\'94, and then applies a watershed deblend that can operate on stacks of \uc0\u8805 3 filters simultaneously, producing a single label map valid for all bands. Its simplicity and R-based workflow are popular for wide\'96field sky surveys. ({\field{\*\fldinst{HYPERLINK "https://arxiv.org/abs/1802.00937"}}{\fldrslt \cf4 \ul \ulc4 \strokec4 arXiv}})\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f1\b \cf0 \strokec2 Pros:
+\f0\b0  Extremely fast; no PSF assumptions; easy to tune by eye.\uc0\u8232 
+\f1\b Cons:
+\f0\b0  Segmentation is colour-blind; severe blending or PSF variation between filters can bias the masks and photometry.\
+\pard\pardeftab720\partightenfactor0
+\cf3 \strokec3 \
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f1\b\fs28 \cf0 \strokec2 2. Template or PSF-matched linear inversion\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\sa240\partightenfactor0
+\ls2\ilvl0
+\fs24 \cf0 \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 T-PHOT
+\f0\b0  (Merlin et al. 2015 / 2016) uses a high-resolution \'93template\'94 image to define priors; it then solves a constrained linear least-squares problem for the fluxes of all templates in a lower-resolution image (or cube). The same machinery works for \uc0\u8805  N bands by solving one linear system per band. ({\field{\*\fldinst{HYPERLINK "https://arxiv.org/abs/1609.00146"}}{\fldrslt \cf4 \ul \ulc4 \strokec4 arXiv}})\
+\ls2\ilvl0
+\f1\b \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 XID+
+\f0\b0  (Hurley et al. 2017) tackles Herschel-SPIRE\'92s highly confused FIR images via hierarchical Bayesian inference (NUTS/HMC sampling) with colours optionally linked by informative SED priors. ({\field{\*\fldinst{HYPERLINK "https://arxiv.org/abs/1704.02192"}}{\fldrslt \cf4 \ul \ulc4 \strokec4 arXiv}})\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f1\b \cf0 \strokec2 Pros:
+\f0\b0  Explicit PSF convolution; photometry is statistically optimal once templates are right.\uc0\u8232 
+\f1\b Cons:
+\f0\b0  Needs an external catalogue; cannot discover unseen sources; linear model struggles when morphologies differ between bands.\
+\pard\pardeftab720\partightenfactor0
+\cf3 \strokec3 \
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f1\b\fs28 \cf0 \strokec2 3. Matrix-factorisation & proximal-gradient deblenders\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\sa240\partightenfactor0
+\ls3\ilvl0
+\fs24 \cf0 \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 scarlet / scarlet-lite
+\f0\b0  (Melchior et al. 2018, 2023) pose multiband deblending as non-negative matrix factorisation with pixel-space constraints (monotonicity, symmetry, sparsity). The algorithm iterates gradients of the log-likelihood and proximal operators; both morphology and SED are updated jointly so colours guide the segmentation as it converges. No external priors are required, but PSF kernels for every band are. ({\field{\*\fldinst{HYPERLINK "https://arxiv.org/abs/1802.10157"}}{\fldrslt \cf4 \ul \ulc4 \strokec4 arXiv}})\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f1\b \cf0 \strokec2 Pros:
+\f0\b0  Fully \'93blind\'94 discovery; leverages colour to separate overlaps; differentiable so it scales to large scenes.\uc0\u8232 
+\f1\b Cons:
+\f0\b0  Requires reasonably accurate PSFs; optimisation can stall for very low-S/N sources; memory-intensive for huge cut-outs (scarlet-lite addresses this).\
+\pard\pardeftab720\partightenfactor0
+\cf3 \strokec3 \
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f1\b\fs28 \cf0 \strokec2 4. Deep-learning semantic & instance segmentation\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f0\b0\fs24 \cf0 Deep CNNs treat the stack of bands as multi-channel input and learn to output masks (semantic) or per-object polygons (instance).\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\sa240\partightenfactor0
+\ls4\ilvl0
+\f1\b \cf0 \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 Morpheus
+\f0\b0  (Hausen & Robertson 2020) \'96 U-Net variant that labels 
+\f3\i every pixel
+\f0\i0  as galaxy / background / artefact using five DES bands; masking improves photometric pipelines.\
+\ls4\ilvl0
+\f1\b \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 DeepSource / HeTu-v2
+\f0\b0  \'96 mixed-attention U-Nets trained on MeerKAT & ASKAP simulations to separate faint radio galaxies from noise; naturally ingest Stokes-I images at multiple frequencies. ({\field{\*\fldinst{HYPERLINK "https://arxiv.org/pdf/2212.02428.pdf"}}{\fldrslt \cf4 \ul \ulc4 \strokec4 arXiv}})\
+\ls4\ilvl0
+\f1\b \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 GGSL-U-Net
+\f0\b0  (Z\'fcrcher et al. 2024) \'96 3D-U-Net that segments strong-lens arcs in 
+\f3\i HST
+\f0\i0  nine-filter cubes, demonstrating that the net can exploit colour gradients to reject interlopers. ({\field{\*\fldinst{HYPERLINK "https://arxiv.org/abs/2410.02936"}}{\fldrslt \cf4 \ul \ulc4 \strokec4 arXiv}})\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f1\b \cf0 \strokec2 Pros:
+\f0\b0  State-of-the-art accuracy when training data match the survey; learns extremely complex morphologies; GPU-accelerated.\uc0\u8232 
+\f1\b Cons:
+\f0\b0  Needs thousands of labelled examples (or realistic sims); prone to domain shift; network output is a probability mask, so one must still derive photometry via e.g. forced-flux fitting.\
+\pard\pardeftab720\partightenfactor0
+\cf3 \strokec3 \
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f1\b\fs28 \cf0 \strokec2 5. Hybrid/next-generation pipelines\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f0\b0\fs24 \cf0 Modern surveys increasingly chain approaches: SourceXtractor++ detects & models, feeds scarlet-lite residuals for difficult blends, then uses a CNN to veto artefacts. The Euclid Morphology Challenge (2022) shows that no single method dominates for every size/SNR regime.\
+\pard\pardeftab720\partightenfactor0
+\cf3 \strokec3 \
+\pard\pardeftab720\sa319\partightenfactor0
+
+\f1\b \cf0 \strokec2 Quick comparison\
+
+\itap1\trowd \taflags0 \trgaph108\trleft-108 \trbrdrt\brdrnil \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalc \clshdrawnil \clwWidth2388\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx1440
+\clvertalc \clshdrawnil \clwWidth3464\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx2880
+\clvertalc \clshdrawnil \clwWidth2616\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth1877\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx5760
+\clvertalc \clshdrawnil \clwWidth2097\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx7200
+\clvertalc \clshdrawnil \clwWidth2416\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+\cf0 Family / Code\cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+\cf0 Uses colour during segmentation?\cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+\cf0 Handles variable PSF?\cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+\cf0 Typical output\cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+\cf0 Computing cost*\cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+\cf0 Good for\'85\cell \row
+
+\itap1\trowd \taflags0 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalc \clshdrawnil \clwWidth2388\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx1440
+\clvertalc \clshdrawnil \clwWidth3464\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx2880
+\clvertalc \clshdrawnil \clwWidth2616\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth1877\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx5760
+\clvertalc \clshdrawnil \clwWidth2097\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx7200
+\clvertalc \clshdrawnil \clwWidth2416\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+
+\f0\b0 \cf0 \uc0\u967 \'b2 threshold (SExtractor)\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+
+\f4 \cf0 \uc0\u10007 
+\f0  (colour only for photometry)\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 crude (homogenise first)\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 binary mask\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 seconds/deg\'b2 CPU\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 wide shallow surveys\cell \row
+
+\itap1\trowd \taflags0 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalc \clshdrawnil \clwWidth2388\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx1440
+\clvertalc \clshdrawnil \clwWidth3464\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx2880
+\clvertalc \clshdrawnil \clwWidth2616\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth1877\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx5760
+\clvertalc \clshdrawnil \clwWidth2097\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx7200
+\clvertalc \clshdrawnil \clwWidth2416\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 ProFound watershed\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+
+\f4 \cf0 \uc0\u10007 
+\f0  / partial\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 no (assumes common PSF)\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 label map + sky\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 seconds/deg\'b2 R\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 rapid visual QA\cell \row
+
+\itap1\trowd \taflags0 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalc \clshdrawnil \clwWidth2388\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx1440
+\clvertalc \clshdrawnil \clwWidth3464\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx2880
+\clvertalc \clshdrawnil \clwWidth2616\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth1877\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx5760
+\clvertalc \clshdrawnil \clwWidth2097\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx7200
+\clvertalc \clshdrawnil \clwWidth2416\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 SourceXtractor++\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+
+\f4 \cf0 \uc0\u10004 
+\f0  (multi-image model fit)\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+
+\f4 \cf0 \uc0\u10004 
+\f0  explicit kernels\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 parametric models\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 minutes/deg\'b2 C++\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 Euclid-scale pipelines\cell \row
+
+\itap1\trowd \taflags0 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalc \clshdrawnil \clwWidth2388\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx1440
+\clvertalc \clshdrawnil \clwWidth3464\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx2880
+\clvertalc \clshdrawnil \clwWidth2616\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth1877\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx5760
+\clvertalc \clshdrawnil \clwWidth2097\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx7200
+\clvertalc \clshdrawnil \clwWidth2416\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 T-PHOT\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 colours fixed by template\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+
+\f4 \cf0 \uc0\u10004 
+\f0 \cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 fluxes per band\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 minutes/deg\'b2\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 crowded FIR images\cell \row
+
+\itap1\trowd \taflags0 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalc \clshdrawnil \clwWidth2388\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx1440
+\clvertalc \clshdrawnil \clwWidth3464\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx2880
+\clvertalc \clshdrawnil \clwWidth2616\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth1877\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx5760
+\clvertalc \clshdrawnil \clwWidth2097\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx7200
+\clvertalc \clshdrawnil \clwWidth2416\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 XID+\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 priors link colours\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+
+\f4 \cf0 \uc0\u10004 
+\f0 \cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 posterior flux PDFs\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 hours/field CPU/GPU\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 confusion-limited SPIRE\cell \row
+
+\itap1\trowd \taflags0 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalc \clshdrawnil \clwWidth2388\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx1440
+\clvertalc \clshdrawnil \clwWidth3464\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx2880
+\clvertalc \clshdrawnil \clwWidth2616\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth1877\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx5760
+\clvertalc \clshdrawnil \clwWidth2097\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx7200
+\clvertalc \clshdrawnil \clwWidth2416\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 scarlet(-lite)\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+
+\f4 \cf0 \uc0\u10004 
+\f0  (joint SED+morph)\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+
+\f4 \cf0 \uc0\u10004 
+\f0 \cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 full cube model\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 minutes/1k pix GPU\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 LSST/HSC deep blends\cell \row
+
+\itap1\trowd \taflags0 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalc \clshdrawnil \clwWidth2388\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx1440
+\clvertalc \clshdrawnil \clwWidth3464\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx2880
+\clvertalc \clshdrawnil \clwWidth2616\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth1877\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx5760
+\clvertalc \clshdrawnil \clwWidth2097\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx7200
+\clvertalc \clshdrawnil \clwWidth2416\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 Morpheus / CNNs\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+
+\f4 \cf0 \uc0\u10004 
+\f0  (input channels)\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 learns PSF implicitly\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 probability mask\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 seconds/deg\'b2 GPU\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 artifact rejection, lenses\cell \row
+
+\itap1\trowd \taflags0 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrt\brdrnil \trbrdrr\brdrnil 
+\clvertalc \clshdrawnil \clwWidth2388\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx1440
+\clvertalc \clshdrawnil \clwWidth3464\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx2880
+\clvertalc \clshdrawnil \clwWidth2616\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth1877\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx5760
+\clvertalc \clshdrawnil \clwWidth2097\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx7200
+\clvertalc \clshdrawnil \clwWidth2416\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 DeepSource HeTu-v2\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+
+\f4 \cf0 \uc0\u10004 
+\f0 \cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 learns beam\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 mask + forced flux\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 GPUs; real-time\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 radio continuum surveys\cell \lastrow\row
+\pard\pardeftab720\sa240\partightenfactor0
+\cf0 \strokec2 *Indicative for 
+\f5 \uc0\u8764 
+\f0 1 deg\'b2 HSC-depth data; deep nets assume a single modern GPU.\
+\pard\pardeftab720\partightenfactor0
+\cf3 \strokec3 \
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f1\b\fs28 \cf0 \strokec2 Practical take-aways\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\sa240\partightenfactor0
+\ls5\ilvl0
+\fs24 \cf0 \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 Colour information helps deblending
+\f0\b0  \'96 methods that update morphology and SED together (scarlet, CNNs) outperform single-band masks in crowded, multi-type fields.\
+\ls5\ilvl0
+\f1\b \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 Choice depends on science
+\f0\b0 \
+\pard\tx940\tx1440\pardeftab720\li1440\fi-1440\sa240\partightenfactor0
+\ls5\ilvl1\cf0 \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	
+\f6 \uc0\u9702 
+\f0 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 Want fast catalogue photometry on billions of sources? Threshold 
+\f5 \uc0\u8594 
+\f0  SourceXtractor++ or ProFound.\
+\ls5\ilvl1\kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	
+\f6 \uc0\u9702 
+\f0 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 Need accurate crowded-field fluxes with known priors? T-PHOT / XID+.\
+\ls5\ilvl1\kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	
+\f6 \uc0\u9702 
+\f0 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 Blind deblend of LSST/HST clusters? scarlet-lite or hybrid (SourceXtractor++ detection 
+\f5 \uc0\u8594 
+\f0  scarlet refinement).\
+\ls5\ilvl1\kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	
+\f6 \uc0\u9702 
+\f0 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 Searching for rare morphologies (lensed arcs, radio jets)? Train a U-Net on simulations.\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\sa240\partightenfactor0
+\ls5\ilvl0
+\f1\b \cf0 \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 Hybrids are the future
+\f0\b0  \'96 Production pipelines increasingly mix (i) fast, conservative masks; (ii) model-based refinement; (iii) learned post-processing to flag residuals, gaining both speed and accuracy.\
+\pard\pardeftab720\sa240\partightenfactor0
+\cf0 \strokec2 These references should give you a solid entry-point to each algorithm class; most codes are open-source and provide worked notebooks so you can benchmark them on your own data.\
+}

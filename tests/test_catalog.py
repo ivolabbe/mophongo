@@ -8,20 +8,42 @@ from photutils.segmentation import SegmentationImage, SourceCatalog
 from photutils.aperture import CircularAperture, aperture_photometry
 import matplotlib.pyplot as plt
 from utils import lupton_norm, label_segmap
+from utils import make_simple_data
+
+
+def test_deblend_sources_lutz(tmp_path):
+    images, segmap, catalog, psfs, truth, wht = make_simple_data(
+        seed=3, nsrc=50, size=101, ndilate=2, peak_snr=2
+    )
+    det = images[0]
+    seg = SegmentationImage(segmap)
+
+    seg_deb = deblend_sources_lutz(det, seg, npixels=5, contrast=1e-2)
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.axis("off")
+    ax.imshow(det, origin="lower", cmap="gray", norm=lupton_norm(det))
+    ax.imshow(seg_deb.data, origin="lower", cmap=seg_deb.cmap, alpha=0.3)
+    if len(catalog) < 50:
+        label_segmap(ax, seg_deb.data, catalog, fontsize=5)
+    out = tmp_path / "deblend_diagnostic.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    assert out.exists()
 
 
 def test_catalog(tmp_path):
-    sci = Path('data/uds-test-f444w_sci.fits')
-    wht = Path('data/uds-test-f444w_wht.fits')
-    out = tmp_path / 'uds-test-f444w_ivar.fits'
+    sci = Path("data/uds-test-f444w_sci.fits")
+    wht = Path("data/uds-test-f444w_wht.fits")
+    out = tmp_path / "uds-test-f444w_ivar.fits"
     params = {
         "kernel_size": 4.0,
         "detect_threshold": 1.0,
         "dilate_segmap": 3,
-        "deblend_mode": 'sinh',
+        "deblend_mode": "sinh",
         "detect_npixels": 5,
         "deblend_nlevels": 32,
-        "deblend_contrast": 1e-3
+        "deblend_contrast": 1e-3,
     }
     cat = Catalog.from_fits(sci, wht, ivar_outfile=out, params=params)
     cat.catalog["x"] = cat.catalog["xcentroid"]
@@ -33,25 +55,22 @@ def test_catalog(tmp_path):
     assert np.all(np.isfinite(cat.ivar))
     assert out.exists()
     hdr = fits.getheader(out)
-    assert 'CRPIX1' in hdr
+    assert "CRPIX1" in hdr
 
     #    segimage = fits.getdata('data/uds-test-f444w_seg.fits')
     #    seg = SegmentationImage(segimage)
     segmap = cat.segmap
-#    segmap = deblend_sources_lutz(cat.det_img,
-#                                  segmap,
-#                                  npixels=cat.params['detect_npixels'],
-#                                  contrast=cat.params['deblend_contrast'])
+    #    segmap = deblend_sources_lutz(cat.det_img,
+    #                                  segmap,
+    #                                  npixels=cat.params['detect_npixels'],
+    #                                  contrast=cat.params['deblend_contrast'])
     cmap_seg = segmap.cmap
 
-    print('UNIQUE ids in segmap', np.unique(segmap.data))
+    print("UNIQUE ids in segmap", np.unique(segmap.data))
 
     fig, ax = plt.subplots(figsize=(6, 6))
-    ax.axis('off')
-    ax.imshow(cat.det_img,
-              origin="lower",
-              cmap="gray",
-              norm=lupton_norm(cat.det_img))
+    ax.axis("off")
+    ax.imshow(cat.det_img, origin="lower", cmap="gray", norm=lupton_norm(cat.det_img))
     ax.imshow(segmap.data, origin="lower", cmap=cmap_seg, alpha=0.3)
     if len(cat.catalog) < 50:
         label_segmap(ax, segmap.data, cat.catalog, fontsize=5)
@@ -67,9 +86,7 @@ def test_catalog(tmp_path):
     # Verify that small unweighted aperture errors reflect the weight map
     positions = np.column_stack([cat.catalog["x"], cat.catalog["y"]])
     apertures = CircularAperture(positions, r=4.0)
-    phot = aperture_photometry(cat.sci,
-                               apertures,
-                               error=np.sqrt(1.0 / cat.ivar))
+    phot = aperture_photometry(cat.sci, apertures, error=np.sqrt(1.0 / cat.ivar))
     measured_err = phot["aperture_sum_err"].data
     expected_err = []
     for mask in apertures.to_mask(method="exact"):

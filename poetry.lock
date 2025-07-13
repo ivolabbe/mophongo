@@ -2002,6 +2002,63 @@ doc = ["intersphinx_registry", "jupyterlite-pyodide-kernel", "jupyterlite-sphinx
 test = ["Cython", "array-api-strict (>=2.3.1)", "asv", "gmpy2", "hypothesis (>=6.30)", "meson", "mpmath", "ninja ; sys_platform != \"emscripten\"", "pooch", "pytest", "pytest-cov", "pytest-timeout", "pytest-xdist", "scikit-umfpack", "threadpoolctl"]
 
 [[package]]
+name = "sep"
+version = "1.4.1"
+description = "Astronomical source extraction and photometry library"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "sep-1.4.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:244c96d339afcca51d77e6a0b97e00844beed430e271edff7c9262ce07ef5a25"},
+    {file = "sep-1.4.1-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:07c3b12b9a5cd6e2e12c8bba0984ea5a2a384032da8d8c3b7f729e007bc8c7cb"},
+    {file = "sep-1.4.1-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:809d86444d44ea65b9844e89574cbe60cbbf8739ac03f1071f351f9414ec2a74"},
+    {file = "sep-1.4.1-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:13a4361fd6da55560ec7367f7631f962af64ebb4f466b031181b68aaf2b33152"},
+    {file = "sep-1.4.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:abd09579f582eeab4c0f43844b800e667578de36d7e1f23e28f08ea053566a15"},
+    {file = "sep-1.4.1-cp310-cp310-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:e52592e686980ff63358301c5efc06e1a7db126b9c9ed6d9b495b0b5acbc8a05"},
+    {file = "sep-1.4.1-cp310-cp310-win32.whl", hash = "sha256:4b343ca237fb0af5eb30c95b1644ba4ac14522bcdc8b47bbec004f4dae341098"},
+    {file = "sep-1.4.1-cp310-cp310-win_amd64.whl", hash = "sha256:deb9dae91eeef8307efbc70b84802db55adf29f6b52eb1e9064e04368e93b4eb"},
+    {file = "sep-1.4.1-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:2f7021958f01709d4e5e028a21516875fa11499466c4418626376491650b5c0b"},
+    {file = "sep-1.4.1-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:02429878b4aad256af26dd38a9fd8a748b25af42bbbd6c189b42af691958ab17"},
+    {file = "sep-1.4.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:6f3bdd42c99ad68e284c4abeba1f556da14155c8ff439d00401508ab8ceffc67"},
+    {file = "sep-1.4.1-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:e604c63d97cedfd3f1a68829198b984cae27b8f57795507fd3014683d6bde0fd"},
+    {file = "sep-1.4.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b9907b5952b3df7f2d2027cd3fa40c0db329e2a267a799e1db25dd5f04417704"},
+    {file = "sep-1.4.1-cp311-cp311-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:dac6777e049c4fad4da987e9626280fbb7a847dcec5968937235b6b40c113296"},
+    {file = "sep-1.4.1-cp311-cp311-win32.whl", hash = "sha256:94b16a9c3b81a0c594d25de6ce6ed03c53f361d7321db3e71db76d738140f2c9"},
+    {file = "sep-1.4.1-cp311-cp311-win_amd64.whl", hash = "sha256:d90a35c6e9465e89d8d1fa58cae14e88888938ae67250fcbccd1749efdf9af80"},
+    {file = "sep-1.4.1-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:cb4a251eb17c72d3c1fdf3e3174970ce01f66cd1801e2b45b582ec2819e1b524"},
+    {file = "sep-1.4.1-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:7cd0b77615b44f22a06e20d2ba4ab7a0b713551e4c5eb3fa36a889ced0aa50ab"},
+    {file = "sep-1.4.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:e3a92bd46657a76b46ce3693820e7917f7b5f1232e3127f6e5ecc8d9ae65ac98"},
+    {file = "sep-1.4.1-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:7fc395f7469f2530d2d6175b98cb77b550f7e9effa88f7b9ec9c50650f52a9e9"},
+    {file = "sep-1.4.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1e1950885d990813fa1a3538841cfeff8531720873102e70c5999bf89a886bc7"},
+    {file = "sep-1.4.1-cp312-cp312-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:93574ada43a6249b32cc78bd6d34e4cb55dac8e82e5febc74112819cd1d7ead5"},
+    {file = "sep-1.4.1-cp312-cp312-win32.whl", hash = "sha256:011072fd8827b9bec70a387799afc916ecff3005504fcd0ad7a95f47a3ab3c01"},
+    {file = "sep-1.4.1-cp312-cp312-win_amd64.whl", hash = "sha256:fc52483ab524eb27d4630b8444feaac93f19baf3fdc44becbd3374b1645e330c"},
+    {file = "sep-1.4.1-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:05109415551332238569cc9420226d815554ed9b4a6623b613bcc281bc84d3dc"},
+    {file = "sep-1.4.1-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:b01c05e21b03154df11737d872683b04fb72eeb11ccf7ab5ed816297608a36e1"},
+    {file = "sep-1.4.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:a4f76d04871d2ae3c42d4dbae66b12b390d1828c81a63eb15e987ef95d9de783"},
+    {file = "sep-1.4.1-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:2c602100d04196d3a16f71ec17245f5c35b84c0f230eca007306decf4aacbece"},
+    {file = "sep-1.4.1-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b9f70e1fee306d0803823c04f6dfbbb373603897b2551390b919dea36e75988c"},
+    {file = "sep-1.4.1-cp313-cp313-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:83e7ae07a2f38d9c3f07aa8aa088ef6449bc85c615c312008850390df17ac629"},
+    {file = "sep-1.4.1-cp313-cp313-win32.whl", hash = "sha256:66a98d6b98d6f4bb597133397b505787499e9cf3a3230967f5d3867e4f7eb7fd"},
+    {file = "sep-1.4.1-cp313-cp313-win_amd64.whl", hash = "sha256:9f6f6fb74cfb92d0fd71ee6b263c20c349f44dfe8e8d1db138b25655f4e67e9b"},
+    {file = "sep-1.4.1-cp39-cp39-macosx_10_9_universal2.whl", hash = "sha256:c08cdfcb40e7fdfe86b1549a51eef7e20fade7b123cad5e160005965329a55c2"},
+    {file = "sep-1.4.1-cp39-cp39-macosx_10_9_x86_64.whl", hash = "sha256:9661f22f8c23c941ea589571973c4f5423c71bf34d6d0f615e2ab470295cae53"},
+    {file = "sep-1.4.1-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:604e96b34ea17664cf77ca610179f328e3dcf17e7ed505b1ad5eb61744484f4a"},
+    {file = "sep-1.4.1-cp39-cp39-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:78e588ef7f8bf1e1af7f6f2f43526a4d320d1c23bde91cf81c677b5a09f6e533"},
+    {file = "sep-1.4.1-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:54560eea0d93acb73a225e1b12a76eec382ceadbd2f7c8fd76a789edbb7185da"},
+    {file = "sep-1.4.1-cp39-cp39-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:a7b226ff130c84deaaae7c567026ac3e1b0389a3c217349b4df38b5d22b6a86c"},
+    {file = "sep-1.4.1-cp39-cp39-win32.whl", hash = "sha256:1c193f3278ec719412725af353d7c3871f0426ede116d1caf0ede50159293894"},
+    {file = "sep-1.4.1-cp39-cp39-win_amd64.whl", hash = "sha256:b61e82b25a63a51c3b8bb38306aa5dda9f03902be4f583666c98320927b079bf"},
+    {file = "sep-1.4.1.tar.gz", hash = "sha256:a0c8324ab66ee716080472cb212e4303e6c3e33b0d43763075b20d4cab793b25"},
+]
+
+[package.dependencies]
+numpy = ">=1.26.4"
+
+[package.extras]
+docs = ["fitsio (>=1.2.1)", "jupyter", "matplotlib (>=3.6)", "myst-parser (>=2.0.0)", "nbsphinx (>=0.9.3)", "numpydoc (>=1.6)", "pandoc (>=2.3)", "sphinx (>=7.2)", "sphinx-astropy[confv2] (>=1.9.1)", "sphinx-copybutton (>=0.5)"]
+
+[[package]]
 name = "six"
 version = "1.17.0"
 description = "Python 2 and 3 compatibility utilities"
@@ -2182,4 +2239,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11"
-content-hash = "32188fda28189835fd1bcdfc8eff8d6eb4d88cf0e0e1caa357a913e9693ae149"
+content-hash = "b235261e6533da2558e28a10697beed110b2f3dd08169d6bf1d0edba348f1067"

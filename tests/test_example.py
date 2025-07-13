@@ -130,5 +130,3 @@ if __name__ == "__main__":
     
     tmpls = Templates()
     tmpls.extract_templates(images[0], segmap, positions)
-
-# %%

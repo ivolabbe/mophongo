@@ -4,11 +4,12 @@ from astropy.visualization import AsinhStretch, ImageNormalize
 
 from mophongo.psf import PSF
 from mophongo.templates import _convolve2d, Template
+from mophongo.catalog import safe_dilate_segmentation
+
 import matplotlib.pyplot as plt
 from astropy.modeling.models import Gaussian2D
 from photutils.segmentation import detect_sources, deblend_sources
 from photutils.datasets import make_model_image, make_model_params
-from skimage.morphology import dilation, disk
 
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -21,18 +22,6 @@ def lupton_norm(img):
     vmin, vmax = -p[1]/20, p[1]
     return ImageNormalize(vmin=vmin, vmax=vmax, stretch=AsinhStretch(0.01))
 
-def safe_dilate_segmentation(segmap, selem=disk(1)):
-    result = np.zeros_like(segmap)
-    for seg_id in np.unique(segmap):
-        if seg_id == 0:
-            continue  # skip background
-        mask = segmap == seg_id
-        dilated = dilation(mask, selem)
-        # Only allow dilation into background
-        dilated = np.logical_and(dilated, segmap == 0)
-        result[dilated] = seg_id
-        result[mask] = seg_id  # retain original
-    return result
 
 def make_simple_data(
     seed: int = 11,
@@ -634,7 +623,7 @@ def label_segmap(ax, segmap, catalog, fontsize=10):
 def make_cutouts():
     """Create cutouts for UDS images based on user-defined parameters."""
     indir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/test/'
-    outdir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/test/cutout/'
+    outdir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/test/testdata/'
 
     # --- User parameters from the pasted image ---
     center_x_40mas = 23243
@@ -651,7 +640,7 @@ def make_cutouts():
          "uds-test-f444w_sci.fits"),
         ("uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_wht.fits",
          "uds-test-f444w_wht.fits"),
-        ("LW_f277w-f356w-f444w_SEGMAP.fits", "uds-test-f444w_seg.fits"),
+        ("LW_f277w-f356w-f444w_SEGMAP.fits", "uds-test-LW_seg.fits"),
         ("LW_f277w-f356w-f444w_opterr.fits", "uds-test-f444w_opterr.fits"),
         ("LW_f277w-f356w-f444w_optavg.fits", "uds-test-f444w_optavg.fits"),
         ("uds-sbkgsub-0.1-40mas-f770w_drz_sci_test2.fits",

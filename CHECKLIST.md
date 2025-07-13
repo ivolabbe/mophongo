@@ -61,3 +61,4 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [x] Renamed TemplateNew to Template and updated extraction defaults
 - [x] Implemented basic `Catalog` for source detection
 - [x] Added configurable detection parameters in `Catalog`
+- [x] Added custom deblending using max-tree and SEP steepest-descent

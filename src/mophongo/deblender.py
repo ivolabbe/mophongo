@@ -10,8 +10,11 @@ from scipy.optimize import nnls
 from photutils.segmentation import SegmentationImage
 from skimage.feature import peak_local_max
 from skimage.measure import label
+from scipy.ndimage import rotate, shift
 
-__all__ = ["deblend_sources_symmetry"]
+from .utils import measure_shape, elliptical_gaussian, elliptical_moffat
+
+__all__ = ["deblend_sources_symmetry", "deblend_sources_hybrid"]
 
 
 def find_top_peaks(
@@ -221,3 +224,124 @@ def deblend_sources_symmetry(
             break
         seg_arr = seg_new
     return SegmentationImage(seg_arr)
+
+
+def _hybrid_models(templates: dict[int, tuple[np.ndarray, tuple[int, int]]]) -> dict[int, np.ndarray]:
+    """Return analytic probability models for templates."""
+    models: dict[int, np.ndarray] = {}
+    for cid, (tmpl, _) in templates.items():
+        mask = tmpl > 0
+        if not np.any(mask):
+            continue
+        x_c, y_c, sigma_x, sigma_y, theta = measure_shape(tmpl, mask)
+        ratio = sigma_x / max(sigma_y, 1e-6)
+        y, x = np.indices(tmpl.shape)
+        if ratio > 1.5 or ratio < (1 / 1.5):
+            model = elliptical_gaussian(
+                y,
+                x,
+                1.0,
+                2.355 * sigma_x,
+                2.355 * sigma_y,
+                theta,
+                x_c,
+                y_c,
+            )
+        else:
+            r = np.hypot(y - y_c, x - x_c)
+            mask_r = r > 0
+            if np.sum(mask_r) > 0:
+                slope, _ = np.polyfit(np.log(r[mask_r]), np.log(tmpl[mask_r] + 1e-6), 1)
+                beta = np.clip(-slope / 2.0, 1.0, 10.0)
+            else:
+                beta = 2.5
+            model = elliptical_moffat(
+                y,
+                x,
+                1.0,
+                2.355 * sigma_x,
+                2.355 * sigma_y,
+                beta,
+                theta,
+                x_c,
+                y_c,
+            )
+        if model.sum() > 0:
+            model = model / model.sum()
+        models[cid] = model
+    return models
+
+
+def deblend_sources_hybrid(
+    image: np.ndarray,
+    segmap: SegmentationImage | np.ndarray,
+    *,
+    nmax: int = 5,
+    eps: float | None = None,
+    min_pix: int = 5,
+    peak_min_distance: int = 3,
+    peak_threshold_abs: float | None = None,
+    peak_threshold_rel: float = 0.0,
+    radius: int | None = None,
+) -> SegmentationImage:
+    """Deblend a segmentation map using analytic symmetry templates."""
+    if not isinstance(segmap, SegmentationImage):
+        segm = SegmentationImage(np.asarray(segmap))
+    else:
+        segm = segmap
+    seg_arr = segm.data.copy()
+    eps = eps or max(1e-4, 1e-3 * np.percentile(image, 99.5))
+
+    peaks = find_top_peaks(
+        image,
+        segm,
+        nmax,
+        min_distance=peak_min_distance,
+        threshold_abs=peak_threshold_abs,
+        threshold_rel=peak_threshold_rel,
+    )
+    templates, mapping = build_templates(image, segm, peaks, eps=eps, radius=radius)
+
+    # Recompute templates with floor distribution
+    for cid, (tmpl, (y0, x0)) in templates.items():
+        cy = tmpl.shape[0] // 2
+        cx = tmpl.shape[1] // 2
+        peak = tmpl[cy, cx]
+        floor = max(eps, peak * 1e-4)
+        y, x = np.indices(tmpl.shape)
+        dist = np.hypot(y - cy, x - cx)
+        mask = tmpl < floor
+        tmpl[mask] = floor / (dist[mask] + 1e-3)
+        if tmpl.sum() > 0:
+            tmpl /= tmpl.sum()
+        templates[cid] = (tmpl, (y0, x0))
+
+    models = _hybrid_models(templates)
+    new_seg = seg_arr.copy()
+    next_label = new_seg.max() + 1
+    groups: dict[int, list[int]] = defaultdict(list)
+    for cid, parent in mapping.items():
+        groups[parent].append(cid)
+    for parent, cids in groups.items():
+        if len(cids) <= 1:
+            continue
+        mask = seg_arr == parent
+        stack = np.zeros((len(cids),) + seg_arr.shape, dtype=float)
+        for i, cid in enumerate(cids):
+            model = models.get(cid)
+            if model is None:
+                continue
+            tmpl, (y0, x0) = templates[cid]
+            h, w = model.shape
+            y1 = min(y0 + h, stack.shape[1])
+            x1 = min(x0 + w, stack.shape[2])
+            stack[i, y0:y1, x0:x1] = model[: y1 - y0, : x1 - x0]
+        best = np.argmax(stack[:, mask], axis=0)
+        for i, cid in enumerate(cids):
+            lbl = next_label + i
+            assign_mask = np.zeros_like(new_seg, dtype=bool)
+            assign_mask[mask] = best == i
+            new_seg[assign_mask] = lbl
+        next_label += len(cids)
+    new_seg, _ = clean_and_relabel(new_seg, {}, min_pix=min_pix)
+    return SegmentationImage(new_seg)

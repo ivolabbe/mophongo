@@ -65,3 +65,4 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [x] Added colour-aware deblending with chi² detection
 - [x] Implemented symmetry-based deblender
 - [x] Added compactness parameter in photutils-based deblender
+- [ ] Implement hybrid deblender with analytic weighting

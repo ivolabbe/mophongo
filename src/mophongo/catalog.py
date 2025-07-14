@@ -19,7 +19,7 @@ from photutils.segmentation import (
     SegmentationImage,
 )
 from .photutils_deblend import deblend_sources
-from skimage.morphology import dilation, disk, max_tree
+from skimage.morphology import dilation, disk, max_tree, square
 from skimage.segmentation import watershed
 from skimage.measure import label
 
@@ -469,8 +469,8 @@ class Catalog:
             "detect_npixels": 5,
             "dilate_segmap": 3,
             "deblend_mode": "exponential",
-            "deblend_nlevels": 64,
-            "deblend_contrast": 1e-3,
+            "deblend_nlevels": 32,
+            "deblend_contrast": 1e-4,
             "deblend_compactness": 0.0,
         }
         defaults.update(self.params)

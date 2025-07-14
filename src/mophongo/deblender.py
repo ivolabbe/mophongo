@@ -97,54 +97,16 @@ def build_templates(
 
             # Create template stamp - same size as segment
             stamp = np.zeros_like(segment_data)
-
-            # Only fill pixels that belong to the parent segment
             stamp[parent_mask] = segment_data[parent_mask]
 
-            # Apply 180-degree rotation around this specific peak
-            h, w = stamp.shape
+            # Use the new symmetry generator
+            tmpl = create_symmetric_template(stamp, parent_mask, local_py, local_px, eps)
 
-            # Create rotated stamp using proper indexing
-            rot_stamp = np.zeros_like(stamp)
-
-            # For each pixel, calculate where it should come from after rotation
-            for y in range(h):
-                for x in range(w):
-                    # Calculate rotated coordinates
-                    y_rot = 2 * local_py - y
-                    x_rot = 2 * local_px - x
-
-                    # Check bounds and copy if valid
-                    if (0 <= y_rot < h and 0 <= x_rot < w and
-                            parent_mask[y, x]):  # Only process parent pixels
-                        rot_stamp[y, x] = stamp[int(y_rot), int(x_rot)]
-
-            # Create symmetric template by taking minimum
-            tmpl = np.minimum(stamp, rot_stamp)
-
-            # Apply threshold
-            tmpl[tmpl < eps] = eps
-
-            # where template is eps, reduce it by distance to the peak
-            # Compute distance from each pixel to the peak
-            yy, xx = np.indices(tmpl.shape)
-            dist = np.sqrt((yy - local_py) ** 2 + (xx - local_px) ** 2)
-            # Only modify where tmpl == eps (i.e., below threshold)
-            mask_eps = tmpl == eps
-            # Reduce value further away from the peak (e.g., inverse with distance + 1)
-            tmpl[mask_eps] = eps / (dist[mask_eps] + 1)
-            
-            # Only keep pixels within the original parent segment
-            tmpl = np.where(parent_mask, tmpl, 0.0)
-
-            # Normalize
-            total = tmpl.sum()
-            if total <= eps:
-                print(f"    Template sum too low: {total}")
+            if tmpl is None:
+                print(f"    Template sum too low: {0.0}")
                 continue
-            tmpl /= total
 
-            print(f"    Created template {cid} with sum {total:.6f}")
+            print(f"    Created template {cid} with sum 1.0")
 
             # Store template with global coordinates
             templates[cid] = (tmpl, (slc[0].start, slc[1].start))
@@ -329,7 +291,7 @@ def _hybrid_models(templates: dict[int, tuple[np.ndarray, tuple[int, int]]]) -> 
             )
         if model.sum() > 0:
             model = model / model.sum()
-        models[cid] = model
+        models[cid] = model * tmpl[mask].sum()  # Scale to match template sum
     return models
 
 
@@ -342,16 +304,33 @@ def deblend_sources_hybrid(
     min_pix: int = 5,
     peak_min_distance: int = 3,
     peak_threshold_abs: float | None = None,
-    peak_threshold_rel: float = 0.0,
+    peak_threshold_rel: float = 1e-6,
     radius: int | None = None,
-) -> SegmentationImage:
-    """Deblend a segmentation map using analytic symmetry templates."""
+    return_debug: bool = False,
+) -> SegmentationImage | tuple[SegmentationImage, dict]:
+    """Deblend a segmentation map using analytic symmetry templates.
+    
+    Parameters
+    ----------
+    return_debug : bool, optional
+        If True, return debugging information including templates and models.
+        
+    Returns
+    -------
+    SegmentationImage or tuple
+        If return_debug=False, returns just the segmentation.
+        If return_debug=True, returns (segmentation, debug_info) where debug_info contains:
+        - 'templates': symmetry templates
+        - 'models': analytic probability models  
+        - 'peaks': peak locations per segment
+        - 'mapping': template to parent mapping
+    """
     if not isinstance(segmap, SegmentationImage):
         segm = SegmentationImage(np.asarray(segmap))
     else:
         segm = segmap
     seg_arr = segm.data.copy()
-    eps = eps or max(1e-4, 1e-3 * np.percentile(image, 99.5))
+    eps = eps or max(1e-4, 1e-6 * np.percentile(image, 99.5))
 
     peaks = find_top_peaks(
         image,
@@ -364,18 +343,18 @@ def deblend_sources_hybrid(
     templates, mapping = build_templates(image, segm, peaks, eps=eps, radius=radius)
 
     # Recompute templates with floor distribution
-    for cid, (tmpl, (y0, x0)) in templates.items():
-        cy = tmpl.shape[0] // 2
-        cx = tmpl.shape[1] // 2
-        peak = tmpl[cy, cx]
-        floor = max(eps, peak * 1e-4)
-        y, x = np.indices(tmpl.shape)
-        dist = np.hypot(y - cy, x - cx)
-        mask = tmpl < floor
-        tmpl[mask] = floor / (dist[mask] + 1e-3)
-        if tmpl.sum() > 0:
-            tmpl /= tmpl.sum()
-        templates[cid] = (tmpl, (y0, x0))
+    # for cid, (tmpl, (y0, x0)) in templates.items():
+    #     cy = tmpl.shape[0] // 2
+    #     cx = tmpl.shape[1] // 2
+    #     peak = tmpl[cy, cx]
+    #     floor = max(eps, peak * 1e-4)
+    #     y, x = np.indices(tmpl.shape)
+    #     dist = np.hypot(y - cy, x - cx)
+    #     mask = tmpl < floor
+    #     tmpl[mask] = floor / (dist[mask] + 1e-3)
+    #     if tmpl.sum() > 0:
+    #         tmpl /= tmpl.sum()
+    #     templates[cid] = (tmpl, (y0, x0))
 
     models = _hybrid_models(templates)
     new_seg = seg_arr.copy()
@@ -405,4 +384,55 @@ def deblend_sources_hybrid(
             new_seg[assign_mask] = lbl
         next_label += len(cids)
     new_seg, _ = clean_and_relabel(new_seg, {}, min_pix=min_pix)
-    return SegmentationImage(new_seg)
+    
+    result = SegmentationImage(new_seg)
+    
+    if return_debug:
+        debug_info = {
+            'templates': templates,
+            'models': models,
+            'peaks': peaks,
+            'mapping': mapping,
+            'groups': groups
+        }
+        return result, debug_info
+    else:
+        return result
+
+def rotate_around_point(arr, center_y, center_x, angle, order=0, cval=0.0):
+    """
+    Rotate a 2D array around an arbitrary point (center_y, center_x).
+    The output shape is the same as input.
+    """
+    h, w = arr.shape
+    # Shift so that rotation center moves to the geometric center
+    shift_y = (h - 1) / 2 - center_y
+    shift_x = (w - 1) / 2 - center_x
+    shifted = shift(arr, shift=(shift_y, shift_x), order=order, mode='constant', cval=cval)
+    # Rotate around the center
+    rotated = rotate(shifted, angle, reshape=False, order=order, mode='constant', cval=cval)
+    # Shift back
+    unshifted = shift(rotated, shift=(-shift_y, -shift_x), order=order, mode='constant', cval=cval)
+    return unshifted
+
+def create_symmetric_template(stamp, mask, peak_y, peak_x, eps, order=0):
+    """
+    Create a symmetric template by rotating the stamp 180 degrees around (peak_y, peak_x).
+    """
+    # Rotate stamp 180 deg around the peak
+    rot_stamp = rotate_around_point(stamp, peak_y, peak_x, 180, order=order, cval=0.0)
+    # Take the minimum for symmetry
+    tmpl = np.minimum(stamp, rot_stamp)
+    tmpl[tmpl < eps] = eps
+
+    # Distance-based floor for low-value pixels
+    yy, xx = np.indices(tmpl.shape)
+    dist = np.sqrt((yy - peak_y) ** 2 + (xx - peak_x) ** 2)
+    mask_eps = tmpl == eps
+    tmpl[mask_eps] = eps / (dist[mask_eps] + 1)
+    tmpl = np.where(mask, tmpl, 0.0)
+#    total = tmpl.sum()
+#    if total <= eps:
+#        return None
+#    tmpl /= total
+    return tmpl

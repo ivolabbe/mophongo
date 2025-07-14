@@ -2,7 +2,7 @@ import numpy as np
 from pathlib import Path
 from astropy.io import fits
 
-from mophongo.catalog import Catalog, deblend_sources_lutz, safe_dilate_segmentation, deblend_sources_color
+from mophongo.catalog import Catalog, safe_dilate_segmentation
 from mophongo.psf import PSF
 from mophongo.templates import _convolve2d
 from photutils.segmentation import SegmentationImage, SourceCatalog, detect_sources, deblend_sources
@@ -15,86 +15,6 @@ from skimage.morphology import dilation, disk, max_tree, square
 from skimage.feature import peak_local_max
 from astropy.visualization import make_lupton_rgb
 
-
-def find_local_maxima(image, segmap, min_distance=3, threshold_abs=5, threshold_rel=1e-7):
-    """
-    Find local maxima within each segment of a segmentation map.
-    
-    Parameters
-    ----------
-    image : np.ndarray
-        The input image to find peaks in
-    segmap : SegmentationImage
-        The segmentation map defining regions
-    min_distance : int
-        Minimum distance between peaks
-    threshold_abs : float
-        Absolute threshold for peak detection
-    threshold_rel : float
-        Relative threshold for peak detection
-        
-    Returns
-    -------
-    all_maxima : np.ndarray
-        Array of (row, col) coordinates of all local maxima
-    segment_counts : dict
-        Dictionary mapping segment ID to number of maxima found
-    """
-    all_maxima = []
-    segment_counts = {}
-    
-    for segment in segmap.segments:
-        seg_id = segment.label
-        
-        # Extract subimage for this segment
-        slices = segment.slices
-        subimg = image[slices]
-        submask = segment.data != 0
-        
-        if submask.sum() == 0:
-            segment_counts[seg_id] = 0
-            continue
-            
-        # Find local maxima within this segment only
-        # Create a masked image where non-segment pixels are set to minimum
-        masked_subimg = np.where(submask, subimg, subimg.min() - 1)
-        
-        # Find peaks in the masked subimage
-        local_peaks = peak_local_max(
-            masked_subimg,
-            min_distance=min_distance,
-            threshold_abs=threshold_abs,
-            threshold_rel=threshold_rel,
-            exclude_border=True,
-            num_peaks=5,
-        )
-        
-        # Convert local coordinates back to global coordinates
-        if len(local_peaks) > 0:
-            global_peaks = local_peaks.copy()
-            global_peaks[:, 0] += slices[0].start  # Add row offset
-            global_peaks[:, 1] += slices[1].start  # Add col offset
-            
-            # Verify peaks are actually within the segment mask
-            valid_peaks = []
-            for peak in global_peaks:
-                row, col = int(peak[0]), int(peak[1])
-                if (0 <= row < segmap.data.shape[0] and 
-                    0 <= col < segmap.data.shape[1] and
-                    segmap.data[row, col] == seg_id):
-                    valid_peaks.append(peak)
-            
-            if valid_peaks:
-                all_maxima.extend(valid_peaks)
-                
-        segment_counts[seg_id] = len(valid_peaks) if len(local_peaks) > 0 else 0
-    
-    return np.array(all_maxima) if all_maxima else np.empty((0, 2)), segment_counts
-
-
-def find_local_maxima_per_segment(image, segmap, min_distance=3, threshold_abs=5, threshold_rel=1e-7):
-    """Compatibility wrapper for legacy test."""
-    return find_local_maxima(image, segmap, min_distance, threshold_abs, threshold_rel)
 
 def test_deblend_sources(tmp_path):
     images, segmap, catalog, psfs, truth, wht = make_simple_data(seed=3,
@@ -122,18 +42,19 @@ def test_deblend_sources(tmp_path):
     seg.data = safe_dilate_segmentation(seg.data, selem=square(3))
 
     # Find local maxima per segment
-    print('finding local maxima per segment')
-    local_maxima, segment_counts = find_local_maxima_per_segment(
-        detimg, seg, min_distance=3, threshold_abs=5, threshold_rel=1e-5,
-    )
+  #  print('finding local maxima per segment')
+  #  local_maxima, segment_counts = find_local_max(
+  #      detimg, seg.data, min_distance=3, threshold_abs=5, threshold_rel=1e-5,
+  #  )
     
-    total_maxima = len(local_maxima)
-    print(f'Found {total_maxima} total local maxima across all segments')
-    print(f'Segment breakdown: {segment_counts}')
+  #  total_maxima = len(local_maxima)
+  #  print(f'Found {total_maxima} total local maxima across all segments')
+  #  print(f'Segment breakdown: {segment_counts}')
 
     # Try with very relaxed parameters
     print('deblending sources')
-#    seg = deblend_sources(detimg, seg, npixels=5, contrast=0.000001, nlevels=32, mode='exponential')
+#    seg = deblend_sources(detimg, seg, npixels=5, contrast=1e-10, nlevels=48, mode='exponential')
+    seg = deblend_sources(detimg, seg, npixels=5, contrast=1e-10, nlevels=64, mode='exponential')
 
     rgb = make_lupton_rgb(
         sci4c,  # red channel (F444W)
@@ -151,11 +72,10 @@ def test_deblend_sources(tmp_path):
     ax1.imshow(seg.data, origin="lower", cmap=seg.cmap, alpha=0.3)
     
     # Plot local maxima as red crosses
-    if len(local_maxima) > 0:
-        ax1.scatter(local_maxima[:, 1], local_maxima[:, 0], 
-                   marker='x', s=20, c='red', linewidths=1, alpha=0.8)
-    
-    ax1.set_title(f"Detection + Segmentation + {total_maxima} Local Maxima")
+ #   if len(local_maxima) > 0:
+ #       ax1.scatter(local_maxima[:, 1], local_maxima[:, 0], 
+ #                  marker='x', s=20, c='red', linewidths=1, alpha=0.8) 
+  #  ax1.set_title(f"Detection + Segmentation + {total_maxima} Local Maxima")
 
     # Right panel: RGB image with segmentation
     ax2.axis("off")
@@ -177,7 +97,7 @@ def test_catalog(tmp_path):
         "kernel_size": 4.0,
         "detect_threshold": 1.0,
         "dilate_segmap": 3,
-        "deblend_mode": "sinh",
+        "deblend_mode": "exponential",
         "detect_npixels": 5,
         "deblend_nlevels": 32,
         "deblend_contrast": 1e-3,

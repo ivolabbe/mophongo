@@ -39,14 +39,18 @@ def find_top_peaks(
             threshold_abs=threshold_abs,
             threshold_rel=threshold_rel,
             exclude_border=False,
+            num_peaks=nmax,
         )
+
         if loc.size == 0:
             # fall back to brightest pixel
             idx = np.unravel_index(np.argmax(masked), masked.shape)
             loc = np.array([idx])
-        values = sub[tuple(loc.T)]
-        order = np.argsort(values)[::-1][:nmax]
-        loc = loc[order]
+
+
+#        values = sub[tuple(loc.T)]
+#        order = np.argsort(values)[::-1][:nmax]
+#        loc = loc[order]
         loc[:, 0] += slc[0].start
         loc[:, 1] += slc[1].start
         peaks[label_id] = [tuple(p) for p in loc]
@@ -61,33 +65,91 @@ def build_templates(
     eps: float,
     radius: int | None = None,
 ) -> tuple[Dict[int, Tuple[np.ndarray, Tuple[int, int]]], Dict[int, int]]:
-    """Create symmetry templates around each peak."""
+    """Create symmetry templates around each peak, only for segments with multiple peaks."""
     templates: Dict[int, Tuple[np.ndarray, Tuple[int, int]]] = {}
     mapping: Dict[int, int] = {}
     cid = 1
+
     for parent, pts in peaks.items():
+        # Skip segments with only one peak - leave them unchanged
+        if len(pts) <= 1:
+            continue
+
+        print(f"Processing segment {parent} with {len(pts)} peaks: {pts}")
+
+        # Get the parent segment mask and bounds
+        idx = segm.get_index(parent)
+        slc = segm.slices[idx]
+        parent_mask = segm.data[slc] == parent
+        segment_data = image[slc]
+
         for py, px in pts:
-            if radius is None:
-                idx = segm.get_index(parent)
-                slc = segm.slices[idx]
-                r = max(slc[0].stop - slc[0].start, slc[1].stop - slc[1].start) // 2
-            else:
-                r = radius
-            y0 = max(0, py - r)
-            x0 = max(0, px - r)
-            y1 = min(image.shape[0], py + r + 1)
-            x1 = min(image.shape[1], px + r + 1)
-            stamp = image[y0:y1, x0:x1]
-            rot = stamp[::-1, ::-1]
-            tmpl = np.minimum(stamp, rot)
-            tmpl[tmpl < eps] = 0.0
+            # Convert global peak coordinates to local coordinates within the slice
+            local_py = py - slc[0].start
+            local_px = px - slc[1].start
+
+            print(
+                f"  Peak at global ({py}, {px}), local ({local_py}, {local_px})"
+            )
+
+            # Create template stamp - same size as segment
+            stamp = np.zeros_like(segment_data)
+
+            # Only fill pixels that belong to the parent segment
+            stamp[parent_mask] = segment_data[parent_mask]
+
+            # Apply 180-degree rotation around this specific peak
+            h, w = stamp.shape
+
+            # Create rotated stamp using proper indexing
+            rot_stamp = np.zeros_like(stamp)
+
+            # For each pixel, calculate where it should come from after rotation
+            for y in range(h):
+                for x in range(w):
+                    # Calculate rotated coordinates
+                    y_rot = 2 * local_py - y
+                    x_rot = 2 * local_px - x
+
+                    # Check bounds and copy if valid
+                    if (0 <= y_rot < h and 0 <= x_rot < w and
+                            parent_mask[y, x]):  # Only process parent pixels
+                        rot_stamp[y, x] = stamp[int(y_rot), int(x_rot)]
+
+            # Create symmetric template by taking minimum
+            tmpl = np.minimum(stamp, rot_stamp)
+
+            # Apply threshold
+            tmpl[tmpl < eps] = eps
+
+            # where template is eps, reduce it by distance to the peak
+            # Compute distance from each pixel to the peak
+            yy, xx = np.indices(tmpl.shape)
+            dist = np.sqrt((yy - local_py) ** 2 + (xx - local_px) ** 2)
+            # Only modify where tmpl == eps (i.e., below threshold)
+            mask_eps = tmpl == eps
+            # Reduce value further away from the peak (e.g., inverse with distance + 1)
+            tmpl[mask_eps] = eps / (dist[mask_eps] + 1)
+            
+            # Only keep pixels within the original parent segment
+            tmpl = np.where(parent_mask, tmpl, 0.0)
+
+            # Normalize
             total = tmpl.sum()
-            if total <= 0:
+            if total <= eps:
+                print(f"    Template sum too low: {total}")
                 continue
             tmpl /= total
-            templates[cid] = (tmpl, (y0, x0))
+
+            print(f"    Created template {cid} with sum {total:.6f}")
+
+            # Store template with global coordinates
+            templates[cid] = (tmpl, (slc[0].start, slc[1].start))
             mapping[cid] = parent
             cid += 1
+
+    print(
+        f"Created {len(templates)} templates for segments with multiple peaks")
     return templates, mapping
 
 
@@ -133,7 +195,7 @@ def assign_pixels(
 ) -> tuple[np.ndarray, Dict[int, int]]:
     """Assign pixels to children based on template models."""
     new_seg = segm.data.copy()
-    next_label = new_seg.max() + 1
+    next_label = new_seg.max() + 1  # This starts at ~264
     child_labels: Dict[int, int] = {}
     groups: Dict[int, List[int]] = defaultdict(list)
     for cid, parent in mapping.items():
@@ -151,14 +213,13 @@ def assign_pixels(
             stack[i, y0:y1, x0:x1] = tmpl[: y1 - y0, : x1 - x0] * fluxes.get(cid, 0.0)
         best = np.argmax(stack[:, mask], axis=0)
         for i, cid in enumerate(cids):
-            lbl = next_label + i
+            lbl = next_label + i  # BUG: This increments for EVERY parent!
             assign_mask = np.zeros_like(new_seg, dtype=bool)
             assign_mask[mask] = best == i
             new_seg[assign_mask] = lbl
             child_labels[lbl] = parent
-        next_label += len(cids)
+        next_label += len(cids)  # BUG: This keeps incrementing!
     return new_seg, child_labels
-
 
 def clean_and_relabel(
     seg: np.ndarray, mapping: Dict[int, int], *, min_pix: int
@@ -182,7 +243,7 @@ def deblend_sources_symmetry(
     segmap: SegmentationImage | np.ndarray,
     *,
     nmax: int = 5,
-    eps: float | None = None,
+    eps: float = 1e-8,
     min_pix: int = 5,
     max_iter: int = 10,
     peak_min_distance: int = 3,
@@ -196,7 +257,7 @@ def deblend_sources_symmetry(
     else:
         segm = segmap
     seg_arr = segm.data.copy()
-    eps = eps or 1e-3 * np.percentile(image, 99.5)
+    eps = eps or 1e-8 * np.percentile(image, 99.5)
 
     for _ in range(max_iter):
         segm = SegmentationImage(seg_arr)

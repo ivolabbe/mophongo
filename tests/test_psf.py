@@ -59,3 +59,18 @@ def test_delta_psf_default():
     assert psf.array.shape == (3, 3)
     assert psf.array[1, 1] == 1.0
     np.testing.assert_allclose(psf.array.sum(), 1.0)
+
+
+def test_psf_from_star():
+    from mophongo.utils import gaussian
+
+    image = gaussian((61, 61), 2.5, 2.5, x0=30.3, y0=29.7)
+    psf = PSF.from_star(image, (30.3, 29.7))
+
+    assert psf.array.shape == (51, 51)
+    np.testing.assert_allclose(psf.array.sum(), 1.0, rtol=0, atol=2e-3)
+
+    cy = psf.array.shape[0] // 2
+    cx = psf.array.shape[1] // 2
+    maxpos = np.unravel_index(np.argmax(psf.array), psf.array.shape)
+    assert maxpos == (cy, cx)

@@ -104,6 +104,55 @@ class PSF:
         """Create a PSF from an arbitrary pixel array."""
         return cls(array)
 
+    @classmethod
+    def from_star(
+        cls,
+        data: np.ndarray,
+        position: tuple[float, float],
+        *,
+        search_boxsize: int | tuple[int, int] = 11,
+        fit_boxsize: int | tuple[int, int] = 5,
+        size: int = 51,
+    ) -> "PSF":
+        """Extract a PSF from ``data`` around an approximate star position.
+
+        Parameters
+        ----------
+        data : ndarray
+            Image containing the star.
+        position : tuple of float
+            Approximate ``(x, y)`` pixel coordinates of the star.
+        search_boxsize, fit_boxsize : int or tuple of int, optional
+            Passed to :func:`photutils.centroids.centroid_quadratic`.
+        size : int, optional
+            Cutout size. The PSF will be a square array of this shape.
+
+        Returns
+        -------
+        PSF
+            PSF instance extracted from the image.
+        """
+        from astropy.nddata import Cutout2D
+        from photutils.centroids import centroid_quadratic
+
+        x_cen, y_cen = centroid_quadratic(
+            data,
+            xpeak=position[0],
+            ypeak=position[1],
+            fit_boxsize=fit_boxsize,
+            search_boxsize=search_boxsize,
+        )
+
+        cut = Cutout2D(
+            data,
+            (int(round(x_cen)), int(round(y_cen))),
+            (size, size),
+            mode="partial",
+            fill_value=0.0,
+            copy=True,
+        )
+        return cls(np.asarray(cut.data))
+
     def matching_kernel(self, other: "PSF" | np.ndarray, window: object | None = None) -> np.ndarray:
         """Return the convolution kernel that matches ``self`` to ``other``.
         

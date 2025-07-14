@@ -8,7 +8,8 @@ from mophongo.catalog import safe_dilate_segmentation
 
 import matplotlib.pyplot as plt
 from astropy.modeling.models import Gaussian2D
-from photutils.segmentation import detect_sources, deblend_sources
+from photutils.segmentation import detect_sources
+from mophongo.photutils_deblend import deblend_sources
 from photutils.datasets import make_model_image, make_model_params
 from skimage.morphology import dilation, disk, max_tree
 
@@ -114,7 +115,13 @@ def make_simple_data(
         seg.data = safe_dilate_segmentation(seg.data, selem=disk(ndilate))
 
     segm = deblend_sources(
-        detimg, seg, npixels=5, nlevels=64, contrast=0.000001, progress_bar=False,
+        detimg,
+        seg,
+        npixels=5,
+        nlevels=64,
+        contrast=0.000001,
+        progress_bar=False,
+        compactness=0.0,
     )
     segdata = segm.data
     segmap = np.zeros_like(segdata, dtype=int)

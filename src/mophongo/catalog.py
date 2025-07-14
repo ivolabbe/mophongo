@@ -16,9 +16,9 @@ from astropy.stats import SigmaClip
 from photutils.segmentation import (
     SourceCatalog,
     detect_sources,
-    deblend_sources,
     SegmentationImage,
 )
+from .photutils_deblend import deblend_sources
 from skimage.morphology import dilation, disk, max_tree
 from skimage.segmentation import watershed
 from skimage.measure import label
@@ -265,6 +265,7 @@ def deblend_sources_color(
     contrast: float = 1e-4,
     color_thresh: float = 0.3,
     nsigma: float = 3.0,
+    compactness: float = 0.0,
 ) -> SegmentationImage:
     """Chi² detection and colour-aware deblending.
 
@@ -292,6 +293,7 @@ def deblend_sources_color(
         mode='exponential',
         contrast=contrast,
         progress_bar=False,
+        compactness=compactness,
     )
 
     print(f"Initial detection: {len(seg_det.labels)} sources")
@@ -471,6 +473,7 @@ class Catalog:
             "deblend_mode": "exponential",
             "deblend_nlevels": 64,
             "deblend_contrast": 1e-3,
+            "deblend_compactness": 0.0,
         }
         defaults.update(self.params)
         self.params = defaults
@@ -503,6 +506,7 @@ class Catalog:
             contrast=float(self.params["deblend_contrast"]),
             connectivity=8,
             progress_bar=False,
+            compactness=float(self.params.get("deblend_compactness", 0.0)),
         )
         self.segmap = seg
         self.det_catalog = SourceCatalog(

@@ -74,3 +74,23 @@ def test_psf_from_star():
     cx = psf.array.shape[1] // 2
     maxpos = np.unravel_index(np.argmax(psf.array), psf.array.shape)
     assert maxpos == (cy, cx)
+
+
+def test_matching_kernel_recenter():
+    from mophongo.utils import moffat
+    from photutils.centroids import centroid_quadratic
+
+    psf_hi = PSF(moffat(41, 2.0, 2.0, beta=3.0))
+    psf_lo = PSF(moffat(41, 10.0, 10.0, beta=2.5, x0=20.3, y0=20.2))
+
+    k_off = psf_hi.matching_kernel(psf_lo, recenter=False)
+    y_off, x_off = centroid_quadratic(k_off, fit_boxsize=5)
+    cy = (k_off.shape[0] - 1) / 2
+    cx = (k_off.shape[1] - 1) / 2
+    dist_off = np.hypot(y_off - cy, x_off - cx)
+
+    k = psf_hi.matching_kernel(psf_lo)
+    y, x = centroid_quadratic(k, fit_boxsize=5)
+    dist = np.hypot(y - cy, x - cx)
+
+    assert dist < dist_off

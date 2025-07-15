@@ -14,6 +14,8 @@ from scipy.optimize import least_squares
 import numpy as np
 from photutils.psf import matching
 from photutils.psf.matching import TukeyWindow
+from photutils.centroids import centroid_quadratic
+from scipy.ndimage import shift as nd_shift
 
 from .utils import elliptical_gaussian, elliptical_moffat, measure_shape, moffat, gaussian
 
@@ -104,7 +106,62 @@ class PSF:
         """Create a PSF from an arbitrary pixel array."""
         return cls(array)
 
-    def matching_kernel(self, other: "PSF" | np.ndarray, window: object | None = None) -> np.ndarray:
+    @classmethod
+    def from_star(
+        cls,
+        data: np.ndarray,
+        position: tuple[float, float],
+        *,
+        search_boxsize: int | tuple[int, int] = 11,
+        fit_boxsize: int | tuple[int, int] = 5,
+        size: int = 51,
+    ) -> "PSF":
+        """Extract a PSF from ``data`` around an approximate star position.
+
+        Parameters
+        ----------
+        data : ndarray
+            Image containing the star.
+        position : tuple of float
+            Approximate ``(x, y)`` pixel coordinates of the star.
+        search_boxsize, fit_boxsize : int or tuple of int, optional
+            Passed to :func:`photutils.centroids.centroid_quadratic`.
+        size : int, optional
+            Cutout size. The PSF will be a square array of this shape.
+
+        Returns
+        -------
+        PSF
+            PSF instance extracted from the image.
+        """
+        from astropy.nddata import Cutout2D
+        from photutils.centroids import centroid_quadratic
+
+        x_cen, y_cen = centroid_quadratic(
+            data,
+            xpeak=position[0],
+            ypeak=position[1],
+            fit_boxsize=fit_boxsize,
+            search_boxsize=search_boxsize,
+        )
+
+        cut = Cutout2D(
+            data,
+            (int(round(x_cen)), int(round(y_cen))),
+            (size, size),
+            mode="partial",
+            fill_value=0.0,
+            copy=True,
+        )
+        return cls(np.asarray(cut.data))
+
+    def matching_kernel(
+        self,
+        other: "PSF" | np.ndarray,
+        window: object | None = None,
+        *,
+        recenter: bool = True,
+    ) -> np.ndarray:
         """Return the convolution kernel that matches ``self`` to ``other``.
         
         Parameters
@@ -114,6 +171,12 @@ class PSF:
         window : optional
             Window function passed to ``create_matching_kernel``. Defaults to TukeyWindow(alpha=0.4).
         
+        Parameters
+        ----------
+        recenter : bool, optional
+            If ``True`` the resulting kernel is shifted to its centroid using
+            bicubic interpolation. Defaults to ``True``.
+
         Returns
         -------
         kernel : np.ndarray
@@ -137,11 +200,8 @@ class PSF:
             psf_hi = pad_to_shape(psf_hi, shape)
             psf_lo = pad_to_shape(psf_lo, shape)
 
-        if window is None:
-            window = TukeyWindow(alpha=0.4)
-
-        kernel = matching.create_matching_kernel(psf_hi, psf_lo, window=window)
-        return np.asarray(kernel)
+        kernel = psf_matching_kernel(psf_hi, psf_lo, window=window, recenter=recenter)
+        return kernel
 
     def fit_moffat(self, free_params: str = "fwhm_x,fwhm_y,beta,theta") -> MoffatFit:
         """Fit a 2-D Moffat profile to the PSF data.
@@ -303,7 +363,11 @@ def pad_to_shape(arr: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
 
 
 def psf_matching_kernel(
-    psf_hi: np.ndarray, psf_lo: np.ndarray, *, window: object | None = None
+    psf_hi: np.ndarray,
+    psf_lo: np.ndarray,
+    *,
+    window: object | None = None,
+    recenter: bool = True,
 ) -> np.ndarray:
     """Compute a convolution kernel matching ``psf_hi`` to ``psf_lo``.
 
@@ -319,6 +383,9 @@ def psf_matching_kernel(
         have different shapes.
     window : optional
         Window function passed to ``create_matching_kernel``. Defaults to TukeyWindow(alpha=0.5).
+    recenter : bool, optional
+        If ``True`` the resulting kernel is shifted to its centroid using
+        bicubic interpolation. Defaults to ``True``.
 
     Returns
     -------
@@ -336,4 +403,10 @@ def psf_matching_kernel(
         window = TukeyWindow(alpha=0.4)
 
     kernel = matching.create_matching_kernel(psf_hi, psf_lo, window=window)
-    return np.asarray(kernel)
+    kernel = np.asarray(kernel)
+    if recenter:
+        ycen, xcen = centroid_quadratic(kernel, fit_boxsize=5)
+        cy = (kernel.shape[0] - 1) / 2
+        cx = (kernel.shape[1] - 1) / 2
+        kernel = nd_shift(kernel, (cy - ycen, cx - xcen), order=3, mode="nearest")
+    return kernel

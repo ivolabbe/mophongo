@@ -146,6 +146,24 @@ docs = ["astropy (>=5.0.4)", "docutils", "furo", "graphviz", "matplotlib", "sphi
 test = ["asdf (>=2.8.0)", "asdf-astropy", "pytest (>=4.6.0)"]
 
 [[package]]
+name = "asteval"
+version = "1.0.6"
+description = "Safe, minimalistic evaluator of python expression using ast module"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "asteval-1.0.6-py3-none-any.whl", hash = "sha256:5e119ed306e39199fd99c881cea0e306b3f3807f050c9be79829fe274c6378dc"},
+    {file = "asteval-1.0.6.tar.gz", hash = "sha256:1aa8e7304b2e171a90d64dd269b648cacac4e46fe5de54ac0db24776c0c4a19f"},
+]
+
+[package.extras]
+all = ["asteval[dev,doc,test]"]
+dev = ["build", "twine"]
+doc = ["Sphinx"]
+test = ["coverage", "pytest", "pytest-cov"]
+
+[[package]]
 name = "astro-prospector"
 version = "1.4.0"
 description = "Stellar Population Inference from Spectra and SEDs"
@@ -1024,6 +1042,22 @@ files = [
     {file = "decorator-5.2.1-py3-none-any.whl", hash = "sha256:d316bb415a2d9e2d2b3abcc4084c6502fc09240e292cd76a76afc106a1c8e04a"},
     {file = "decorator-5.2.1.tar.gz", hash = "sha256:65f266143752f734b0a7cc83c46f4618af75b8c5911b00ccb61d0ac9b6da0360"},
 ]
+
+[[package]]
+name = "dill"
+version = "0.4.0"
+description = "serialize all of Python"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "dill-0.4.0-py3-none-any.whl", hash = "sha256:44f54bf6412c2c8464c14e8243eb163690a9800dbe2c367330883b19c7561049"},
+    {file = "dill-0.4.0.tar.gz", hash = "sha256:0633f1d2df477324f53a895b02c901fb961bdbf65a17122586ea7019292cbcf0"},
+]
+
+[package.extras]
+graph = ["objgraph (>=1.7.2)"]
+profile = ["gprof2dot (>=2022.7.29)"]
 
 [[package]]
 name = "donfig"
@@ -2058,6 +2092,31 @@ files = [
     {file = "llvmlite-0.44.0-cp313-cp313-win_amd64.whl", hash = "sha256:2fb7c4f2fb86cbae6dca3db9ab203eeea0e22d73b99bc2341cdf9de93612e930"},
     {file = "llvmlite-0.44.0.tar.gz", hash = "sha256:07667d66a5d150abed9157ab6c0b9393c9356f229784a4385c02f99e94fc94d4"},
 ]
+
+[[package]]
+name = "lmfit"
+version = "1.3.3"
+description = "Least-Squares Minimization with Bounds and Constraints"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "lmfit-1.3.3-py3-none-any.whl", hash = "sha256:a9e9ec7d0d0ec962cc6c078ad1ec6c8311d3ac0e5f0947a00a91f5509dacc2b2"},
+    {file = "lmfit-1.3.3.tar.gz", hash = "sha256:73321e6b881f2f686235721a7dfc02af6bb0f030a25efeb66638f62b1c6053a1"},
+]
+
+[package.dependencies]
+asteval = ">=1.0"
+dill = ">=0.3.4"
+numpy = ">=1.24"
+scipy = ">=1.10.0"
+uncertainties = ">=3.2.2"
+
+[package.extras]
+all = ["lmfit[dev,doc,test]"]
+dev = ["build", "check-wheel-contents", "flake8-pyproject", "pre-commit", "twine"]
+doc = ["Pillow", "Sphinx", "cairosvg", "corner", "emcee (>=3.0.0)", "ipykernel", "jupyter_sphinx (>=0.2.4)", "matplotlib", "numdifftools", "pandas", "pycairo ; platform_system == \"Windows\"", "sphinx-gallery (>=0.10)", "sphinxcontrib-svg2pdfconverter", "sympy"]
+test = ["coverage", "flaky", "pytest", "pytest-cov"]
 
 [[package]]
 name = "locket"
@@ -4297,6 +4356,24 @@ files = [
 ]
 
 [[package]]
+name = "uncertainties"
+version = "3.2.3"
+description = "calculations with values with uncertainties, error propagation"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "uncertainties-3.2.3-py3-none-any.whl", hash = "sha256:313353900d8f88b283c9bad81e7d2b2d3d4bcc330cbace35403faaed7e78890a"},
+    {file = "uncertainties-3.2.3.tar.gz", hash = "sha256:76a5653e686f617a42922d546a239e9efce72e6b35411b7750a1d12dcba03031"},
+]
+
+[package.extras]
+all = ["uncertainties[arrays,doc,test]"]
+arrays = ["numpy"]
+doc = ["python-docs-theme", "sphinx", "sphinx-copybutton"]
+test = ["pytest", "pytest_codspeed", "pytest_cov", "scipy"]
+
+[[package]]
 name = "urllib3"
 version = "2.5.0"
 description = "HTTP library with thread-safe connection pooling, file post, and more."
@@ -4416,4 +4493,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.13"
-content-hash = "43e79a56743d90a12cf87194791bdd5e3203bf30677526a82048627f96795fe5"
+content-hash = "0ce981c8b5b4ab47640d451620222df2a7bb5290c182051b10e164836b4678ee"

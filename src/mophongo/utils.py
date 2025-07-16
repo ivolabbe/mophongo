@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import numpy as np
+from astropy.io import fits
+from astropy.wcs import WCS
+from astropy.table import Table
+from shapely.geometry import Polygon
 
-
+# model based stuff 
 def elliptical_moffat(
     y: np.ndarray,
     x: np.ndarray,
@@ -150,3 +155,111 @@ def gaussian(
     psf /= psf.sum()
     return psf
 
+
+# ---------------------------------------------------------------------
+# Basic WCS utilities
+# ---------------------------------------------------------------------
+def get_wcs_pscale(wcs, set_attribute=True):
+    """Pixel scale in arcsec from a ``WCS`` object."""
+    from numpy.linalg import det
+
+    if isinstance(wcs, fits.Header):
+        wcs = WCS(wcs, relax=True)
+
+    if hasattr(wcs.wcs, "cd") and wcs.wcs.cd is not None:
+        detv = det(wcs.wcs.cd)
+    else:
+        detv = det(wcs.wcs.pc)
+
+    pscale = np.sqrt(np.abs(detv)) * 3600.0
+    if set_attribute:
+        wcs.pscale = pscale
+    return pscale
+
+
+def to_header(wcs, add_naxis=True, relax=True, key=None):
+    """Convert WCS to a FITS header with a few extra keywords."""
+    hdr = wcs.to_header(relax=relax, key=key)
+    if add_naxis:
+        if hasattr(wcs, "pixel_shape") and wcs.pixel_shape is not None:
+            hdr["NAXIS"] = wcs.naxis
+            hdr["NAXIS1"] = wcs.pixel_shape[0]
+            hdr["NAXIS2"] = wcs.pixel_shape[1]
+        elif hasattr(wcs, "_naxis1"):
+            hdr["NAXIS"] = wcs.naxis
+            hdr["NAXIS1"] = wcs._naxis1
+            hdr["NAXIS2"] = wcs._naxis2
+
+    if hasattr(wcs.wcs, "cd"):
+        for i in [0, 1]:
+            for j in [0, 1]:
+                hdr[f"CD{i + 1}_{j + 1}"] = wcs.wcs.cd[i][j]
+
+    if hasattr(wcs, "sip") and wcs.sip is not None:
+        hdr["SIPCRPX1"], hdr["SIPCRPX2"] = wcs.sip.crpix
+    return hdr
+
+
+def get_slice_wcs(wcs, slx, sly):
+    """Slice a WCS while propagating SIP and distortion keywords."""
+    nx = slx.stop - slx.start
+    ny = sly.stop - sly.start
+    swcs = wcs.slice((sly, slx))
+
+    if hasattr(swcs, "_naxis1"):
+        swcs.naxis1 = swcs._naxis1 = nx
+        swcs.naxis2 = swcs._naxis2 = ny
+    else:
+        swcs._naxis = [nx, ny]
+        swcs._naxis1 = nx
+        swcs._naxis2 = ny
+
+    if hasattr(swcs, "sip") and swcs.sip is not None:
+        for c in [0, 1]:
+            swcs.sip.crpix[c] = swcs.wcs.crpix[c]
+
+    acs = [4096 / 2, 2048 / 2]
+    dx = swcs.wcs.crpix[0] - acs[0]
+    dy = swcs.wcs.crpix[1] - acs[1]
+    for ext in ["cpdis1", "cpdis2", "det2im1", "det2im2"]:
+        if hasattr(swcs, ext):
+            extw = getattr(swcs, ext)
+            if extw is not None:
+                extw.crval[0] += dx
+                extw.crval[1] += dy
+                setattr(swcs, ext, extw)
+    return swcs
+
+
+# ---------------------------------------------------------------------
+# WCS information from CSV
+# ---------------------------------------------------------------------
+def read_wcs_csv(drz_file, csv_file=None):
+    """Read exposure WCS info from a CSV table."""
+    if csv_file is None:
+        csv_file = (
+            drz_file.split("_drz_sci")[0].split("_drc_sci")[0] + "_wcs.csv"
+        )
+        if not os.path.exists(csv_file):
+            raise FileNotFoundError(f"CSV file {csv_file} not found")
+
+    tab = Table.read(csv_file, format="csv")
+    flt_keys = []
+    wcs_dict = {}
+    footprints = {}
+
+    for row in tab:
+        key = (row["file"], row["ext"])
+        hdr = fits.Header()
+        for col in tab.colnames:
+            hdr[col] = row[col]
+
+        wcs = WCS(hdr, relax=True)
+        get_wcs_pscale(wcs)
+        wcs.expweight = hdr.get("EXPTIME", 1)
+
+        flt_keys.append(key)
+        wcs_dict[key] = wcs
+        footprints[key] = Polygon(wcs.calc_footprint())
+
+    return flt_keys, wcs_dict, footprints

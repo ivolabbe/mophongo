@@ -17,6 +17,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.nddata import Cutout2D
 from reproject import reproject_interp
+from astropy.coordinates import SkyCoord
 
 
 def lupton_norm(img):
@@ -631,14 +632,14 @@ def label_segmap(ax, segmap, catalog, fontsize=10):
 
 def make_cutouts():
     """Create cutouts for UDS images based on user-defined parameters."""
-    indir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/test/'
-    outdir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/test/testdata/'
+    indir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/'
+    outdir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/testdata/'
 
     # --- User parameters from the pasted image ---
     center_x_40mas = 23243
     center_y_40mas = 19388
-    size_x_40mas = 1044
-    size_y_40mas = 778
+    size_x_40mas = 1144
+    size_y_40mas = 878
 
     center = (center_x_40mas, center_y_40mas)
     size = (size_y_40mas, size_x_40mas)  # Cutout2D expects (ny, nx)
@@ -656,24 +657,38 @@ def make_cutouts():
         ("LW_f277w-f356w-f444w_SEGMAP.fits", "uds-test-LW_seg.fits"),
         ("LW_f277w-f356w-f444w_opterr.fits", "uds-test-f444w_opterr.fits"),
         ("LW_f277w-f356w-f444w_optavg.fits", "uds-test-f444w_optavg.fits"),
-        ("uds-sbkgsub-0.1-40mas-f770w_drz_sci_test2.fits",
-         "uds-test-f770w_sci.fits"),
     ]
 
     # --- Extract cutouts for 40mas images ---
     for infile, outfile in files_40mas:
         with fits.open(indir + infile) as hdul:
             data = hdul[0].data
-            wcs = WCS(hdul[0].header)
-            cutout = Cutout2D(data, position=center, size=size, wcs=wcs)
-            hdu = fits.PrimaryHDU(cutout.data, header=cutout.wcs.to_header())
+            hdr = hdul[0].header
+            wcs = WCS(hdr)
+            center_radec = SkyCoord(*wcs.all_pix2world(center_x_40mas,
+                                                       center_y_40mas, 0),
+                                    unit='deg')
+            cutout = Cutout2D(data, position=center_radec, size=size, wcs=wcs)
+            hdr.update(cutout.wcs.to_header())
+            hdu = fits.PrimaryHDU(cutout.data, header=hdr)
             hdu.writeto(outdir + outfile, overwrite=True)
             print(f"Saved {outdir+outfile}")
 
     # --- Extract cutout for 80mas image (2x2 binned), reproject to 40mas grid ---
-    infile_80mas = "uds-sbkgsub-v0.3-80mas-f770w_drz_wht.fits"
-    outfile_80mas = "uds-test-f770w_wht.fits"
+    # THESE ARE 160mas !!
 
+
+#    files_80mas = [
+#        ("uds-lowres-all-f770w_drz_sci.fits", "uds-test-f770w_sci.fits"),
+#        ("uds-lowres-all-f770w_drz_wht.fits", "uds-test-f770w_wht.fits"),
+#    ]
+
+    files_80mas = [
+        ('uds-sbkgsub-v0.3-80mas-f770w_drz_sci.fits',
+         "uds-test-f770w_sci.fits"),
+        ('uds-sbkgsub-v0.3-80mas-f770w_drz_wht.fits',
+         "uds-test-f770w_wht.fits"),
+    ]
     # Use the WCS and shape from one of the 40mas cutouts as the target
     ref_cutout_file = outdir + files_40mas[0][1]
     with fits.open(ref_cutout_file) as ref_hdul:
@@ -681,22 +696,27 @@ def make_cutouts():
         target_wcs = WCS(target_header)
         target_shape = ref_hdul[0].data.shape
 
-    with fits.open(indir + infile_80mas) as hdul:
-        data = hdul[0].data
-        wcs = WCS(hdul[0].header)
-        # Extract the cutout at the 80mas scale
-        center_80mas = (center_x_40mas / 2, center_y_40mas / 2)
-        size_80mas = (size[0] // 2, size[1] // 2)
-        cutout_80mas = Cutout2D(data,
-                                position=center_80mas,
-                                size=size_80mas,
-                                wcs=wcs)
-        # Reproject to 40mas grid
-        reprojected_data, _ = reproject_interp(
-            (cutout_80mas.data, cutout_80mas.wcs),
-            output_projection=target_wcs,
-            shape_out=target_shape)
-        hdu = fits.PrimaryHDU(reprojected_data.astype(np.float32),
-                              header=target_wcs.to_header())
-        hdu.writeto(outdir + outfile_80mas, overwrite=True)
-        print(f"Saved {outdir + outfile_80mas} (registered to 40mas grid)")
+    for infile, outfile in files_80mas:
+        with fits.open(indir + infile) as hdul:
+            data = hdul[0].data
+            hdr = hdul[0].header
+            hdr['KERNEL'] = ('square', 'Drizzle kernel')
+            hdr['PIXFRAC'] = (0.75, 'Drizzle pixfrac')
+
+            # Extract the cutout at the 80mas scale
+            size_80mas = (size[0] // 2, size[1] // 2)
+            cutout_80mas = Cutout2D(data,
+                                    position=center_radec,
+                                    size=size_80mas,
+                                    wcs=WCS(hdr))
+            # Reproject to 40mas grid
+            reprojected_data, _ = reproject_interp(
+                (cutout_80mas.data, cutout_80mas.wcs),
+                output_projection=target_wcs,
+                shape_out=target_shape)
+            # update hdr with new wcs
+            hdr.update(target_wcs.to_header())
+            hdu = fits.PrimaryHDU(reprojected_data.astype(np.float32),
+                                  header=hdr)
+            hdu.writeto(outdir + outfile, overwrite=True)
+            print(f"Saved {outdir + outfile} (registered to 40mas grid)")

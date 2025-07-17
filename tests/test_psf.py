@@ -114,6 +114,172 @@ from astropy.stats import mad_std
 import astropy.units as u
 from astropy.io import fits
 from photutils.aperture import CircularAperture
+from mophongo.templates import _convolve2d
+from matplotlib.colors import SymLogNorm
+from astropy.nddata import Cutout2D    
+
+
+from photutils.centroids import centroid_quadratic
+import astropy.units as u
+from astropy.io import fits
+import numpy as np
+
+#         Cutout2D(cutout.data, cutout.pos, next_odd(size//4), wcs=cutout.wcs), 
+#         dpsf, fkey)
+def psf_register(cutout, dpsf, fkey, max_iterations=3, convergence_threshold=0.1, verbose=False):
+    """
+    Register PSF model to match data centroid through iterative centering.
+    
+    Parameters
+    ----------
+    ra : float
+        Right ascension in degrees
+    dec : float  
+        Declination in degrees
+    size : int
+        Cutout size in pixels
+    dpsf : DrizzlePSF
+        DrizzlePSF object with loaded PSF models
+    fkey : str
+        Filter key for PSF model (e.g., 'STDPSF_MIRI_F770W_EXTENDED')
+    max_iterations : int, optional
+        Maximum number of centering iterations (default: 3)
+    convergence_threshold : float, optional
+        Convergence threshold in pixels (default: 0.05)
+        
+    Returns
+    -------
+    cutout : PSF
+        PSF object with extracted data cutout
+    psf_hdu : HDU
+        Final PSF model HDU after centering
+    """
+
+    # Calculate native pixel size for PSF model
+    N = cutout.shape[0] // 2
+    N_native = int(np.ceil((N * dpsf.driz_pscale / dpsf.wcs[dpsf.flt_keys[0]].pscale)))
+
+    # Initial position
+    xi, yi = cutout.input_position_cutout
+    
+    # Iterative centering
+    for i in range(max_iterations):
+        # Convert pixel coordinates to world coordinates
+        ri, di = cutout.wcs.pixel_to_world_values(xi, yi)
+
+        # Get PSF model at current position
+        psf_hdu = dpsf.get_psf(
+            ra=ri, dec=di,
+            filter=fkey, wcs_slice=cutout.wcs,
+            kernel=dpsf.driz_header['KERNEL'],
+            pixfrac=dpsf.driz_header['PIXFRAC'],
+            verbose=verbose, npix=N_native,
+        )
+
+        # Find centroid of PSF model
+        xc, yc = centroid_quadratic(psf_hdu[1].data, 
+                                   xpeak=cutout.input_position_cutout[0], 
+                                   ypeak=cutout.input_position_cutout[1], 
+                                   fit_boxsize=5)
+        
+        # Calculate centroid shift
+        dx, dy = cutout.input_position_cutout[0] - xc, cutout.input_position_cutout[1] - yc
+        dr = np.hypot(dx, dy)
+        
+        if verbose: print(f"Iteration {i+1}: Centroid shift: {dx:.3f}, {dy:.3f}, dr= {dr:.3f}")
+        
+        # Update position
+        xi, yi = dx + xi, dy + yi
+        
+        # Check convergence
+        if dr < convergence_threshold:
+            if verbose: print(f"Converged after {i+1} iterations")
+            break
+    else:
+        if verbose: print(f"Maximum iterations ({max_iterations}) reached")
+    
+    return (ri, di), cutout.data, psf_hdu[1].data
+
+def gaussian_matching_kernel(data, psf_model, method='gaussian', params='flux,fwhm,xc,yc', fit_size=25):
+    """
+    Determine a convolution kernel to match PSF model to observed data.
+    
+    Parameters
+    ----------
+    data : array_like
+        Observed data (e.g., star cutout)
+    psf_model : array_like
+        PSF model to be convolved
+    method : str, optional
+        Method for kernel determination:
+        - 'gaussian': Fit Gaussian profiles and derive kernel from FWHM difference
+        - 'moffat': Fit Moffat profiles and derive kernel from FWHM difference
+        Default: 'gaussian'
+    fit_size : int, optional
+        Size of central region to use for profile fitting (default: 25)
+        
+    Returns
+    -------
+    kernel : ndarray
+        Convolution kernel to match PSF model to data
+    fwhm_kernel : float
+        FWHM of the derived kernel
+    data_fit : object
+        Fit result for the data
+    psf_fit : object
+        Fit result for the PSF model
+        
+    Examples
+    --------
+    >>> kernel, fwhm_k, data_fit, psf_fit = psf_matching_kernel(star_data, psf_model)
+    >>> convolved_psf = _convolve2d(psf_model, kernel)
+    """
+    from mophongo.templates import _convolve2d
+    
+    # Fit profiles to both data and PSF model
+    if method.lower() == 'gaussian':
+        data_fit = PSF.from_data(data, size=fit_size).fit_gaussian(params)
+        psf_fit = PSF.from_data(psf_model, size=fit_size).fit_gaussian(params)
+    elif method.lower() == 'moffat':
+        data_fit = PSF.from_data(data, size=fit_size).fit_moffat(params)
+        psf_fit = PSF.from_data(psf_model, size=fit_size).fit_moffat(params)
+    else:
+        raise ValueError(f"Unknown method: {method}. Use 'gaussian' or 'moffat'")
+    
+    # Calculate kernel FWHM from quadrature difference
+    # Assumes: FWHM_data^2 = FWHM_psf^2 + FWHM_kernel^2
+    fwhm_kernel_sq = data_fit.fwhm_x**2 - psf_fit.fwhm_x**2
+    
+    if fwhm_kernel_sq <= 0:
+        # PSF model is already broader than data - return delta function
+        kernel_size = 3
+        kernel = np.zeros((kernel_size, kernel_size))
+        kernel[kernel_size//2, kernel_size//2] = 1.0
+        fwhm_kernel = 0.0
+    else:
+        fwhm_kernel = np.sqrt(fwhm_kernel_sq)
+        
+        # Create Gaussian kernel with derived FWHM
+        kernel_size = int(fwhm_kernel * 2.5)  # 2.5x FWHM for good sampling
+        if kernel_size % 2 == 0:  # Ensure odd size
+            kernel_size += 1
+        if kernel_size < 3:  # Minimum size
+            kernel_size = 3
+            
+        kernel = PSF.gaussian(kernel_size, fwhm_kernel, fwhm_kernel).array
+    
+    return kernel, fwhm_kernel, data_fit, psf_fit
+
+# Example usage in your test:
+def test_gaussian_kernel_matching():
+    """Test the PSF matching kernel functionality."""
+    # Your existing code...
+    kernel, fwhm_kern, pm, pmp = gaussian_matching_kernel(cutout.data, psf_data, method='moffat')
+    psfc = _convolve2d(psf_data, kernel)
+    
+    print(f"Kernel FWHM: {fwhm_kern:.3f}")
+    print(f"Data FWHM: {pm.fwhm_x:.3f}")
+    print(f"PSF model FWHM: {pmp.fwhm_x:.3f}")
 
 # from https://github.com/gbrammer/grizli/pull/268
 # but with withiout grizli dependencies
@@ -336,8 +502,6 @@ def test_drizzle_psf():
 
 # %%
 def test_NIRCam_psf():
-    # A log of the exposures that contribute to the mosaic is in drz_file.replace("_drz_sci.fits.gz", "_wcs.csv")
-
     filt = 'F770W'
     filter_pattern = f"STDPSF_MIRI.*{filt}.*EXTENDED"
     fkey = f"STDPSF_MIRI_{filt}_EXTENDED"
@@ -354,12 +518,11 @@ def test_NIRCam_psf():
     # Coordinates of a demo star
     ra, dec = 34.304205, -5.1221591
     ra, dec = 34.298222, -5.1262568  # bright star for 770 and wings
-#    ra, dec = 34.295953, -5.1293929
+    
     size = 201
+    N=size//2
+    next_odd = lambda n: int(round(n)) | 1 
 
-    # Cache downloads from remote URL
-    #    cached_drz_file = download_file(drz_file, cache=True)
-    #    cached_csv_file = download_file(drz_file.split('_dr')[0] + "_wcs.csv", cache=True)
     cached_drz_file = drz_file
     cached_csv_file = drz_file.split('_sci')[0] + "_wcs.csv"
 
@@ -369,112 +532,79 @@ def test_NIRCam_psf():
     dpsf.epsf_obj.load_jwst_stdpsf(local_dir=psf_dir,
                                    filter_pattern=filter_pattern)
 
-    # image
+    N_native = int(np.ceil((N * dpsf.driz_pscale / dpsf.wcs[dpsf.flt_keys[0]].pscale)))
+ 
+    # Extract data cutout
     with fits.open(dpsf.driz_image) as im:
         cutout = PSF.from_data(im[0].data, (ra * u.deg, dec * u.deg),
                                wcs=dpsf.driz_wcs,
                                search_boxsize=11,
+                               fit_boxsize=5,
                                size=size,
-                               verbose=True)
+                               verbose=False)
 
-    cra, cdec = cutout.wcs.all_pix2world([cutout.pos], 0)[0]
 
+
+    pos_reg, cut_reg, psf_reg = psf_register(
+         Cutout2D(cutout.data, cutout.pos, next_odd(size//4), wcs=cutout.wcs), 
+         dpsf, fkey, verbose=True)
+
+    # Get PSF model at current position
     psf_hdu = dpsf.get_psf(
-        ra=cra,
-        dec=cdec,
-        filter=fkey,
-        wcs_slice=cutout.wcs,
-        kernel=dpsf.driz_header['KERNEL'],
-        pixfrac=dpsf.driz_header['PIXFRAC'],
-        verbose=False,
-        npix=51,
-    )
+            ra=pos_reg[0], dec=pos_reg[1],
+            filter=fkey, wcs_slice=cutout.wcs,
+            kernel=dpsf.driz_header['KERNEL'],
+            pixfrac=dpsf.driz_header['PIXFRAC'],
+            verbose=False, npix=N_native,
+        )
 
-    mask = CircularAperture(cutout.pos,
-                            r=18).to_mask(method='center').to_image(
-                                (size, size)) > 0
-    mask_large = CircularAperture(cutout.pos,
-                                  r=30).to_mask(method='center').to_image(
-                                      (size, size)) > 0
-    mask_small = CircularAperture(cutout.pos,
-                                  r=8).to_mask(method='center').to_image(
-                                      (size, size)) > 0
+    psf_data = psf_hdu[1].data
 
-    from skimage.morphology import dilation, square, disk
+    kernel, fwhm_kern, pm, pmp = gaussian_matching_kernel(cutout.data, psf_data, method='moffat')
 
-    psf = psf_hdu[1].data.copy()
-    psf = _convolve2d(psf,  PSF.gaussian(11, 3., 3.).data)
-    mask_star = dilation(psf > 0,
-                         disk(1.))  # dilation to include diffraction spikes
-    #   bg_off = np.median(
-    #      psf[mask * ~mask_star])  # set level between diffraction spikes to zero
-    #   bg_off = np.percentile(psf[mask * ~mask_star], 10)
-    bg_off = 0.0
-    plt.imshow(psf, vmin=-0.001, vmax=0.001, cmap='gray')
-    plt.imshow(psf * mask, vmin=-0.001, vmax=0.001, cmap='gray')
-    plt.imshow(psf * ~mask_star, vmin=-0.001, vmax=0.001, cmap='gray')
-    print(f"Background offset: {bg_off:.3e}", len(psf[mask * ~mask_star]))
+    rnorm = 2.0/dpsf.driz_pscale
+    mask_rad = np.hypot(*np.mgrid[-N:N+1,-N:N+1]) < rnorm
+    mask_psf = psf_data > np.nanpercentile(psf_data[psf_data > 0], 50)
+    mask_bad = np.isfinite(cutout.data) & (cutout.data != 0)
+    mask = mask_rad & mask_psf & mask_bad 
 
-    psf -= bg_off
-    #    psf[~mask] = 0.0
+    mask_small = np.hypot(*np.mgrid[-N:N+1,-N:N+1]) >5
 
-    scl = (cutout.data * psf)[mask].sum() / (psf[mask]**2).sum()
+    Bg_off = 0.0 
+
+    scl = (cutout.data * psf_data)[mask].sum() / (psf_data[mask]**2).sum()
     #    scl = (cutout.data *
     #           psf)[mask * ~mask_small].sum() / (psf[mask * ~mask_small]**2).sum()
-    psf *= scl
+   # psf *= scl
 
     #   fits.writeto('testpsf444.fits', psf, psf_hdu[0].header, overwrite=True)
 
-    _ = PSF.from_data(psf,
-                      cutout.pos,
-                      search_boxsize=11,
-                      size=201,
-                      verbose=True)
+    fig, axes = plt.subplots(2, 3, figsize=(10, 5), sharex=False, sharey=False)
+    axes = axes.flatten()
+    offset, rms = np.median(cutout.data), mad_std(cutout.data)
+    norm = SymLogNorm(linthresh=offset + 3 * rms,
+                      vmin=offset - 3 * rms,
+                      vmax=cutout.data.max())
+    kws = dict(norm=norm,
+               cmap='bone_r',
+               origin='lower',
+               interpolation='nearest')
 
-    if 0:
-        with fits.open(
-                '/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/f444w_psf_norm.fits'
-        ) as hdul:
-            psf_stack = PSF.from_data(hdul[0].data,
-                                      ((hdul[0].data.shape[0] - 1) / 2,
-                                       (hdul[0].data.shape[1] - 1) / 2),
-                                      search_boxsize=11,
-                                      size=201,
-                                      verbose=True)
+    kern = PSF.gaussian(21, 3.3, 3.3).data
+    axes[0].imshow(cutout.data, **kws)
+    axes[1].imshow(psf_data*scl, **kws)
+    axes[2].imshow(kern, vmin=-1e-4,vmax=1e-4, cmap='gray', origin='lower', interpolation='nearest')
+    axes[3].imshow(cutout.data*mask, **kws)
+    axes[4].imshow(cutout.data - psf_data*scl, **kws)
+    axes[5].imshow(cutout.data - scl*_convolve2d(psf_data,  kern),  **kws)
 
-        scl_psf_stack = (cutout.data * psf_stack.data)[mask].sum() / (
-            psf_stack.data[mask]**2).sum()
-        scl_psf_stack = (cutout.data * psf_stack.data)[mask * ~mask_small].sum(
-        ) / (psf_stack.data[mask * ~mask_small]**2).sum()
-        psf_ext = psf_stack.data * scl_psf_stack
 
-        from scipy.ndimage import rotate
-        from scipy.optimize import minimize_scalar, minimize
-        from scipy.ndimage import shift
+#    axes[5].imshow(cutout.data - 1.0*_convolve2d(psf,  PSF.gaussian(21, 3, 3).data),  **kws)
+#    axes[5].imshow(cutout.data - psf_stack.data * scl_psf_stack, **kws)
 
-        def loss_fn(theta, psf_large, psf_core, mask):
-            theta = float(np.atleast_1d(theta)[0])
-            psf_rot = rotate(psf_large, theta, reshape=False, order=3)
-            diff = (psf_rot - psf_core)[mask]
-            plt.imshow((psf_rot - psf_core) * mask,
-                       vmin=-0.001,
-                       vmax=0.001,
-                       cmap='gray')
-            print(theta, np.sum(diff**2))
-            return np.sum(diff**2)
+#psfc = _convolve2d(psf, PSF.gaussian(21, 3, 3).data)
 
-        res = minimize_scalar(loss_fn,
-                              args=(psf_ext, psf, mask * ~mask_small),
-                              bounds=(-5, 15),
-                              method='bounded')
-
-        # res = minimize_scalar(loss_fn, args=(psf_ext, psf, mask * ~mask_small), bounds=(-5, 15), method='bounded')
-
-        print("Optimal theta:", res.x)
-        psf_ext_rot = rotate(psf_ext, res.x, reshape=False, order=3)
-        psf[~mask] = psf_ext_rot[~mask] * 0.7  # scale to match the core
-
-    # from lmfit import minimize, Parameters
+   # from lmfit import minimize, Parameters
     # def loss_fn_shift_lmfit(params, image, theta, mask=None, plot=False):
     #     dx = params['dx'].value
     #     dy = params['dy'].value
@@ -500,25 +630,62 @@ def test_NIRCam_psf():
 
     # print("Optimal shift (lmfit):", result.params['dx'].value, result.params['dy'].value)
 
-    from matplotlib.colors import SymLogNorm
-    fig, axes = plt.subplots(2, 3, figsize=(10, 5), sharex=False, sharey=False)
-    axes = axes.flatten()
-    offset, rms = np.median(cutout.data), mad_std(cutout.data)
-    norm = SymLogNorm(linthresh=offset + 3 * rms,
-                      vmin=offset - 3 * rms,
-                      vmax=cutout.data.max())
-    kws = dict(norm=norm,
-               cmap='bone_r',
-               origin='lower',
-               interpolation='nearest')
+     #   from skimage.morphology import dilation, square, disk
+#    psf = _convolve2d(psf,  PSF.gaussian(11, 3., 3.).data)
+#    mask_star = dilation(psf > 0,  disk(1.))  # dilation to include diffraction spikes
+    #   bg_off = np.median(
+    #      psf[mask * ~mask_star])  # set level between diffraction spikes to zero
+    #   bg_off = np.percentile(psf[mask * ~mask_star], 10)
+#    bg_off = 0.0
+#    plt.imshow(psf, vmin=-0.001, vmax=0.001, cmap='gray')
+#    plt.imshow(psf * mask, vmin=-0.001, vmax=0.001, cmap='gray')
+#    plt.imshow(psf * ~mask_star, vmin=-0.001, vmax=0.001, cmap='gray')
+#    print(f"Background offset: {bg_off:.3e}", len(psf[mask * ~mask_star]))
+#    psf -= bg_off
+    #    psf[~mask] = 0.0
 
-    axes[0].imshow(cutout.data, **kws)
-    axes[1].imshow(psf, **kws)
-    axes[2].imshow(psf_star.data, **kws)
-    axes[4].imshow(cutout.data - psf, **kws)
-    axes[5].imshow(cutout.data - _convolve2d(psf,
-                                             PSF.gaussian(11, 3, 3).data),
-                   **kws)
-#    axes[5].imshow(cutout.data - psf_stack.data * scl_psf_stack, **kws)
 
-# %%
+    # if 0:
+    #     with fits.open(
+    #             '/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/f444w_psf_norm.fits'
+    #     ) as hdul:
+    #         psf_stack = PSF.from_data(hdul[0].data,
+    #                                   ((hdul[0].data.shape[0] - 1) / 2,
+    #                                    (hdul[0].data.shape[1] - 1) / 2),
+    #                                   search_boxsize=11,
+    #                                   size=201,
+    #                                   verbose=True)
+
+    #     scl_psf_stack = (cutout.data * psf_stack.data)[mask].sum() / (
+    #         psf_stack.data[mask]**2).sum()
+    #     scl_psf_stack = (cutout.data * psf_stack.data)[mask * ~mask_small].sum(
+    #     ) / (psf_stack.data[mask * ~mask_small]**2).sum()
+    #     psf_ext = psf_stack.data * scl_psf_stack
+
+    #     from scipy.ndimage import rotate
+    #     from scipy.optimize import minimize_scalar, minimize
+    #     from scipy.ndimage import shift
+
+    #     def loss_fn(theta, psf_large, psf_core, mask):
+    #         theta = float(np.atleast_1d(theta)[0])
+    #         psf_rot = rotate(psf_large, theta, reshape=False, order=3)
+    #         diff = (psf_rot - psf_core)[mask]
+    #         plt.imshow((psf_rot - psf_core) * mask,
+    #                    vmin=-0.001,
+    #                    vmax=0.001,
+    #                    cmap='gray')
+    #         print(theta, np.sum(diff**2))
+    #         return np.sum(diff**2)
+
+    #     res = minimize_scalar(loss_fn,
+    #                           args=(psf_ext, psf, mask * ~mask_small),
+    #                           bounds=(-5, 15),
+    #                           method='bounded')
+
+    #     # res = minimize_scalar(loss_fn, args=(psf_ext, psf, mask * ~mask_small), bounds=(-5, 15), method='bounded')
+
+    #     print("Optimal theta:", res.x)
+    #     psf_ext_rot = rotate(psf_ext, res.x, reshape=False, order=3)
+    #     psf[~mask] = psf_ext_rot[~mask] * 0.7  # scale to match the core
+
+ 

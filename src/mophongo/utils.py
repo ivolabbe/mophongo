@@ -92,8 +92,9 @@ def moffat(
     theta: float = 0.0,
     x0: float | None = None,
     y0: float | None = None,
+    flux: float = 1.0,
 ) -> np.ndarray:
-    """Return a 2-D elliptical Moffat PSF normalized to unit sum."""
+    """Return a 2-D elliptical Moffat PSF with specified total flux."""
     if isinstance(size, int):
         ny = nx = size
     else:
@@ -106,10 +107,19 @@ def moffat(
         x0 = cx
     if y0 is None:
         y0 = cy
+    
+    # Convert flux to amplitude analytically
+    # For a Moffat profile: flux = amplitude * pi * alpha_x * alpha_y / (beta - 1)
+    # where alpha = fwhm / (2 * sqrt(2^(1/beta) - 1))
+    factor = 2 ** (1 / beta) - 1
+    alpha_x = fwhm_x / (2 * np.sqrt(factor))
+    alpha_y = fwhm_y / (2 * np.sqrt(factor))
+    amplitude = flux * (beta - 1) / (np.pi * alpha_x * alpha_y)
+    
     psf = elliptical_moffat(
         y,
         x,
-        1.0,
+        amplitude,
         fwhm_x,
         fwhm_y,
         beta,
@@ -117,7 +127,6 @@ def moffat(
         x0,
         y0,
     )
-    psf /= psf.sum()
     return psf
 
 
@@ -128,8 +137,9 @@ def gaussian(
     theta: float = 0.0,
     x0: float | None = None,
     y0: float | None = None,
+    flux: float = 1.0,
 ) -> np.ndarray:
-    """Return a 2-D elliptical Gaussian PSF normalized to unit sum."""
+    """Return a 2-D elliptical Gaussian PSF with specified total flux."""
     if isinstance(size, int):
         ny = nx = size
     else:
@@ -142,17 +152,24 @@ def gaussian(
         x0 = cx
     if y0 is None:
         y0 = cy
+    
+    # Convert flux to amplitude analytically
+    # For a Gaussian profile: flux = amplitude * 2 * pi * sigma_x * sigma_y
+    # where sigma = fwhm / (2 * sqrt(2 * ln(2)))
+    sigma_x = fwhm_x / (2 * np.sqrt(2 * np.log(2)))
+    sigma_y = fwhm_y / (2 * np.sqrt(2 * np.log(2)))
+    amplitude = flux / (2 * np.pi * sigma_x * sigma_y)
+    
     psf = elliptical_gaussian(
         y,
         x,
-        1.0,
+        amplitude,
         fwhm_x,
         fwhm_y,
         theta,
         x0,
         y0,
     )
-    psf /= psf.sum()
     return psf
 
 

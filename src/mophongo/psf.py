@@ -31,6 +31,24 @@ from astropy.nddata import Cutout2D
 from astropy.coordinates import SkyCoord
 
 @dataclass
+class GaussianFit:
+    """Parameters describing a fitted Gaussian profile."""
+
+    fwhm_x: float
+    fwhm_y: float
+    theta: float
+    xc: float
+    yc: float
+    flux: float
+    shape: tuple = None  # Store the original array shape
+    
+    def model(self) -> np.ndarray:
+        """Generate the best fit Gaussian model."""
+        from .utils import gaussian
+        return gaussian(self.shape, self.fwhm_x, self.fwhm_y, self.theta, 
+                       x0=self.xc, y0=self.yc, flux=self.flux)
+
+@dataclass
 class MoffatFit:
     """Parameters describing a fitted Moffat profile."""
 
@@ -38,16 +56,16 @@ class MoffatFit:
     fwhm_y: float
     beta: float
     theta: float
-
-
-@dataclass
-class GaussianFit:
-    """Parameters describing a fitted Gaussian profile."""
-
-    fwhm_x: float
-    fwhm_y: float
-    theta: float
-
+    xc: float
+    yc: float
+    flux: float
+    shape: tuple = None  # Store the original array shape
+    
+    def model(self) -> np.ndarray:
+        """Generate the best fit Moffat model."""
+        from .utils import moffat
+        return moffat(self.shape, self.fwhm_x, self.fwhm_y, self.beta, 
+                     self.theta, x0=self.xc, y0=self.yc, flux=self.flux)
 
 @dataclass
 class PSF:
@@ -254,157 +272,120 @@ class PSF:
                                      recenter=recenter)
         return kernel
 
-    def fit_moffat(self,
-                   free_params: str = "fwhm_x,fwhm_y,beta,theta") -> MoffatFit:
-        """Fit a 2-D Moffat profile to the PSF data.
+    def _fit_profile(self, model_func, default_params, free_params, xc=None, yc=None, result_class=None):
+        """Shared fitting logic for both Gaussian and Moffat profiles."""
+        from scipy.optimize import least_squares
         
-        Parameters
-        ----------
-        free_params : str
-            Comma-separated list of parameters to fit. Options: 'fwhm_x', 'fwhm_y', 'beta', 'theta'
-            Default: "fwhm_x,fwhm_y,beta,theta"
-        """
-        from .utils import moffat
-
         y, x = np.indices(self.array.shape)
-        cy = (self.array.shape[0] - 1) / 2
-        cx = (self.array.shape[1] - 1) / 2
+        cy = (self.array.shape[0] - 1) / 2 if yc is None else yc
+        cx = (self.array.shape[1] - 1) / 2 if xc is None else xc
 
-        # Get initial values from measure_shape
         _, _, sigma_x, sigma_y, theta0 = measure_shape(
             self.array, np.ones_like(self.array, dtype=bool))
         theta0 = ((theta0 + np.pi / 2) % np.pi) - np.pi / 2
 
-        # Initial parameter values
-        params = {
+        params = default_params.copy()
+        params.update({
             'fwhm_x': 2.355 * sigma_x,
             'fwhm_y': 2.355 * sigma_y,
-            'beta': 2.5,
-            'theta': theta0
-        }
+            'theta': theta0,
+            'xc': cx,
+            'yc': cy,
+            'flux': self.array.sum()  # Initial flux estimate
+        })
 
-        # Parse free parameters
+        # Build optimization parameter list and mapping
         free_list = [p.strip() for p in free_params.split(',')]
-        all_params = ['fwhm_x', 'fwhm_y', 'beta', 'theta']
-
-        # Create parameter vector and bounds for free parameters only
-        p0 = []
-        bounds_lower = []
-        bounds_upper = []
+        opt_params = []
         param_map = {}
-
-        for i, param in enumerate(all_params):
-            if param in free_list:
-                p0.append(params[param])
-                param_map[len(p0) - 1] = param
-                if param in ['fwhm_x', 'fwhm_y']:
-                    bounds_lower.append(1e-3)
-                    bounds_upper.append(np.inf)
-                elif param == 'beta':
+        bounds_lower, bounds_upper = [], []
+        
+        for param in free_list:
+            if param == 'fwhm':  # Special case for symmetric fwhm
+                # Use fwhm_x as the initial value for symmetric fitting
+                opt_params.append(params['fwhm_x'])
+                param_map[param] = len(opt_params) - 1
+                bounds_lower.append(1e-3)
+                bounds_upper.append(np.inf)
+            elif param.startswith('fwhm') and param in params:
+                opt_params.append(params[param])
+                param_map[param] = len(opt_params) - 1
+                bounds_lower.append(1e-3)
+                bounds_upper.append(np.inf)
+            elif param in params:
+                opt_params.append(params[param])
+                param_map[param] = len(opt_params) - 1
+                
+                # Set bounds based on parameter type
+                if param == 'beta':
                     bounds_lower.append(0.5)
                     bounds_upper.append(20.0)
                 elif param == 'theta':
                     bounds_lower.append(-np.pi / 2)
                     bounds_upper.append(np.pi / 2)
-
-        bounds = (bounds_lower, bounds_upper)
-
-        def residual(p: np.ndarray) -> np.ndarray:
-            # Update parameters with fitted values
-            current_params = params.copy()
-            for i, param_name in param_map.items():
-                current_params[param_name] = p[i]
-
-            model = moffat(self.array.shape,
-                           current_params['fwhm_x'],
-                           current_params['fwhm_y'],
-                           current_params['beta'],
-                           current_params['theta'],
-                           x0=cx,
-                           y0=cy)
-            return (model - self.array).ravel()
-
-        result = least_squares(residual, p0, bounds=bounds)
-
-        # Update fitted parameters
-        for i, param_name in param_map.items():
-            params[param_name] = float(result.x[i])
-
-        return MoffatFit(params['fwhm_x'], params['fwhm_y'], params['beta'],
-                         params['theta'])
-
-    def fit_gaussian(self,
-                     free_params: str = "fwhm_x,fwhm_y,theta") -> GaussianFit:
-        """Fit a 2-D Gaussian profile to the PSF data.
-        
-        Parameters
-        ----------
-        free_params : str
-            Comma-separated list of parameters to fit. Options: 'fwhm_x', 'fwhm_y', 'theta'
-            Default: "fwhm_x,fwhm_y,theta"
-        """
-        from .utils import gaussian
-
-        y, x = np.indices(self.array.shape)
-        cy = (self.array.shape[0] - 1) / 2
-        cx = (self.array.shape[1] - 1) / 2
-
-        # Get initial values from measure_shape
-        _, _, sigma_x, sigma_y, theta0 = measure_shape(
-            self.array, np.ones_like(self.array, dtype=bool))
-        theta0 = ((theta0 + np.pi / 2) % np.pi) - np.pi / 2
-
-        # Initial parameter values
-        params = {
-            'fwhm_x': 2.355 * sigma_x,
-            'fwhm_y': 2.355 * sigma_y,
-            'theta': theta0
-        }
-
-        # Parse free parameters
-        free_list = [p.strip() for p in free_params.split(',')]
-        all_params = ['fwhm_x', 'fwhm_y', 'theta']
-
-        # Create parameter vector and bounds for free parameters only
-        p0 = []
-        bounds_lower = []
-        bounds_upper = []
-        param_map = {}
-
-        for i, param in enumerate(all_params):
-            if param in free_list:
-                p0.append(params[param])
-                param_map[len(p0) - 1] = param
-                if param in ['fwhm_x', 'fwhm_y']:
-                    bounds_lower.append(1e-3)
+                elif param in ['xc', 'yc']:
+                    max_val = self.array.shape[1 if param == 'xc' else 0] - 1
+                    bounds_lower.append(0)
+                    bounds_upper.append(max_val)
+                elif param == 'flux':
+                    bounds_lower.append(1e-10)
                     bounds_upper.append(np.inf)
-                elif param == 'theta':
-                    bounds_lower.append(-np.pi / 2)
-                    bounds_upper.append(np.pi / 2)
 
-        bounds = (bounds_lower, bounds_upper)
-
-        def residual(p: np.ndarray) -> np.ndarray:
-            # Update parameters with fitted values
+        def residual(p):
+            # Map optimization parameters back to model parameters
             current_params = params.copy()
-            for i, param_name in param_map.items():
-                current_params[param_name] = p[i]
-
-            model = gaussian(self.array.shape,
-                             current_params['fwhm_x'],
-                             current_params['fwhm_y'],
-                             current_params['theta'],
-                             x0=cx,
-                             y0=cy)
+            
+            for param_name, idx in param_map.items():
+                if param_name == 'fwhm':  # Symmetric case
+                    current_params['fwhm_x'] = current_params['fwhm_y'] = p[idx]
+                else:
+                    current_params[param_name] = p[idx]
+            
+            model = model_func(self.array.shape, **current_params)
             return (model - self.array).ravel()
 
-        result = least_squares(residual, p0, bounds=bounds)
+        result = least_squares(residual, opt_params, bounds=(bounds_lower, bounds_upper))
+        
+        # Update parameters with fitted values
+        for param_name, idx in param_map.items():
+            if param_name == 'fwhm':  # Symmetric case
+                fwhm_val = float(result.x[idx])
+                params['fwhm_x'] = params['fwhm_y'] = fwhm_val
+            else:
+                params[param_name] = float(result.x[idx])
+        
+        # Return result with appropriate parameter names
+        result_params = {}
+        for field_name in result_class.__annotations__:
+            if field_name != 'shape':  # Skip the shape field
+                result_params[field_name] = params[field_name]
+        
+        # Add the shape information
+        result_params['shape'] = self.array.shape
+        
+        return result_class(**result_params)
 
-        # Update fitted parameters
-        for i, param_name in param_map.items():
-            params[param_name] = float(result.x[i])
+    def fit_moffat(self, free_params: str = "fwhm_x,fwhm_y,beta,theta,flux", 
+                   xc: float = None, yc: float = None) -> MoffatFit:
+        from .utils import moffat
+        
+        def model_func(shape, fwhm_x, fwhm_y, beta, theta, xc, yc, flux, **kwargs):
+            return moffat(shape, fwhm_x, fwhm_y, beta, theta, x0=xc, y0=yc, flux=flux)
+        
+        return self._fit_profile(
+            model_func, {'beta': 2.5}, free_params, xc, yc, MoffatFit
+        )
 
-        return GaussianFit(params['fwhm_x'], params['fwhm_y'], params['theta'])
+    def fit_gaussian(self, free_params: str = "fwhm_x,fwhm_y,theta,flux",
+                     xc: float = None, yc: float = None) -> GaussianFit:
+        from .utils import gaussian
+        
+        def model_func(shape, fwhm_x, fwhm_y, theta, xc, yc, flux, **kwargs):
+            return gaussian(shape, fwhm_x, fwhm_y, theta, x0=xc, y0=yc, flux=flux)
+        
+        return self._fit_profile(
+            model_func, {}, free_params, xc, yc, GaussianFit
+        )
 
 
 def pad_to_shape(arr: np.ndarray, shape: tuple[int, int]) -> np.ndarray:

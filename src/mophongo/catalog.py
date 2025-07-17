@@ -18,7 +18,7 @@ from photutils.segmentation import (
     detect_sources,
     SegmentationImage,
 )
-from .photutils_deblend import deblend_sources
+from photutils.segmentation import deblend_sources
 from skimage.morphology import dilation, disk, max_tree, square
 from skimage.segmentation import watershed
 from skimage.measure import label
@@ -291,7 +291,7 @@ def deblend_sources_color(
         mode='exponential',
         contrast=contrast,
         progress_bar=False,
-        compactness=compactness,
+#        compactness=compactness,
     )
 
     print(f"Initial detection: {len(seg_det.labels)} sources")
@@ -432,7 +432,7 @@ def calibrate_wht(
     clipped = SigmaClip(sigma=3.0)(det_bin)
     mask = clipped.mask
     if ndilate > 0:
-        mask = binary_dilation(mask, disk(ndilate))
+        mask = safe_dilate_segmentation(mask, disk(ndilate))
     std = MADStdBackgroundRMS()(det_bin[~mask])
     sqrt_wht = np.sqrt(wht_bin) / std
     wht_bin_cal = sqrt_wht**2
@@ -504,7 +504,7 @@ class Catalog:
             contrast=float(self.params["deblend_contrast"]),
             connectivity=8,
             progress_bar=False,
-            compactness=float(self.params.get("deblend_compactness", 0.0)),
+#            compactness=float(self.params.get("deblend_compactness", 0.0)),
         )
         self.segmap = seg
         self.det_catalog = SourceCatalog(

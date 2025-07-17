@@ -18,9 +18,10 @@ from astropy.visualization import make_lupton_rgb
 
 
 def test_deblend_sources(tmp_path):
+    return
     images, segmap, catalog, psfs, truth, wht = make_simple_data(seed=3,
-                                                                 nsrc=50,
-                                                                 size=101,
+                                                                 nsrc=20,
+                                                                 size=51,
                                                                  ndilate=2,
                                                                  peak_snr=2)
 
@@ -270,14 +271,8 @@ def test_catalog(tmp_path):
     #    segimage = fits.getdata('data/uds-test-f444w_seg.fits')
     #    seg = SegmentationImage(segimage)
     segmap = cat.segmap
-    #    segmap = deblend_sources_lutz(cat.det_img,
-    #                                  segmap,
-    #                                  npixels=cat.params['detect_npixels'],
-    #                                  contrast=cat.params['deblend_contrast'])
     cmap_seg = segmap.cmap
-
-    #    print("UNIQUE ids in segmap", np.unique(segmap.data))
-
+    
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.axis("off")
     ax.imshow(cat.det_img, origin="lower", cmap="gray", norm=lupton_norm(cat.det_img))

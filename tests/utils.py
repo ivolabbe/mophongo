@@ -9,7 +9,8 @@ from mophongo.catalog import safe_dilate_segmentation
 import matplotlib.pyplot as plt
 from astropy.modeling.models import Gaussian2D
 from photutils.segmentation import detect_sources
-from mophongo.photutils_deblend import deblend_sources
+from photutils.segmentation import deblend_sources
+#from mophongo.photutils_deblend import deblend_sources
 from photutils.datasets import make_model_image, make_model_params
 from skimage.morphology import dilation, disk, max_tree
 
@@ -122,7 +123,7 @@ def make_simple_data(
         nlevels=64,
         contrast=0.000001,
         progress_bar=False,
-        compactness=0.0,
+#        compactness=0.0,
     )
     segdata = segm.data
     segmap = np.zeros_like(segdata, dtype=int)
@@ -379,7 +380,7 @@ def save_flux_vs_truth_plot(
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
-    print('TRUTH min max', truth.min(), truth.max())
+#    print('TRUTH min max', truth.min(), truth.max())
     # Panel 1 (top-left): Recovered vs True
     axes[0, 0].scatter(truth, recovered, s=20, alpha=0.4)
     minval = min(truth.min(), recovered.min())

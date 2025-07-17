@@ -21,13 +21,6 @@ def _convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     return np.einsum("ijkl,kl->ij", windows, kernel)
 
 
-@dataclass
-class TemplateOld:
-    array: np.ndarray
-    bbox: Tuple[int, int, int, int]
-    position_cutout: Tuple[float, float] | None = None
-
-
 class Template(Cutout2D):
     """Cutout-based template storing slice bookkeeping."""
 

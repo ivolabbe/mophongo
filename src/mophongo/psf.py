@@ -27,7 +27,7 @@ from photutils.psf import matching
 from photutils.psf.matching import TukeyWindow
 from photutils.centroids import centroid_quadratic
 
-from .utils import measure_shape, get_wcs_pscale, get_slice_wcs, to_header
+from .utils import measure_shape, get_wcs_pscale, get_slice_wcs, to_header, read_wcs_csv
 from astropy.nddata import Cutout2D
 from astropy.coordinates import SkyCoord
 
@@ -431,7 +431,7 @@ class PSF:
             psf_fit = PSF.from_data(psf_model, size=fit_size).fit_gaussian(params)
         elif method.lower() == "moffat":
             data_fit = PSF.from_data(data, size=fit_size).fit_moffat(params)
-            psF_fit = PSF.from_data(psf_model, size=fit_size).fit_moffat(params)
+            psf_fit = PSF.from_data(psf_model, size=fit_size).fit_moffat(params)
         else:
             raise ValueError(
                 f"Unknown method: {method}. Use 'gaussian' or 'moffat'."

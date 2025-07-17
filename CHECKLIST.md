@@ -24,6 +24,7 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
   - [x] Add methods to fit Moffat and Gaussian profiles to existing PSF arrays
   - [x] Added `PSF.delta` for symmetric delta-function PSFs
   - [x] Added `PSF.from_star` constructor for extracting PSFs from images
+  - [x] Added `PSF.gaussian_matching_kernel` and `DrizzlePSF.register`
 - [x] **Template builder** (`src/mophongo/templates.py`)
   - `extract_templates` to create PSF-matched templates
   - Extract per-object cutouts from the high‑res image using the detection segmentation.

@@ -69,3 +69,4 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [x] Implemented symmetry-based deblender
 - [x] Added compactness parameter in photutils-based deblender
 - [ ] Implement hybrid deblender with analytic weighting
+- [ ] Implement JWST STDPSF extension utility

@@ -12,7 +12,7 @@ from utils import make_simple_data
 
 
 def test_benchmark_pipeline_steps():
-    images, segmap, catalog, psfs, _, _ = make_simple_data(nsrc=100, size=201, ndilate=2)
+    images, segmap, catalog, psfs, _, _ = make_simple_data(nsrc=20, size=101, ndilate=2)
     psf_hi = PSF.from_array(psfs[0])
     psf_lo = PSF.from_array(psfs[1])
     kernel = psf_hi.matching_kernel(psf_lo)
@@ -21,10 +21,7 @@ def test_benchmark_pipeline_steps():
     tmpls = Templates.from_image(images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel)
     extract_time = time.perf_counter() - start
 
-#    start = time.perf_counter()
-#    tmpls.extend_with_moffat(kernel)
-#    extend_time = time.perf_counter() - start
-
+  
     start = time.perf_counter()
     fitter = SparseFitter(tmpls.templates, images[1])
     fitter.solve()

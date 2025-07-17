@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 
+import logging
 import os
 import numpy as np
 from scipy.optimize import least_squares
@@ -29,6 +30,8 @@ from photutils.centroids import centroid_quadratic
 from .utils import measure_shape, get_wcs_pscale, get_slice_wcs, to_header
 from astropy.nddata import Cutout2D
 from astropy.coordinates import SkyCoord
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class GaussianFit:
@@ -386,6 +389,69 @@ class PSF:
         return self._fit_profile(
             model_func, {}, free_params, xc, yc, GaussianFit
         )
+
+    @staticmethod
+    def gaussian_matching_kernel(
+        data: np.ndarray,
+        psf_model: np.ndarray,
+        method: str = "gaussian",
+        params: str = "flux,fwhm,xc,yc",
+        fit_size: int = 25,
+    ) -> tuple[np.ndarray, float, GaussianFit | MoffatFit, GaussianFit | MoffatFit]:
+        """Derive a convolution kernel matching ``psf_model`` to ``data``.
+
+        Parameters
+        ----------
+        data : ndarray
+            Observed data (e.g., a star cutout).
+        psf_model : ndarray
+            PSF model array to be convolved.
+        method : {{'gaussian', 'moffat'}}, optional
+            Profile used for the fit. Defaults to ``'gaussian'``.
+        params : str, optional
+            Parameters to optimize during the fit. Defaults to
+            ``'flux,fwhm,xc,yc'``.
+        fit_size : int, optional
+            Size of the central region used for the profile fit.
+
+        Returns
+        -------
+        kernel : ndarray
+            Convolution kernel matching ``psf_model`` to ``data``.
+        fwhm_kernel : float
+            FWHM of the derived kernel.
+        data_fit : ``GaussianFit`` or ``MoffatFit``
+            Fit result for the data.
+        psf_fit : ``GaussianFit`` or ``MoffatFit``
+            Fit result for the PSF model.
+        """
+
+        if method.lower() == "gaussian":
+            data_fit = PSF.from_data(data, size=fit_size).fit_gaussian(params)
+            psf_fit = PSF.from_data(psf_model, size=fit_size).fit_gaussian(params)
+        elif method.lower() == "moffat":
+            data_fit = PSF.from_data(data, size=fit_size).fit_moffat(params)
+            psf_fit = PSF.from_data(psf_model, size=fit_size).fit_moffat(params)
+        else:
+            raise ValueError(
+                f"Unknown method: {method}. Use 'gaussian' or 'moffat'."
+            )
+
+        fwhm_kernel_sq = data_fit.fwhm_x**2 - psf_fit.fwhm_x**2
+        if fwhm_kernel_sq <= 0:
+            kernel_size = 3
+            kernel = np.zeros((kernel_size, kernel_size))
+            kernel[kernel_size // 2, kernel_size // 2] = 1.0
+            fwhm_kernel = 0.0
+        else:
+            fwhm_kernel = float(np.sqrt(fwhm_kernel_sq))
+            kernel_size = int(fwhm_kernel * 2.5)
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+            kernel_size = max(kernel_size, 3)
+            kernel = PSF.gaussian(kernel_size, fwhm_kernel, fwhm_kernel).array
+
+        return kernel, fwhm_kernel, data_fit, psf_fit
 
 
 def pad_to_shape(arr: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
@@ -830,3 +896,93 @@ class DrizzlePSF:
             fits.ImageHDU(data=outsci * scale, header=to_header(wcs_slice))
         ])
         return hdu
+
+    def register(
+        self,
+        cutout: Cutout2D,
+        fkey: str,
+        max_iterations: int = 3,
+        convergence_threshold: float = 0.1,
+        verbose: bool = False,
+    ) -> tuple[tuple[float, float], np.ndarray, np.ndarray]:
+        """Register a PSF model to match the data centroid.
+
+        Parameters
+        ----------
+        cutout : `~astropy.nddata.Cutout2D`
+            Data cutout used for registration.
+        fkey : str
+            Filter key identifying the PSF model.
+        max_iterations : int, optional
+            Maximum number of centering iterations.
+        convergence_threshold : float, optional
+            Convergence threshold in pixels.
+        verbose : bool, optional
+            If ``True`` emit progress information through the logger.
+
+        Returns
+        -------
+        position : tuple of float
+            Final world coordinate position ``(ra, dec)``.
+        data : ndarray
+            Data cutout used for registration.
+        psf_model : ndarray
+            Registered PSF model array.
+        """
+
+        N = cutout.shape[0] // 2
+        N_native = int(
+            np.ceil(
+                (N * self.driz_pscale / self.wcs[self.flt_keys[0]].pscale)
+            )
+        )
+
+        xi, yi = cutout.input_position_cutout
+        for i in range(max_iterations):
+            ri, di = cutout.wcs.pixel_to_world_values(xi, yi)
+
+            psf_hdu = self.get_psf(
+                ra=ri,
+                dec=di,
+                filter=fkey,
+                wcs_slice=cutout.wcs,
+                kernel=self.driz_header["KERNEL"],
+                pixfrac=self.driz_header["PIXFRAC"],
+                verbose=verbose,
+                npix=N_native,
+            )
+
+            xc, yc = centroid_quadratic(
+                psf_hdu[1].data,
+                xpeak=cutout.input_position_cutout[0],
+                ypeak=cutout.input_position_cutout[1],
+                fit_boxsize=5,
+            )
+
+            dx = cutout.input_position_cutout[0] - xc
+            dy = cutout.input_position_cutout[1] - yc
+            dr = np.hypot(dx, dy)
+
+            if verbose:
+                logger.info(
+                    "Iteration %d: Centroid shift: %.3f, %.3f, dr= %.3f",
+                    i + 1,
+                    dx,
+                    dy,
+                    dr,
+                )
+
+            xi += dx
+            yi += dy
+
+            if dr < convergence_threshold:
+                if verbose:
+                    logger.info("Converged after %d iterations", i + 1)
+                break
+        else:
+            if verbose:
+                logger.info(
+                    "Maximum iterations (%d) reached", max_iterations
+                )
+
+        return (ri, di), cutout.data, psf_hdu[1].data

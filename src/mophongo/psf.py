@@ -431,7 +431,7 @@ class PSF:
             psf_fit = PSF.from_data(psf_model, size=fit_size).fit_gaussian(params)
         elif method.lower() == "moffat":
             data_fit = PSF.from_data(data, size=fit_size).fit_moffat(params)
-            psf_fit = PSF.from_data(psf_model, size=fit_size).fit_moffat(params)
+            psF_fit = PSF.from_data(psf_model, size=fit_size).fit_moffat(params)
         else:
             raise ValueError(
                 f"Unknown method: {method}. Use 'gaussian' or 'moffat'."

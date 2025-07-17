@@ -28,6 +28,9 @@ packages = [{include = "mophongo", from = "src"}]
 pytest = "^8.4.1"
 matplotlib = "^3.10.3"
 ipykernel = "^6.29.5"
+stpsf = "^2.1.0"
+webbpsf = "^2.0.0"
+photutils = "^2.2.0"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

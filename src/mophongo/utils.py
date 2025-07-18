@@ -8,6 +8,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.table import Table
 from shapely.geometry import Polygon
+from scipy.special import hermite
 
 # model based stuff 
 def elliptical_moffat(
@@ -172,3 +173,179 @@ def gaussian(
     )
     return psf
 
+
+def gauss_hermite_basis(order: int, scales: list[float], size: int) -> np.ndarray:
+    """Return a stack of Gauss--Hermite basis functions.
+
+    Parameters
+    ----------
+    order : int
+        Maximum Hermite polynomial order ``n`` where ``0 <= i + j <= n``.
+    scales : list of float
+        Standard deviation of the underlying Gaussian for each scale.
+    size : int
+        Output image size (square).
+
+    Returns
+    -------
+    ndarray
+        Array of shape ``(size, size, n_basis)`` containing the basis set.
+    """
+
+    y, x = np.mgrid[:size, :size]
+    cy = (size - 1) / 2
+    cx = (size - 1) / 2
+    basis = []
+    for s in scales:
+        xn = (x - cx) / s
+        yn = (y - cy) / s
+        g = np.exp(-0.5 * (xn**2 + yn**2))
+        for i in range(order + 1):
+            for j in range(order + 1 - i):
+                hx = hermite(i)(xn)
+                hy = hermite(j)(yn)
+                b = g * hx * hy
+                if i == 0 and j == 0:
+                    b /= b.sum()
+                else:
+                    b -= b.mean()
+                basis.append(b)
+    return np.stack(basis, axis=2)
+
+
+def multi_gaussian_basis(scales: list[float], size: int) -> np.ndarray:
+    """Return a set of Gaussian basis functions with varying width."""
+
+    gauss_list = [gaussian(size, s, s) for s in scales]
+    basis = np.stack(gauss_list, axis=2)
+    basis /= basis.sum(axis=(0, 1))
+    return basis
+
+
+def fit_kernel_fourier(
+    psf_hi: np.ndarray, psf_lo: np.ndarray, basis: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fit a convolution kernel using a set of basis functions in Fourier space."""
+
+    nb = basis.shape[2]
+    f_hi = np.fft.fft2(psf_hi)
+    f_lo = np.fft.fft2(psf_lo)
+    f_basis = np.fft.fft2(basis, axes=(0, 1))
+    A = f_hi[..., None] * f_basis
+    A = A.reshape(-1, nb)
+    b = f_lo.ravel()
+    A_real = np.vstack([A.real, A.imag])
+    b_real = np.concatenate([b.real, b.imag])
+    coeffs, *_ = np.linalg.lstsq(A_real, b_real, rcond=None)
+    kernel = np.sum(basis * coeffs.reshape(1, 1, -1), axis=2)
+    kernel /= kernel.sum()
+    return kernel, coeffs
+
+
+# ---------------------------------------------------------------------
+# Basic WCS utilities
+# ---------------------------------------------------------------------
+def get_wcs_pscale(wcs, set_attribute=True):
+    """Pixel scale in arcsec from a ``WCS`` object."""
+    from numpy.linalg import det
+
+    if isinstance(wcs, fits.Header):
+        wcs = WCS(wcs, relax=True)
+
+    if hasattr(wcs.wcs, "cd") and wcs.wcs.cd is not None:
+        detv = det(wcs.wcs.cd)
+    else:
+        detv = det(wcs.wcs.pc)
+
+    pscale = np.sqrt(np.abs(detv)) * 3600.0
+    if set_attribute:
+        wcs.pscale = pscale
+    return pscale
+
+
+def to_header(wcs, add_naxis=True, relax=True, key=None):
+    """Convert WCS to a FITS header with a few extra keywords."""
+    hdr = wcs.to_header(relax=relax, key=key)
+    if add_naxis:
+        if hasattr(wcs, "pixel_shape") and wcs.pixel_shape is not None:
+            hdr["NAXIS"] = wcs.naxis
+            hdr["NAXIS1"] = wcs.pixel_shape[0]
+            hdr["NAXIS2"] = wcs.pixel_shape[1]
+        elif hasattr(wcs, "_naxis1"):
+            hdr["NAXIS"] = wcs.naxis
+            hdr["NAXIS1"] = wcs._naxis1
+            hdr["NAXIS2"] = wcs._naxis2
+
+    if hasattr(wcs.wcs, "cd"):
+        for i in [0, 1]:
+            for j in [0, 1]:
+                hdr[f"CD{i + 1}_{j + 1}"] = wcs.wcs.cd[i][j]
+
+    if hasattr(wcs, "sip") and wcs.sip is not None:
+        hdr["SIPCRPX1"], hdr["SIPCRPX2"] = wcs.sip.crpix
+    return hdr
+
+
+def get_slice_wcs(wcs, slx, sly):
+    """Slice a WCS while propagating SIP and distortion keywords."""
+    nx = slx.stop - slx.start
+    ny = sly.stop - sly.start
+    swcs = wcs.slice((sly, slx))
+
+    if hasattr(swcs, "_naxis1"):
+        swcs.naxis1 = swcs._naxis1 = nx
+        swcs.naxis2 = swcs._naxis2 = ny
+    else:
+        swcs._naxis = [nx, ny]
+        swcs._naxis1 = nx
+        swcs._naxis2 = ny
+
+    if hasattr(swcs, "sip") and swcs.sip is not None:
+        for c in [0, 1]:
+            swcs.sip.crpix[c] = swcs.wcs.crpix[c]
+
+    acs = [4096 / 2, 2048 / 2]
+    dx = swcs.wcs.crpix[0] - acs[0]
+    dy = swcs.wcs.crpix[1] - acs[1]
+    for ext in ["cpdis1", "cpdis2", "det2im1", "det2im2"]:
+        if hasattr(swcs, ext):
+            extw = getattr(swcs, ext)
+            if extw is not None:
+                extw.crval[0] += dx
+                extw.crval[1] += dy
+                setattr(swcs, ext, extw)
+    return swcs
+
+
+# ---------------------------------------------------------------------
+# WCS information from CSV
+# ---------------------------------------------------------------------
+def read_wcs_csv(drz_file, csv_file=None):
+    """Read exposure WCS info from a CSV table."""
+    if csv_file is None:
+        csv_file = (
+            drz_file.split("_drz_sci")[0].split("_drc_sci")[0] + "_wcs.csv"
+        )
+        if not os.path.exists(csv_file):
+            raise FileNotFoundError(f"CSV file {csv_file} not found")
+
+    tab = Table.read(csv_file, format="csv")
+    flt_keys = []
+    wcs_dict = {}
+    footprints = {}
+
+    for row in tab:
+        key = (row["file"], row["ext"])
+        hdr = fits.Header()
+        for col in tab.colnames:
+            hdr[col] = row[col]
+
+        wcs = WCS(hdr, relax=True)
+        get_wcs_pscale(wcs)
+        wcs.expweight = hdr.get("EXPTIME", 1)
+
+        flt_keys.append(key)
+        wcs_dict[key] = wcs
+        footprints[key] = Polygon(wcs.calc_footprint())
+
+    return flt_keys, wcs_dict, footprints

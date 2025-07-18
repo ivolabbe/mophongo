@@ -16,7 +16,7 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.ndimage import shift as nd_shift
 from dataclasses import dataclass
-from shapely.geometry import Point
+from shapely.geometry import Point, Polygon
 from drizzlepac import adrizzle
 
 from astropy.io import fits
@@ -25,11 +25,12 @@ from astropy.table import Table
 from astropy.utils.data import download_file
 from photutils.psf import matching
 from photutils.psf.matching import TukeyWindow
-from photutils.centroids import centroid_quadratic
+from photutils.centroids import centroid_quadratic, centroid_com   
 
-from .utils import measure_shape, get_wcs_pscale, get_slice_wcs, to_header, read_wcs_csv
+from .utils import measure_shape 
 from astropy.nddata import Cutout2D
 from astropy.coordinates import SkyCoord
+ 
 
 logger = logging.getLogger(__name__)
 
@@ -538,6 +539,7 @@ class EffectivePSF:
         local_dir=None,
         filter_pattern=None,
         use_astropy_cache=True,
+        verbose=False,
     ):
         """Download JWST STDPSF models."""
 
@@ -545,10 +547,13 @@ class EffectivePSF:
         if local_dir is not None and filter_pattern is not None:
             p = Path(local_dir)
             files_dir = list(p.rglob('*.fits'))
-            rx = re.compile(filter_pattern)
+            #rx = re.compile(filter_pattern)
+            rx = re.compile(f"{filter_pattern}(?!_EXTENDED)")
             files = [f for f in files_dir if rx.search(os.path.basename(f))]
             for f in files:
                 with fits.open(f) as im:
+                    if verbose:
+                        print(f"Loading {f}")
                     data = np.array([d.T for d in im[0].data]).T
                     if clip_negative:
                         data[data < 0] = 0
@@ -718,9 +723,85 @@ class EffectivePSF:
 
 
 # ---------------------------------------------------------------------
+# Basic WCS utilities
+# ---------------------------------------------------------------------
+def get_wcs_pscale(wcs, set_attribute=True):
+    """Pixel scale in arcsec from a ``WCS`` object."""
+    from numpy.linalg import det
+
+    if isinstance(wcs, fits.Header):
+        wcs = WCS(wcs, relax=True)
+
+    if hasattr(wcs.wcs, "cd") and wcs.wcs.cd is not None:
+        detv = det(wcs.wcs.cd)
+    else:
+        detv = det(wcs.wcs.pc)
+
+    pscale = np.sqrt(np.abs(detv)) * 3600.0
+    if set_attribute:
+        wcs.pscale = pscale
+    return pscale
+
+
+def to_header(wcs, add_naxis=True, relax=True, key=None):
+    """Convert WCS to a FITS header with a few extra keywords."""
+    hdr = wcs.to_header(relax=relax, key=key)
+    if add_naxis:
+        if hasattr(wcs, "pixel_shape") and wcs.pixel_shape is not None:
+            hdr["NAXIS"] = wcs.naxis
+            hdr["NAXIS1"] = wcs.pixel_shape[0]
+            hdr["NAXIS2"] = wcs.pixel_shape[1]
+        elif hasattr(wcs, "_naxis1"):
+            hdr["NAXIS"] = wcs.naxis
+            hdr["NAXIS1"] = wcs._naxis1
+            hdr["NAXIS2"] = wcs._naxis2
+
+    if hasattr(wcs.wcs, "cd"):
+        for i in [0, 1]:
+            for j in [0, 1]:
+                hdr[f"CD{i + 1}_{j + 1}"] = wcs.wcs.cd[i][j]
+
+    if hasattr(wcs, "sip") and wcs.sip is not None:
+        hdr["SIPCRPX1"], hdr["SIPCRPX2"] = wcs.sip.crpix
+    return hdr
+
+
+def get_slice_wcs(wcs, slx, sly):
+    """Slice a WCS while propagating SIP and distortion keywords."""
+    nx = slx.stop - slx.start
+    ny = sly.stop - sly.start
+    swcs = wcs.slice((sly, slx))
+
+    if hasattr(swcs, "_naxis1"):
+        swcs.naxis1 = swcs._naxis1 = nx
+        swcs.naxis2 = swcs._naxis2 = ny
+    else:
+        swcs._naxis = [nx, ny]
+        swcs._naxis1 = nx
+        swcs._naxis2 = ny
+
+    if hasattr(swcs, "sip") and swcs.sip is not None:
+        for c in [0, 1]:
+            swcs.sip.crpix[c] = swcs.wcs.crpix[c]
+
+    acs = [4096 / 2, 2048 / 2]
+    dx = swcs.wcs.crpix[0] - acs[0]
+    dy = swcs.wcs.crpix[1] - acs[1]
+    for ext in ["cpdis1", "cpdis2", "det2im1", "det2im2"]:
+        if hasattr(swcs, ext):
+            extw = getattr(swcs, ext)
+            if extw is not None:
+                extw.crval[0] += dx
+                extw.crval[1] += dy
+                setattr(swcs, ext, extw)
+    return swcs
+
+
+
+
+# ---------------------------------------------------------------------
 # Drizzle PSF class
 # ---------------------------------------------------------------------
-
 
 class DrizzlePSF:
 
@@ -735,7 +816,7 @@ class DrizzlePSF:
         epsf_obj=None,
     ):
         if info is None:
-            info = read_wcs_csv(driz_image, csv_file=csv_file)
+            info = self.read_wcs_csv(driz_image, csv_file=csv_file)
 
         self.flt_keys, self.wcs, self.footprint = info
         self.flt_files = list({k[0] for k in self.flt_keys})
@@ -755,7 +836,44 @@ class DrizzlePSF:
         self.driz_pscale = get_wcs_pscale(self.driz_wcs)
         self.driz_wcs.pscale = self.driz_pscale
 
+        self._next_odd_int = lambda x: int(round(x)) | 1
+
+
     # ---------------------------------------------------------------
+    # ---------------------------------------------------------------------
+    # WCS information from CSV
+    # ---------------------------------------------------------------------
+    @staticmethod
+    def read_wcs_csv(drz_file, csv_file=None):
+        """Read exposure WCS info from a CSV table."""
+        if csv_file is None:
+            csv_file = (
+                drz_file.split("_drz_sci")[0].split("_drc_sci")[0] + "_wcs.csv"
+            )
+            if not os.path.exists(csv_file):
+                raise FileNotFoundError(f"CSV file {csv_file} not found")
+
+        tab = Table.read(csv_file, format="csv")
+        flt_keys = []
+        wcs_dict = {}
+        footprints = {}
+
+        for row in tab:
+            key = (row["file"], row["ext"])
+            hdr = fits.Header()
+            for col in tab.colnames:
+                hdr[col] = row[col]
+
+            wcs = WCS(hdr, relax=True)
+            get_wcs_pscale(wcs)
+            wcs.expweight = hdr.get("EXPTIME", 1)
+
+            flt_keys.append(key)
+            wcs_dict[key] = wcs
+            footprints[key] = Polygon(wcs.calc_footprint())
+
+        return flt_keys, wcs_dict, footprints
+
     @staticmethod
     def _get_empty_driz(wcs):
         if hasattr(wcs, "pixel_shape") and wcs.pixel_shape is not None:
@@ -770,30 +888,46 @@ class DrizzlePSF:
         outctx = np.zeros(sh, dtype=np.int32)
         return outsci, outwht, outctx
 
+    # always return odd size
     def get_driz_cutout(self,
                         ra,
                         dec,
                         size=None,
-                        N=None,
-                        size_native=31,
-                        odd=True):
-        """Return a drizzle cutout or its WCS."""
-        xy = self.driz_wcs.all_world2pix([[ra, dec]], 0)[0]
-        xyp = np.asarray(np.round(xy), dtype=int)
+                        size_native=None,
+                        recenter=False,
+                        search_boxsize=11,
+                        fit_boxsize=5,                
+                        verbose=False):
+        """Return a drizzle Cutout2D, including WCS."""
 
         if size is None:
-            N = int((size_native * self.wcs[self.flt_keys[0]].pscale /
-                     self.driz_pscale) // 2)
-        else:
-            N = int(size // 2)
+            if size_native is None:    # get from the first filter
+                first_key, first_value = next(iter(self.epsf_obj.epsf.items()))
+                size_native = first_value.shape[0] / 4  # 4x oversampling
+                if verbose:
+                    print(f"Using native size {size_native} from {first_key} assuming 4x oversampling.")
 
-        size_psf = 2 * N + odd
+            size = size_native * self.wcs[self.flt_keys[0]].pscale / self.driz_pscale
+            
+
+        size_odd = self._next_odd_int(size)
+        if verbose:
+            print(f"Cutout size: {size_odd} pixels")
 
         with fits.open(self.driz_image) as im:
+            data = im[0].data
+            # Convert RA, Dec to pixel coordinates: and get accurate centroid
+            xc, yc = self.driz_wcs.world_to_pixel_values(ra, dec)
+            if recenter:
+                xc, yc = centroid_quadratic(
+                    data, xpeak = xc, ypeak = yc,
+                    fit_boxsize=fit_boxsize,
+                    search_boxsize=search_boxsize
+                )
             cutout = Cutout2D(
                 im[0].data,
-                SkyCoord(ra, dec, unit="deg"),
-                (size_psf, size_psf),
+                (xc, yc),
+                (size_odd, size_odd),
                 wcs=self.driz_wcs,
                 mode="partial",
                 fill_value=0.0,
@@ -837,10 +971,10 @@ class DrizzlePSF:
                 dy = xy[1] - int(xy[1]) + yphase
                 chip_offset = 2051 if ext == 2 else 0
 
-                # for NIRCam select detector from flt file name
-                if 'NRC*' in filter:
+                # for NIRCam select detector from flt file name if the filter is a regexp
+                if 'NRC..' in filter:
                     det = Path(file).stem.split('_')[-2][0:5].upper()
-                    flt_filter = filter.replace('NRC*', det)
+                    flt_filter = filter.replace('NRC..', det)
                 else:
                     flt_filter = filter
 
@@ -900,9 +1034,9 @@ class DrizzlePSF:
     def register(
         self,
         cutout: Cutout2D,
-        fkey: str,
+        filter: str,
         max_iterations: int = 3,
-        convergence_threshold: float = 0.1,
+        convergence_threshold: float = 0.05,
         verbose: bool = False,
     ) -> tuple[tuple[float, float], np.ndarray, np.ndarray]:
         """Register a PSF model to match the data centroid.
@@ -911,8 +1045,8 @@ class DrizzlePSF:
         ----------
         cutout : `~astropy.nddata.Cutout2D`
             Data cutout used for registration.
-        fkey : str
-            Filter key identifying the PSF model.
+        filter : str
+            Filter key or regexp identifying the PSF model.
         max_iterations : int, optional
             Maximum number of centering iterations.
         convergence_threshold : float, optional
@@ -944,7 +1078,7 @@ class DrizzlePSF:
             psf_hdu = self.get_psf(
                 ra=ri,
                 dec=di,
-                filter=fkey,
+                filter=filter,
                 wcs_slice=cutout.wcs,
                 kernel=self.driz_header["KERNEL"],
                 pixfrac=self.driz_header["PIXFRAC"],
@@ -953,36 +1087,33 @@ class DrizzlePSF:
             )
 
             xc, yc = centroid_quadratic(
-                psf_hdu[1].data,
-                xpeak=cutout.input_position_cutout[0],
-                ypeak=cutout.input_position_cutout[1],
-                fit_boxsize=5,
+                 psf_hdu[1].data,
+                 xpeak=cutout.input_position_cutout[0],
+                 ypeak=cutout.input_position_cutout[1],
+                 fit_boxsize=5,
             )
-
+#            print('centroid_com')
+#            xc, yc = centroid_com(psf_hdu[1].data)
+ 
             dx = cutout.input_position_cutout[0] - xc
             dy = cutout.input_position_cutout[1] - yc
             dr = np.hypot(dx, dy)
 
             if verbose:
-                logger.info(
-                    "Iteration %d: Centroid shift: %.3f, %.3f, dr= %.3f",
-                    i + 1,
-                    dx,
-                    dy,
-                    dr,
-                )
+                print( "Iteration %d: Centroid box5 shift: %.3f, %.3f, dr= %.3f",
+                    i + 1,  dx,  dy,  dr,  )
 
             xi += dx
             yi += dy
 
             if dr < convergence_threshold:
                 if verbose:
-                    logger.info("Converged after %d iterations", i + 1)
+                    print("Converged after %d iterations", i + 1)
                 break
         else:
             if verbose:
-                logger.info(
-                    "Maximum iterations (%d) reached", max_iterations
-                )
+                print( "Maximum iterations (%d) reached", max_iterations )
 
+  
+        ri, di = cutout.wcs.pixel_to_world_values(xi, yi)
         return (ri, di), cutout.data, psf_hdu[1].data

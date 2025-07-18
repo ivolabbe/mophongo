@@ -9,6 +9,11 @@ from astropy.wcs import WCS
 from astropy.table import Table
 from shapely.geometry import Polygon
 from scipy.special import hermite
+from scipy.interpolate import PchipInterpolator
+from astropy.utils import lazyproperty
+from astropy.modeling.fitting import TRFLSQFitter
+from astropy.modeling.models import Moffat1D
+from photutils.profiles import RadialProfile, CurveOfGrowth
 
 # model based stuff 
 def elliptical_moffat(
@@ -349,3 +354,183 @@ def read_wcs_csv(drz_file, csv_file=None):
         footprints[key] = Polygon(wcs.calc_footprint())
 
     return flt_keys, wcs_dict, footprints
+
+
+class CircularApertureProfile(RadialProfile):
+    """Combined radial profile and curve of growth for a source.
+
+    This class extends :class:`photutils.profiles.RadialProfile` by
+    computing a matching :class:`photutils.profiles.CurveOfGrowth` and
+    providing convenience methods for normalization, 1D model fitting
+    and plotting.
+
+    Parameters
+    ----------
+    data : 2D `~numpy.ndarray`
+        Background subtracted image data.
+    xycen : tuple of 2 floats
+        ``(x, y)`` pixel coordinate of the source centre.
+    radial_edges : 1D array_like
+        Radii defining the edges for the radial profile annuli.
+    cog_radii : 1D array_like, optional
+        Radii for the curve of growth apertures.  If `None`, the values
+        of ``radial_edges[1:]`` are used.
+    name : str, optional
+        Name of the profile used for plot legends.
+    norm_radius : float, optional
+        Radius at which to normalise both profiles.
+    error, mask, method, subpixels : optional
+        Passed to :class:`photutils.profiles.RadialProfile` and
+        :class:`photutils.profiles.CurveOfGrowth`.
+    """
+
+    def __init__(
+        self,
+        data: np.ndarray,
+        xycen: tuple[float, float],
+        radial_edges: np.ndarray,
+        *,
+        cog_radii: np.ndarray | None = None,
+        error: np.ndarray | None = None,
+        mask: np.ndarray | None = None,
+        method: str = "exact",
+        subpixels: int = 5,
+        name: str | None = None,
+        norm_radius: float | None = None,
+    ) -> None:
+        super().__init__(
+            data,
+            xycen,
+            radial_edges,
+            error=error,
+            mask=mask,
+            method=method,
+            subpixels=subpixels,
+        )
+
+        if cog_radii is None:
+            cog_radii = radial_edges[1:]
+
+        self.cog = CurveOfGrowth(
+            data,
+            xycen,
+            cog_radii,
+            error=error,
+            mask=mask,
+            method=method,
+            subpixels=subpixels,
+        )
+
+        self.name = name
+        self.norm_radius = norm_radius
+
+        if norm_radius is not None:
+            self.normalize(norm_radius)
+
+    def normalize(self, norm_radius: float | None = None) -> None:
+        """Normalize the radial profile and curve of growth."""
+
+        if norm_radius is not None:
+            self.norm_radius = norm_radius
+
+        if self.norm_radius is None:
+            raise ValueError("norm_radius must be provided")
+
+        rp_val = PchipInterpolator(self.radius, self.profile, extrapolate=False)(
+            self.norm_radius
+        )
+        if np.isfinite(rp_val) and rp_val != 0:
+            self.normalization_value *= rp_val
+            self.__dict__["profile"] = self.profile / rp_val
+            self.__dict__["profile_error"] = self.profile_error / rp_val
+
+        cog_val = PchipInterpolator(
+            self.cog.radius, self.cog.profile, extrapolate=False
+        )(self.norm_radius)
+        if np.isfinite(cog_val) and cog_val != 0:
+            self.cog.normalization_value *= cog_val
+            self.cog.__dict__["profile"] = self.cog.profile / cog_val
+            self.cog.__dict__["profile_error"] = self.cog.profile_error / cog_val
+
+    @lazyproperty
+    def moffat_fit(self):
+        """Return a 1D Moffat model fitted to the radial profile."""
+
+        profile = self.profile[self._profile_nanmask]
+        radius = self.radius[self._profile_nanmask]
+        amplitude = float(np.max(profile))
+        gamma = float(radius[np.argmax(profile < amplitude / 2)] or 1.0)
+        m_init = Moffat1D(amplitude=amplitude, x_0=0.0, gamma=gamma, alpha=2.5)
+        m_init.x_0.fixed = True
+        fitter = TRFLSQFitter()
+        return fitter(m_init, radius, profile)
+
+    @lazyproperty
+    def moffat_fwhm(self) -> float:
+        """Full width at half maximum (FWHM) of the fitted Moffat."""
+
+        fit = self.moffat_fit
+        return 2 * fit.gamma.value * np.sqrt(2 ** (1 / fit.alpha.value) - 1)
+
+    def cog_ratio(self, other: "CircularApertureProfile") -> np.ndarray:
+        """Return the ratio of this curve of growth to another."""
+
+        interp = PchipInterpolator(
+            other.cog.radius, other.cog.profile, extrapolate=False
+        )(self.cog.radius)
+        return self.cog.profile / interp
+
+    def _plot_radial_profile(self, ax) -> None:
+        label = self.name or "profile"
+        ax.plot(self.radius, self.profile, label=label, color="C0")
+        ax.set_yscale("log")
+        ax.set_xlabel("Radius (pix)")
+        ax.set_ylabel("Normalized Profile")
+        ax.axvline(self.gaussian_fwhm / 2, color="C1", ls="--", label="Gauss FWHM")
+        ax.axvline(self.moffat_fwhm / 2, color="C2", ls=":", label="Moffat FWHM")
+        ax.legend()
+
+    def _plot_cog(self, ax) -> None:
+        label = self.name or "profile"
+        ax.plot(self.cog.radius, self.cog.profile, label=label, color="C0")
+        ax.set_xlabel("Radius (pix)")
+        ax.set_ylabel("Encircled Energy")
+        if self.norm_radius is not None:
+            r20 = self.cog.calc_radius_at_ee(0.2)
+            r80 = self.cog.calc_radius_at_ee(0.8)
+            ax.axvline(r20, color="C1", ls=":")
+            ax.axvline(r80, color="C1", ls="--")
+        ax.set_ylim(0, 1.05)
+        ax.legend()
+
+    def _plot_ratio(self, other: "CircularApertureProfile", ax) -> None:
+        ratio = self.cog_ratio(other)
+        ax.plot(self.cog.radius, ratio, color="C0")
+        ax.axhline(1.0, color="0.5", ls="--")
+        ax.set_xlabel("Radius (pix)")
+        ax.set_ylabel("COG Ratio")
+        ax.set_ylim(0.8, 1.2)
+
+    def plot(
+        self,
+        *,
+        compare_to: "CircularApertureProfile" | None = None,
+        show: bool = False,
+    ) -> tuple["matplotlib.figure.Figure", list]:
+        """Plot radial profile and curve of growth."""
+
+        import matplotlib.pyplot as plt
+
+        ncols = 3 if compare_to is not None else 2
+        fig, axes = plt.subplots(1, ncols, figsize=(5 * ncols, 4))
+
+        self._plot_radial_profile(axes[0])
+        self._plot_cog(axes[1])
+
+        if compare_to is not None:
+            self._plot_ratio(compare_to, axes[2])
+
+        fig.tight_layout()
+        if show:
+            plt.show()
+        return fig, axes

@@ -27,7 +27,14 @@ from photutils.psf import matching
 from photutils.psf.matching import TukeyWindow
 from photutils.centroids import centroid_quadratic, centroid_com   
 
-from .utils import measure_shape 
+from .utils import (
+    measure_shape,
+    get_wcs_pscale,
+    get_slice_wcs,
+    to_header,
+    read_wcs_csv,
+    fit_kernel_fourier,
+)
 from astropy.nddata import Cutout2D
 from astropy.coordinates import SkyCoord
  
@@ -276,6 +283,42 @@ class PSF:
                                      recenter=recenter)
         return kernel
 
+    def matching_kernel_basis(
+        self,
+        other: "PSF" | np.ndarray,
+        basis: np.ndarray,
+        *,
+        recenter: bool = True,
+    ) -> np.ndarray:
+        """Return convolution kernel using a Fourier basis fit."""
+
+        psf_hi = self.array
+        psf_lo = other.array if isinstance(other, PSF) else np.asarray(other, dtype=float)
+        if psf_lo.sum() != 0:
+            psf_lo = psf_lo / psf_lo.sum()
+
+        if psf_hi.shape != psf_lo.shape:
+            ny = max(psf_hi.shape[0], psf_lo.shape[0])
+            nx = max(psf_hi.shape[1], psf_lo.shape[1])
+            shape = (ny, nx)
+            psf_hi = pad_to_shape(psf_hi, shape)
+            psf_lo = pad_to_shape(psf_lo, shape)
+
+        if basis.shape[:2] != psf_hi.shape:
+            basis = np.stack(
+                [pad_to_shape(basis[:, :, i], psf_hi.shape) for i in range(basis.shape[2])],
+                axis=2,
+            )
+
+        kernel, _ = fit_kernel_fourier(psf_hi, psf_lo, basis)
+        if recenter:
+            ycen, xcen = centroid_quadratic(kernel, fit_boxsize=5)
+            if not np.isnan(ycen) and not np.isnan(xcen):
+                cy = (kernel.shape[0] - 1) / 2
+                cx = (kernel.shape[1] - 1) / 2
+                kernel = nd_shift(kernel, (cy - ycen, cx - xcen), order=3, mode="nearest")
+        return kernel
+
     def _fit_profile(self, model_func, default_params, free_params, xc=None, yc=None, result_class=None):
         """Shared fitting logic for both Gaussian and Moffat profiles."""
         from scipy.optimize import least_squares
@@ -509,6 +552,25 @@ def psf_matching_kernel(
         cy = (kernel.shape[0] - 1) / 2
         cx = (kernel.shape[1] - 1) / 2
         kernel = nd_shift(kernel, (cy - ycen, cx - xcen), order=3, mode="nearest")
+    return kernel
+
+
+def psf_matching_kernel_basis(
+    psf_hi: np.ndarray,
+    psf_lo: np.ndarray,
+    basis: np.ndarray,
+    *,
+    recenter: bool = True,
+) -> np.ndarray:
+    """Match ``psf_hi`` to ``psf_lo`` using basis function fitting."""
+
+    kernel, _ = fit_kernel_fourier(psf_hi, psf_lo, basis)
+    if recenter:
+        ycen, xcen = centroid_quadratic(kernel, fit_boxsize=5)
+        if not np.isnan(ycen) and not np.isnan(xcen):
+            cy = (kernel.shape[0] - 1) / 2
+            cx = (kernel.shape[1] - 1) / 2
+            kernel = nd_shift(kernel, (cy - ycen, cx - xcen), order=3, mode="nearest")
     return kernel
 
 

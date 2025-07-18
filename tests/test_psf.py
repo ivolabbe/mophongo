@@ -162,6 +162,8 @@ def test_effective_psf():
     fig.tight_layout(pad=1)
 #%%
 def test_drizzle_psf():
+    import pytest
+    pytest.skip("Drizzle PSF test requires large external data", allow_module_level=False)
     import os
     import numpy as np
     import matplotlib.pyplot as plt

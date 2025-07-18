@@ -510,7 +510,7 @@ def psf_matching_kernel(
     psf_lo: np.ndarray,
     *,
     window: object | None = None,
-    recenter: bool = True,
+    recenter: bool = False,
 ) -> np.ndarray:
     """Compute a convolution kernel matching ``psf_hi`` to ``psf_lo``.
 

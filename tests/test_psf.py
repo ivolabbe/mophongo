@@ -104,18 +104,42 @@ def test_gaussian_matching_kernel_method():
 
 
 def test_matching_kernel_basis(tmp_path):
-    from mophongo.utils import multi_gaussian_basis
-    from mophongo.utils import CircularApertureProfile
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    import importlib
+    import mophongo.utils
+    from mophongo.psf import PSF
+    importlib.reload(mophongo.utils)
+    from mophongo.utils import multi_gaussian_basis, gauss_hermite_basis, CircularApertureProfile
+    from mophongo.templates import _convolve2d
+    from utils import save_psf_diagnostic 
+    from matplotlib import pyplot as plt
 
-    psf_hi = PSF.gaussian(51, 2.0, 2.0)
-    psf_lo = PSF.gaussian(51, 4.0, 4.0)
+    psf_hi = PSF.gaussian(51, 2.5, 2.0)
+    psf_lo = PSF.gaussian(51, 5.0, 4.0)
 
-    basis = multi_gaussian_basis([1.0, 2.0, 3.0], 51)
+    rphi = CircularApertureProfile(psf_hi.array, name='hi')
+    rplo = CircularApertureProfile(psf_lo.array, name='lo')
+    rplo.plot(compare_to=rphi)
+
+#    basis = gauss_hermite_basis(3, [2], 51)
+    basis = multi_gaussian_basis([1.0, 2.0, 3.0, 4.0, 8.0, 16.0], 51)
     kernel = psf_hi.matching_kernel_basis(psf_lo, basis)
     conv = _convolve2d(psf_hi.array, kernel)
+    
+    plt.imshow(psf_hi.array,vmin=-1e-3,vmax=1e-3)
+    plt.imshow(basis[:,:,1],vmin=-1e-3,vmax=1e-3)
+    plt.imshow(kernel,vmin=-1e-3,vmax=1e-3)
+
+    rpconv = CircularApertureProfile(conv, name='conv')
+    rplo.plot(compare_to=rpconv)
+
 #    np.testing.assert_allclose(conv, psf_lo.array, rtol=0, atol=4e-2)
     fname = tmp_path / "psf_kernel_basis.png"
     save_psf_diagnostic(fname, psf_hi.array, psf_lo.array, kernel)
+
+
     assert fname.exists()
 
 
@@ -168,22 +192,26 @@ def test_drizzle_psf():
     import numpy as np
     import matplotlib.pyplot as plt
     from astropy.utils.data import download_file
-    from mophongo.psf import DrizzlePSF, EffectivePSF
+    from mophongo.psf import DrizzlePSF, PSF
     from astropy.nddata import Cutout2D
     from astropy.io import fits
     import importlib
     import mophongo.psf
     importlib.reload(mophongo.psf)
-    from mophongo.psf import DrizzlePSF, EffectivePSF
+    from mophongo.psf import DrizzlePSF, PSF
+    from mophongo.templates import _convolve2d
     from scipy.ndimage import shift  
 
-    filt = 'F115W'
+    filt = 'F770W'
     psf_dir = '/Users/ivo/Astro/PROJECTS/JWST/PSF/'
-    filter_regex = f"STDPSF_NRC.._{filt}_EXTENDED"
+    filter_regex = f"STDPSF_MIRI_{filt}_EXTENDED"
+#    filter_regex = f"STDPSF_NRC.._{filt}_EXTENDED"
 #    filter_regex = f"STDPSF_NRC.._{filt}"
     verbose = True
     # Coordinates of a demo star
-    ra, dec = 34.30421, -5.1221624
+#    ra, dec = 34.30421, -5.1221624
+#    ra, dec = 34.298227, -5.1262533
+    ra, dec = 34.295937, -5.1294261
     size=201
 
     # DJA mosaic file
@@ -214,14 +242,23 @@ def test_drizzle_psf():
     )
     psf_data = psf_hdu[1].data
 
+    Rnorm_as = 1.5
     ########
     # Scale the PSF model to the data
-    mask = np.hypot(*np.indices(cutout_data.shape) - cutout_data.shape[0]//2) < 20
+    mask = np.hypot(*np.indices(cutout_data.shape) - cutout_data.shape[0]//2) < (Rnorm_as / dpsf.driz_pscale)
     scl = (cutout.data * psf_data)[mask].sum() / (psf_data[mask]**2).sum()
+
+    from mophongo.utils import multi_gaussian_basis, gauss_hermite_basis, CircularApertureProfile
+
+    basis = multi_gaussian_basis([1.0, 2.0, 3.0, 4.0, 6.0], cutout_data.shape[0])
+    psfd = PSF.from_array(psf_data)
+    kernel = psfd.matching_kernel_basis(cutout_data, basis)
+#    kernel = psfd.matching_kernel(cutout_data, recenter=False,window=mophongo.psf.TukeyWindow(0.6))
+    conv = _convolve2d(psf_data, kernel)
 
     ########
     # Make a plot showing the results
-    fig, axes = plt.subplots(1,3,figsize=(12,6), sharex=False, sharey=False)
+    fig, axes = plt.subplots(2,3,figsize=(12,8), sharex=False, sharey=False)
     axes = axes.flatten()
     # background for log scale
     offset = 2e-5
@@ -229,10 +266,18 @@ def test_drizzle_psf():
     axes[0].imshow(np.log10(cutout_data/scl + offset), **kws)
     axes[1].imshow(np.log10(psf_data + offset), **kws)
     axes[2].imshow(np.log10(cutout_data/scl - psf_data + offset), **kws)
-#    axes[3].imshow(np.log10(psf_data_reload + offset), **kws)
+    axes[3].imshow(np.log10(cutout_data/scl - conv + offset), **kws)
+    axes[4].imshow(np.log10(kernel + offset), **kws)
 
-    from photutils.profiles import RadialProfile, CurveOfGrowth
+    rp_data = CircularApertureProfile(cutout_data/scl, name='data', norm_radius = Rnorm_as / dpsf.driz_pscale)
+    rp_psf = CircularApertureProfile(psf_data, name='psf', norm_radius = Rnorm_as / dpsf.driz_pscale)
+    rp_conv = CircularApertureProfile(conv, name='conv', norm_radius = Rnorm_as / dpsf.driz_pscale)
+    rp_data.plot(compare_to=rp_psf)
+    rp_data.plot(compare_to=rp_conv)
 
+    return 
+
+#%%
     Rmax = cutout_data.shape[0] // 2    
     norm_radius = 1.5 / dpsf.driz_pscale
     Rmax_plot = 1.0

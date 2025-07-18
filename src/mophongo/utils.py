@@ -179,43 +179,73 @@ def gaussian(
     return psf
 
 
-def gauss_hermite_basis(order: int, scales: list[float], size: int) -> np.ndarray:
-    """Return a stack of Gauss--Hermite basis functions.
+import numpy as np
+from scipy.special import eval_hermite      # physicists' Hermite
 
-    Parameters
-    ----------
-    order : int
-        Maximum Hermite polynomial order ``n`` where ``0 <= i + j <= n``.
-    scales : list of float
-        Standard deviation of the underlying Gaussian for each scale.
-    size : int
-        Output image size (square).
-
-    Returns
-    -------
-    ndarray
-        Array of shape ``(size, size, n_basis)`` containing the basis set.
+# ------------------------------------------------------------------
+# 1. 2-D Gauss–Hermite basis (physicists' convention)
+# ------------------------------------------------------------------
+def gauss_hermite_basis(order: int, scales, size: int):
     """
-
+    Return an (size, size, Nbasis) cube of 2-D Gauss–Hermite functions.
+    H_{i}(x) H_{j}(y) e^{-(x²+y²)/2s²},   0 ≤ i+j ≤ order  for each scale s.
+    Zeroth component is unit-sum, all others are zero-sum.
+    """
     y, x = np.mgrid[:size, :size]
-    cy = (size - 1) / 2
-    cx = (size - 1) / 2
+    cx = cy = (size - 1) / 2                        # geometric centre
     basis = []
+
     for s in scales:
         xn = (x - cx) / s
         yn = (y - cy) / s
-        g = np.exp(-0.5 * (xn**2 + yn**2))
+        g  = np.exp(-0.5 * (xn**2 + yn**2))        # isotropic Gaussian
+
         for i in range(order + 1):
             for j in range(order + 1 - i):
-                hx = hermite(i)(xn)
-                hy = hermite(j)(yn)
-                b = g * hx * hy
+                b = g * eval_hermite(i, xn) * eval_hermite(j, yn)
+
                 if i == 0 and j == 0:
-                    b /= b.sum()
+                    b /= b.sum()                   # unit DC
                 else:
-                    b -= b.mean()
+                    b -= b.mean()                  # kill residual DC
+
                 basis.append(b)
-    return np.stack(basis, axis=2)
+
+    # Stack as (Ny, Nx, Nbasis)
+    return np.stack(basis, axis=-1)
+
+
+# ------------------------------------------------------------------
+# 2. Fourier-space kernel fit
+# ------------------------------------------------------------------
+import numpy as np
+
+def fit_kernel_fourier(img_hi, img_lo, basis):
+    """
+    Solve  FFT(img_hi) * FFT(basis_k) * c_k  =  FFT(img_lo)
+    and return a centred real-space kernel.
+    """
+    n_pix = img_hi.size                    # = size²
+
+    # 1.  Shift arrays so that the PSF/basis centre is at pixel (0,0) **before** FFT
+    f_hi    = np.fft.fft2(np.fft.ifftshift(img_hi))
+    f_lo    = np.fft.fft2(np.fft.ifftshift(img_lo))
+    f_basis = np.fft.fft2(np.fft.ifftshift(basis, axes=(0, 1)), axes=(0, 1))
+
+    # 2.  Build the least-squares matrix in Fourier space
+    nb = basis.shape[-1]
+    A  = (f_basis * f_hi[..., None] / n_pix).reshape(-1, nb)   # IDL normalisation
+    b  = (f_lo / n_pix).ravel()
+
+    A_ri = np.vstack([A.real, A.imag])
+    b_ri = np.concatenate([b.real, b.imag])
+    coeffs, *_ = np.linalg.lstsq(A_ri, b_ri, rcond=None)
+
+    # 3.  Back to real space – already centred, so **no fftshift here**
+    kernel = np.tensordot(basis, coeffs, axes=([-1], [0]))
+    kernel /= kernel.sum()                 # final normalisation
+
+    return kernel, coeffs
 
 
 def multi_gaussian_basis(scales: list[float], size: int) -> np.ndarray:
@@ -226,25 +256,6 @@ def multi_gaussian_basis(scales: list[float], size: int) -> np.ndarray:
     basis /= basis.sum(axis=(0, 1))
     return basis
 
-
-def fit_kernel_fourier(
-    psf_hi: np.ndarray, psf_lo: np.ndarray, basis: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Fit a convolution kernel using a set of basis functions in Fourier space."""
-
-    nb = basis.shape[2]
-    f_hi = np.fft.fft2(psf_hi)
-    f_lo = np.fft.fft2(psf_lo)
-    f_basis = np.fft.fft2(basis, axes=(0, 1))
-    A = f_hi[..., None] * f_basis
-    A = A.reshape(-1, nb)
-    b = f_lo.ravel()
-    A_real = np.vstack([A.real, A.imag])
-    b_real = np.concatenate([b.real, b.imag])
-    coeffs, *_ = np.linalg.lstsq(A_real, b_real, rcond=None)
-    kernel = np.sum(basis * coeffs.reshape(1, 1, -1), axis=2)
-    kernel /= kernel.sum()
-    return kernel, coeffs
 
 
 # ---------------------------------------------------------------------
@@ -368,13 +379,17 @@ class CircularApertureProfile(RadialProfile):
     ----------
     data : 2D `~numpy.ndarray`
         Background subtracted image data.
-    xycen : tuple of 2 floats
-        ``(x, y)`` pixel coordinate of the source centre.
-    radial_edges : 1D array_like
-        Radii defining the edges for the radial profile annuli.
+    xycen : tuple of 2 floats, optional
+        ``(x, y)`` pixel coordinate of the source centre. If None, use image center.
+    radii : 1D array_like, optional
+        Radii defining the edges for the radial profile annuli. If None, use [0, 0.5, 1, 2, 4, ...] pix.
     cog_radii : 1D array_like, optional
         Radii for the curve of growth apertures.  If `None`, the values
-        of ``radial_edges[1:]`` are used.
+        of ``radii[1:]`` are used.
+    recenter : bool, optional
+        If True, recenter using centroid_quadratic. Default False.
+    centroid_kwargs : dict, optional
+        Passed to centroid_quadratic. Defaults to {'search_boxsize': 11, 'fit_boxsize': 5}.
     name : str, optional
         Name of the profile used for plot legends.
     norm_radius : float, optional
@@ -387,10 +402,12 @@ class CircularApertureProfile(RadialProfile):
     def __init__(
         self,
         data: np.ndarray,
-        xycen: tuple[float, float],
-        radial_edges: np.ndarray,
+        xycen: tuple[float, float] | None = None,
+        radii: np.ndarray | None = None,
         *,
         cog_radii: np.ndarray | None = None,
+        recenter: bool = False,
+        centroid_kwargs: dict = None,
         error: np.ndarray | None = None,
         mask: np.ndarray | None = None,
         method: str = "exact",
@@ -398,18 +415,47 @@ class CircularApertureProfile(RadialProfile):
         name: str | None = None,
         norm_radius: float | None = None,
     ) -> None:
+        from photutils.centroids import centroid_quadratic
+
+        # Set centroid kwargs defaults
+        if centroid_kwargs is None:
+            centroid_kwargs = {"search_boxsize": 11, "fit_boxsize": 5}
+
+        # Default xycen: image center
+        if xycen is None:
+            ny, nx = data.shape
+            xycen = ((nx - 1) / 2, (ny - 1) / 2)
+
+        # Optionally recenter using centroid_quadratic
+        if recenter:
+            xp, yp = xycen
+            xycen = centroid_quadratic(data, xpeak=xp, ypeak=yp, **centroid_kwargs)
+
+        # Default radii: logarithmic bins from 0, 0.5, 1, 2, 4, ... up to edge of image
+        if radii is None:
+            ny, nx = data.shape
+            maxrad = min(nx, ny) / 2
+            radii = np.unique(
+                np.concatenate([
+                    np.array([0, 0.5, 1]),
+                    np.logspace(np.log10(2), np.log10(maxrad), num=101)
+                ])
+            )
+            radii = radii[radii <= maxrad]
+
+        # Always set cog_radii = radii[1:] if not provided
+        if cog_radii is None:
+            cog_radii = radii[1:]
+
         super().__init__(
             data,
             xycen,
-            radial_edges,
+            radii,
             error=error,
             mask=mask,
             method=method,
             subpixels=subpixels,
         )
-
-        if cog_radii is None:
-            cog_radii = radial_edges[1:]
 
         self.cog = CurveOfGrowth(
             data,
@@ -480,19 +526,20 @@ class CircularApertureProfile(RadialProfile):
         )(self.cog.radius)
         return self.cog.profile / interp
 
-    def _plot_radial_profile(self, ax) -> None:
+    def _plot_radial_profile(self, ax, color="C0") -> None:
         label = self.name or "profile"
-        ax.plot(self.radius, self.profile, label=label, color="C0")
+        ax.plot(self.radius, self.profile, label=label, color=color)
         ax.set_yscale("log")
         ax.set_xlabel("Radius (pix)")
         ax.set_ylabel("Normalized Profile")
         ax.axvline(self.gaussian_fwhm / 2, color="C1", ls="--", label="Gauss FWHM")
         ax.axvline(self.moffat_fwhm / 2, color="C2", ls=":", label="Moffat FWHM")
+        ax.set_ylim(np.max(self.profile)/1e5, np.max(self.profile) * 1.3)
         ax.legend()
 
-    def _plot_cog(self, ax) -> None:
+    def _plot_cog(self, ax, color="C0") -> None:
         label = self.name or "profile"
-        ax.plot(self.cog.radius, self.cog.profile, label=label, color="C0")
+        ax.plot(self.cog.radius, self.cog.profile, label=label, color=color)
         ax.set_xlabel("Radius (pix)")
         ax.set_ylabel("Encircled Energy")
         if self.norm_radius is not None:
@@ -524,10 +571,14 @@ class CircularApertureProfile(RadialProfile):
         ncols = 3 if compare_to is not None else 2
         fig, axes = plt.subplots(1, ncols, figsize=(5 * ncols, 4))
 
+        # Main profile: blue
         self._plot_radial_profile(axes[0])
         self._plot_cog(axes[1])
 
         if compare_to is not None:
+            # Compare profile: red
+            compare_to._plot_radial_profile(axes[0], color="C3")
+            compare_to._plot_cog(axes[1], color="C3")
             self._plot_ratio(compare_to, axes[2])
 
         fig.tight_layout()

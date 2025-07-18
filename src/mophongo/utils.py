@@ -8,6 +8,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.table import Table
 from shapely.geometry import Polygon
+from scipy.special import hermite
 
 # model based stuff 
 def elliptical_moffat(
@@ -171,6 +172,74 @@ def gaussian(
         y0,
     )
     return psf
+
+
+def gauss_hermite_basis(order: int, scales: list[float], size: int) -> np.ndarray:
+    """Return a stack of Gauss--Hermite basis functions.
+
+    Parameters
+    ----------
+    order : int
+        Maximum Hermite polynomial order ``n`` where ``0 <= i + j <= n``.
+    scales : list of float
+        Standard deviation of the underlying Gaussian for each scale.
+    size : int
+        Output image size (square).
+
+    Returns
+    -------
+    ndarray
+        Array of shape ``(size, size, n_basis)`` containing the basis set.
+    """
+
+    y, x = np.mgrid[:size, :size]
+    cy = (size - 1) / 2
+    cx = (size - 1) / 2
+    basis = []
+    for s in scales:
+        xn = (x - cx) / s
+        yn = (y - cy) / s
+        g = np.exp(-0.5 * (xn**2 + yn**2))
+        for i in range(order + 1):
+            for j in range(order + 1 - i):
+                hx = hermite(i)(xn)
+                hy = hermite(j)(yn)
+                b = g * hx * hy
+                if i == 0 and j == 0:
+                    b /= b.sum()
+                else:
+                    b -= b.mean()
+                basis.append(b)
+    return np.stack(basis, axis=2)
+
+
+def multi_gaussian_basis(scales: list[float], size: int) -> np.ndarray:
+    """Return a set of Gaussian basis functions with varying width."""
+
+    gauss_list = [gaussian(size, s, s) for s in scales]
+    basis = np.stack(gauss_list, axis=2)
+    basis /= basis.sum(axis=(0, 1))
+    return basis
+
+
+def fit_kernel_fourier(
+    psf_hi: np.ndarray, psf_lo: np.ndarray, basis: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fit a convolution kernel using a set of basis functions in Fourier space."""
+
+    nb = basis.shape[2]
+    f_hi = np.fft.fft2(psf_hi)
+    f_lo = np.fft.fft2(psf_lo)
+    f_basis = np.fft.fft2(basis, axes=(0, 1))
+    A = f_hi[..., None] * f_basis
+    A = A.reshape(-1, nb)
+    b = f_lo.ravel()
+    A_real = np.vstack([A.real, A.imag])
+    b_real = np.concatenate([b.real, b.imag])
+    coeffs, *_ = np.linalg.lstsq(A_real, b_real, rcond=None)
+    kernel = np.sum(basis * coeffs.reshape(1, 1, -1), axis=2)
+    kernel /= kernel.sum()
+    return kernel, coeffs
 
 
 # ---------------------------------------------------------------------

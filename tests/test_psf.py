@@ -101,3 +101,17 @@ def test_gaussian_matching_kernel_method():
     conv = _convolve2d(psf_model.array, kernel)
     np.testing.assert_allclose(conv, data, rtol=0, atol=1e-2)  # <-- Relaxed tolerance
     np.testing.assert_allclose(fwhm_k, np.sqrt(2.5**2 - 2.0**2), atol=0.1)
+
+
+def test_matching_kernel_basis(tmp_path):
+    psf_hi = PSF.gaussian(51, 2.0, 2.0)
+    psf_lo = PSF.gaussian(51, 4.0, 4.0)
+    from mophongo.utils import multi_gaussian_basis
+
+    basis = multi_gaussian_basis([1.0, 2.0, 3.0], 51)
+    kernel = psf_hi.matching_kernel_basis(psf_lo, basis)
+    conv = _convolve2d(psf_hi.array, kernel)
+    np.testing.assert_allclose(conv, psf_lo.array, rtol=0, atol=4e-2)
+    fname = tmp_path / "psf_kernel_basis.png"
+    save_psf_diagnostic(fname, psf_hi.array, psf_lo.array, kernel)
+    assert fname.exists()

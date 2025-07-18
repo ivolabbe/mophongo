@@ -69,5 +69,6 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [x] Added colour-aware deblending with chi² detection
 - [x] Implemented symmetry-based deblender
 - [x] Added compactness parameter in photutils-based deblender
+- [x] Added `CircularApertureProfile` utility for radial profile and curve of growth
 - [ ] Implement hybrid deblender with analytic weighting
 - [ ] Implement JWST STDPSF extension utility

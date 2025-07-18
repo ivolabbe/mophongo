@@ -101,3 +101,316 @@ def test_gaussian_matching_kernel_method():
     conv = _convolve2d(psf_model.array, kernel)
     np.testing.assert_allclose(conv, data, rtol=0, atol=1e-2)  # <-- Relaxed tolerance
     np.testing.assert_allclose(fwhm_k, np.sqrt(2.5**2 - 2.0**2), atol=0.1)
+
+def test_effective_psf():
+    return 
+
+    import matplotlib.pyplot as plt
+    from mophongo.psf import DrizzlePSF, EffectivePSF
+
+    sw_filter = 'F090W'
+    lw_filter = 'F444W'
+
+    epsf = EffectivePSF()
+    epsf.load_jwst_stdpsf(nircam_sw_filters=[sw_filter], nircam_lw_filters=[lw_filter])
+
+    fig, axes = plt.subplots(2,5, figsize=(1.5*5, 1.5*2.2), sharex=True, sharey=True)
+
+    # Detector coords
+    x, y = 1024, 1024
+
+    for j, module in enumerate('AB'):
+        for i in range(4):
+            key = f"STDPSF_NRC{module}{i+1}_{sw_filter}"
+            prf = epsf.get_at_position(x=x, y=y, filter=key)
+            ax = axes[j][i]
+            ax.imshow(np.log10(prf), cmap='RdYlBu')
+            ax.grid()
+
+            ax.set_xticklabels([])
+            ax.set_yticklabels([])
+            ax.text(0.05, 0.05, f"{module}{i+1}", ha="left", va="bottom", transform=ax.transAxes, fontsize=7)
+
+        key = f"STDPSF_NRC{module}LONG_{lw_filter}"
+        prf = epsf.get_at_position(x=x, y=y, filter=key)
+        ax = axes[j][4]
+        ax.imshow(np.log10(prf), cmap='RdYlBu')
+        ax.grid()
+
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        ax.text(0.05, 0.05, f"{module}LONG", ha="left", va="bottom", transform=ax.transAxes, fontsize=7)
+
+    axes[0][0].text(0.95, 0.05, sw_filter, ha="right", va="bottom", transform=axes[0][0].transAxes, fontsize=7)
+    axes[0][4].text(0.95, 0.05, lw_filter, ha="right", va="bottom", transform=axes[0][4].transAxes, fontsize=7)
+
+    fig.tight_layout(pad=1)
+#%%
+def test_drizzle_psf():
+    import os
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from astropy.utils.data import download_file
+    from mophongo.psf import DrizzlePSF, EffectivePSF
+    from astropy.nddata import Cutout2D
+    from astropy.io import fits
+    import importlib
+    import mophongo.psf
+    importlib.reload(mophongo.psf)
+    from mophongo.psf import DrizzlePSF, EffectivePSF
+    from scipy.ndimage import shift  
+
+    filt = 'F115W'
+    psf_dir = '/Users/ivo/Astro/PROJECTS/JWST/PSF/'
+    filter_regex = f"STDPSF_NRC.._{filt}_EXTENDED"
+#    filter_regex = f"STDPSF_NRC.._{filt}"
+    verbose = True
+    # Coordinates of a demo star
+    ra, dec = 34.30421, -5.1221624
+    size=201
+
+    # DJA mosaic file
+    # A log of the exposures that contribute to the mosaic is in drz_file.replace("_drz_sci.fits.gz", "_wcs.csv")
+    drz_file = f'../data/uds-test-{filt}_sci.fits'
+    csv_file = drz_file.split('_sci')[0] + "_wcs.csv"
+
+    # The target mosaic and its output WCS doesn't necessarily have to be the same drz_file
+    dpsf = DrizzlePSF(driz_image=drz_file,csv_file=csv_file)
+    dpsf.epsf_obj.load_jwst_stdpsf(local_dir=psf_dir, filter_pattern=filter_regex,verbose=verbose)
+
+    # register on small cutout
+    cutout_reg = dpsf.get_driz_cutout(ra,dec,size=15,verbose=verbose, recenter=True)
+    pos_drz, cutout_reg_data, psf_data = dpsf.register(cutout_reg, filter_regex, verbose=verbose)
+
+    # full size 
+    cutout = dpsf.get_driz_cutout(ra,dec,size=size, verbose=verbose, recenter=True)
+    cutout_data = cutout.data
+
+    N=cutout_data.shape[0] // 2
+    N_native = int(np.ceil((N * dpsf.driz_pscale / dpsf.wcs[dpsf.flt_keys[0]].pscale)))
+
+    psf_hdu = dpsf.get_psf(
+        ra=pos_drz[0],  dec=pos_drz[1],
+        filter=filter_regex,  wcs_slice=cutout.wcs,
+        kernel=dpsf.driz_header["KERNEL"],  pixfrac=dpsf.driz_header["PIXFRAC"],
+        verbose=False,  npix=N_native,
+    )
+    psf_data = psf_hdu[1].data
+
+    ########
+    # Scale the PSF model to the data
+    mask = np.hypot(*np.indices(cutout_data.shape) - cutout_data.shape[0]//2) < 20
+    scl = (cutout.data * psf_data)[mask].sum() / (psf_data[mask]**2).sum()
+
+    ########
+    # Make a plot showing the results
+    fig, axes = plt.subplots(1,3,figsize=(12,6), sharex=False, sharey=False)
+    axes = axes.flatten()
+    # background for log scale
+    offset = 2e-5
+    kws = dict(vmin=-5.3, vmax=-1.5, cmap='bone_r')
+    axes[0].imshow(np.log10(cutout_data/scl + offset), **kws)
+    axes[1].imshow(np.log10(psf_data + offset), **kws)
+    axes[2].imshow(np.log10(cutout_data/scl - psf_data + offset), **kws)
+#    axes[3].imshow(np.log10(psf_data_reload + offset), **kws)
+
+    from photutils.profiles import RadialProfile, CurveOfGrowth
+
+    Rmax = 2.1 / dpsf.driz_pscale
+    norm_radius = 2.0 / dpsf.driz_pscale
+    Rmax_plot = 1.0
+
+    # Center coordinates
+    max_radius = np.minimum(cutout_data.shape[0] // 2, Rmax)
+#    N = cutout_data.shape[0] // 2
+    xycen = cutout.input_position_cutout
+
+    # Define radii arrays (in pixels)
+ #   max_radius = min(N, size//2)  # or whatever max radius you want
+    radial_edges = np.linspace(0, max_radius, 101)  # 100 bins for RadialProfile
+    cog_radii = np.linspace(0.5, max_radius, 100)    # must be >0 for CurveOfGrowth
+
+    # Radial profile (azimuthal average in annuli)
+    rp_star = RadialProfile(cutout_data, xycen, radial_edges)
+    rp_psf  = RadialProfile(psf_data, xycen, radial_edges)
+
+    # Normalize at R=1.0 arcsec
+    star_norm = rp_star.profile[rp_star.radius >= norm_radius][0]
+    psf_norm  = rp_psf.profile[rp_psf.radius >= norm_radius][0]
+    star_profile = rp_star.profile / star_norm
+    psf_profile  = rp_psf.profile / psf_norm
+
+    # Curve of growth (aperture sum vs radius)
+    cog_star = CurveOfGrowth(cutout_data, xycen, cog_radii)
+    cog_psf  = CurveOfGrowth(psf_data, xycen, cog_radii)
+
+    cog_star.normalize()
+    cog_psf.normalize()
+    cog_star.profile /= cog_star.profile[cog_star.radii >= norm_radius][0]
+    cog_psf.profile  /= cog_psf.profile[cog_star.radii >= norm_radius][0]
+
+    # EE radii
+    ee20_star = cog_star.calc_radius_at_ee(0.2)
+    ee80_star = cog_star.calc_radius_at_ee(0.8)
+    ee20_psf  = cog_psf.calc_radius_at_ee(0.2)
+    ee80_psf  = cog_psf.calc_radius_at_ee(0.8)
+
+    # Ratio
+    ratio_cog = star_cog / psf_cog
+
+    # Plot
+    fig, axes = plt.subplots(1, 3, figsize=(12, 3.5))
+    # Panel 1: Radial profile
+    axes[0].plot(rp_star.radius * dpsf.driz_pscale, star_profile, 'k-', label='Star')
+    axes[0].plot(rp_psf.radius * dpsf.driz_pscale, psf_profile, 'r-', label='PSF')
+    axes[0].set_yscale('log')
+    axes[0].set_xlabel('Radius [arcsec]')
+    axes[0].set_ylabel('Normalized Profile')
+    axes[0].legend()
+    axes[0].set_title(f'Radial Profile\n{filt}')
+    axes[0].set_xlim(0, Rmax_plot  )
+
+    # Panel 2: Curve of Growth
+    axes[1].plot(cog_star.radius * dpsf.driz_pscale, cog_star.profile , 'k-', label='Star')
+    axes[1].plot(cog_psf.radius * dpsf.driz_pscale, cog_psf.profile, 'r-', label='PSF')
+    axes[1].set_xlabel('Radius [arcsec]')
+    axes[1].set_ylabel('Encircled Energy')
+    axes[1].set_title(f'Curve of Growth\n{filt}')
+    axes[1].legend()
+    axes[1].axvline(ee20_star * dpsf.driz_pscale, color='k', ls=':', label='Star EE20%')
+    axes[1].axvline(ee80_star * dpsf.driz_pscale, color='k', ls='--', label='Star EE80%')
+    axes[1].axvline(ee20_psf * dpsf.driz_pscale, color='r', ls=':', label='PSF EE20%')
+    axes[1].axvline(ee80_psf * dpsf.driz_pscale, color='r', ls='--', label='PSF EE80%')
+    axes[1].annotate(f'EE(20%)={ee20_star*dpsf.driz_pscale:.3f}"', (ee20_star*dpsf.driz_pscale, 0.2), color='k')
+    axes[1].annotate(f'EE(80%)={ee80_star*dpsf.driz_pscale:.3f}"', (ee80_star*dpsf.driz_pscale, 0.8), color='k')
+    axes[1].annotate(f'EE(20%)={ee20_psf*dpsf.driz_pscale:.3f}"', (ee20_psf*dpsf.driz_pscale, 0.2-0.1), color='r')
+    axes[1].annotate(f'EE(80%)={ee80_psf*dpsf.driz_pscale:.3f}"', (ee80_psf*dpsf.driz_pscale, 0.8-0.1), color='r')
+    axes[1].set_xlim(0, Rmax_plot  )
+
+    # Panel 3: Ratio
+    axes[2].plot(cog_star.radius * dpsf.driz_pscale, ratio_cog, 'b-')
+    axes[2].axhline(1.0, color='k', ls='--', label='Unity')
+    axes[2].set_xlabel('Radius [arcsec]')
+    axes[2].set_ylabel('Star/PSF COG Ratio')
+    axes[2].set_ylim(0.8, 1.2)
+    axes[2].set_title('COG Ratio')
+    axes[2].set_xlim(0, Rmax_plot  )
+
+    fig.tight_layout()
+    plt.show()
+
+    return
+
+#%%
+    # Data centroid
+    yp, xp = np.indices(cutout_hdu[0].data.shape)
+    R = np.sqrt((xp-N)**2 + (yp-N)**2)
+    mask = cutout_hdu[0].data > np.nanpercentile(cutout_hdu[0].data[cutout_hdu[0].data > 0], 10)
+    mask &= R < 20
+
+    sci_norm = cutout_hdu[0].data[mask].sum()
+    xi = (xp * cutout_hdu[0].data)[mask].sum() / sci_norm
+    yi = (yp * cutout_hdu[0].data)[mask].sum() / sci_norm
+
+    ri, di = np.squeeze(wcs_slice.all_pix2world([xi], [yi], 0))
+
+    fkey = f"STDPSF_MIRI_{dpsf.driz_header['FILTER']}_EXTENDED"
+
+    psf_hdu = dpsf.get_psf(
+        ra=ri,
+        dec=di,
+        filter=fkey,
+        wcs_slice=wcs_slice,
+        kernel=dpsf.driz_header['KERNEL'],
+        pixfrac=dpsf.driz_header['PIXFRAC'],
+        verbose=False,
+        npix=npix,
+    )
+
+    psf_data = psf_hdu[1].data
+    psf_norm = psf_data[mask].sum()
+    pxi = (xp * psf_data)[mask].sum() / psf_norm
+    pyi = (yp * psf_data)[mask].sum() / psf_norm
+    xr, yr = xi, yi
+
+    # Recenter ePSF to match data centroid
+    for iter in range(3):
+        ri, di = np.squeeze(wcs_slice.all_pix2world([xr], [yr], 0))
+
+        psf_hdu = dpsf.get_psf(
+            ra=ri,
+            dec=di,
+            filter=fkey,
+            wcs_slice=wcs_slice,
+            kernel=dpsf.driz_header['KERNEL'],
+            pixfrac=dpsf.driz_header['PIXFRAC'],
+            verbose=False,
+            npix=npix,
+        )
+        
+        psf_data = psf_hdu[1].data
+        psf_norm = psf_data[mask].sum()
+        pxi = (xp * psf_data)[mask].sum() / psf_norm
+        pyi = (yp * psf_data)[mask].sum() / psf_norm
+        xr += xi - pxi
+        yr += yi - pyi
+        
+        print(pxi - xi, pyi - yi)
+
+    ########
+    # Scale the PSF model to the data
+    scl = (cutout_hdu[0].data * psf_data)[mask].sum() / (psf_data[mask]**2).sum()
+
+    ########
+    # Make a plot showing the results
+    fig, axes = plt.subplots(1,4,figsize=(12,3.4), sharex=False, sharey=False)
+
+    # background for log scale
+    offset = 2e-5
+    kws = dict(vmin=-5.2, vmax=-2, cmap='bone_r')
+
+    axes[0].imshow(np.log10(cutout_hdu[0].data/scl + offset), **kws)
+    axes[1].imshow(np.log10(psf_data + offset), **kws)
+    axes[2].imshow(np.log10(cutout_hdu[0].data/scl - psf_data + offset), **kws)
+
+    for ax in axes[:3]:
+        ax.set_xticklabels([]); ax.set_yticklabels([])
+        ax.set_xticks([0, N*2+1]); ax.set_yticks([0, N*2+1])
+
+    for i, label in enumerate([os.path.basename(drz_file), fkey, 'Residual']):
+        axes[i].text(
+            0.5, -0.02,
+            label,
+            ha='center', va='top', fontsize=7,
+            transform=axes[i].transAxes
+        )
+
+    # Plot radial profile
+    R = np.sqrt((xp-xi)**2 + (yp-yi)**2)
+    ax = axes[3]
+    nz = cutout_hdu[0].data != 0
+    ps = dpsf.driz_pscale
+
+    ax.scatter(R[nz]*ps, (cutout_hdu[0].data / scl + offset)[nz], alpha=0.1, color='k', label='Data')
+    ax.scatter(R[nz]*ps, (psf_data + offset)[nz], alpha=0.1, color='r', label='ePSF model')
+    ax.semilogy()
+    ax.legend(loc='upper right')
+
+    # Reference radii
+    for rpix, rc in zip([0.4/ps, 1.2/ps], ["coral", "magenta"]):
+        sr = utils.SRegion(f"circle({xi},{yi},{rpix})", wrap=False, ncirc=256)
+        axes[-1].vlines([rpix*ps], 1.e-10, 10, color=rc, linestyle='-', alpha=0.5, lw=1.5)
+        for ax in axes[:3]:
+            # sr.add_patch_to_axis(ax, fc='None', ec='w', linestyle='-', alpha=0.5)
+            sr.add_patch_to_axis(ax, fc='None', ec=rc, linestyle='-', alpha=0.5, lw=1.5)
+
+    ax = axes[-1]
+    ax.set_ylim(1.e-5, 3e-2)
+    ax.set_xlim(-3*ps, 40*ps)
+    ax.set_yticklabels([])
+    ax.set_xlabel(r'$R$, arcsec')
+
+    fig.tight_layout(pad=0.5)
+
+
+# %%

@@ -1100,7 +1100,7 @@ version = "2.0.0"
 description = "An implementation of lxml.xmlfile for the standard library"
 optional = false
 python-versions = ">=3.8"
-groups = ["dev"]
+groups = ["main", "dev"]
 files = [
     {file = "et_xmlfile-2.0.0-py3-none-any.whl", hash = "sha256:7a91720bc756843502c3b7504c77b8fe44217c85c537d85037f0f536151b2caa"},
     {file = "et_xmlfile-2.0.0.tar.gz", hash = "sha256:dab3f4764309081ce75662649be815c4c9081e88f0837825f90fd28317d4da54"},
@@ -2223,7 +2223,7 @@ version = "2.11.0"
 description = "Fast numerical expression evaluator for NumPy"
 optional = false
 python-versions = ">=3.10"
-groups = ["dev"]
+groups = ["main", "dev"]
 files = [
     {file = "numexpr-2.11.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:7f471fd055a9e13cf5f4337ee12379b30b4dcda1ae0d85018d4649e841578c02"},
     {file = "numexpr-2.11.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:6e68a9800a3fa37c438b73a669f507c4973801a456a864ac56b62c3bd63d08af"},
@@ -2332,7 +2332,7 @@ version = "3.1.5"
 description = "A Python library to read/write Excel 2010 xlsx/xlsm files"
 optional = false
 python-versions = ">=3.8"
-groups = ["dev"]
+groups = ["main", "dev"]
 files = [
     {file = "openpyxl-3.1.5-py2.py3-none-any.whl", hash = "sha256:5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2"},
     {file = "openpyxl-3.1.5.tar.gz", hash = "sha256:cf0e3cf56142039133628b5acffe8ef0c12bc902d2aadd3e0fe5878dc08d1050"},
@@ -2662,7 +2662,7 @@ version = "1.1.2"
 description = "Physical optics propagation (wavefront diffraction) for optical simulations, particularly of telescopes."
 optional = false
 python-versions = ">=3.10"
-groups = ["dev"]
+groups = ["main", "dev"]
 files = [
     {file = "poppy-1.1.2-py3-none-any.whl", hash = "sha256:7585bd44fc0bfc1a3fe4928012c86491d251b07de6d5a9ac935257c9dbbe7e59"},
     {file = "poppy-1.1.2.tar.gz", hash = "sha256:d8bdee1fb01d0048ffcfa0f43102ab9dc46dbba7a26da5206661d147736a7657"},
@@ -2843,7 +2843,7 @@ version = "0.24.1"
 description = "Handling of Science Instrument Aperture Files (SIAF) for space telescopes"
 optional = false
 python-versions = ">=3.10"
-groups = ["dev"]
+groups = ["main", "dev"]
 files = [
     {file = "pysiaf-0.24.1-py3-none-any.whl", hash = "sha256:2b5a341ab93400db9210b6d0957735a0650b4948df378e2b187241fef184da36"},
     {file = "pysiaf-0.24.1.tar.gz", hash = "sha256:40c3c6d3561352dae09771df872073604a3c0713f81c53d55967eb582528fa49"},
@@ -3629,7 +3629,7 @@ version = "2.1.0"
 description = "Creates simulated point spread functions for Space Telescopes (James Webb, Roman)"
 optional = false
 python-versions = ">=3.10"
-groups = ["dev"]
+groups = ["main", "dev"]
 files = [
     {file = "stpsf-2.1.0-py3-none-any.whl", hash = "sha256:5d6a70e8abf938d467d55aa75371fe5103ece839916625ccd45d8063b3de7224"},
     {file = "stpsf-2.1.0.tar.gz", hash = "sha256:a6838b7167c38c996ce1a039d361779e30d39fdbb24cfa1839f5440936e72ba4"},
@@ -3869,7 +3869,7 @@ version = "1.6.0"
 description = "Synthetic photometry"
 optional = false
 python-versions = ">=3.10"
-groups = ["dev"]
+groups = ["main", "dev"]
 files = [
     {file = "synphot-1.6.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:1a4622415e2a781f8a95950ed9dc4b5ff147e1890ebf5a66daa0e3c5e3e3c183"},
     {file = "synphot-1.6.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:213cddf1ba2a5239484594966514cde4ed8eb969b23438eddebeee55983b842d"},
@@ -4181,4 +4181,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.13"
-content-hash = "c8211840695f8b43f3c5f48e90fd2e92e1ab1e008c8308dd73da600238b9218f"
+content-hash = "9227b462963e0ae1c51755e73c954e73433ed10ade3d5821aeb03b8cf9619e8a"

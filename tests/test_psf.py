@@ -231,8 +231,8 @@ def test_drizzle_psf():
 
     from photutils.profiles import RadialProfile, CurveOfGrowth
 
-    Rmax = 2.1 / dpsf.driz_pscale
-    norm_radius = 2.0 / dpsf.driz_pscale
+    Rmax = cutout_data.shape[0] // 2    
+    norm_radius = 1.5 / dpsf.driz_pscale
     Rmax_plot = 1.0
 
     # Center coordinates

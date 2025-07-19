@@ -3,6 +3,7 @@ from .fit import FitConfig, SparseFitter
 from .catalog import Catalog
 from .deblender import deblend_sources_symmetry, deblend_sources_hybrid
 from .jwst_psf import make_extended_grid
+from .psf_map import PSFRegionMap
 
 try:
     from .photutils_deblend import deblend_sources
@@ -18,4 +19,5 @@ __all__ = [
     "deblend_sources_hybrid",
     "deblend_sources",
     "make_extended_grid",
+    "PSFRegionMap",
 ]

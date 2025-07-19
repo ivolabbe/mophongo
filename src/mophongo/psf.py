@@ -264,11 +264,13 @@ class PSF:
         # Handle both PSF objects and numpy arrays
         if isinstance(other, PSF):
             psf_lo = other.array
+        elif hasattr(other, "array"):
+            psf_lo = np.asarray(other.array, dtype=float)
         else:
             psf_lo = np.asarray(other, dtype=float)
-            # Normalize if not already normalized
-            if psf_lo.sum() != 0:
-                psf_lo = psf_lo / psf_lo.sum()
+        # Normalize if not already normalized
+        if psf_lo.sum() != 0:
+            psf_lo = psf_lo / psf_lo.sum()
 
         if psf_hi.shape != psf_lo.shape:
             ny = max(psf_hi.shape[0], psf_lo.shape[0])

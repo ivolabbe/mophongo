@@ -18,7 +18,9 @@ dependencies = [
     "drizzlepac (==3.9.1)",
     "sregion (>=1.4.2,<2.0.0)",
     "lmfit (>=1.3.3,<2.0.0)",
-    "stpsf (>=2.1.0,<3.0.0)"
+    "stpsf (>=2.1.0,<3.0.0)",
+    "shapely (>=2.1.1,<3.0.0)",
+    "geopandas (>=1.1.1,<2.0.0)"
 ]
 
 [tool.poetry]

@@ -204,6 +204,8 @@ def test_drizzle_psf():
 
     filt = 'F770W'
     psf_dir = '/Users/ivo/Astro/PROJECTS/JWST/PSF/'
+    if not Path(psf_dir).exists():
+        pytest.skip('PSF data not available')
     filter_regex = f"STDPSF_MIRI_{filt}_EXTENDED"
 #    filter_regex = f"STDPSF_NRC.._{filt}_EXTENDED"
 #    filter_regex = f"STDPSF_NRC.._{filt}"
@@ -216,8 +218,9 @@ def test_drizzle_psf():
 
     # DJA mosaic file
     # A log of the exposures that contribute to the mosaic is in drz_file.replace("_drz_sci.fits.gz", "_wcs.csv")
-    drz_file = f'../data/uds-test-{filt}_sci.fits'
-    csv_file = drz_file.split('_sci')[0] + "_wcs.csv"
+    data_dir = Path(__file__).resolve().parent.parent / "data"
+    drz_file = str(data_dir / f"uds-test-{filt.lower()}_sci.fits")
+    csv_file = str(data_dir / f"uds-test-{filt.lower()}_wcs.csv")
 
     # The target mosaic and its output WCS doesn't necessarily have to be the same drz_file
     dpsf = DrizzlePSF(driz_image=drz_file,csv_file=csv_file)

@@ -48,7 +48,7 @@ class PSFRegionMap:
 
     # ───────────── private derived constants ──────────────
     def __post_init__(self) -> None:
-        self._area_min = self.area_factor * np.pi * (self.fwhm / 2) ** 2
+        self._area_min = self.area_factor * self.buffer_tol
         self.tree = STRtree(self.regions.geometry.to_list())
 
     # =================================================================
@@ -61,46 +61,31 @@ class PSFRegionMap:
         *,
         crs: str | None = "EPSG:4326",  # lat long, ok for wcs
         snap_tol: float = 0.2 / 3600,
-        buffer_tol: float = 1.0 / 3600,
-        area_factor: float = 300.0,
+        buffer_tol: float = 0.2 / 3600,
+        area_factor: float = 100.0,
         wcs: Mapping[Hashable, WCS] | None = None,
-        pa_tol: float = 1.0,
+        pa_tol: float = 0.0,
     ) -> "PSFRegionMap":
         """Build a PSFRegionMap from ``(frame_id → footprint polygon)``.
-        
+
         Parameters
         ----------
-        footprints : Mapping[Hashable, Polygon]
-            Mapping of frame identifiers to footprint polygons.
+        footprints
+            Mapping of frame identifier to footprint polygon.
         wcs
-            Optional mapping dictionary of frame identifier to its ``WCS`` for
+            Optional mapping of frame identifier to its ``WCS`` for
             orientation bucketing.
         pa_tol
             Tolerance in degrees for grouping frames by position angle.
             ``0`` disables orientation coarsening.
         All other tolerances are given in degrees.
-        crs : str or None, optional
-            Coordinate reference system of the input footprints. Defaults to
-            "EPSG:4326".
-        snap_tol : float, optional
-            Tolerance for ``shapely.set_precision`` in degrees.
-        buffer_tol : float, optional
-            Buffer size used to close small gaps in degrees.
-        area_factor : float, optional
-            Scale factor applied to the buffer_tol**2 area when defining the minimum
-            region area to retain
-
-        Returns
-        -------
-        PSFRegionMap
-            New instance constructed from the provided footprints.
         """
         self = cls.__new__(cls)
         self.snap_tol = snap_tol
         self.buffer_tol = buffer_tol
-        self.fwhm = fwhm
         self.area_factor = area_factor
         self._area_min = area_factor * buffer_tol
+
         pa_class = None
         if wcs is not None and pa_tol > 0:
             pa_class = {fid: cls._pa_class(wcs[fid], pa_tol) for fid in footprints}
@@ -213,21 +198,19 @@ class PSFRegionMap:
             ]
             if not nbrs:
                 continue
-
+            
             # Check if poly.boundary is valid before using it
             if poly.boundary is None:
                 continue
-
+                
             # Filter again for safety in lambda
             nbr = max(
                 nbrs,
                 key=lambda j: (
                     poly.boundary.intersection(gdf.at[j, "geometry"]).length
-                    if (
-                        gdf.at[j, "geometry"] is not None
-                        and not gdf.at[j, "geometry"].is_empty
-                        and poly.boundary is not None
-                    )
+                    if (gdf.at[j, "geometry"] is not None 
+                        and not gdf.at[j, "geometry"].is_empty 
+                        and poly.boundary is not None)
                     else -1
                 ),
             )
@@ -236,3 +219,4 @@ class PSFRegionMap:
         return gdf.dissolve(by="psf_key", as_index=False, aggfunc="first").drop(
             columns="area"
         )
+

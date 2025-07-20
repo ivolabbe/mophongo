@@ -7,6 +7,7 @@ from photutils.segmentation import SegmentationImage, SourceCatalog
 from skimage.morphology import binary_erosion, dilation, disk, footprint_rectangle
 
 from .utils import measure_shape
+from .kernels import KernelLookup
 
 
 def _convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
@@ -270,24 +271,53 @@ class Templates:
         self._templates = templates
         return templates
 
-    def convolve_templates(self,
-                           kernel: np.ndarray,
-                           inplace: bool = False) -> list[Template]:
-        """Convolve all templates with kernel, operating in-place with padding."""
+    def convolve_templates(
+        self,
+        kernel: np.ndarray | KernelLookup,
+        inplace: bool = False,
+    ) -> list[Template]:
+        """Convolve all templates with ``kernel``.
+
+        Parameters
+        ----------
+        kernel
+            Either a fixed convolution kernel or a :class:`~mophongo.kernels.KernelLookup`
+            instance providing spatially varying kernels.
+        inplace
+            If ``True`` update the stored templates. Otherwise return a new
+            list of convolved templates.
+        """
 
         if not self._templates:
             raise ValueError(
                 "No templates to convolve. Run extract_templates first.")
 
-        kernel = kernel / kernel.sum()
-        ky, kx = kernel.shape
+        # Determine kernel shape from fixed kernel or first lookup entry
+        if isinstance(kernel, KernelLookup):
+            sample_kernel = next(iter(kernel.kernels))
+        else:
+            sample_kernel = kernel
 
-        # pad and convolve templates
+        sample_kernel = sample_kernel / sample_kernel.sum()
+        ky, kx = sample_kernel.shape
+
         new_templates: list[Template] = []
-        for i, tmpl in enumerate(self._templates):
-            # Pad template for convolution in place
+        for tmpl in self._templates:
             new_tmpl = tmpl.pad((ky, kx), self.original_shape, inplace=inplace)
-            conv = _convolve2d(new_tmpl.data / new_tmpl.data.sum(), kernel)
+
+            if isinstance(kernel, KernelLookup):
+                if tmpl.wcs is None:
+                    kern = kernel.get_kernel(None, None)
+                else:
+                    x, y = tmpl.position_original
+                    ra, dec = tmpl.wcs.wcs_pix2world(x, y, 0)
+                    kern = kernel.get_kernel(ra, dec)
+                if kern is None:
+                    raise ValueError("KernelLookup returned None for position")
+                kern = kern / kern.sum()
+            else:
+                kern = kernel
+            conv = _convolve2d(new_tmpl.data / new_tmpl.data.sum(), kern)
             new_tmpl.data[:] = conv / conv.sum()
 
             if not inplace:

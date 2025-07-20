@@ -49,7 +49,7 @@ class PSFRegionMap:
         crs: str | None = "EPSG:4326",
         snap_tol: float = 0.2 / 3600,
         buffer_tol: float = 1.0 / 3600,
-        area_factor: float = 100.0,
+        area_factor: float = 300.0,
     ) -> "PSFRegionMap":
         """Build a PSFRegionMap from *(frame_id → footprint polygon)*.
         All tolerances in degrees.

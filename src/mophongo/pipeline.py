@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from .kernels import KernelLookup
+
 import numpy as np
 from astropy.table import Table
 
@@ -26,6 +28,7 @@ def run_photometry(
     wht_images: Sequence[np.ndarray] | None = None,
     *,
     extend_templates: str | None = None,
+    kernels: Sequence[np.ndarray | KernelLookup] | None = None,
 ) -> tuple[Table, np.ndarray]:
     """Run photometry on a set of images.
 
@@ -41,6 +44,10 @@ def run_photometry(
         positions. New flux columns will be added to a copy of this table.
     psfs
         Point-spread functions matching each image.
+    kernels
+        Optional sequence of precomputed kernels or :class:`~mophongo.kernels.KernelLookup`
+        objects corresponding to ``images``. If ``None``, matching kernels are
+        computed from ``psfs``.
 
     Returns
     -------
@@ -67,7 +74,6 @@ def run_photometry(
 
     # Step 1: Extract templates from the first image (alternatively, use models)
     tmpl_psf = PSF.from_array(psfs[0])
-    tmpl_wht = 0.0 if wht_images[0].max() == 0.0 else wht_images[0]
 
     tmpls = Templates()
     tmpls.extract_templates(images[0], segmap, positions)
@@ -75,15 +81,17 @@ def run_photometry(
         tmpls.extend_with_psf_wings(tmpl_psf.array, inplace=True)
 
     residuals = []
-    for idx in range(1,len(images)):
+    for idx in range(1, len(images)):
 
-        # some wave of controlling window goes here
-        kernel = tmpl_psf.matching_kernel(psfs[idx])
+        if kernels is not None and kernels[idx] is not None:
+            kernel = kernels[idx]
+        else:
+            kernel = tmpl_psf.matching_kernel(psfs[idx])
 
         templates = tmpls.convolve_templates(kernel, inplace=False)
 
         # assume weights are dominated by photometry image (for proper weights see sparse fitter, needes iteration)
-        weights = wht_images[idx]
+        weights = wht_images[idx] if wht_images is not None else None
         
         fitter = SparseFitter(templates, images[idx], weights)
         fluxes, _ = fitter.solve()

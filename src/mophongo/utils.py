@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import numpy as np
+import scipy
 from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.table import Table
@@ -255,6 +256,203 @@ def multi_gaussian_basis(scales: list[float], size: int) -> np.ndarray:
     basis = np.stack(gauss_list, axis=2)
     basis /= basis.sum(axis=(0, 1))
     return basis
+
+
+def difference_of_gaussians_basis(scales: list[float], size: int) -> np.ndarray:
+    """Return Difference-of-Gaussians (DoG) basis functions.
+
+    Parameters
+    ----------
+    scales : list of float
+        FWHM values for the Gaussian stack.  Must be in increasing order.
+    size : int
+        Output array size (``size`` \times ``size``).
+
+    Notes
+    -----
+    If ``n`` scales are provided, ``n-1`` DoG modes are returned.  Each
+    mode is the difference between successive Gaussians and has zero sum.
+    """
+
+    gauss_list = [gaussian(size, s, s) for s in scales]
+    dog_list = [gauss_list[i + 1] - gauss_list[i] for i in range(len(scales) - 1)]
+    basis = np.stack(dog_list, axis=2)
+    basis -= basis.mean(axis=(0, 1))
+    return basis
+
+
+def gaussian_laguerre_basis(
+    nmax: int, m_list: list[int], scales: list[float], size: int
+) -> np.ndarray:
+    """Return Gaussian-Laguerre (polar shapelet) basis functions.
+
+    Parameters
+    ----------
+    nmax : int
+        Maximum radial order ``n`` of the Laguerre polynomial.
+    m_list : list of int
+        Azimuthal orders ``m`` (typically ``[0, 2, 4]``).
+    scales : list of float
+        Gaussian ``FWHM`` values controlling the radial scale.
+    size : int
+        Output array size.
+    """
+
+    y, x = np.mgrid[:size, :size]
+    cy = cx = (size - 1) / 2
+    r = np.hypot(x - cx, y - cy)
+    theta = np.arctan2(y - cy, x - cx)
+
+    basis = []
+    for s in scales:
+        sigma = s / (2 * np.sqrt(2 * np.log(2)))
+        rsq = (r / sigma) ** 2
+        g = np.exp(-0.5 * rsq)
+
+        for n in range(nmax + 1):
+            for m in m_list:
+                if m > n or (n - m) % 2:
+                    continue
+                radial = scipy.special.genlaguerre((n - m) // 2, m)(rsq)
+                b = g * radial * np.cos(m * theta)
+                if n == 0 and m == 0:
+                    b /= b.sum()
+                else:
+                    b -= b.mean()
+                basis.append(b)
+
+    return np.stack(basis, axis=-1)
+
+
+def zernike_basis(
+    nmax: int, m_list: list[int], sigma: float, size: int
+) -> np.ndarray:
+    """Return Zernike polynomial basis functions with a Gaussian envelope."""
+
+    y, x = np.mgrid[:size, :size]
+    cy = cx = (size - 1) / 2
+    r = np.hypot(x - cx, y - cy)
+    theta = np.arctan2(y - cy, x - cx)
+    rho = r / (size / 2)
+    env = np.exp(-0.5 * (r / sigma) ** 2)
+
+    def _zernike(n, m, rho):
+        out = np.zeros_like(rho)
+        for k in range((n - m) // 2 + 1):
+            c = (
+                (-1) ** k
+                * scipy.special.factorial(n - k)
+                / (
+                    scipy.special.factorial(k)
+                    * scipy.special.factorial((n + m) // 2 - k)
+                    * scipy.special.factorial((n - m) // 2 - k)
+                )
+            )
+            out += c * rho ** (n - 2 * k)
+        return out
+
+    basis = []
+    for n in range(nmax + 1):
+        for m in m_list:
+            if m > n or (n - m) % 2:
+                continue
+            z = _zernike(n, m, rho) * np.cos(m * theta) * env
+            if n == 0 and m == 0:
+                z /= z.sum()
+            else:
+                z -= z.mean()
+            basis.append(z)
+
+    return np.stack(basis, axis=-1)
+
+
+def radial_bspline_basis(
+    size: int, n_knots: int = 6, degree: int = 3, rmin: float = 0.5
+) -> np.ndarray:
+    """Radial B-spline basis on a logarithmic radius grid."""
+
+    from scipy.interpolate import BSpline
+
+    y, x = np.mgrid[:size, :size]
+    cy = cx = (size - 1) / 2
+    r = np.hypot(x - cx, y - cy)
+    rmax = r.max()
+    r = np.where(r == 0, rmin / 10, r)
+    log_r = np.log10(r)
+
+    knots = np.linspace(np.log10(rmin), np.log10(rmax), n_knots)
+    t = np.pad(knots, (degree, degree), mode="edge")
+    design = BSpline.design_matrix(log_r.ravel(), t, degree, extrapolate=True).toarray()
+    basis = design.reshape(size, size, -1)
+    for i in range(basis.shape[-1]):
+        if i == 0:
+            basis[:, :, i] /= basis[:, :, i].sum()
+        else:
+            basis[:, :, i] -= basis[:, :, i].mean()
+    return basis
+
+
+def starlet_basis(size: int, n_scales: int = 5) -> np.ndarray:
+    """Return à-trous starlet wavelet basis."""
+
+    from scipy.ndimage import convolve
+
+    delta = np.zeros((size, size))
+    cy = cx = size // 2
+    delta[cy, cx] = 1.0
+    h_1d = np.array([1, 4, 6, 4, 1], dtype=float) / 16
+    h = np.outer(h_1d, h_1d)
+
+    c = delta
+    basis = []
+    for j in range(n_scales):
+        if j == 0:
+            kernel = h
+        else:
+            step = 2 ** (j - 1)
+            kernel = np.zeros((h.shape[0] + 4 * step, h.shape[1] + 4 * step))
+            kernel[:: step, :: step] = h
+        sm = convolve(c, kernel, mode="nearest")
+        w = c - sm
+        w -= w.mean()
+        basis.append(w)
+        c = sm
+    return np.stack(basis, axis=-1)
+
+
+def eigen_psf_basis(stack: np.ndarray, n_modes: int) -> np.ndarray:
+    """Return data-driven eigen-PSF basis using SVD."""
+
+    npsf, ny, nx = stack.shape
+    U, S, Vt = np.linalg.svd(stack.reshape(npsf, ny * nx), full_matrices=False)
+    basis = Vt[:n_modes].reshape(n_modes, ny, nx).transpose(1, 2, 0)
+    for i in range(basis.shape[-1]):
+        if i == 0:
+            basis[:, :, i] /= basis[:, :, i].sum()
+        else:
+            basis[:, :, i] -= basis[:, :, i].mean()
+    return basis
+
+
+def powerlaw_basis(
+    slopes: list[float], size: int, sigma: float | None = None, r0: float = 1.0
+) -> np.ndarray:
+    """Return power-law radial basis functions with Gaussian taper."""
+
+    y, x = np.mgrid[:size, :size]
+    cy = cx = (size - 1) / 2
+    r = np.hypot(x - cx, y - cy)
+    if sigma is None:
+        sigma = size / 3
+    taper = np.exp(-0.5 * (r / sigma) ** 2)
+
+    basis = []
+    for s in slopes:
+        b = ((r + r0) / r0) ** s * taper
+        b -= b.mean()
+        basis.append(b)
+
+    return np.stack(basis, axis=-1)
 
 
 

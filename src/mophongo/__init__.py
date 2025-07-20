@@ -4,7 +4,10 @@ from .catalog import Catalog
 from .deblender import deblend_sources_symmetry, deblend_sources_hybrid
 from .jwst_psf import make_extended_grid
 from .psf_map import PSFRegionMap
+from .sim_data import make_mosaic_dataset
+from .kernels import KernelLookup
 from . import psf_map as _psf_map
+
 
 try:
     from .photutils_deblend import deblend_sources
@@ -22,4 +25,5 @@ __all__ = [
     "make_extended_grid",
     "PSFRegionMap",
     "KernelLookup",
+    "make_mosaic_dataset",
 ]

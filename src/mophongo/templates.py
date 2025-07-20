@@ -298,7 +298,7 @@ class Templates:
         else:
             sample_kernel = kernel
 
-        sample_kernel = sample_kernel / sample_kernel.sum()
+        sample_kernel = sample_kernel 
         ky, kx = sample_kernel.shape
 
         new_templates: list[Template] = []
@@ -306,18 +306,13 @@ class Templates:
             new_tmpl = tmpl.pad((ky, kx), self.original_shape, inplace=inplace)
 
             if isinstance(kernel, KernelLookup):
-                if tmpl.wcs is None:
-                    kern = kernel.get_kernel(None, None)
-                else:
-                    x, y = tmpl.position_original
-                    ra, dec = tmpl.wcs.wcs_pix2world(x, y, 0)
-                    kern = kernel.get_kernel(ra, dec)
-                if kern is None:
-                    raise ValueError("KernelLookup returned None for position")
-                kern = kern / kern.sum()
+                x, y = tmpl.position_original
+                ra, dec = tmpl.wcs.wcs_pix2world(x, y, 0)
+                kern = kernel.get_kernel(ra, dec)
             else:
                 kern = kernel
-            conv = _convolve2d(new_tmpl.data / new_tmpl.data.sum(), kern)
+
+            conv = _convolve2d(new_tmpl.data, kern)
             new_tmpl.data[:] = conv / conv.sum()
 
             if not inplace:

@@ -84,7 +84,7 @@ class PSFRegionMap:
         self.snap_tol = snap_tol
         self.buffer_tol = buffer_tol
         self.area_factor = area_factor
-        self._area_min = area_factor * buffer_tol
+        self._area_min = area_factor * buffer_tol**2
 
         pa_class = None
         if wcs is not None and pa_tol > 0:
@@ -155,17 +155,20 @@ class PSFRegionMap:
     # =================================================================
     # public query helpers
     # =================================================================
-    def lookup_key(self, ra: float, dec: float) -> int | None:
-        """Return the integer *psf_key* at (ra, dec) in deg; None if outside."""
+    def lookup_key(self, ra: float, dec: float, nearest: bool = True) -> int | None:
+        """Return the integer *psf_key* at (ra, dec) in deg.
+        If not inside any region, optionally return the nearest region's psf_key by boundary.
+        """
         pt = Point(ra, dec)
         for idx in self.tree.query(pt):
             if self.regions.geometry.iloc[idx].contains(pt):
                 return int(self.regions.psf_key.iloc[idx])
+        if nearest and len(self.regions) > 0:
+            # Find the region with the closest boundary to the point
+            distances = self.regions.geometry.boundary.distance(pt)
+            nearest_idx = distances.idxmin()
+            return int(self.regions.psf_key.iloc[nearest_idx])
         return None
-
-    def build_psf(self, key: int):
-        """Placeholder stub – replace with real PSF synthesis."""
-        return f"psf-{key}"
 
     # =================================================================
     # private helpers (operate on *self.* tolerances)

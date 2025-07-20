@@ -59,7 +59,7 @@ class PSFRegionMap:
         cls,
         footprints: Mapping[Hashable, Polygon],
         *,
-        crs: str | None = "EPSG:4326",
+        crs: str | None = "EPSG:4326",  # lat long, ok for wcs
         snap_tol: float = 0.2 / 3600,
         buffer_tol: float = 1.0 / 3600,
         area_factor: float = 300.0,

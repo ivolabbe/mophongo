@@ -1,4 +1,3 @@
-
 """Utilities for PSF region mapping from exposure footprints."""
 
 from __future__ import annotations
@@ -30,15 +29,13 @@ class PSFRegionMap:
 
     regions: gpd.GeoDataFrame
     snap_tol: float = 0.2 / 3600
-    buffer_tol: float = 0.2 / 3600
-    fwhm: float = 0.2 / 3600
     area_factor: float = 100.0
 
     tree: STRtree = field(init=False, repr=False)
 
     # ───────────── private derived constants ──────────────
     def __post_init__(self) -> None:
-        self._area_min = self.area_factor * np.pi * (self.fwhm / 2) ** 2
+        self._area_min = self.area_factor * self.buffer_tol
         self.tree = STRtree(self.regions.geometry.to_list())
 
     # =================================================================
@@ -51,8 +48,7 @@ class PSFRegionMap:
         *,
         crs: str | None = "EPSG:4326",
         snap_tol: float = 0.2 / 3600,
-        buffer_tol: float = 0.2 / 3600,
-        fwhm: float = 0.2 / 3600,
+        buffer_tol: float = 1.0 / 3600,
         area_factor: float = 100.0,
     ) -> "PSFRegionMap":
         """Build a PSFRegionMap from *(frame_id → footprint polygon)*.
@@ -61,9 +57,8 @@ class PSFRegionMap:
         self = cls.__new__(cls)
         self.snap_tol = snap_tol
         self.buffer_tol = buffer_tol
-        self.fwhm = fwhm
         self.area_factor = area_factor
-        self._area_min = area_factor * np.pi * (fwhm / 2) ** 2
+        self._area_min = area_factor * buffer_tol**2
 
         regions: list[tuple[Polygon, set[Hashable]]] = []
         for fid, poly in footprints.items():
@@ -132,21 +127,40 @@ class PSFRegionMap:
 
         gdf = gdf.copy()
         gdf["area"] = gdf.geometry.area
-        rtree = STRtree(gdf.geometry.values)
+        rtree = STRtree(list(gdf.geometry))
 
         small_idx = gdf.query("area < @self._area_min").index
         for idx in small_idx:
             poly = gdf.at[idx, "geometry"]
+            if poly is None or poly.is_empty:
+                continue
             nbrs = [
                 j
-                for j in rtree.query(poly.bounds)
-                if j != idx and poly.touches(gdf.at[j, "geometry"])
+                for j in rtree.query(poly)
+                if (
+                    j != idx
+                    and gdf.at[j, "geometry"] is not None
+                    and not gdf.at[j, "geometry"].is_empty
+                    and poly.touches(gdf.at[j, "geometry"])
+                )
             ]
             if not nbrs:
                 continue
+            
+            # Check if poly.boundary is valid before using it
+            if poly.boundary is None:
+                continue
+                
+            # Filter again for safety in lambda
             nbr = max(
                 nbrs,
-                key=lambda j: poly.boundary.intersection(gdf.at[j, "geometry"]).length,
+                key=lambda j: (
+                    poly.boundary.intersection(gdf.at[j, "geometry"]).length
+                    if (gdf.at[j, "geometry"] is not None 
+                        and not gdf.at[j, "geometry"].is_empty 
+                        and poly.boundary is not None)
+                    else -1
+                ),
             )
             gdf.at[idx, "psf_key"] = gdf.at[nbr, "psf_key"]
 

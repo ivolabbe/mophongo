@@ -233,15 +233,12 @@ def test_drizzle_psf():
     # full size 
     cutout = dpsf.get_driz_cutout(ra,dec,size=size, verbose=verbose, recenter=True)
     cutout_data = cutout.data
-
-    N=cutout_data.shape[0] // 2
-    N_native = int(np.ceil((N * dpsf.driz_pscale / dpsf.wcs[dpsf.flt_keys[0]].pscale)))
-
+    
     psf_hdu = dpsf.get_psf(
         ra=pos_drz[0],  dec=pos_drz[1],
         filter=filter_regex,  wcs_slice=cutout.wcs,
         kernel=dpsf.driz_header["KERNEL"],  pixfrac=dpsf.driz_header["PIXFRAC"],
-        verbose=False,  npix=N_native,
+        verbose=False, 
     )
     psf_data = psf_hdu[1].data
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Hashable
 
+from astropy.wcs import WCS
+
 import numpy as np
 import geopandas as gpd
 import shapely
@@ -22,16 +24,27 @@ class PSFRegionMap:
     Parameters (all degree units; factory defaults are 0.2″)
     ----------------------------------------------------------------
     snap_tol     snap grid for Shapely ``set_precision``.
-    buffer_tol   +/- buffer used to seal <2·buffer_tol gaps.
-    fwhm         PSF core FWHM (sets sliver area threshold).
-    area_factor  area_min = area_factor × π(FWHM/2)².
+    buffer_tol   ±buffer used to seal <2·buffer_tol gaps.
+    area_factor  area_min = area_factor × buffer_tol.
     """
 
     regions: gpd.GeoDataFrame
     snap_tol: float = 0.2 / 3600
+    buffer_tol: float = 0.2 / 3600
     area_factor: float = 100.0
 
     tree: STRtree = field(init=False, repr=False)
+
+    # ------------------------------------------------------------------
+    # orientation helper
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _pa_class(wcs: WCS, tol: float) -> int:
+        """Return orientation bucket index for ``wcs`` with width ``tol`` degrees."""
+        pa = (np.rad2deg(np.arctan2(wcs.wcs.cd[0, 1], wcs.wcs.cd[0, 0])) + 360.0) % 360.0
+        if tol <= 0:
+            return int(round(pa))  # effectively unique per degree
+        return int(np.round(pa / tol))
 
     # ───────────── private derived constants ──────────────
     def __post_init__(self) -> None:
@@ -48,17 +61,34 @@ class PSFRegionMap:
         *,
         crs: str | None = "EPSG:4326",
         snap_tol: float = 0.2 / 3600,
-        buffer_tol: float = 1.0 / 3600,
+        buffer_tol: float = 0.2 / 3600,
         area_factor: float = 100.0,
+        wcs: Mapping[Hashable, WCS] | None = None,
+        pa_tol: float = 0.0,
     ) -> "PSFRegionMap":
-        """Build a PSFRegionMap from *(frame_id → footprint polygon)*.
-        All tolerances in degrees.
+        """Build a PSFRegionMap from ``(frame_id → footprint polygon)``.
+
+        Parameters
+        ----------
+        footprints
+            Mapping of frame identifier to footprint polygon.
+        wcs
+            Optional mapping of frame identifier to its ``WCS`` for
+            orientation bucketing.
+        pa_tol
+            Tolerance in degrees for grouping frames by position angle.
+            ``0`` disables orientation coarsening.
+        All other tolerances are given in degrees.
         """
         self = cls.__new__(cls)
         self.snap_tol = snap_tol
         self.buffer_tol = buffer_tol
         self.area_factor = area_factor
-        self._area_min = area_factor * buffer_tol**2
+        self._area_min = area_factor * buffer_tol
+
+        pa_class = None
+        if wcs is not None and pa_tol > 0:
+            pa_class = {fid: cls._pa_class(wcs[fid], pa_tol) for fid in footprints}
 
         regions: list[tuple[Polygon, set[Hashable]]] = []
         for fid, poly in footprints.items():
@@ -68,7 +98,10 @@ class PSFRegionMap:
                 if geom.intersects(poly):
                     inter = geom.intersection(poly)
                     if not inter.is_empty and inter.area > 0:
-                        new_regions.append((inter, frames | {fid}))
+                        token = (
+                            (pa_class[fid], fid) if pa_class is not None else fid
+                        )
+                        new_regions.append((inter, frames | {token}))
                     diff = geom.difference(poly)
                     if not diff.is_empty and diff.area > 0:
                         new_regions.append((diff, frames))
@@ -76,19 +109,38 @@ class PSFRegionMap:
                 else:
                     new_regions.append((geom, frames))
             if not poly.is_empty and poly.area > 0:
-                new_regions.append((poly, {fid}))
+                token = (
+                    (pa_class[fid], fid) if pa_class is not None else fid
+                )
+                new_regions.append((poly, {token}))
             regions = new_regions
 
         records = []
         for geom, frames in regions:
+            if pa_class is not None:
+                pa_list = tuple(sorted({p for p, _ in frames}))
+                fid_list = tuple(sorted(f for _, f in frames))
+            else:
+                pa_list = ()
+                fid_list = tuple(sorted(frames))
+
             if geom.geom_type == "MultiPolygon":
                 for part in geom.geoms:
-                    records.append({"geometry": part, "frame_list": tuple(sorted(frames))})
+                    records.append({
+                        "geometry": part,
+                        "frame_list": fid_list,
+                        "pa_list": pa_list,
+                    })
             else:
-                records.append({"geometry": geom, "frame_list": tuple(sorted(frames))})
+                records.append({
+                    "geometry": geom,
+                    "frame_list": fid_list,
+                    "pa_list": pa_list,
+                })
 
         gdf = gpd.GeoDataFrame(records, crs=crs)
-        gdf["psf_key"] = gdf.groupby("frame_list").ngroup()
+        group_col = "pa_list" if pa_class is not None else "frame_list"
+        gdf["psf_key"] = gdf.groupby(group_col).ngroup()
 
         self.regions = self._merge_slivers(gdf).reset_index(drop=True)
 

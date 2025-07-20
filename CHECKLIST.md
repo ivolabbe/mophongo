@@ -73,3 +73,4 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [ ] Implement hybrid deblender with analytic weighting
 - [ ] Implement JWST STDPSF extension utility
  - [x] Build PSF region map from exposure footprints
+ - [x] Add PA-based coarsening option to PSFRegionMap

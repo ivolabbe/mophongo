@@ -5,39 +5,39 @@ pytest.skip("JWST PSF utilities require external data", allow_module_level=True)
 import numpy as np
 from astropy.io import fits
 import mophongo.jwst_psf as jwst_psf
+import shutil
+from pathlib import Path
+from mophongo.psf import DrizzlePSF
 
-class DummySTDPSFGrid:
-    def __init__(self, data, oversampling=4):
-        self.data = np.asarray(data)
-        self.oversampling = oversampling
-        self.grid_xypos = [(0, 0)] * len(data)
-        self.meta = {
-            "detector": "NRCAL",
-            "filter": "F444W",
-            "grid_shape": (1, 1),
-        }
+ 
+def test_get_psf_radec(tmp_path):
+    data_dir = Path(__file__).resolve().parents[1] / "data"
+    drz_file = data_dir / "uds-test-f444w_sci.fits"
+    csv_file = data_dir / "uds-test-f444w_wcs.csv"
 
-class DummyNIRCam:
-    def __init__(self):
-        self.filter = None
-        self.detector = None
+    dpsf = DrizzlePSF(driz_image=str(drz_file), csv_file=str(csv_file))
 
-    def psf_grid(self, num_psfs, all_detectors=False, oversample=4, fov_arcsec=1.0):
-        arr = np.zeros((num_psfs, 11, 11))
-        cy = cx = 5
-        arr[:, cy, cx] = 1.0
-        hdul = fits.HDUList([fits.PrimaryHDU(), fits.ImageHDU(arr, name="DET_SAMP")])
-        return hdul
+    psf_dir = Path(__file__).resolve().parents[1] / "data" / "PSF"
+    psf_src = Path(__file__).parent / "test_psf_ext_nrca5.fits"
+    psf_dst = tmp_path / "STDPSF_NRCA5_F444W_EXTENDED.fits"
+    shutil.copy(psf_src, psf_dst)
 
+    dpsf.epsf_obj.load_jwst_stdpsf(
+        local_dir=tmp_path,
+        filter_pattern="STDPSF_NRC.._F444W_EXTENDED",
+        verbose=False,
+    )
 
-def test_make_extended_grid(monkeypatch):
-    emp = DummySTDPSFGrid(np.ones((1, 5, 5)))
-    monkeypatch.setattr(jwst_psf.stpsf, "NIRCam", DummyNIRCam)
-    grid = jwst_psf.make_extended_grid(emp, Rmax=0.5, Rtaper=0.1, pixscale=0.5)
-    assert grid.data.shape == (1, 9, 9)
-    np.testing.assert_allclose(grid.data.sum(), 1.0)
+    positions = [
+        (34.30205712, -5.12741357),
+        (34.29982609, -5.12630224),
+    ]
 
+    cube = dpsf.get_psf_radec(positions, filter="STDPSF_NRCA5_F444W_EXTENDED", size=11)
 
+    assert cube.shape == (len(positions), 11, 11)
+
+ 
 
 def test_make_jwst_extended_grid(tmp_path):
 
@@ -62,7 +62,6 @@ def test_make_jwst_extended_grid(tmp_path):
                           epsf_ext,
                           overwrite=True,
                           verbose=True)
-
 # do all NIRCam  
     psf_dir = '/Users/ivo/Astro/PROJECTS/JWST/PSF/PSF/JWST/NIRCam/'
     p = Path(psf_dir)

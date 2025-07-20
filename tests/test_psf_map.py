@@ -40,3 +40,24 @@ def test_plot(tmp_path):
     fig.savefig(out, dpi=150)
     plt.close(fig)
     assert out.exists()
+
+
+def test_psf_region_map_from_file(tmp_path):
+    import importlib
+    from pathlib import Path
+    import mophongo.psf
+    importlib.reload(mophongo.psf)
+    from mophongo.psf import DrizzlePSF, PSF
+
+    filt = 'F444W'
+    data_dir = Path(__file__).resolve().parent.parent / "data"
+    drz_file = str(data_dir / f"uds-test-{filt.lower()}_sci.fits")
+    csv_file = str(data_dir / f"uds-test-{filt.lower()}_wcs.csv")
+
+    # The target mosaic and its output WCS doesn't necessarily have to be the same drz_file
+    dpsf = DrizzlePSF(driz_image=drz_file,csv_file=csv_file)
+
+    prm = PSFRegionMap.from_footprints(dpsf.footprint)
+    prm.regions.plot(column="psf_key", ax=ax, edgecolor="k", cmap="tab20")
+
+ 

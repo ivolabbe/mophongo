@@ -48,7 +48,7 @@ class PSFRegionMap:
 
     # ───────────── private derived constants ──────────────
     def __post_init__(self) -> None:
-        self._area_min = self.area_factor * np.pi * (self.fwhm / 2) ** 2
+        self._area_min = self.area_factor * self.buffer_tol
         self.tree = STRtree(self.regions.geometry.to_list())
 
     # =================================================================
@@ -98,7 +98,6 @@ class PSFRegionMap:
         self = cls.__new__(cls)
         self.snap_tol = snap_tol
         self.buffer_tol = buffer_tol
-        self.fwhm = fwhm
         self.area_factor = area_factor
         self._area_min = area_factor * buffer_tol
         pa_class = None

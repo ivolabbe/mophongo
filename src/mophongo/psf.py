@@ -1101,6 +1101,57 @@ class DrizzlePSF:
         else:
             return outsci * scale
 
+    def get_psf_radec(
+        self,
+        positions: list[tuple[float, float]],
+        filter: str,
+        *,
+        size: int,
+        verbose: bool = False,
+    ) -> np.ndarray:
+        """Return a cube of drizzled PSFs evaluated at given coordinates.
+
+        Parameters
+        ----------
+        positions : list of tuple(float, float)
+            World coordinate pairs ``(ra, dec)`` in degrees.
+        filter : str
+            Filter key or regular expression selecting the PSF model.
+        size : int
+            Cutout size in drizzle pixels for each PSF model.
+        verbose : bool, optional
+            Emit progress information if ``True``.
+
+        Returns
+        -------
+        np.ndarray
+            Array of shape ``(Npos, size, size)`` containing the drizzled PSFs.
+        """
+
+        psf_cube: list[np.ndarray] = []
+        for ra, dec in positions:
+            cutout = self.get_driz_cutout(
+                ra,
+                dec,
+                size=size,
+                verbose=verbose,
+                recenter=False,
+            )
+
+            psf = self.get_psf(
+                ra=ra,
+                dec=dec,
+                filter=filter,
+                wcs_slice=cutout.wcs,
+                kernel=self.driz_header["KERNEL"],
+                pixfrac=self.driz_header["PIXFRAC"],
+                verbose=False,
+                npix=size // 2,
+            )
+            psf_cube.append(psf)
+
+        return np.asarray(psf_cube)
+    
     def register(
         self,
         cutout: Cutout2D,

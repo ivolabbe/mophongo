@@ -76,4 +76,5 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
  - [x] Build PSF region map from exposure footprints
  - [x] Add PA-based coarsening option to PSFRegionMap
  - [x] Added KernelLookup utility and kernel generation notebook
+ - [x] Added spatially varying kernel support in `run_photometry` and template convolution
  - [ ] End-to-end test with realistic mosaic data using `make_mosaic_dataset`

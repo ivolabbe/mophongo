@@ -43,6 +43,13 @@ def test_plot(tmp_path):
 
 
 def test_psf_region_map_from_file(tmp_path):
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import shapely.geometry as sgeom
+    from shapely.affinity import translate
+
+    from mophongo.psf_map import PSFRegionMap
+
     import importlib
     from pathlib import Path
     import mophongo.psf
@@ -57,7 +64,23 @@ def test_psf_region_map_from_file(tmp_path):
     # The target mosaic and its output WCS doesn't necessarily have to be the same drz_file
     dpsf = DrizzlePSF(driz_image=drz_file,csv_file=csv_file)
 
-    prm = PSFRegionMap.from_footprints(dpsf.footprint)
-    prm.regions.plot(column="psf_key", ax=ax, edgecolor="k", cmap="tab20")
+    # extract the first 10 footprints from dpsf.footprint
+    footprints = {k: v for i, (k, v) in enumerate(dpsf.footprint.items()) if i < 10}
 
+    prm = PSFRegionMap.from_footprints(dpsf.footprint, buffer_tol=1.0/3600, area_factor=300)
+#    prm = PSFRegionMap.from_footprints(dpsf.footprint)
+
+    fig, ax = plt.subplots()
+    prm.regions.plot(column="psf_key", ax=ax, edgecolor="k", cmap="tab20")
+    ax.set_xlabel("RA")
+    ax.set_ylabel("Dec")
+    ax.set_ylim(-5.27,-5.24)
+    ax.set_xlim(34.48,34.52)
+    ax.set_ylim(-5.12,-5.07)
+    ax.set_xlim(34.25,34.32)
+    plt.show()
+
+    plt.hist(prm.regions.area, bins=50,range=(0.1,1000),log=True)
+#    ax.set_ylim(-5.24,-5.20)
+#    ax.set_xlim(34.46,34.50)
  

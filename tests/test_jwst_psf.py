@@ -97,30 +97,6 @@ def test_make_jwst_extended_grid(tmp_path):
 
 
     # from mophongo.jwst_psf import , blend_psf, write_stdpsf
-
-    scl_ext = 1.2
-    blend_core2 = w * core_psf + (1 - w) * cutout_data * scl_ext
-
-    N = blend_core.shape[0]//2
-    r = np.hypot(*np.indices(blend_core.shape) - N)  
-    bgmask = ~(core_psf > np.nanpercentile(core_psf[core_psf > 0.0],10) ) & (r < N-2)
-    offset = np.nanmedian(core_psf[bgmask])
-
-    print(np.median(core_psf[bgmask]))
-
-    plt.imshow(core_psf * bgmask, vmin=-2e-4, vmax=2e-4)
-    plt.imshow(core_psf, vmin=-2e-4, vmax=2e-4)
-    plt.imshow(blend_psf, vmin=-2e-4, vmax=2e-4)
-    plt.imshow(blend_core2, vmin=-2e-4, vmax=2e-4)
-    plt.imshow(w, vmin=-0.01, vmax=0.01)
-    plt.imshow(w * cutout_data, vmin=-0.1, vmax=0.2)
-    plt.imshow((1 - w) * cutout_data, vmin=-0.0001, vmax=0.0001)
-    tmp = ext_psf.copy() # * scl_ext
-    #  tmp[slices] = blend_core
-    tmp[slices] = (1 - w) * cutout_data
-    tmp[slices] = (1 - w) * cutout_data * scl_ext + w * core_psf 
-    plt.imshow(tmp, vmin=-1e-4, vmax=1e-4)
-
     #    plt.imshow(blend_core,vmin=-0.002,vmax=0.002)
 
     return

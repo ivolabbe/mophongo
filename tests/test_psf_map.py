@@ -51,4 +51,4 @@ def test_psf_region_map_from_file(tmp_path):
     prm = PSFRegionMap.from_footprints(dpsf.footprint)
     prm.regions.plot(column="psf_key", ax=ax, edgecolor="k", cmap="tab20")
 
-prm.
+ 

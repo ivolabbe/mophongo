@@ -1,3 +1,4 @@
+
 """Utilities for PSF region mapping from exposure footprints."""
 
 from __future__ import annotations
@@ -5,42 +6,68 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Hashable
 
+import numpy as np
 import geopandas as gpd
+import shapely
 from shapely.geometry import Polygon, Point
 from shapely.strtree import STRtree
 
 
+# ────────────────────────────────────────────────────────────────────
+#  Main public dataclass
+# ────────────────────────────────────────────────────────────────────
 @dataclass
 class PSFRegionMap:
-    """Lookup table for unique composite PSFs.
+    """Lookup table that maps a sky position → *psf_key*.
 
-    Parameters
-    ----------
-    regions : GeoDataFrame
-        Table with ``geometry`` polygons and ``psf_key`` identifiers.
+    Parameters (all degree units; factory defaults are 0.2″)
+    ----------------------------------------------------------------
+    snap_tol     snap grid for Shapely ``set_precision``.
+    buffer_tol   +/- buffer used to seal <2·buffer_tol gaps.
+    fwhm         PSF core FWHM (sets sliver area threshold).
+    area_factor  area_min = area_factor × π(FWHM/2)².
     """
 
     regions: gpd.GeoDataFrame
-    tree: STRtree = field(init=False)
+    snap_tol: float = 0.2 / 3600
+    buffer_tol: float = 0.2 / 3600
+    fwhm: float = 0.2 / 3600
+    area_factor: float = 100.0
 
+    tree: STRtree = field(init=False, repr=False)
+
+    # ───────────── private derived constants ──────────────
     def __post_init__(self) -> None:
+        self._area_min = self.area_factor * np.pi * (self.fwhm / 2) ** 2
         self.tree = STRtree(self.regions.geometry.to_list())
 
+    # =================================================================
+    # public factory
+    # =================================================================
     @classmethod
     def from_footprints(
-        cls, footprints: Mapping[Hashable, Polygon], crs: str | None = "EPSG:4326"
+        cls,
+        footprints: Mapping[Hashable, Polygon],
+        *,
+        crs: str | None = "EPSG:4326",
+        snap_tol: float = 0.2 / 3600,
+        buffer_tol: float = 0.2 / 3600,
+        fwhm: float = 0.2 / 3600,
+        area_factor: float = 100.0,
     ) -> "PSFRegionMap":
-        """Create a :class:`PSFRegionMap` from input footprints.
-
-        Parameters
-        ----------
-        footprints
-            Mapping from frame identifier to polygon footprint.
-        crs
-            Coordinate reference system of the polygons. Defaults to ``EPSG:4326``.
+        """Build a PSFRegionMap from *(frame_id → footprint polygon)*.
+        All tolerances in degrees.
         """
+        self = cls.__new__(cls)
+        self.snap_tol = snap_tol
+        self.buffer_tol = buffer_tol
+        self.fwhm = fwhm
+        self.area_factor = area_factor
+        self._area_min = area_factor * np.pi * (fwhm / 2) ** 2
+
         regions: list[tuple[Polygon, set[Hashable]]] = []
         for fid, poly in footprints.items():
+            poly = self._preprocess(poly)
             new_regions: list[tuple[Polygon, set[Hashable]]] = []
             for geom, frames in regions:
                 if geom.intersects(poly):
@@ -67,19 +94,63 @@ class PSFRegionMap:
 
         gdf = gpd.GeoDataFrame(records, crs=crs)
         gdf["psf_key"] = gdf.groupby("frame_list").ngroup()
-        gdf = gdf.reset_index(drop=True)
-        return cls(regions=gdf[["geometry", "frame_list", "psf_key"]])
 
+        self.regions = self._merge_slivers(gdf).reset_index(drop=True)
+
+        self.tree = STRtree(self.regions.geometry.to_list())
+        return self
+
+    # =================================================================
+    # public query helpers
+    # =================================================================
     def lookup_key(self, ra: float, dec: float) -> int | None:
-        """Return the PSF key for a sky position."""
+        """Return the integer *psf_key* at (ra, dec) in deg; None if outside."""
         pt = Point(ra, dec)
         for idx in self.tree.query(pt):
-            geom = self.regions.geometry.iloc[idx]
-            if geom.contains(pt):
+            if self.regions.geometry.iloc[idx].contains(pt):
                 return int(self.regions.psf_key.iloc[idx])
         return None
 
     def build_psf(self, key: int):
-        """Placeholder for PSF construction."""
+        """Placeholder stub – replace with real PSF synthesis."""
         return f"psf-{key}"
+
+    # =================================================================
+    # private helpers (operate on *self.* tolerances)
+    # =================================================================
+    def _preprocess(self, poly: Polygon) -> Polygon:
+        """±buffer then snap to grid."""
+        if self.buffer_tol:
+            poly = poly.buffer(+self.buffer_tol, join_style="mitre")
+            poly = poly.buffer(-self.buffer_tol, join_style="mitre")
+        return shapely.set_precision(poly, self.snap_tol)
+
+    def _merge_slivers(self, gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+        """Dissolve regions whose area < self._area_min."""
+        if gdf.empty:
+            return gdf
+
+        gdf = gdf.copy()
+        gdf["area"] = gdf.geometry.area
+        rtree = STRtree(gdf.geometry.values)
+
+        small_idx = gdf.query("area < @self._area_min").index
+        for idx in small_idx:
+            poly = gdf.at[idx, "geometry"]
+            nbrs = [
+                j
+                for j in rtree.query(poly.bounds)
+                if j != idx and poly.touches(gdf.at[j, "geometry"])
+            ]
+            if not nbrs:
+                continue
+            nbr = max(
+                nbrs,
+                key=lambda j: poly.boundary.intersection(gdf.at[j, "geometry"]).length,
+            )
+            gdf.at[idx, "psf_key"] = gdf.at[nbr, "psf_key"]
+
+        return gdf.dissolve(by="psf_key", as_index=False, aggfunc="first").drop(
+            columns="area"
+        )
 

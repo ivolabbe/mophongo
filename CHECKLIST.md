@@ -10,6 +10,7 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 ## Dependencies
 - [x] Add `numpy`, `scipy`, and `astropy` to project dependencies
 - [x] Run `poetry install` to install all dependencies
+- [x] Added `nbformat` for generating example notebooks
 
 ## assumptions input data
 - [ ] input data are images + wcs that are multiextention fits files with first extention the SCI image, and second extention the ERR image
@@ -73,3 +74,4 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [ ] Implement hybrid deblender with analytic weighting
 - [ ] Implement JWST STDPSF extension utility
  - [x] Build PSF region map from exposure footprints
+ - [x] Add PA-based coarsening option to PSFRegionMap

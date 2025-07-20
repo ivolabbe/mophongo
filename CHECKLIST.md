@@ -72,4 +72,4 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [x] Added `CircularApertureProfile` utility for radial profile and curve of growth
 - [ ] Implement hybrid deblender with analytic weighting
 - [ ] Implement JWST STDPSF extension utility
-- [ ] Build PSF region map from exposure footprints
+ - [x] Build PSF region map from exposure footprints

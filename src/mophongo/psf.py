@@ -1012,17 +1012,23 @@ class DrizzlePSF:
         get_extended=True,
         get_weight=False,
         ds9=None,
-        npix=13,
+        npix=None,
         renormalize=True,
         xphase=0,
         yphase=0,
+        return_hdul=False,
     ):
         """Drizzle a PSF model at ``ra``, ``dec`` onto ``wcs_slice``."""
         pix = np.arange(-npix, npix + 1)
         if wcs_slice is None:
             wcs_slice = self.driz_wcs.copy()
-
+        
         outsci, outwht, outctx = self._get_empty_driz(wcs_slice)
+
+        if npix is None:    
+            # Calculate npix based on the WCS pixel scale            
+            N = outsci.shape[0] // 2
+            npix = int(np.ceil((N * self.driz_pscale / self.wcs[self.flt_keys[0]].pscale)))            
 
         for key in self.flt_keys:
             if self.footprint[key].contains(Point(ra, dec)):
@@ -1051,9 +1057,7 @@ class DrizzlePSF:
                 yp, xp = np.meshgrid(pix - dy, pix - dx, indexing="ij")
                 extended_data = (self.epsf_obj.extended_epsf.get(flt_filter)
                                  if get_extended else None)
-                psf = self.epsf_obj.eval_ePSF(psf_xy,
-                                              xp,
-                                              yp,
+                psf = self.epsf_obj.eval_ePSF(psf_xy,  xp,  yp,
                                               extended_data=extended_data)
 
                 flt_weight = self.wcs[key].expweight
@@ -1089,11 +1093,13 @@ class DrizzlePSF:
                 )
 
         scale = 1.0 / outsci.sum() * psf.sum() if renormalize else 1.0
-        hdu = fits.HDUList([
-            fits.PrimaryHDU(),
-            fits.ImageHDU(data=outsci * scale, header=to_header(wcs_slice))
-        ])
-        return hdu
+        if return_hdul is True:
+            return fits.HDUList([
+                fits.PrimaryHDU(),
+                fits.ImageHDU(data=outsci * scale, header=to_header(wcs_slice))
+            ])
+        else:
+            return outsci * scale
 
     def register(
         self,
@@ -1128,13 +1134,6 @@ class DrizzlePSF:
             Registered PSF model array.
         """
 
-        N = cutout.shape[0] // 2
-        N_native = int(
-            np.ceil(
-                (N * self.driz_pscale / self.wcs[self.flt_keys[0]].pscale)
-            )
-        )
-
         xi, yi = cutout.input_position_cutout
         for i in range(max_iterations):
             ri, di = cutout.wcs.pixel_to_world_values(xi, yi)
@@ -1147,7 +1146,6 @@ class DrizzlePSF:
                 kernel=self.driz_header["KERNEL"],
                 pixfrac=self.driz_header["PIXFRAC"],
                 verbose=verbose,
-                npix=N_native,
             )
 
             xc, yc = centroid_quadratic(

@@ -4,6 +4,7 @@ import shapely.geometry as sgeom
 from shapely.affinity import translate
 
 from mophongo.psf_map import PSFRegionMap
+from astropy.wcs import WCS
 
 # synthetic 2 × 2 dither with sub-pixel offsets
 base = sgeom.box(0, 0, 1, 1)
@@ -19,7 +20,7 @@ def test_region_count():
 
 def test_no_tiny_regions():
     regmap = PSFRegionMap.from_footprints(footprints, crs=None)
-    area_min = regmap.area_factor * np.pi * (regmap.fwhm / 2) ** 2
+    area_min = regmap.area_factor * regmap.buffer_tol
     assert (regmap.regions.geometry.area >= area_min).all()
 
 def test_lookup():
@@ -28,7 +29,7 @@ def test_lookup():
     key = regmap.lookup_key(2.5e-05, 0.5)
     assert key is not None
     frames = regmap.regions.query("psf_key == @key").frame_list.iloc[0]
-    assert frames == ("A",)
+    assert frames == ("A", "B")
 
 def test_plot(tmp_path):
     regmap = PSFRegionMap.from_footprints(footprints, crs=None)
@@ -40,6 +41,36 @@ def test_plot(tmp_path):
     fig.savefig(out, dpi=150)
     plt.close(fig)
     assert out.exists()
+
+
+def _make_wcs(pa):
+    w = WCS(naxis=2)
+    scale = 1.0 / 3600
+    theta = np.deg2rad(pa)
+    w.wcs.cd = np.array(
+        [[scale * np.cos(theta), -scale * np.sin(theta)],
+         [scale * np.sin(theta), scale * np.cos(theta)]]
+    )
+    return w
+
+
+def test_pa_coarsening():
+    fp = {
+        "A": base,
+        "B": translate(base, 1.1, 0),
+        "C": translate(base, 0, 1.1),
+    }
+    wcs = {
+        "A": _make_wcs(0.1),
+        "B": _make_wcs(0.2),
+        "C": _make_wcs(90.0),
+    }
+    regmap = PSFRegionMap.from_footprints(fp, wcs=wcs, pa_tol=1.0, crs=None)
+    key_a = regmap.lookup_key(0.5, 0.5)
+    key_b = regmap.lookup_key(1.6, 0.5)
+    key_c = regmap.lookup_key(0.5, 1.6)
+    assert key_a == key_b
+    assert key_c != key_a
 
 
 def test_psf_region_map_from_file(tmp_path):

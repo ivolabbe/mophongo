@@ -144,6 +144,11 @@ class PSFRegionMap:
 
         self.regions = self._merge_slivers(gdf).reset_index(drop=True)
 
+        # Renumber psf_key to be consecutive starting from 0
+        unique_keys = sorted(self.regions['psf_key'].unique())
+        key_mapping = {old_key: new_key for new_key, old_key in enumerate(unique_keys)}
+        self.regions['psf_key'] = self.regions['psf_key'].map(key_mapping)
+
         self.tree = STRtree(self.regions.geometry.to_list())
         return self
 

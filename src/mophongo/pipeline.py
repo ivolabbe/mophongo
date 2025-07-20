@@ -106,11 +106,29 @@ def run_photometry(
 
         if weights is not None:
             pred = fitter.predicted_errors()
-            catalog[f"err_pred_{idx}"] = pred
 
-        catalog[f"flux_{idx}"] = fluxes
-        catalog[f"err_{idx}"] = errs
-        catalog[f"err_{idx}"] = pred
+        if len(tmpls.templates) == len(catalog):
+            if weights is not None:
+                catalog[f"err_pred_{idx}"] = pred
+            catalog[f"flux_{idx}"] = fluxes
+            catalog[f"err_{idx}"] = errs
+            if weights is not None:
+                catalog[f"err_{idx}"] = pred
+        else:
+            # fill arrays with NaN and map via tmpl_idx
+            full_flux = np.full(len(catalog), np.nan)
+            full_err = np.full(len(catalog), np.nan)
+            full_pred = np.full(len(catalog), np.nan)
+            for j, ci in enumerate(tmpl_idx):
+                if ci is not None:
+                    full_flux[ci] = fluxes[j]
+                    full_err[ci] = errs[j]
+                    if weights is not None:
+                        full_pred[ci] = pred[j]
+            catalog[f"flux_{idx}"] = full_flux
+            catalog[f"err_{idx}"] = full_err
+            if weights is not None:
+                catalog[f"err_pred_{idx}"] = full_pred
         residuals.append(resid)
 
     return catalog, residuals, tmpls

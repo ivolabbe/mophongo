@@ -75,5 +75,5 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
  - [ ] Implement JWST STDPSF extension utility
  - [x] Build PSF region map from exposure footprints
  - [x] Add PA-based coarsening option to PSFRegionMap
-- [x] Added additional PSF kernel basis sets (Laguerre, Zernike, B-spline, DoG, starlet, eigen-PSF, powerlaw)
-- [x] Added KernelLookup utility and kernel generation notebook
+ - [x] Added KernelLookup utility and kernel generation notebook
+ - [ ] End-to-end test with realistic mosaic data using `make_mosaic_dataset`

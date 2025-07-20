@@ -29,13 +29,14 @@ class PSFRegionMap:
 
     regions: gpd.GeoDataFrame
     snap_tol: float = 0.2 / 3600
+    fwhm: float = 0.2 / 3600
     area_factor: float = 100.0
 
     tree: STRtree = field(init=False, repr=False)
 
     # ───────────── private derived constants ──────────────
     def __post_init__(self) -> None:
-        self._area_min = self.area_factor * self.buffer_tol
+        self._area_min = self.area_factor * np.pi * (self.fwhm / 2) ** 2
         self.tree = STRtree(self.regions.geometry.to_list())
 
     # =================================================================
@@ -49,16 +50,39 @@ class PSFRegionMap:
         crs: str | None = "EPSG:4326",
         snap_tol: float = 0.2 / 3600,
         buffer_tol: float = 1.0 / 3600,
+        fwhm: float = 0.2 / 3600,
         area_factor: float = 100.0,
     ) -> "PSFRegionMap":
         """Build a PSFRegionMap from *(frame_id → footprint polygon)*.
-        All tolerances in degrees.
+
+        Parameters
+        ----------
+        footprints : Mapping[Hashable, Polygon]
+            Mapping of frame identifiers to footprint polygons.
+        crs : str or None, optional
+            Coordinate reference system of the input footprints. Defaults to
+            "EPSG:4326".
+        snap_tol : float, optional
+            Tolerance for ``shapely.set_precision`` in degrees.
+        buffer_tol : float, optional
+            Buffer size used to close small gaps in degrees.
+        fwhm : float, optional
+            PSF FWHM assumed for the region area threshold in degrees.
+        area_factor : float, optional
+            Scale factor applied to the PSF area when defining the minimum
+            region area.
+
+        Returns
+        -------
+        PSFRegionMap
+            New instance constructed from the provided footprints.
         """
         self = cls.__new__(cls)
         self.snap_tol = snap_tol
         self.buffer_tol = buffer_tol
+        self.fwhm = fwhm
         self.area_factor = area_factor
-        self._area_min = area_factor * buffer_tol**2
+        self._area_min = area_factor * np.pi * (fwhm / 2) ** 2
 
         regions: list[tuple[Polygon, set[Hashable]]] = []
         for fid, poly in footprints.items():
@@ -83,7 +107,9 @@ class PSFRegionMap:
         for geom, frames in regions:
             if geom.geom_type == "MultiPolygon":
                 for part in geom.geoms:
-                    records.append({"geometry": part, "frame_list": tuple(sorted(frames))})
+                    records.append(
+                        {"geometry": part, "frame_list": tuple(sorted(frames))}
+                    )
             else:
                 records.append({"geometry": geom, "frame_list": tuple(sorted(frames))})
 
@@ -146,19 +172,21 @@ class PSFRegionMap:
             ]
             if not nbrs:
                 continue
-            
+
             # Check if poly.boundary is valid before using it
             if poly.boundary is None:
                 continue
-                
+
             # Filter again for safety in lambda
             nbr = max(
                 nbrs,
                 key=lambda j: (
                     poly.boundary.intersection(gdf.at[j, "geometry"]).length
-                    if (gdf.at[j, "geometry"] is not None 
-                        and not gdf.at[j, "geometry"].is_empty 
-                        and poly.boundary is not None)
+                    if (
+                        gdf.at[j, "geometry"] is not None
+                        and not gdf.at[j, "geometry"].is_empty
+                        and poly.boundary is not None
+                    )
                     else -1
                 ),
             )
@@ -167,4 +195,3 @@ class PSFRegionMap:
         return gdf.dissolve(by="psf_key", as_index=False, aggfunc="first").drop(
             columns="area"
         )
-

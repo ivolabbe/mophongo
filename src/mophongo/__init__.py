@@ -6,8 +6,6 @@ from .jwst_psf import make_extended_grid
 from .psf_map import PSFRegionMap
 from . import psf_map as _psf_map
 
-_psf_map.fwhm = 0.2 / 3600
-
 try:
     from .photutils_deblend import deblend_sources
 except ImportError:
@@ -23,4 +21,5 @@ __all__ = [
     "deblend_sources",
     "make_extended_grid",
     "PSFRegionMap",
+    "KernelLookup",
 ]

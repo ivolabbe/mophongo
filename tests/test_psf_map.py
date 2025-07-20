@@ -65,10 +65,10 @@ def test_psf_region_map_from_file(tmp_path):
     dpsf = DrizzlePSF(driz_image=drz_file,csv_file=csv_file)
 
     # extract the first 10 footprints from dpsf.footprint
-    footprints = {k: v for i, (k, v) in enumerate(dpsf.footprint.items()) if i < 10}
+    footprint = {k: v for i, (k, v) in enumerate(dpsf.footprint.items()) if i < 10}
 
-    prm = PSFRegionMap.from_footprints(dpsf.footprint, buffer_tol=1.0/3600, area_factor=300)
-#    prm = PSFRegionMap.from_footprints(dpsf.footprint)
+#    prm = PSFRegionMap.from_footprints(dpsf.footprint, buffer_tol=1.0/3600, area_factor=300)
+    prm = PSFRegionMap.from_footprints(footprint)
 
     fig, ax = plt.subplots()
     prm.regions.plot(column="psf_key", ax=ax, edgecolor="k", cmap="tab20")

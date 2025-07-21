@@ -112,6 +112,7 @@ def make_mosaic_dataset(seed: int = 1) -> MosaicDataset:
     truth, catalog, ratio, params = _generate_truth(mosaic_size, 50, seed)
 
     # F444W frames
+    pscale = 0.063 # arcsec/pix
     frame_size = int(30 / pscale)
     wcs_a = _make_wcs(pscale, frame_size, -20.0)
     wcs_b = _make_wcs(pscale, frame_size, 20.0)
@@ -127,9 +128,11 @@ def make_mosaic_dataset(seed: int = 1) -> MosaicDataset:
         frames_f444w.append(data_frame)
 
     # F770W single frame
+    pscale = 0.11 # arcsec/pix
     frame_size_770 = int(30 / pscale)
     wcs_c = _make_wcs(pscale, frame_size_770, 0.0)
     psf_c = PSF.gaussian(31, 3.5, 3.5).array
+    
     params_770 = params.copy()
     params_770['amplitude'] = params['amplitude'] * ratio
     truth_770 = make_model_image(

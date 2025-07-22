@@ -290,6 +290,7 @@ class PSF:
         other: "PSF" | np.ndarray,
         basis: np.ndarray,
         *,
+        method: str = "lstsq",
         recenter: bool = True,
     ) -> np.ndarray:
         """Return convolution kernel using a Fourier basis fit."""
@@ -312,7 +313,7 @@ class PSF:
                 axis=2,
             )
 
-        kernel, _ = fit_kernel_fourier(psf_hi, psf_lo, basis)
+        kernel, _ = fit_kernel_fourier(psf_hi, psf_lo, basis, method=method)
         if recenter:
             ycen, xcen = centroid_quadratic(kernel, fit_boxsize=5)
             if not np.isnan(ycen) and not np.isnan(xcen):
@@ -707,15 +708,11 @@ class EffectivePSF:
     def get_at_position(self, x, y, filter, rot90=0):
         """Interpolate the ePSF grid to a detector position."""
         epsf = self.epsf[filter]
-        psf_type = "HST/Optical"
-        if filter.startswith("STDPSF_MIRI"):
-            psf_type = "STDPSF_MIRI"
-        elif filter.startswith("STDPSF_NRC"):
-            psf_type = "STDPSF_NRC"
 
-        self.eval_psf_type = psf_type
+        self.eval_psf_type = "HST/Optical"
 
-        if psf_type == "STDPSF_MIRI":
+        if  "MIRI" in filter:
+            self.eval_psf_type = "MIRI"
             ndet = int(np.sqrt(epsf.shape[2]))
             rx = np.interp(x, [1, 358, 1032], [1, 2, 3]) - 1
             ry = np.interp(y, [1, 512, 1024], [1, 2, 3]) - 1
@@ -732,7 +729,8 @@ class EffectivePSF:
                 psf_xy += fx * fy * epsf[:, :, nx + 1 + (ny + 1) * ndet]
             psf_xy = psf_xy.T
 
-        elif psf_type == "STDPSF_NRC":
+        elif "NRC" in filter:
+            self.eval_psf_type = "NRC"
             ndet = int(np.sqrt(epsf.shape[2]))
             rx = np.interp(x, [0, 512, 1024, 1536, 2048], [1, 2, 3, 4, 5]) - 1
             ry = np.interp(y, [0, 512, 1024, 1536, 2048], [1, 2, 3, 4, 5]) - 1
@@ -882,10 +880,11 @@ class DrizzlePSF:
         if info is None:
             info = self.read_wcs_csv(driz_image, csv_file=csv_file)
 
-        self.flt_keys, self.wcs, self.footprint = info
+        self.flt_keys, self.wcs, self.footprint, self.hdrs = info
         self.flt_files = list({k[0] for k in self.flt_keys})
 
         if epsf_obj is None:
+#            epsf_obj = NEffectivePSF()
             epsf_obj = EffectivePSF()
         self.epsf_obj = epsf_obj
 
@@ -921,6 +920,7 @@ class DrizzlePSF:
         flt_keys = []
         wcs_dict = {}
         footprints = {}
+        hdrs = {}
 
         for row in tab:
             key = (row["file"], row["ext"])
@@ -933,10 +933,11 @@ class DrizzlePSF:
             wcs.expweight = hdr.get("EXPTIME", 1)
 
             flt_keys.append(key)
+            hdrs[key] = hdr
             wcs_dict[key] = wcs
             footprints[key] = Polygon(wcs.calc_footprint())
 
-        return flt_keys, wcs_dict, footprints
+        return flt_keys, wcs_dict, footprints, hdrs
 
     @staticmethod
     def _get_empty_driz(wcs):
@@ -964,6 +965,7 @@ class DrizzlePSF:
                         verbose=False):
         """Return a drizzle Cutout2D, including WCS."""
 
+        # default size to size of the ePSF model
         if size is None:
             if size_native is None:    # get from the first filter
                 first_key, first_value = next(iter(self.epsf_obj.epsf.items()))
@@ -973,7 +975,6 @@ class DrizzlePSF:
 
             size = size_native * self.wcs[self.flt_keys[0]].pscale / self.driz_pscale
             
-
         size_odd = self._next_odd_int(size)
         if verbose:
             print(f"Cutout size: {size_odd} pixels")
@@ -1019,7 +1020,6 @@ class DrizzlePSF:
         return_hdul=False,
     ):
         """Drizzle a PSF model at ``ra``, ``dec`` onto ``wcs_slice``."""
-        pix = np.arange(-npix, npix + 1)
         if wcs_slice is None:
             wcs_slice = self.driz_wcs.copy()
         
@@ -1030,6 +1030,7 @@ class DrizzlePSF:
             N = outsci.shape[0] // 2
             npix = int(np.ceil((N * self.driz_pscale / self.wcs[self.flt_keys[0]].pscale)))            
 
+        pix = np.arange(-npix, npix + 1)
         for key in self.flt_keys:
             if self.footprint[key].contains(Point(ra, dec)):
                 file, ext = key
@@ -1041,9 +1042,11 @@ class DrizzlePSF:
                 dy = xy[1] - int(xy[1]) + yphase
                 chip_offset = 2051 if ext == 2 else 0
 
+                # here get the riġht inst, dector, and MJD
                 # for NIRCam select detector from flt file name if the filter is a regexp
                 if 'NRC..' in filter:
                     det = Path(file).stem.split('_')[-2][0:5].upper()
+                    det = det.replace('L','5')
                     flt_filter = filter.replace('NRC..', det)
                 else:
                     flt_filter = filter
@@ -1189,7 +1192,7 @@ class DrizzlePSF:
         for i in range(max_iterations):
             ri, di = cutout.wcs.pixel_to_world_values(xi, yi)
 
-            psf_hdu = self.get_psf(
+            psf = self.get_psf(
                 ra=ri,
                 dec=di,
                 filter=filter,
@@ -1200,14 +1203,12 @@ class DrizzlePSF:
             )
 
             xc, yc = centroid_quadratic(
-                 psf_hdu[1].data,
+                 psf,
                  xpeak=cutout.input_position_cutout[0],
                  ypeak=cutout.input_position_cutout[1],
                  fit_boxsize=5,
             )
-#            print('centroid_com')
-#            xc, yc = centroid_com(psf_hdu[1].data)
- 
+
             dx = cutout.input_position_cutout[0] - xc
             dy = cutout.input_position_cutout[1] - yc
             dr = np.hypot(dx, dy)
@@ -1229,4 +1230,179 @@ class DrizzlePSF:
 
   
         ri, di = cutout.wcs.pixel_to_world_values(xi, yi)
-        return (ri, di), cutout.data, psf_hdu[1].data
+        return (ri, di), cutout.data, psf
+
+# ------------------------------------------------------------------
+# EffectivePSF  —  now grid-agnostic (MIRI & NIRCam)
+# ------------------------------------------------------------------
+from collections import OrderedDict
+from pathlib import Path
+import os, re
+import numpy as np
+from astropy.io import fits
+from astropy.utils.data import download_file
+
+class NEffectivePSF:
+    """
+    Minimal JWST STDPSF loader/evaluator that *learns* the grid break-points
+    (IPSFX## / JPSFY##) from every cube it opens, so it works with any SIAF
+    release.
+    """
+    # ──────────────────────────────────────────────────────────────
+    def __init__(self):
+        self.epsf           = OrderedDict()   # key → (Ny, Nx, Ncube)
+        self.grid_breaks    = {}              # key → {'x':[...], 'y':[...]}
+        self.extended_epsf  = {}              # unchanged
+        self.extended_N     = None
+        self.eval_psf_type  = None            # set in get_at_position
+
+    # ──────────────────────────────────────────────────────────────
+    # 1. LOAD CUBES ─ exactly as before, but store the break-points
+    # ──────────────────────────────────────────────────────────────
+    def _store_cube(self, key, hdu, clip_negative=False):
+        """Helper: transpose to (Ny,Nx,N), clip <0, save cube & breaks."""
+        dat = np.array([d.T for d in hdu.data]).T
+        if clip_negative:
+            dat[dat < 0] = 0
+        self.epsf[key] = dat
+
+        hdr  = hdu.header
+        nxps = hdr.get('NXPSFS', 1)
+        nyps = hdr.get('NYPSFS', 1)
+        xk   = [hdr[f'IPSFX{i:02d}'] for i in range(1, nxps+1)]
+        yk   = [hdr[f'JPSFY{i:02d}'] for i in range(1, nyps+1)]
+        self.grid_breaks[key] = {'x': xk, 'y': yk}
+
+    def load_jwst_stdpsf(
+        self,
+        miri_filters=("F770W",),               # default shortened for brevity
+        nircam_sw_filters=("F200W",),
+        nircam_sw_detectors=("A1","A2","A3","A4","B1","B2","B3","B4"),
+        nircam_lw_filters=("F444W",),
+        nircam_lw_detectors=("AL","BL"),
+        *,
+        miri_extended=True,
+        clip_negative=False,
+        local_dir=None,
+        filter_pattern=None,
+        use_astropy_cache=True,
+        verbose=False,
+    ):
+        """Load cubes from STScI site *or* a local directory (unchanged API)."""
+        # ─── Local directory mode ───────────────────────────────────────
+        if local_dir and filter_pattern:
+            regex = re.compile(filter_pattern, re.IGNORECASE)
+            for fp in Path(local_dir).rglob("*.fits"):
+                if regex.search(fp.name):
+                    with fits.open(fp) as hdul:
+                        if verbose: print(f"Loading {fp}")
+                        key = fp.stem
+                        self._store_cube(key, hdul[0], clip_negative)
+            return
+
+        # ─── Remote STScI buckets ───────────────────────────────────────
+        base = "https://www.stsci.edu/~jayander/JWST1PASS/LIB/PSFs/STDPSFs/"
+        get = lambda url: download_file(url, cache=use_astropy_cache)
+
+        # ---- MIRI ----
+        miri_fmt = ("MIRI/EXTENDED/STDPSF_MIRI_{filt}_EXTENDED.fits"
+                    if miri_extended else "MIRI/STDPSF_MIRI_{filt}.fits")
+        for filt in miri_filters:
+            url = base + miri_fmt.format(filt=filt)
+            try:
+                with fits.open(get(url)) as h:
+                    if verbose: print("Loading", url)
+                    self._store_cube(Path(url).stem, h[0], clip_negative)
+            except Exception as e:
+                print("Failed", url, e)
+
+        # ---- NIRCam SW ----
+        sw_fmt = "NIRCam/SWC/{filt}/STDPSF_NRC{det}_{filt}.fits"
+        for filt in nircam_sw_filters:
+            for det in nircam_sw_detectors:
+                url = base + sw_fmt.format(filt=filt, det=det)
+                try:
+                    with fits.open(get(url)) as h:
+                        if verbose: print("Loading", url)
+                        self._store_cube(Path(url).stem, h[0], clip_negative)
+                except Exception as e:
+                    print("Failed", url, e)
+
+        # ---- NIRCam LW ----
+        lw_fmt = "NIRCam/LWC/STDPSF_NRC{det}_{filt}.fits"
+        for filt in nircam_lw_filters:
+            for det in nircam_lw_detectors:
+                url = base + lw_fmt.format(filt=filt, det=det)
+                try:
+                    with fits.open(get(url)) as h:
+                        if verbose: print("Loading", url)
+                        key = Path(url).stem.replace(f"{det}_", f"{det}ONG_")
+                        self._store_cube(key, h[0], clip_negative)
+                except Exception as e:
+                    print("Failed", url, e)
+
+    # ──────────────────────────────────────────────────────────────
+    # 2. GET AT POSITION ─ use stored break-points, not literals
+    # ──────────────────────────────────────────────────────────────
+    def get_at_position(self, x, y, filter, rot90=0):
+        """Return the oversampled PSF at (x,y) detector coords."""
+        epsf = self.epsf[filter]            # cube (Ny,Nx,N)
+        br   = self.grid_breaks[filter]     # {'x': [...], 'y': [...]}
+
+        # Determine flavour
+        if   filter.startswith("STDPSF_MIRI"):
+            self.eval_psf_type = "STDPSF_MIRI"
+        elif filter.startswith("STDPSF_NRC"):
+            self.eval_psf_type = "STDPSF_NRC"
+        else:
+            self.eval_psf_type = "HST/Optical"
+
+        # ---- generic 2×2 (MIRI) or 3×3 / 5×5 (NIRCam) bilinear blend
+        xk, yk = br['x'], br['y']
+        nxps, nyps = len(xk), len(yk)
+        ndet = int(np.sqrt(epsf.shape[2]))  # 3×3 → 3 etc.
+
+        # 0-based fractional indices within the grid
+        rx = np.interp(x, xk, np.arange(nxps)) - 0
+        ry = np.interp(y, yk, np.arange(nyps)) - 0
+        ix, iy  = np.clip(rx.astype(int), 0, nxps-2), np.clip(ry.astype(int), 0, nyps-2)
+        fx, fy  = rx - ix, ry - iy
+
+        # Bilinear combination
+        psf_xy  = (1-fx)*(1-fy)*epsf[:,:, ix   + iy   *ndet]
+        psf_xy +=   fx *(1-fy)*epsf[:,:, ix+1 + iy   *ndet]
+        psf_xy += (1-fx)*  fy *epsf[:,:, ix   +(iy+1)*ndet]
+        psf_xy +=   fx *  fy *epsf[:,:, ix+1 +(iy+1)*ndet]
+        psf_xy  = psf_xy.T          # your historical transpose
+
+        if rot90:
+            psf_xy = np.rot90(psf_xy, rot90)
+
+        return psf_xy
+
+    # ──────────────────────────────────────────────────────────────
+    # 3. eval_ePSF unchanged
+    # ──────────────────────────────────────────────────────────────
+    def eval_ePSF(self, psf_xy, dx, dy, extended_data=None):
+        from scipy.ndimage import map_coordinates
+
+        if self.eval_psf_type in ("WFC3/IR", "HST/Optical"):
+            ok = (np.abs(dx)<=12.5) & (np.abs(dy)<=12.5)
+            coords = np.array([50 + 4*dx[ok], 50 + 4*dy[ok]])
+        else:
+            sz   = (psf_xy.shape[0]-1)//4
+            x0   = sz*2
+            cen  = (x0-1)//2
+            ok   = (np.abs(dx)<=cen) & (np.abs(dy)<=cen)
+            coords = np.array([x0 + 4*dx[ok], x0 + 4*dy[ok]])
+
+        out = np.zeros_like(dx, dtype=np.float32)
+        out[ok] = map_coordinates(psf_xy, coords, order=3)
+
+        # optional extended halo
+        if extended_data is not None:
+            ok2 = (np.abs(dx)<self.extended_N) & (np.abs(dy)<self.extended_N)
+            coords = np.array([self.extended_N+dy[ok2],
+                               self.extended_N+dx[ok2]])
+            out[ok2] += map_coordinates(extended_data, coords, order=0)
+        return out

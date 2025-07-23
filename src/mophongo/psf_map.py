@@ -84,7 +84,7 @@ class PSFRegionMap:
         self.snap_tol = snap_tol
         self.buffer_tol = buffer_tol
         self.area_factor = area_factor
-        self._area_min = area_factor * buffer_tol
+        self._area_min = area_factor * buffer_tol**2
 
         pa_class = None
         if wcs is not None and pa_tol > 0:

@@ -8,11 +8,11 @@ from typing import Tuple
 
 import numpy as np
 from scipy import ndimage as ndi
-from astropy.convolution import Gaussian2DKernel
+from astropy.convolution import Gaussian2DKernel, Box2DKernel, convolve
 from astropy.io import fits
 from astropy.table import Table
 from photutils.background import MADStdBackgroundRMS
-from astropy.stats import SigmaClip
+from astropy.stats import SigmaClip, mad_std
 from photutils.segmentation import (
     SourceCatalog,
     detect_sources,
@@ -83,6 +83,76 @@ def calibrate_wht(
         pad_x = nx - expanded.shape[1]
         expanded = np.pad(expanded, ((0, pad_y), (0, pad_x)), mode="edge")
     return expanded[:ny, :nx] / (nbin**2)
+
+
+def noise_equalised_image(data: np.ndarray, weight: np.ndarray | None = None) -> np.ndarray:
+    """Return image divided by the per-pixel noise."""
+    if weight is None:
+        return data
+    return data * np.sqrt(weight)
+
+
+def detect_peaks(
+    img_eq: np.ndarray,
+    sigma: float = 3.0,
+    npix_min: int = 5,
+    kernel_w: int = 3,
+) -> tuple[SegmentationImage, SourceCatalog]:
+    """Detect peaks in a noise-equalised image."""
+
+    sm = convolve(img_eq, Box2DKernel(kernel_w), normalize_kernel=True)
+    std = mad_std(sm)
+    seg = detect_sources(sm, sigma * std, npixels=npix_min)
+    props = SourceCatalog(img_eq, seg)
+    return seg, props
+
+
+def point_like_mask(
+    props: SourceCatalog,
+    r50_max_pix: float = 1.5,
+    elong_max: float = 1.3,
+    sharp_lohi: tuple[float, float] = (0.2, 1.2),
+) -> np.ndarray:
+    """Return mask for point-like sources."""
+
+    good = []
+    for prop in props:
+        r50 = prop.equivalent_radius.value
+        elong = prop.elongation.value
+        sharp = prop.max_value * np.pi * r50 ** 2 / prop.segment_flux
+        good.append(
+            (r50 < r50_max_pix)
+            and (elong < elong_max)
+            and (sharp > sharp_lohi[0])
+            and (sharp < sharp_lohi[1])
+        )
+    return np.array(good, dtype=bool)
+
+
+def fit_psf_stamp(
+    data: np.ndarray,
+    sigma: np.ndarray,
+    psf_model: np.ndarray,
+) -> tuple[float, float]:
+    """Fit a PSF to a small stamp and return flux and reduced chi^2."""
+
+    y, x = np.indices(data.shape)
+    flat = np.ones_like(psf_model)
+
+    A = np.vstack([(psf_model / sigma), (flat / sigma)]).reshape(2, -1).T
+    b = (data / sigma).ravel()
+    coeff, *_ = np.linalg.lstsq(A, b, rcond=None)
+    model = coeff[0] * psf_model + coeff[1]
+    chi2 = np.sum(((data - model) ** 2) / sigma ** 2)
+    dof = data.size - 2
+    return coeff[0], chi2 / dof
+
+
+def vet_by_chi2(star_list: Table, chi2_max: float = 3.0) -> Table:
+    """Filter table rows by reduced chi^2."""
+
+    mask = star_list['chi2_red'] < chi2_max
+    return star_list[mask]
 
 
 @dataclass
@@ -179,6 +249,68 @@ class Catalog:
                 overwrite=True,
             )
         self._detect()
+
+    def find_stars(
+        self,
+        *,
+        psf: np.ndarray | None = None,
+        sigma: float = 3.0,
+        npix_min: int = 5,
+        kernel_w: int = 3,
+        r50_max_pix: float = 1.5,
+        elong_max: float = 1.3,
+        sharp_lohi: tuple[float, float] = (0.2, 1.2),
+        chi2_max: float = 3.0,
+        return_seg: bool = False,
+    ) -> Table | tuple[Table, SegmentationImage]:
+        """Find point sources in the catalog image."""
+
+        if self.ivar is None:
+            raise RuntimeError("Run the catalog first to compute ivar")
+
+        img_eq = noise_equalised_image(self.sci - self.background, self.ivar)
+        seg, props_eq = detect_peaks(img_eq, sigma, npix_min, kernel_w)
+
+        props = SourceCatalog(
+            self.sci,
+            seg,
+            error=np.sqrt(1.0 / self.ivar),
+        )
+
+        keep = point_like_mask(props_eq, r50_max_pix, elong_max, sharp_lohi)
+        table = props.to_table()[keep]
+        table['x'] = table['xcentroid']
+        table['y'] = table['ycentroid']
+        if 'segment_fluxerr' in table.colnames:
+            snr = table['segment_flux'] / table['segment_fluxerr']
+        else:
+            snr = np.full(len(table), np.nan)
+        table['flux'] = table['segment_flux']
+        table['snr'] = snr
+
+        if psf is not None and len(table) > 0:
+            chi2 = []
+            flux_psf = []
+            half = psf.shape[0] // 2
+            for row in table:
+                y0 = int(row['y'])
+                x0 = int(row['x'])
+                y_slice = slice(max(0, y0 - half), min(self.sci.shape[0], y0 + half + 1))
+                x_slice = slice(max(0, x0 - half), min(self.sci.shape[1], x0 + half + 1))
+                stamp = self.sci[y_slice, x_slice]
+                sigma_im = np.sqrt(1.0 / self.ivar[y_slice, x_slice])
+                if stamp.shape != psf.shape:
+                    chi2.append(np.inf)
+                    flux_psf.append(np.nan)
+                    continue
+                flux, c2 = fit_psf_stamp(stamp, sigma_im, psf)
+                chi2.append(c2)
+                flux_psf.append(flux)
+            table['flux_psf'] = flux_psf
+            table['chi2_red'] = chi2
+            table = vet_by_chi2(table, chi2_max)
+
+        return (table, seg) if return_seg else table
 
     @classmethod
     def from_fits(

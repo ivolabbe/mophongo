@@ -181,7 +181,7 @@ def psf_grid_from_csv(
             use_detsampled_psf = use_detsampled_psf,
             verbose       = verbose,            
 #            single_psf_centered = True,   
-#            save       = True,
+#            save       = False,
 #            outdir     = None,
 #            outfile    = outfile,
         )

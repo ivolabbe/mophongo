@@ -224,6 +224,8 @@ def blend_psf(
     core_shape = core_psf.shape
     core_psf_out = core_psf
     
+    core_psf_out = core_psf
+    
     pos = np.asarray(ext_psf.shape) // 2
     ext_cutout = Cutout2D(ext_psf, position=pos, size=core_shape)
     ext_cutout_data = ext_cutout.data
@@ -236,9 +238,19 @@ def blend_psf(
     mask_norm = r <= min(Rnorm_px, N)
     scl_ext = core_psf_out[mask_norm].sum() / ext_cutout_data[mask_norm].sum()
 
+    
+    # Scaling for normalization in the blend region
+    mask_norm = r <= min(Rnorm_px, N)
+    scl_ext = core_psf_out[mask_norm].sum() / ext_cutout_data[mask_norm].sum()
+
     if subtract_bg:
         bgmask = ~(core_psf > np.nanpercentile(core_psf[core_psf > 0.0],bg_pct) ) & (r < N - buf_px)
+        bgmask = ~(core_psf > np.nanpercentile(core_psf[core_psf > 0.0],bg_pct) ) & (r < N - buf_px)
         if np.any(bgmask):
+            core_psf_out = core_psf - np.nanmedian((core_psf - ext_cutout_data)[bgmask])  
+            print('percentile background core:', np.nanmedian((core_psf)[bgmask]))  
+            print('percentile background extended:', np.nanmedian((ext_cutout_data)[bgmask]))  
+            print('subtracting background -(core - extended):', np.nanmedian((core_psf - ext_cutout_data)[bgmask]))  
             core_psf_out = core_psf - np.nanmedian((core_psf - ext_cutout_data)[bgmask])  
             print('percentile background core:', np.nanmedian((core_psf)[bgmask]))  
             print('percentile background extended:', np.nanmedian((ext_cutout_data)[bgmask]))  
@@ -277,6 +289,9 @@ def make_extended_grid(
     Rtaper: float = 0.2,
     Rnorm: float = 0.5,
     verbose: bool = False,
+    subtract_bg=True,       # subtract dc offset from ePSF
+    bg_pct: float = 15.0,    # Percentile for dc offset 
+    return_stpsf: bool = True,
     subtract_bg=True,       # subtract dc offset from ePSF
     bg_pct: float = 15.0,    # Percentile for dc offset 
     return_stpsf: bool = True,
@@ -327,6 +342,7 @@ def make_extended_grid(
         Nemp = 1
 
     st_grid = nrc.psf_grid(
+    st_grid = nrc.psf_grid(
         num_psfs=Nemp,
         all_detectors=False,
         oversample=oversamp,
@@ -338,10 +354,15 @@ def make_extended_grid(
     Rtaper_px = Rtaper / (nrc.pixelscale / oversamp)
 
     n_outpix = st_grid.data[0].shape[0]
+    n_outpix = st_grid.data[0].shape[0]
     out_arr = np.empty((Nemp, n_outpix, n_outpix), dtype=float)
+    print(out_arr.shape, emp_grid.data.shape, st_grid.data.shape)
     print(out_arr.shape, emp_grid.data.shape, st_grid.data.shape)
     for i in range(Nemp):
         out_arr[i] = blend_psf(
+            emp_grid.data[i], st_grid.data[i], 
+            Rcore_px, Rtaper_px = Rtaper_px, Rnorm_px = Rnorm_px, 
+            subtract_bg=subtract_bg, bg_pct=bg_pct
             emp_grid.data[i], st_grid.data[i], 
             Rcore_px, Rtaper_px = Rtaper_px, Rnorm_px = Rnorm_px, 
             subtract_bg=subtract_bg, bg_pct=bg_pct
@@ -392,12 +413,29 @@ def write_stdpsf(
     overwrite: bool = False,
     history: str | None = None,
     verbose: bool = False,
+    filename: str | Path,
+    psf_grid=None,                     # NEW name; raw cube still accepted
+    xgrid: np.ndarray | None = None,
+    ygrid: np.ndarray | None = None,
+    *,
+    detector: str | None = None,
+    filt: str | None = None,
+    overwrite: bool = False,
+    history: str | None = None,
+    verbose: bool = False,
 ):
     """
+    Write a JWST “STDPSF” file.
     Write a JWST “STDPSF” file.
 
     Parameters
     ----------
+    filename  :  str or Path
+        Destination path.
+    psf_grid  :  STDPSFGrid object **or** (N, Y, X) float32 array.
+    xgrid/ygrid
+        1-D arrays of detector-pixel centres for the PSF grid.
+        *Ignored* when a STDPSFGrid is passed (taken from its meta).
     filename  :  str or Path
         Destination path.
     psf_grid  :  STDPSFGrid object **or** (N, Y, X) float32 array.
@@ -423,10 +461,31 @@ def write_stdpsf(
         raise ValueError("psf_grid/cube must be a 3-D array (N, Y, X)")
 
     npsf, ny, nx = cube.shape
+
+    # ───────────────────── accept either STDPSFGrid or raw cube ──────────
+    if hasattr(psf_grid, "data") and hasattr(psf_grid, "meta"):
+        grid_obj = psf_grid
+        cube     = np.asarray(grid_obj.data,  dtype='float32')
+        xgrid    = np.unique(grid_obj.grid_xypos[:, 0]).astype(int)
+        ygrid    = np.unique(grid_obj.grid_xypos[:, 1]).astype(int)
+        detector = detector or grid_obj.meta.get("detector")
+        filt     = filt     or grid_obj.meta.get("filter")
+        meta     = dict(grid_obj.meta)          # copy – we'll pop below
+    else:
+        cube  = np.asarray(psf_grid, dtype='float32')
+        meta  = {}                              # nothing extra to copy
+
+    if cube.ndim != 3:
+        raise ValueError("psf_grid/cube must be a 3-D array (N, Y, X)")
+
+    npsf, ny, nx = cube.shape
     xgrid = np.asarray(xgrid, dtype=int)
     ygrid = np.asarray(ygrid, dtype=int)
     if npsf != len(xgrid) * len(ygrid):
+    if npsf != len(xgrid) * len(ygrid):
         raise ValueError(
+            f"psf_grid.shape[0] ({npsf}) ≠ len(xgrid)*len(ygrid) "
+            f"({len(xgrid)*len(ygrid)})"
             f"psf_grid.shape[0] ({npsf}) ≠ len(xgrid)*len(ygrid) "
             f"({len(xgrid)*len(ygrid)})"
         )
@@ -439,13 +498,29 @@ def write_stdpsf(
     hdr['NAXIS3'] = npsf
     hdr['NXPSFs'] = len(xgrid)
     hdr['NYPSFs'] = len(ygrid)
+    # ───────────────────── primary HDU and required keywords ─────────────
+    hdu  = fits.PrimaryHDU(cube)
+    hdr  = hdu.header
+    hdr['NAXIS1'] = nx
+    hdr['NAXIS2'] = ny
+    hdr['NAXIS3'] = npsf
+    hdr['NXPSFs'] = len(xgrid)
+    hdr['NYPSFs'] = len(ygrid)
 
+    # detector grid positions – store pixel numbers 1-indexed
     # detector grid positions – store pixel numbers 1-indexed
     for i, xv in enumerate(xgrid, 1):
         hdr[f'IPSFX{i:02d}'] = int(xv + 1)
+        hdr[f'IPSFX{i:02d}'] = int(xv + 1)
     for i, yv in enumerate(ygrid, 1):
         hdr[f'JPSFY{i:02d}'] = int(yv + 1)
+        hdr[f'JPSFY{i:02d}'] = int(yv + 1)
 
+    # convenience keywords
+    if detector:
+        hdr['DETECTOR'] = detector
+    if filt:
+        hdr['FILTER']   = filt
     # convenience keywords
     if detector:
         hdr['DETECTOR'] = detector
@@ -481,7 +556,39 @@ def write_stdpsf(
             hdr[kw] = (str(val)[:68], comment)
 
     # ───────────────────── date / time / history ────────────────────────
+    # ───────────────── copy every meta entry into the header ──────────────
+    for key, raw in meta.items():
+
+        # skip if explicitly handled above
+        if key.lower() in {'detector', 'filter'}:
+            continue
+
+        # unpack "(value, comment)" or fall back to plain value
+        if isinstance(raw, tuple) and len(raw) >= 1:
+            val     = raw[0]
+            comment = raw[1] if len(raw) > 1 else ''
+        else:
+            val     = raw
+            comment = f'From meta: {key}'
+
+        # FITS keyword (≤8 chars, alnum only)
+        kw = _fits_key(key)
+
+        # truncate very long strings so they fit (FITS allows 68 chars)
+        if isinstance(val, str):
+            val = val[:68]
+
+        try:
+            hdr[kw] = (val, comment)
+        except Exception:
+            # fall back to string representation if value type not supported
+            hdr[kw] = (str(val)[:68], comment)
+
+    # ───────────────────── date / time / history ────────────────────────
     now = datetime.utcnow()
+    hdr['DATE'] = now.strftime('%Y-%m-%d')
+    hdr['TIME'] = now.strftime('%H:%M:%S')
+    hdr.add_history('File written by write_stdpsf')
     hdr['DATE'] = now.strftime('%Y-%m-%d')
     hdr['TIME'] = now.strftime('%H:%M:%S')
     hdr.add_history('File written by write_stdpsf')
@@ -490,6 +597,8 @@ def write_stdpsf(
             hdr.add_history(line.strip())
 
     # ───────────────────── write file ────────────────────────────────────
+    # ───────────────────── write file ────────────────────────────────────
     hdu.writeto(filename, overwrite=overwrite)
     if verbose:
+        print(f"Wrote {npsf} PSFs ➜ {filename}")
         print(f"Wrote {npsf} PSFs ➜ {filename}")

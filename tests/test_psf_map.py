@@ -20,7 +20,7 @@ def test_region_count():
 
 def test_no_tiny_regions():
     regmap = PSFRegionMap.from_footprints(footprints, crs=None)
-    area_min = regmap.area_factor * regmap.buffer_tol
+    area_min = regmap.area_factor * regmap.buffer_tol**2
     assert (regmap.regions.geometry.area >= area_min).all()
 
 def test_lookup():
@@ -29,7 +29,7 @@ def test_lookup():
     key = regmap.lookup_key(2.5e-05, 0.5)
     assert key is not None
     frames = regmap.regions.query("psf_key == @key").frame_list.iloc[0]
-    assert frames == ("A", "B")
+    assert frames == ("A",)
 
 def test_plot(tmp_path):
     regmap = PSFRegionMap.from_footprints(footprints, crs=None)

@@ -307,7 +307,10 @@ class Templates:
 
             if isinstance(kernel, KernelLookup):
                 x, y = tmpl.position_original
-                ra, dec = tmpl.wcs.wcs_pix2world(x, y, 0)
+                if tmpl.wcs is not None:
+                    ra, dec = tmpl.wcs.wcs_pix2world(x, y, 0)
+                else:
+                    ra, dec = x, y
                 kern = kernel.get_kernel(ra, dec)
             else:
                 kern = kernel

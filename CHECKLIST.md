@@ -78,3 +78,4 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
  - [x] Added KernelLookup utility and kernel generation notebook
  - [x] Added spatially varying kernel support in `run_photometry` and template convolution
  - [x] End-to-end test with realistic mosaic data using `make_mosaic_dataset`
+- [x] Implemented star finder in Catalog

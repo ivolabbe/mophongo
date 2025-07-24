@@ -855,6 +855,7 @@ class CircularApertureProfile(RadialProfile):
         subpixels: int = 5,
         name: str | None = None,
         norm_radius: float | None = None,
+        pixel_scale: float | None = None,  # <-- add pixel_scale argument
     ) -> None:
         from photutils.centroids import centroid_quadratic
 
@@ -910,6 +911,7 @@ class CircularApertureProfile(RadialProfile):
 
         self.name = name
         self.norm_radius = norm_radius
+        self.pixel_scale = pixel_scale
 
         # save indices into data 
         yidx, xidx = np.indices(self.data.shape)
@@ -973,65 +975,90 @@ class CircularApertureProfile(RadialProfile):
         )(self.cog.radius)
         return self.cog.profile / interp
 
-    def _plot_radial_profile(self, ax, color="C0") -> None:
+    def _radius_unit(self):
+        return "arcsec" if self.pixel_scale is not None else "pix"
+
+    def _convert_radius(self, r):
+        return r * self.pixel_scale if self.pixel_scale is not None else r
+
+    def _plot_radial_profile(self, ax, color="C0", **kwargs) -> None:
         label = self.name or "profile"
-        ax.plot(self.radius, self.profile, label=label, color=color)
+        radius = self._convert_radius(self.radius)
+        ax.plot(radius, self.profile, label=label, color=color, **kwargs)
         ax.set_yscale("log")
-        ax.set_xlabel("Radius (pix)")
+        ax.set_xlabel(f"Radius ({self._radius_unit()})")
         ax.set_ylabel("Normalized Profile")
-        ax.axvline(self.gaussian_fwhm / 2, color="C1", ls="--", label="Gauss FWHM")
-        ax.axvline(self.moffat_fwhm / 2, color="C2", ls=":", label="Moffat FWHM")
-        ax.set_ylim(np.max(self.profile)/1e5, np.max(self.profile) * 1.3)
+        gfwhm = self.gaussian_fwhm
+        ax.axvline(self._convert_radius(gfwhm / 2), color=color, ls="--", label=f"Gauss FWHM {self._convert_radius(gfwhm):.2f} {self._radius_unit()}")
+        ax.set_ylim(np.max(self.profile) / 1e5, np.max(self.profile) * 1.3)
         ax.legend()
 
-    def _plot_cog(self, ax, color="C0") -> None:
+    def _plot_cog(self, ax, color="C0", **kwargs) -> None:
         label = self.name or "profile"
-        ax.plot(self.cog.radius, self.cog.profile, label=label, color=color)
-        ax.set_xlabel("Radius (pix)")
+        radius = self._convert_radius(self.cog.radius)
+        ax.plot(radius, self.cog.profile, label=label, color=color, **kwargs)
+        ax.set_xlabel(f"Radius ({self._radius_unit()})")
         ax.set_ylabel("Encircled Energy")
         if self.norm_radius is not None:
             r20 = self.cog.calc_radius_at_ee(0.2)
             r80 = self.cog.calc_radius_at_ee(0.8)
-            ax.axvline(r20, color="C1", ls=":")
-            ax.axvline(r80, color="C1", ls="--")
+            ax.axvline(self._convert_radius(r20), color=color, ls=":", label=f"R20 {self._convert_radius(r20):.2f} {self._radius_unit()}", **kwargs)
+            ax.axvline(self._convert_radius(r80), color=color, ls="--", label=f"R80 {self._convert_radius(r80):.2f} {self._radius_unit()}", **kwargs)
         ax.set_ylim(0, 1.05)
         ax.legend()
 
-    def _plot_ratio(self, other: "CircularApertureProfile", ax) -> None:
+    def _plot_ratio(self, other: "CircularApertureProfile", ax, ylabel='', color='k', **kwargs) -> None:
         ratio = self.cog_ratio(other)
-        ax.plot(self.cog.radius, ratio, color="C0")
-        ax.axhline(1.0, color="0.5", ls="--")
-        ax.set_xlabel("Radius (pix)")
-        ax.set_ylabel("COG Ratio")
+        radius = self._convert_radius(self.cog.radius)
+        ax.plot(radius, ratio, color=color, label=ylabel, **kwargs)
+        ax.axhline(1.0, ls="-", color='gray')
+        gfwhm = self.gaussian_fwhm
+        ax.axvline(self._convert_radius(gfwhm / 2), color=color, ls="--", label=f"Gauss FWHM {self._convert_radius(gfwhm):.2f} {self._radius_unit()}", **kwargs)
+        ax.set_xlabel(f"Radius ({self._radius_unit()})")
+        ax.set_ylabel("COG Ratio " + ylabel)
         ax.set_ylim(0.8, 1.2)
 
     def plot(
         self,
         *,
-        compare_to: "CircularApertureProfile" | None = None,
-        show: bool = False,
+        axes: list | None = None,
+        cog_ratio: bool = True,
+        **kwargs: dict
     ) -> tuple["matplotlib.figure.Figure", list]:
         """Plot radial profile and curve of growth."""
 
         import matplotlib.pyplot as plt
 
-        ncols = 3 if compare_to is not None else 2
-        fig, axes = plt.subplots(1, ncols, figsize=(5 * ncols, 4))
-
+#        ncols = 3 if cog_ratio else 2
+        if axes is None:
+            fig, axes = plt.subplots(1 + cog_ratio, 2, figsize=(4 * 2, 3.5 * (1+ cog_ratio)))
+            axes = axes.flatten()
+        else:
+            fig = axes[0].figure
+        
         # Main profile: blue
-        self._plot_radial_profile(axes[0])
-        self._plot_cog(axes[1])
-
-        if compare_to is not None:
-            # Compare profile: red
-            compare_to._plot_radial_profile(axes[0], color="C3")
-            compare_to._plot_cog(axes[1], color="C3")
-            self._plot_ratio(compare_to, axes[2])
+        self._plot_radial_profile(axes[0], color='C0')
+        self._plot_cog(axes[1], color='C0')
 
         fig.tight_layout()
-        if show:
-            plt.show()
         return fig, axes
+
+    def plot_other(self, other_profile, axes=None, color='C4', cog_ratio=True, **kwargs):
+        """
+        Plot only the other CircularApertureProfile on the provided axes.
+        """
+        if axes is None:
+            fig, axes = plt.subplots(1 + cog_ratio, 2, figsize=(4 * 2, 3.5 * (1+ cog_ratio)))
+            axes = axes.flatten()
+        else:
+            fig = axes[0].figure
+        
+        other_profile._plot_radial_profile(axes[0], color=color, **kwargs)
+        other_profile._plot_cog(axes[1], color=color, **kwargs)
+        self._plot_ratio(other_profile, axes[2], ylabel=self.name + " / " + other_profile.name, color=color, **kwargs)
+        fig.tight_layout()
+
+        return axes
 
 def clean_stamp(
     data,

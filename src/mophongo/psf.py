@@ -14,7 +14,7 @@ import logging
 import os
 import numpy as np
 from scipy.optimize import least_squares
-from scipy.ndimage import shift as nd_shift
+from scipy.ndimage import shift as shift
 from dataclasses import dataclass
 from shapely.geometry import Point, Polygon
 from drizzlepac import adrizzle
@@ -283,7 +283,7 @@ class PSF:
                                      psf_lo,
                                      window=window,
                                      recenter=recenter)
-        return kernel
+        return kernel.astype(np.float32)
 
     def matching_kernel_basis(
         self,
@@ -319,7 +319,7 @@ class PSF:
             if not np.isnan(ycen) and not np.isnan(xcen):
                 cy = (kernel.shape[0] - 1) / 2
                 cx = (kernel.shape[1] - 1) / 2
-                kernel = nd_shift(kernel, (cy - ycen, cx - xcen), order=3, mode="nearest")
+                kernel = shift(kernel, (cy - ycen, cx - xcen), order=3, mode="nearest")
         return kernel
 
     def _fit_profile(self, model_func, default_params, free_params, xc=None, yc=None, result_class=None):
@@ -513,7 +513,7 @@ def psf_matching_kernel(
     psf_lo: np.ndarray,
     *,
     window: object | None = None,
-    recenter: bool = False,
+    recenter: bool = True,
 ) -> np.ndarray:
     """Compute a convolution kernel matching ``psf_hi`` to ``psf_lo``.
 
@@ -551,10 +551,13 @@ def psf_matching_kernel(
     kernel = matching.create_matching_kernel(psf_hi, psf_lo, window=window)
     kernel = np.asarray(kernel)
     if recenter:
-        ycen, xcen = centroid_quadratic(kernel, fit_boxsize=5)
         cy = (kernel.shape[0] - 1) / 2
         cx = (kernel.shape[1] - 1) / 2
-        kernel = nd_shift(kernel, (cy - ycen, cx - xcen), order=3, mode="nearest")
+        ycen, xcen = centroid_quadratic(kernel, xpeak=cx, ypeak=cy, fit_boxsize=5)
+        if not np.isnan(ycen) and not np.isnan(xcen):
+            kernel = shift(kernel, (cy - ycen, cx - xcen), order=3, mode="nearest")
+        else:
+            logger.warning("Centroiding failed, kernel not recentered.")
     return kernel
 
 
@@ -563,17 +566,19 @@ def psf_matching_kernel_basis(
     psf_lo: np.ndarray,
     basis: np.ndarray,
     *,
-    recenter: bool = True,
+    recenter: bool = False,
 ) -> np.ndarray:
     """Match ``psf_hi`` to ``psf_lo`` using basis function fitting."""
 
     kernel, _ = fit_kernel_fourier(psf_hi, psf_lo, basis)
     if recenter:
-        ycen, xcen = centroid_quadratic(kernel, fit_boxsize=5)
+        cy = (kernel.shape[0] - 1) / 2
+        cx = (kernel.shape[1] - 1) / 2
+        ycen, xcen = centroid_quadratic(kernel, xpeak=cx, ypeak=cy, fit_boxsize=5)
         if not np.isnan(ycen) and not np.isnan(xcen):
-            cy = (kernel.shape[0] - 1) / 2
-            cx = (kernel.shape[1] - 1) / 2
-            kernel = nd_shift(kernel, (cy - ycen, cx - xcen), order=3, mode="nearest")
+            kernel = shift(kernel, (cy - ycen, cx - xcen), order=3, mode="nearest")
+        else:
+            logger.warning("Centroiding failed, kernel not recentered.")
     return kernel
 
 
@@ -620,14 +625,13 @@ class EffectivePSF:
                     h = im[0].header
                     if verbose:
                         hstr = (
-                            f"Loading {f} "
                             f"{h.get('NAXIS1', '?')}x{h.get('NAXIS2', '?')}x{h.get('NAXIS3', '?')} "
                             f"{h.get('INSTRUME', '?')} "
                             f"{h.get('DETECTOR', '?')} "
                             f"{h.get('FILTER',   '?')} "
                             f"{float(h.get('MJD-AVG', 0.0)):6.1f}"
                         )
-                        print(f"Loading {hstr}")       
+                        print(f"Loading {f} {hstr}")       
                     data = np.array([d.T for d in im[0].data]).T
                     if clip_negative:
                         data[data < 0] = 0
@@ -887,6 +891,11 @@ class DrizzlePSF:
         csv_file=None,
         epsf_obj=None,
     ):
+
+        import warnings
+        from astropy.wcs import FITSFixedWarning
+        warnings.simplefilter('ignore', FITSFixedWarning)
+
         if info is None:
             info = self.read_wcs_csv(driz_image, csv_file=csv_file)
 
@@ -904,10 +913,11 @@ class DrizzlePSF:
         else:
             self.driz_image = driz_image
             self.driz_header = driz_hdu.header
-
+            
         self.driz_wcs = WCS(self.driz_header)
         self.driz_pscale = get_wcs_pscale(self.driz_wcs)
         self.driz_wcs.pscale = self.driz_pscale
+        self.driz_footprint = Polygon(self.driz_wcs.calc_footprint())
 
         self._next_odd_int = lambda x: int(round(x)) | 1
 
@@ -917,11 +927,11 @@ class DrizzlePSF:
     # WCS information from CSV
     # ---------------------------------------------------------------------
     @staticmethod
-    def read_wcs_csv(drz_file, csv_file=None):
+    def read_wcs_csv(drz_file:str, csv_file=None):
         """Read exposure WCS info from a CSV table."""
         if csv_file is None:
             csv_file = (
-                drz_file.split("_drz_sci")[0].split("_drc_sci")[0] + "_wcs.csv"
+                drz_file.split("_drz_sci")[0].split("_drc_sci")[0].split("_sci")[0] + "_wcs.csv"
             )
             if not os.path.exists(csv_file):
                 raise FileNotFoundError(f"CSV file {csv_file} not found")
@@ -986,8 +996,6 @@ class DrizzlePSF:
             size = size_native * self.wcs[self.flt_keys[0]].pscale / self.driz_pscale
             
         size_odd = self._next_odd_int(size)
-        if verbose:
-            print(f"Cutout size: {size_odd} pixels")
 
         with fits.open(self.driz_image) as im:
             data = im[0].data
@@ -1018,7 +1026,7 @@ class DrizzlePSF:
         filter,
         pixfrac=0.1,
         kernel="point",
-        verbose=True,
+        verbose=False,
         wcs_slice=None,
         get_extended=True,
         get_weight=False,
@@ -1027,6 +1035,7 @@ class DrizzlePSF:
         renormalize=True,
         xphase=0,
         yphase=0,
+        taper_alpha=0.05, # radial percent of tapering
         return_hdul=False,
     ):
         """Drizzle a PSF model at ``ra``, ``dec`` onto ``wcs_slice``."""
@@ -1034,6 +1043,8 @@ class DrizzlePSF:
             wcs_slice = self.driz_wcs.copy()
         
         outsci, outwht, outctx = self._get_empty_driz(wcs_slice)
+
+        tukey_taper = TukeyWindow(alpha=0.05)(outsci.shape)
 
         if npix is None:    
             # Calculate npix based on the WCS pixel scale            
@@ -1105,6 +1116,11 @@ class DrizzlePSF:
                     wcsmap=None,
                 )
 
+        # taper PSF to avoid discontinuities at the edges and ringing
+        if taper_alpha is not None and taper_alpha > 0:
+            tukey_taper = TukeyWindow(alpha=taper_alpha)(outsci.shape)
+            outsci *= tukey_taper 
+            
         scale = 1.0 / outsci.sum() * psf.sum() if renormalize else 1.0
         if return_hdul is True:
             return fits.HDUList([
@@ -1149,6 +1165,7 @@ class DrizzlePSF:
                 size=size,
                 verbose=verbose,
                 recenter=False,
+                search_boxsize=11,                
             )
 
             psf = self.get_psf(
@@ -1219,9 +1236,12 @@ class DrizzlePSF:
                  fit_boxsize=5,
             )
 
-            dx = cutout.input_position_cutout[0] - xc
-            dy = cutout.input_position_cutout[1] - yc
-            dr = np.hypot(dx, dy)
+            if not np.isnan(yc) and not np.isnan(xc):
+                dx = cutout.input_position_cutout[0] - xc
+                dy = cutout.input_position_cutout[1] - yc
+                dr = np.hypot(dx, dy)
+            else:
+                logger.warning("Centroiding failed, psf not recentered.")
 
             if verbose:
                 print( "Iteration %d: Centroid box5 shift: %.3f, %.3f, dr= %.3f",

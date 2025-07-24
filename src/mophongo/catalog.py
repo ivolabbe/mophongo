@@ -19,7 +19,7 @@ from photutils.segmentation import (
     SegmentationImage,
 )
 from photutils.segmentation import deblend_sources
-from skimage.morphology import dilation, disk, max_tree, square
+from skimage.morphology import dilation, disk, square
 from skimage.segmentation import watershed
 from skimage.measure import label
 
@@ -32,7 +32,6 @@ __all__ = [
     "estimate_background",
     "calibrate_wht",
 ]
-
 
 def safe_dilate_segmentation(segmap, selem=disk(1)):
     result = np.zeros_like(segmap)
@@ -47,8 +46,6 @@ def safe_dilate_segmentation(segmap, selem=disk(1)):
         result[mask] = seg_id  # retain original
     return result
 
-
-
 def estimate_background(sci: np.ndarray, nbin: int = 4) -> float:
     """Estimate image background using sigma-clipped median."""
     binned = block_reduce(sci, (nbin, nbin), func=np.mean)
@@ -61,7 +58,7 @@ def calibrate_wht(
     wht: np.ndarray,
     *,
     background: float = 0.0,
-    nbin: int = 4,
+    nbin: int = 3,
     ndilate: int = 3,
 ) -> np.ndarray:
     """Calibrate weight map using noise estimates from the image."""
@@ -82,7 +79,7 @@ def calibrate_wht(
         pad_y = ny - expanded.shape[0]
         pad_x = nx - expanded.shape[1]
         expanded = np.pad(expanded, ((0, pad_y), (0, pad_x)), mode="edge")
-    return expanded[:ny, :nx] / (nbin**2)
+    return (expanded[:ny, :nx] / (nbin**2)).astype(np.float32)
 
 
 def noise_equalised_image(data: np.ndarray, weight: np.ndarray | None = None) -> np.ndarray:
@@ -240,6 +237,7 @@ class Catalog:
                 ndilate=self.params["dilate_segmap"],
             )
         else:
+            # assume wht is inverse variance
             self.ivar = self.wht
         if ivar_outfile is not None:
             fits.writeto(

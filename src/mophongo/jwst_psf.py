@@ -180,10 +180,6 @@ def psf_grid_from_csv(
             all_detectors = False,
             use_detsampled_psf = use_detsampled_psf,
             verbose       = verbose,            
-#            single_psf_centered = True,   
-#            save       = False,
-#            outdir     = None,
-#            outfile    = outfile,
         )
 
         grid.meta['DATE-OBS'] = date_obs.isot
@@ -194,7 +190,6 @@ def psf_grid_from_csv(
             write_stdpsf(outdir / outfile, grid, overwrite=True, verbose=True)
         
     return grids
-
 
 
 

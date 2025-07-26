@@ -13,13 +13,15 @@ from astropy.io import fits
 from astropy.table import Table
 from photutils.background import MADStdBackgroundRMS
 from astropy.stats import SigmaClip, mad_std
+from astropy.wcs import WCS
 from photutils.segmentation import (
     SourceCatalog,
     detect_sources,
     SegmentationImage,
 )
+from photutils.segmentation.catalog import DEFAULT_COLUMNS
 from photutils.segmentation import deblend_sources
-from skimage.morphology import dilation, disk, square
+from skimage.morphology import binary_dilation, dilation, disk #, square
 from skimage.segmentation import watershed
 from skimage.measure import label
 
@@ -27,33 +29,70 @@ from itertools import product
 
 from astropy.nddata import block_reduce, block_replicate
 
+import matplotlib.pyplot as plt
+
 __all__ = [
     "Catalog",
     "estimate_background",
     "calibrate_wht",
 ]
 
-def safe_dilate_segmentation(segmap, selem=disk(1)):
-    result = np.zeros_like(segmap)
-    for seg_id in np.unique(segmap):
+def enlarge_slice(slc, shape, pad):
+    """
+    Enlarge a 2D slice by pad pixels on each side, clipped to array boundaries.
+
+    Parameters
+    ----------
+    slc : tuple of slices
+        (slice_y, slice_x)
+    shape : tuple
+        (ny, nx) shape of the array
+    pad : int
+        Number of pixels to pad on each side
+
+    Returns
+    -------
+    tuple of slices
+        Enlarged (slice_y, slice_x)
+    """
+    y0 = max(slc[0].start - pad, 0)
+    y1 = min(slc[0].stop + pad, shape[0])
+    x0 = max(slc[1].start - pad, 0)
+    x1 = min(slc[1].stop + pad, shape[1])
+    return (slice(y0, y1), slice(x0, x1))
+
+def safe_dilate_segmentation(segmap: SegmentationImage, selem=disk(1.5)):
+    """
+    Efficiently dilate segments in a SegmentationImage, only into background.
+    Works on small enlarged slices for each segment for speed.
+    """
+    result = np.zeros_like(segmap.data)
+    pad = max(selem.shape) // 2
+    arr_shape = segmap.data.shape
+    for segment in segmap.segments:
+        seg_id = segment.label
         if seg_id == 0:
             continue  # skip background
-        mask = segmap == seg_id
-        dilated = dilation(mask, selem)
-        # Only allow dilation into background
-        dilated = np.logical_and(dilated, segmap == 0)
-        result[dilated] = seg_id
-        result[mask] = seg_id  # retain original
+        slc = enlarge_slice(segment.slices, arr_shape, pad)
+        mask = segmap.data[slc] == seg_id
+        dilated = binary_dilation(mask, selem)
+        bg_mask = segmap.data[slc] == 0
+        dilated_bg = np.logical_and(dilated, bg_mask)
+        sub_result = result[slc]
+        sub_result[dilated_bg] = seg_id
+        sub_result[mask] = seg_id  # retain original
+        result[slc] = sub_result
     return result
 
-def estimate_background(sci: np.ndarray, nbin: int = 4) -> float:
+def measure_background(sci: np.ndarray, nbin: int = 4) -> float:
     """Estimate image background using sigma-clipped median."""
+    print('Measuring background...')
     binned = block_reduce(sci, (nbin, nbin), func=np.mean)
     clipped = SigmaClip(sigma=3.0)(binned)
     return float(np.median(clipped))
 
 
-def calibrate_wht(
+def measure_ivar(
     sci: np.ndarray,
     wht: np.ndarray,
     *,
@@ -62,6 +101,7 @@ def calibrate_wht(
     ndilate: int = 3,
 ) -> np.ndarray:
     """Calibrate weight map using noise estimates from the image."""
+    print("Measuring inverse variance map...") 
     sci_sub = sci - background
     sci_bin = block_reduce(sci_sub, (nbin, nbin), func=np.mean)
     wht_bin = block_reduce(wht, (nbin, nbin), func=np.mean)
@@ -69,7 +109,8 @@ def calibrate_wht(
     clipped = SigmaClip(sigma=3.0)(det_bin)
     mask = clipped.mask
     if ndilate > 0:
-        mask = safe_dilate_segmentation(mask, disk(ndilate))
+        mask = binary_dilation(mask, disk(ndilate))
+
     std = MADStdBackgroundRMS()(det_bin[~mask])
     sqrt_wht = np.sqrt(wht_bin) / std
     wht_bin_cal = sqrt_wht**2
@@ -104,28 +145,6 @@ def detect_peaks(
     return seg, props
 
 
-def point_like_mask(
-    props: SourceCatalog,
-    r50_max_pix: float = 1.5,
-    elong_max: float = 1.3,
-    sharp_lohi: tuple[float, float] = (0.2, 1.2),
-) -> np.ndarray:
-    """Return mask for point-like sources."""
-
-    good = []
-    for prop in props:
-        r50 = prop.equivalent_radius.value
-        elong = prop.elongation.value
-        sharp = prop.max_value * np.pi * r50 ** 2 / prop.segment_flux
-        good.append(
-            (r50 < r50_max_pix)
-            and (elong < elong_max)
-            and (sharp > sharp_lohi[0])
-            and (sharp < sharp_lohi[1])
-        )
-    return np.array(good, dtype=bool)
-
-
 def fit_psf_stamp(
     data: np.ndarray,
     sigma: np.ndarray,
@@ -152,6 +171,28 @@ def vet_by_chi2(star_list: Table, chi2_max: float = 3.0) -> Table:
     return star_list[mask]
 
 
+# Add 'eccentricity' to the default columns for SourceCatalog
+#if 'eccentricity' not in DEFAULT_COLUMNS:
+#    DEFAULT_COLUMNS.append(['ra','dec','eccentricity'])
+
+DEFAULT_COLUMNS = ['label',
+ 'xcentroid',
+ 'ycentroid',
+ 'sky_centroid',
+ 'area',
+ 'semimajor_sigma',
+ 'semiminor_sigma',
+ 'kron_radius',
+ 'eccentricity',
+ 'orientation',
+ 'min_value',
+ 'max_value',
+ 'local_background',
+ 'segment_flux',
+ 'segment_fluxerr',
+ 'kron_flux',
+ 'kron_fluxerr']
+
 @dataclass
 class Catalog:
     """Create a catalog from a science image and weight map."""
@@ -160,7 +201,7 @@ class Catalog:
     wht: np.ndarray
     nbin: int = 4
     estimate_background: bool = False
-    calibrate_wht: bool = False
+    estimate_ivar: bool = False
 
     background: float = 0.0
     ivar: np.ndarray | None = None
@@ -169,12 +210,15 @@ class Catalog:
     det_catalog: SourceCatalog | None = None
     det_img: np.ndarray | None = None
     params: dict[str, float | int] = field(default_factory=dict)
+    default_columns: list[str] = field(default_factory=lambda: DEFAULT_COLUMNS)
+    wcs: WCS | None = None
 
     def __post_init__(self) -> None:
         defaults = {
             "kernel_size": 3.5,
             "detect_npixels": 5,
-            "dilate_segmap": 3,
+            "detect_threshold": 2.0,
+            "dilate_segmap": 2,
             "deblend_mode": "exponential",
             "deblend_nlevels": 32,
             "deblend_contrast": 1e-4,
@@ -185,13 +229,15 @@ class Catalog:
 
     def _detect(self) -> None:
         self.det_img = (self.sci - self.background) * np.sqrt(self.ivar)
-        kernel_pix = int(2 * self.params["kernel_size"] + 1)
+        kernel_pix = int(2 * self.params["kernel_size"]) | 1 # ensure odd size
         kernel = Gaussian2DKernel(
             self.params["kernel_size"] / 2.355, x_size=kernel_pix, y_size=kernel_pix
         )
         from astropy.convolution import convolve
 
+        print(f"Convolving with kernel size {self.params["kernel_size"]} pixels")
         smooth = convolve(self.det_img, kernel, normalize_kernel=True)
+        print("Detecting sources...")
         seg = detect_sources(
             smooth,
             threshold=float(self.params["detect_threshold"]),
@@ -199,8 +245,9 @@ class Catalog:
         )
         # Dilate the segmentation map to include more pixels
         if self.params["dilate_segmap"] > 0:
+            print(f"Dilating segmentation map with size {self.params['dilate_segmap']}")
             seg.data = safe_dilate_segmentation(
-                seg.data, square(self.params["dilate_segmap"])
+                seg, disk(self.params["dilate_segmap"])
             )
         if self.params["deblend_mode"] is not None:
             seg = deblend_sources(
@@ -215,21 +262,33 @@ class Catalog:
     #            compactness=float(self.params.get("deblend_compactness", 0.0)),
             )
         self.segmap = seg
-        self.det_catalog = SourceCatalog(
+        self.catalog = SourceCatalog(
             self.sci,
             seg,
             error=np.sqrt(1.0 / self.ivar),
+            wcs=self.wcs
         )
-        self.catalog = self.det_catalog.to_table()
-
+        # Compute r50 and sharpness for each source and add to table
+        self.table = self.catalog.to_table(self.default_columns)
+        self.table['r50'] = self.catalog.fluxfrac_radius(0.5).value
+#        self.table.rename_column('label', 'id')
+        self.table['eccentricity'] = self.catalog.eccentricity.value
+        self.table['sharpness'] =  (self.catalog.max_value * np.pi * self.table['r50']**2 / self.catalog.segment_flux).value        
+        self.table['snr'] = self.table['segment_flux'] / self.table['segment_fluxerr']
+        self.table.rename_columns(['label','xcentroid', 'ycentroid'],['id','x', 'y'])  
+        if 'sky_centroid' in self.table.colnames:
+            self.table['ra'] = [sc.ra.deg if sc is not None else np.nan for sc in self.table['sky_centroid']]
+            self.table['dec'] = [sc.dec.deg if sc is not None else np.nan for sc in self.table['sky_centroid']]
+            self.table.remove_column('sky_centroid')
+     
     def run(
         self, ivar_outfile: str | Path | None = None, header: fits.Header | None = None
     ) -> None:
         if self.estimate_background:
-            self.background = estimate_background(self.sci, self.nbin)
+            self.background = measure_background(self.sci, self.nbin)
             self.sci = self.sci - self.background
-        if self.calibrate_wht:
-            self.ivar = calibrate_wht(
+        if self.estimate_ivar:
+            self.ivar = measure_ivar(
                 self.sci,
                 self.wht,
                 background=self.background,
@@ -252,41 +311,32 @@ class Catalog:
         self,
         *,
         psf: np.ndarray | None = None,
-        sigma: float = 3.0,
-        npix_min: int = 5,
-        kernel_w: int = 3,
-        r50_max_pix: float = 1.5,
-        elong_max: float = 1.3,
+        snr_min: float = 100,
+        r50_max: float = 5,
+        eccen_max: float = 0.2,
         sharp_lohi: tuple[float, float] = (0.2, 1.2),
         chi2_max: float = 3.0,
         return_seg: bool = False,
     ) -> Table | tuple[Table, SegmentationImage]:
         """Find point sources in the catalog image."""
 
-        if self.ivar is None:
-            raise RuntimeError("Run the catalog first to compute ivar")
-
-        img_eq = noise_equalised_image(self.sci - self.background, self.ivar)
-        seg, props_eq = detect_peaks(img_eq, sigma, npix_min, kernel_w)
-
-        props = SourceCatalog(
-            self.sci,
-            seg,
-            error=np.sqrt(1.0 / self.ivar),
+        point_like = (
+            (self.table['r50'] < r50_max)
+            & (self.table['eccentricity'] < eccen_max)
+            & (self.table['sharpness'] > sharp_lohi[0])
+            & (self.table['sharpness'] < sharp_lohi[1])
         )
+        self.table['point_like'] = point_like
 
-        keep = point_like_mask(props_eq, r50_max_pix, elong_max, sharp_lohi)
-        table = props.to_table()[keep]
-        table['x'] = table['xcentroid']
-        table['y'] = table['ycentroid']
-        if 'segment_fluxerr' in table.colnames:
-            snr = table['segment_flux'] / table['segment_fluxerr']
-        else:
-            snr = np.full(len(table), np.nan)
-        table['flux'] = table['segment_flux']
-        table['snr'] = snr
+        table = self.table.copy()
+        print('found',len(table), 'sources')
+
+        idx_stars = np.where(point_like & (table['snr'] > snr_min))[0]
+        table = table[idx_stars]
+        print('kept',len(table), 'point-like sources')
 
         if psf is not None and len(table) > 0:
+            print('fitting PSF to stamps')
             chi2 = []
             flux_psf = []
             half = psf.shape[0] // 2
@@ -306,9 +356,9 @@ class Catalog:
                 flux_psf.append(flux)
             table['flux_psf'] = flux_psf
             table['chi2_red'] = chi2
-            table = vet_by_chi2(table, chi2_max)
+#            table = vet_by_chi2(table, chi2_max)
 
-        return (table, seg) if return_seg else table
+        return table, idx_stars
 
     @classmethod
     def from_fits(
@@ -322,6 +372,95 @@ class Catalog:
         sci = fits.getdata(sci_file)
         wht = fits.getdata(wht_file)
         header = fits.getheader(sci_file)
-        obj = cls(np.asarray(sci, dtype=float), np.asarray(wht, dtype=float), **kwargs)
+        obj = cls(np.asarray(sci, dtype=float), np.asarray(wht, dtype=float), wcs=WCS(header), **kwargs)
         obj.run(ivar_outfile=ivar_outfile, header=header)
         return obj
+
+    def show_stamp(
+        self,
+        idnum: int,
+        offset: float = 3e-5,
+        buffer: int = 20,
+        ax=None,
+        cmap='gray',
+        alpha=0.2,
+        keys: list[str] | None = None,
+    ):
+        """
+        Show a cutout stamp of the source with segmentation mask overlay.
+
+        Parameters
+        ----------
+        idnum : int
+            Catalog row index (not segment label).
+        buffer : int, optional
+            Number of pixels to pad around the segmentation footprint.
+        ax : matplotlib axis, optional
+            Axis to plot on. If None, creates a new figure.
+        cmap : str, optional
+            Colormap for the image.
+        alpha : float, optional
+            Alpha for the segmentation mask overlay.
+        label : list of str, optional
+            List of column names to display as text in the top left.
+        """
+        if self.segmap is None or self.catalog is None:
+            raise RuntimeError("Catalog must be detected (run .run()) before calling showstamp.")
+
+        idx = self.table['id'] == idnum
+        row = self.table[idx][0]
+
+        x = int(round(row['x']))
+        y = int(round(row['y']))
+        segm = self.segmap  # Already a SegmentationImage
+        label_val = segm.data[y, x]
+        if label_val == 0:
+            raise ValueError("Selected position is not inside any segment.")
+
+        idx = segm.get_index(label_val)
+        bbox = segm.bbox[idx]
+        # Expand bbox by buffer
+        iymin = max(bbox.iymin - buffer, 0)
+        iymax = min(bbox.iymax + buffer, self.sci.shape[0] - 1)
+        ixmin = max(bbox.ixmin - buffer, 0)
+        ixmax = min(bbox.ixmax + buffer, self.sci.shape[1] - 1)
+
+        stamp = self.sci[iymin:iymax+1, ixmin:ixmax+1]
+        segmask = segm.data[iymin:iymax+1, ixmin:ixmax+1]
+#        segmask[segmask != 0] = segmask[segmask != 0] - label_val + 1  # Keep only the selected segment
+        scl = stamp[segmask == label_val].sum()
+
+        if ax is None:
+            fig, ax = plt.subplots()
+        else:
+            fig = ax.figure  # <-- add this line
+            titles = ['data', 'psf', 'data - psf', 'data - psf x kernel', 'kernel']
+            kws = dict(vmin=-5.3, vmax=-1.5, cmap='bone_r', origin='lower', interpolation='nearest')
+
+            from matplotlib.colors import ListedColormap
+            # Create a new colormap with the first color transparent
+            cmap = segm.cmap
+            cmap_mod = ListedColormap(
+                np.vstack(([0, 0, 0, 0], cmap(np.arange(1, cmap.N))))
+            )
+            ax.imshow(np.log10(stamp / scl + offset), **kws)
+            ax.imshow(segmask, origin='lower', cmap=cmap_mod, alpha=alpha)
+            ax.axis('off')
+            ax.set_title(f"ID {idnum}")
+            text_lines = []
+            if keys:
+                for col in keys:
+                    val = row[col]
+                    try:
+                        sval = f"{val:.2f}"
+                    except Exception:
+                        sval = str(val)
+                    text_lines.append(f"{col}: {sval}")
+            if text_lines:
+                ax.text(
+                    0.02, 0.98, "\n".join(text_lines),
+                    color='w', fontsize=10, ha='left', va='top',
+                    transform=ax.transAxes, bbox=dict(facecolor='black', alpha=0.4, lw=0)
+                )
+
+        return fig, ax

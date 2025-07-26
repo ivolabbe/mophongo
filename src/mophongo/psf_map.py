@@ -475,7 +475,7 @@ class PSFRegionMap:
             key = 0
             logging.warning("RA/Dec is None or NaN, returning default kernel at index 0.")
         else:
-            key = self.region_map.lookup_key(ra, dec)
+            key = self.lookup_key(ra, dec)
             if key is None or np.isnan(key):
                 logging.warning("key are requested ra,dec is None or NaN, returning default kernel at index 0.")
                 key = 0

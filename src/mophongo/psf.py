@@ -13,7 +13,6 @@ from collections import OrderedDict
 import logging
 import os
 import numpy as np
-from scipy.optimize import least_squares
 from scipy.ndimage import shift as shift
 from dataclasses import dataclass
 from shapely.geometry import Point, Polygon
@@ -25,15 +24,15 @@ from astropy.table import Table
 from astropy.utils.data import download_file
 from photutils.psf import matching
 from photutils.psf.matching import TukeyWindow
-from photutils.centroids import centroid_quadratic, centroid_com   
+from photutils.centroids import centroid_quadratic
 
 from .utils import (
     measure_shape,
     get_wcs_pscale,
     get_slice_wcs,
     to_header,
-    read_wcs_csv,
     fit_kernel_fourier,
+    pad_to_shape
 )
 from astropy.nddata import Cutout2D
 from astropy.coordinates import SkyCoord
@@ -272,13 +271,6 @@ class PSF:
         if psf_lo.sum() != 0:
             psf_lo = psf_lo / psf_lo.sum()
 
-        if psf_hi.shape != psf_lo.shape:
-            ny = max(psf_hi.shape[0], psf_lo.shape[0])
-            nx = max(psf_hi.shape[1], psf_lo.shape[1])
-            shape = (ny, nx)
-            psf_hi = pad_to_shape(psf_hi, shape)
-            psf_lo = pad_to_shape(psf_lo, shape)
-
         kernel = psf_matching_kernel(psf_hi,
                                      psf_lo,
                                      window=window,
@@ -500,14 +492,6 @@ class PSF:
 
         return kernel, fwhm_kernel, data_fit, psf_fit
 
-
-def pad_to_shape(arr: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
-    """Pad array with zeros to center it in the target shape."""
-    py = (shape[0] - arr.shape[0]) // 2
-    px = (shape[1] - arr.shape[1]) // 2
-    return np.pad(arr, ((py, shape[0] - arr.shape[0] - py), (px, shape[1] - arr.shape[1] - px)))
-
-
 def psf_matching_kernel(
     psf_hi: np.ndarray,
     psf_lo: np.ndarray,
@@ -550,6 +534,7 @@ def psf_matching_kernel(
 
     kernel = matching.create_matching_kernel(psf_hi, psf_lo, window=window)
     kernel = np.asarray(kernel)
+    
     if recenter:
         cy = (kernel.shape[0] - 1) / 2
         cx = (kernel.shape[1] - 1) / 2
@@ -981,7 +966,8 @@ class DrizzlePSF:
                         size_native=None,
                         recenter=False,
                         search_boxsize=11,
-                        fit_boxsize=5,                
+                        fit_boxsize=5,
+                        cutout_data = None,                
                         verbose=False):
         """Return a drizzle Cutout2D, including WCS."""
 
@@ -997,18 +983,32 @@ class DrizzlePSF:
             
         size_odd = self._next_odd_int(size)
 
-        with fits.open(self.driz_image) as im:
-            data = im[0].data
-            # Convert RA, Dec to pixel coordinates: and get accurate centroid
-            xc, yc = self.driz_wcs.world_to_pixel_values(ra, dec)
-            if recenter:
-                xc, yc = centroid_quadratic(
-                    data, xpeak = xc, ypeak = yc,
-                    fit_boxsize=fit_boxsize,
-                    search_boxsize=search_boxsize
-                )
+        xc, yc = self.driz_wcs.world_to_pixel_values(ra, dec)
+
+        if cutout_data is None:
+            data = fits.getdata(self.driz_image)         
+        else:
+            data = cutout_data
+        
+        # if data is 3D cube or list of 2D images, take loop over and append to output list
+        # check if data is a 2D array or a list of 2D arrays
+        if not isinstance(data, list):
+            if data.ndim == 2: 
+                data = [data]
+
+        # get accurate centroid from first image
+        if recenter:
+            xc, yc = centroid_quadratic(
+                data[0], xpeak = xc, ypeak = yc,
+                fit_boxsize=fit_boxsize,
+                search_boxsize=search_boxsize
+            )
+
+        # get cutouts for all images
+        cutout_list = []
+        for data_i in data:
             cutout = Cutout2D(
-                im[0].data,
+                data_i,
                 (xc, yc),
                 (size_odd, size_odd),
                 wcs=self.driz_wcs,
@@ -1016,7 +1016,10 @@ class DrizzlePSF:
                 fill_value=0.0,
                 copy=True,
             )
-        return cutout
+            cutout_list.append(cutout)
+
+        return cutout_list if len(cutout_list) > 1 else cutout_list[0]
+                
 
     # ---------------------------------------------------------------
     def get_psf(
@@ -1118,7 +1121,12 @@ class DrizzlePSF:
 
         # taper PSF to avoid discontinuities at the edges and ringing
         if taper_alpha is not None and taper_alpha > 0:
-            tukey_taper = TukeyWindow(alpha=taper_alpha)(outsci.shape)
+            # rtaper is maximum radial extent of drizzled footprint
+            shape = int(np.sqrt((outwht > 0).sum()))
+            tukey_taper = pad_to_shape(
+                TukeyWindow(alpha=taper_alpha)((shape,shape)),
+                outsci.shape
+            )                        
             outsci *= tukey_taper 
             
         scale = 1.0 / outsci.sum() * psf.sum() if renormalize else 1.0
@@ -1184,8 +1192,10 @@ class DrizzlePSF:
     
     def register(
         self,
-        cutout: Cutout2D,
+        ra: float,
+        dec: float,
         filter: str,
+        size: int = 15,
         max_iterations: int = 3,
         convergence_threshold: float = 0.05,
         verbose: bool = False,
@@ -1214,6 +1224,8 @@ class DrizzlePSF:
         psf_model : ndarray
             Registered PSF model array.
         """
+
+        cutout = self.get_driz_cutout(ra, dec, size=size, recenter=True)
 
         xi, yi = cutout.input_position_cutout
         for i in range(max_iterations):
@@ -1244,19 +1256,17 @@ class DrizzlePSF:
                 logger.warning("Centroiding failed, psf not recentered.")
 
             if verbose:
-                print( "Iteration %d: Centroid box5 shift: %.3f, %.3f, dr= %.3f",
-                    i + 1,  dx,  dy,  dr,  )
-
+                print(f"Iteration {i + 1}: Centroid box5 shift: {dx:.3f}, {dy:.3f}, dr= {dr:.3f}")
             xi += dx
             yi += dy
 
             if dr < convergence_threshold:
                 if verbose:
-                    print("Converged after %d iterations", i + 1)
+                    print(f"Converged after {i+1} iterations")
                 break
         else:
             if verbose:
-                print( "Maximum iterations (%d) reached", max_iterations )
+                print(f"Maximum iterations {max_iterations} reached")
 
   
         ri, di = cutout.wcs.pixel_to_world_values(xi, yi)

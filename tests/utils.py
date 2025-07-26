@@ -123,7 +123,7 @@ def make_simple_data(
         nlevels=64,
         contrast=0.000001,
         progress_bar=False,
-#        compactness=0.0,
+    #        compactness=0.0,
     )
     segdata = segm.data
     segmap = np.zeros_like(segdata, dtype=int)
@@ -380,7 +380,7 @@ def save_flux_vs_truth_plot(
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
-#    print('TRUTH min max', truth.min(), truth.max())
+    #    print('TRUTH min max', truth.min(), truth.max())
     # Panel 1 (top-left): Recovered vs True
     axes[0, 0].scatter(truth, recovered, s=20, alpha=0.4)
     minval = min(truth.min(), recovered.min())
@@ -630,8 +630,15 @@ def label_segmap(ax, segmap, catalog, fontsize=10):
     for idx, (y, x) in enumerate(zip(catalog["y"], catalog["x"]), start=1):
         ax.text(x, y, str(idx), color="white", fontsize=fontsize, ha="center", va="center", weight="medium", alpha=0.7)
 
-
-def make_cutouts():
+#%%
+def make_testdata():
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    from astropy.coordinates import SkyCoord
+    from astropy.nddata import Cutout2D
+    from astropy.table import Table
+    from reproject import reproject_interp
+    import numpy as np
     """Create cutouts for UDS images based on user-defined parameters."""
     indir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/'
     outdir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/testdata/'
@@ -639,8 +646,10 @@ def make_cutouts():
     # --- User parameters from the pasted image ---
     center_x_40mas = 23243
     center_y_40mas = 19388
-    size_x_40mas = 1144
-    size_y_40mas = 878
+    #    size_x_40mas = 1144
+    #    size_y_40mas = 878
+    size_x_40mas = 4144
+    size_y_40mas = 2978
 
     center = (center_x_40mas, center_y_40mas)
     size = (size_y_40mas, size_x_40mas)  # Cutout2D expects (ny, nx)
@@ -721,3 +730,5 @@ def make_cutouts():
                                   header=hdr)
             hdu.writeto(outdir + outfile, overwrite=True)
             print(f"Saved {outdir + outfile} (registered to 40mas grid)")
+
+# %%

@@ -26,4 +26,4 @@ def test_realistic_pipeline(tmp_path):
     diag = tmp_path / "diagnostic.png"
     save_diagnostic_image(diag, ds.truth_f770w, ds.f444w, images[1], model, resid[0], segmap=ds.segmap, catalog=ds.catalog)
     assert diag.exists()
-
+ 

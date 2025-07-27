@@ -26,10 +26,13 @@ def run(
     catalog: Table | None = None,
     psfs: Sequence[np.ndarray] | None = None,
     weights: Sequence[np.ndarray] | None = None,
+    wht_images: Sequence[np.ndarray] | None = None,
     kernels: Sequence[np.ndarray | PSFRegionMap] | None = None,
     wcs: Sequence[WCS] | None = None,
     window: Window | None = None,
     extend_templates: str | None = None,
+    fit_astrometry: bool = False,
+    astrom_order: int = 3,
 ) -> tuple[Table, np.ndarray]:
     """Run photometry on a set of images.
 
@@ -65,12 +68,15 @@ def run(
     if psfs is not None:
         if len(images) != len(psfs):
             raise ValueError("Number of images and PSFs must match")
+    if weights is None and wht_images is not None:
+        weights = wht_images
     if weights is not None and len(weights) != len(images):
         raise ValueError("Number of weight images must match number of images")
 
     from .psf import PSF
     from .templates import Templates
-    from .fit import SparseFitter
+    from .fit import SparseFitter, FitConfig
+    from .astro_fit import GlobalAstroFitter
     from .psf_map import PSFRegionMap
     from . import utils
     import warnings
@@ -110,7 +116,11 @@ def run(
         # assume weights are dominated by photometry image (for proper weights see sparse fitter, needes iteration)
         weights_i = weights[idx] if weights is not None else None
 
-        fitter = SparseFitter(templates, images[idx], weights_i)
+        fitter_cls = GlobalAstroFitter if fit_astrometry else SparseFitter
+        if fit_astrometry:
+            fitter = fitter_cls(templates, images[idx], weights_i, segmap, FitConfig(fit_astrometry=True, astrom_basis_order=astrom_order))
+        else:
+            fitter = fitter_cls(templates, images[idx], weights_i, FitConfig())
         fluxes, _ = fitter.solve()
         resid = fitter.residual()
         errs = fitter.flux_errors()

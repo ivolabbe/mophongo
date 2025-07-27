@@ -143,6 +143,7 @@ def run(
 
         if weights_i is not None:
             pred = fitter.predicted_errors()
+            pred = pred[: len(cat)]      # guard against length drift
 
         if len(tmpls.templates) == len(cat):
             if weights_i is not None:

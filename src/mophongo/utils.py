@@ -1088,7 +1088,7 @@ class CircularApertureProfile(RadialProfile):
         if self.pixel_scale is not None:
             norm_radius = norm_radius / pixel_scale
 
-        self.norm_radius = None
+        self.norm_radius = norm_radius  # Always set this attribute
         if norm_radius is not None:
             self.normalize(norm_radius)
 

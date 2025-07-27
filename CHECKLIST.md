@@ -37,7 +37,7 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
   - Solve for fluxes with scipy.sparse.linalg.cg (plus optional positivity and residual regularization).
   - Create the modeled low‑res image and residual map.
  - [x] **Pipeline orchestrator** (`src/mophongo/pipeline.py`)
-  - `run_photometry` to tie all pieces together
+  - `run` to tie all pieces together
   - don't implement source detection just yet: assume detection + segmentation image + catalog are available.
   - Load or receive arrays for the images, catalog, and PSFs.
   - Call template builder, construct sparse system, solve for fluxes, and return a table of measurements plus residuals.
@@ -60,23 +60,16 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [x] Save output catalog to disk during pipeline test
 
 - [x] Implement template extension methods (Moffat fit and PSF dilation)
-- [x] Added selectable template extension method in `run_photometry` and consolidated analytic profiles
+- [x] Added selectable template extension method in `run` and consolidated analytic profiles
 - [x] Benchmarked key pipeline steps in `tests/test_benchmark.py`
 - [x] Introduced Cutout2D-based template extraction and normal matrix helpers
-- [x] Renamed TemplateNew to Template and updated extraction defaults
 - [x] Implemented basic `Catalog` for source detection
 - [x] Added configurable detection parameters in `Catalog`
-- [x] Added custom deblending using max-tree and SEP steepest-descent
-- [x] Added colour-aware deblending with chi² detection
-- [x] Implemented symmetry-based deblender
-- [x] Added compactness parameter in photutils-based deblender
  - [x] Added `CircularApertureProfile` utility for radial profile and curve of growth
- - [ ] Implement hybrid deblender with analytic weighting
  - [x] Implement JWST STDPSF extension utility
  - [x] Build PSF region map from exposure footprints
  - [x] Add PA-based coarsening option to PSFRegionMap
- - [x] Added KernelLookup utility and kernel generation notebook
- - [x] Added spatially varying kernel support in `run_photometry` and template convolution
+ - [x] Added spatially varying kernel support in `run` and template convolution
  - [x] End-to-end test with realistic mosaic data using `make_mosaic_dataset`
 - [x] Implemented star finder in Catalog
 - [x] Added GlobalAstroFitter for astrometric correction

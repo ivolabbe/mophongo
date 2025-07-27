@@ -276,7 +276,7 @@ class Catalog:
         )
         from astropy.convolution import convolve
 
-        print(f"Convolving with kernel size {self.params["kernel_size"]} pixels")
+        print(f"Convolving with kernel size {self.params['kernel_size']} pixels")
         smooth = convolve(self.det_img, kernel, normalize_kernel=True)
         print("Detecting sources...")
         segmap = detect_sources(

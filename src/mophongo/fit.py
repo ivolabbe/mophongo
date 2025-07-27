@@ -30,6 +30,9 @@ class FitConfig:
     positivity: bool = False
     reg: float = 0.0
     cg_kwargs: Dict[str, Any] = field(default_factory=dict)
+    fit_astrometry: bool = False
+    astrom_basis_order: int = 3
+    reg_astrom: float | None = None
 
 
 class SparseFitter:

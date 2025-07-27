@@ -18,8 +18,8 @@ print(sys.path)
 from mophongo.psf import PSF
 from mophongo.fit import SparseFitter
 from mophongo.templates import Templates, Template
-from utils import make_simple_data, lupton_norm, make_cutouts
-from mophongo.pipeline import run_photometry
+from utils import make_simple_data, lupton_norm 
+from mophongo import pipeline  
 from photutils.segmentation import SegmentationImage, SourceCatalog
 
 #%%
@@ -71,7 +71,7 @@ if __name__ == "__main__":
 
     # %%
     images, segmap, catalog, psfs, truth_img, rms = make_simple_data(nsrc=30, size=151, ndilate=0, peak_snr=3)
-    table, resid, templates = run_photometry(images, segmap, catalog, psfs, rms)
+    table, resid, templates = pipeline.run(images, segmap, catalog, psfs, rms)
     # %%
     sig = np.max(np.abs(resid[1])) * 3
     plt.imshow(resid[0],origin='lower',cmap='gray',vmin=-sig, vmax=sig)

@@ -9,8 +9,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from astropy.table import Table
 from astropy.nddata import Cutout2D
+from photutils.psf.matching import SplitCosineBellWindow, TukeyWindow
+import mophongo.utils as mutils
 
-from mophongo.pipeline import run_photometry
+import mophongo.pipeline as pipeline
 from utils import (
     make_simple_data,
     save_diagnostic_image,
@@ -20,21 +22,24 @@ from utils import (
 
 def test_pipeline_flux_recovery(tmp_path):
     #    images, segmap, catalog, psfs, truth_img, rms = make_simple_data(seed=5, nsrc=300, size=501, ndilate=1, peak_snr=1)
-    #    table, resid, templates = run_photometry(images, segmap, catalog, psfs, rms)
+    #    table, resid, templates = pipeline.run(images, segmap, catalog, psfs, rms)
 
     images, segmap, catalog, psfs, truth_img, wht = make_simple_data(
         seed=5, nsrc=151, size=301, ndilate=2, peak_snr=1.5)
-    #    table, resid, templates = run_photometry(images, segmap, catalog, psfs, rms, extend_templates='psf')
+    #    table, resid, templates = pipeline.run(images, segmap, catalog, psfs, rms, extend_templates='psf')
 
     # add the hires images as the first fitting image, so that we can compare fluxes
     images.insert(0, images[0])
-#    wht.insert(0, np.zeros(wht[0].shape))
     wht.insert(0, wht[0])
     psfs.insert(0, psfs[0])
     # images are: hires, hires, lowres
     # psfs are:   hires, hires, lowres
     # so this would add psf hires wings to templates, and result in a delta function for kernel
-    table, resid, templates = run_photometry(images, segmap, catalog, psfs,  wht)
+    dirac = lambda n: ((np.arange(n)[:,None] == n//2) & (np.arange(n) == n//2)).astype(float)
+   
+    kernel = [mutils.matching_kernel(psfs[0], psf) for psf in psfs]
+    kernel[0] =  kernel[1] = dirac(3)  # no kernel for the first image, it is the hires image                                
+    table, resid, templates = pipeline.run(images, segmap, catalog=catalog,  wht_images=wht, kernels=kernel)
 
     # @@@ sometimes flux_true is NEGATIVE?
     table["flux_true"] = catalog["flux_true"]  # add flux_true to the table
@@ -77,9 +82,10 @@ def test_pipeline_flux_recovery(tmp_path):
     assert flux_lo_hi_plot.exists()
 
     # ----------------------------------- separate run for high-res, using the truth image as templates
-    table_true, resid_hi, templates_true = run_photometry(
-        [truth_img, images[1]], segmap, catalog, [np.floor(psfs[0]/psfs[0].max()),psfs[1]],
-        [np.zeros(wht[0].shape), wht[1]])
+#images, segmap, catalog=catalog, psfs=psfs,  wht_images=wht)
+    table_true, resid_hi, templates_true = pipeline.run(
+        [truth_img, images[1]], segmap, catalog=catalog, kernels=[dirac(3),psfs[1]],
+        wht_images=[np.zeros(wht[0].shape), wht[1]])
     # Plot for high-res (flux_0) vs truth
     flux_true_plot = tmp_path / "flux_hi_vs_true_truemodel.png"
     save_flux_vs_truth_plot(

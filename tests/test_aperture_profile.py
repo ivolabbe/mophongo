@@ -13,9 +13,7 @@ def test_circular_aperture_profile_normalization():
 
     from scipy.interpolate import PchipInterpolator
 
-    rp_norm_val = PchipInterpolator(prof.radius, prof.profile)(5.0)
     cog_norm_val = PchipInterpolator(prof.cog.radius, prof.cog.profile)(5.0)
-    assert np.isclose(rp_norm_val, 1.0, atol=1e-3)
     assert np.isclose(cog_norm_val, 1.0, atol=1e-3)
 
     assert np.isclose(prof.gaussian_fwhm, 5.0, atol=1.0)

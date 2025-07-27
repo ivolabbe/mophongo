@@ -1,6 +1,8 @@
-import matplotlib.pyplot as plt
+import pytest
+
 import numpy as np
 import shapely.geometry as sgeom
+import matplotlib.pyplot as plt
 from shapely.affinity import translate
 
 from mophongo.psf_map import PSFRegionMap
@@ -10,7 +12,7 @@ from astropy.wcs import WCS
 base = sgeom.box(0, 0, 1, 1)
 footprints = {
     "A": base,
-    "B": translate(base, 0.00003, 0.00002),  # ~0.108", 0.072"
+    "B": translate(base, 0.5, 0.5),  # ~0.108", 0.072"
 }
 
 def test_region_count():
@@ -26,7 +28,7 @@ def test_no_tiny_regions():
 def test_lookup():
     regmap = PSFRegionMap.from_footprints(footprints, crs=None)
     # pick a point firmly inside footprint 'A' only
-    key = regmap.lookup_key(2.5e-05, 0.5)
+    key = regmap.lookup_key(0.1, 0.1)
     assert key is not None
     frames = regmap.regions.query("psf_key == @key").frame_list.iloc[0]
     assert frames == ("A",)
@@ -73,6 +75,7 @@ def test_pa_coarsening():
     assert key_c != key_a
 
 
+@pytest.mark.skipif(1, reason="uses external data")
 def test_psf_region_map_from_file(tmp_path):
     import matplotlib.pyplot as plt
     import numpy as np
@@ -101,18 +104,5 @@ def test_psf_region_map_from_file(tmp_path):
 #    prm = PSFRegionMap.from_footprints(dpsf.footprint, buffer_tol=1.0/3600, area_factor=300)
 #    prm = PSFRegionMap.from_footprints(footprint)
     prm = PSFRegionMap.from_footprints(footprint, pa_tol=1.0)
+    prm.plot()
 
-    fig, ax = plt.subplots()
-    prm.regions.plot(column="psf_key", ax=ax, edgecolor="k", cmap="tab20")
-    ax.set_xlabel("RA")
-    ax.set_ylabel("Dec")
-#    ax.set_ylim(-5.27,-5.24)
-#    ax.set_xlim(34.55,34.15)
-#    ax.set_ylim(-5.12,-5.07)
-#    ax.set_xlim(34.25,34.32)
-    plt.show()
-
-    plt.hist(prm.regions.area, bins=50,range=(0.1,1000),log=True)
-#    ax.set_ylim(-5.24,-5.20)
-#    ax.set_xlim(34.46,34.50)
- 

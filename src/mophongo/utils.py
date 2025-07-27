@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
+import copy
 import numpy as np
 import scipy
+from scipy.ndimage import shift
+
 from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.table import Table
@@ -15,8 +18,72 @@ from astropy.utils import lazyproperty
 from astropy.modeling.fitting import TRFLSQFitter
 from astropy.modeling.models import Moffat1D
 from photutils.profiles import RadialProfile, CurveOfGrowth
+from photutils.centroids import centroid_quadratic
 
-# model based stuff 
+from scipy.special import eval_hermite      # physicists' Hermite
+from photutils.psf import matching
+
+import logging
+logger = logging.getLogger(__name__)
+
+
+import copy
+from astropy.wcs import WCS
+
+def rebin_wcs(wcs: WCS, n: int) -> WCS:
+    """
+    Up‐ or down‐sample a WCS by a power of two, *exactly* preserving the
+    tangent point (CRVALs), and updating CRPIX and NAXIS accordingly.
+
+    Parameters
+    ----------
+    wcs : astropy.wcs.WCS
+        Original WCS.
+    n : int
+        Power of two to scale by:
+          - n > 0 : down‐bin by 2**n  (pixels get larger)
+          - n < 0 : up‐sample by 2**|n| (pixels get smaller)
+
+    Returns
+    -------
+    new_wcs : astropy.wcs.WCS
+        The rebinned WCS.
+    """
+    factor = 2 ** n
+    new_wcs = copy.deepcopy(wcs)
+
+    # — scale the CD or CDELT matrix
+    if getattr(new_wcs.wcs, 'cd', None) is not None:
+        new_wcs.wcs.cd = new_wcs.wcs.cd / factor
+    else:
+        new_wcs.wcs.cdelt = new_wcs.wcs.cdelt / factor
+
+    # — shift CRPIX so that CRVAL stays fixed on the sky:
+    #    new_crpix = (old_crpix - 0.5)/factor + 0.5
+    old_crpix = new_wcs.wcs.crpix.copy()
+    new_wcs.wcs.crpix = (old_crpix - 0.5) / factor + 0.5
+
+    # — update the “NAXIS” so to_header() will emit the right shape
+    #    (Astropy uses .pixel_shape if present, else _naxis1/_naxis2)
+    if hasattr(new_wcs, 'pixel_shape') and new_wcs.pixel_shape is not None:
+        ny, nx = new_wcs.pixel_shape
+        new_wcs.pixel_shape = (int(ny // factor), int(nx // factor))
+    else:
+        # fallback into the private attributes
+        if hasattr(new_wcs.wcs, '_naxis1'):
+            new_wcs.wcs._naxis1 = int(new_wcs.wcs._naxis1 // factor)
+            new_wcs.wcs._naxis2 = int(new_wcs.wcs._naxis2 // factor)
+        if hasattr(new_wcs.wcs, '_naxis'):
+            na = new_wcs.wcs._naxis
+            new_wcs.wcs._naxis = [int(na[0] // factor), int(na[1] // factor)]
+
+    # re‐initialize internally computed stuff
+    new_wcs.wcs.set()
+
+    return new_wcs
+
+
+# model based stuff
 def elliptical_moffat(
     y: np.ndarray,
     x: np.ndarray,
@@ -114,7 +181,7 @@ def moffat(
         x0 = cx
     if y0 is None:
         y0 = cy
-    
+
     # Convert flux to amplitude analytically
     # For a Moffat profile: flux = amplitude * pi * alpha_x * alpha_y / (beta - 1)
     # where alpha = fwhm / (2 * sqrt(2^(1/beta) - 1))
@@ -122,7 +189,7 @@ def moffat(
     alpha_x = fwhm_x / (2 * np.sqrt(factor))
     alpha_y = fwhm_y / (2 * np.sqrt(factor))
     amplitude = flux * (beta - 1) / (np.pi * alpha_x * alpha_y)
-    
+
     psf = elliptical_moffat(
         y,
         x,
@@ -166,14 +233,14 @@ def gaussian(
         x0 = cx
     if y0 is None:
         y0 = cy
-    
+
     # Convert flux to amplitude analytically
     # For a Gaussian profile: flux = amplitude * 2 * pi * sigma_x * sigma_y
     # where sigma = fwhm / (2 * sqrt(2 * ln(2)))
     sigma_x = fwhm_x / (2 * np.sqrt(2 * np.log(2)))
     sigma_y = fwhm_y / (2 * np.sqrt(2 * np.log(2)))
     amplitude = flux / (2 * np.pi * sigma_x * sigma_y)
-    
+
     psf = elliptical_gaussian(
         y,
         x,
@@ -206,8 +273,83 @@ def convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     return np.einsum("ijkl,kl->ij", windows, kernel)
 
 
-import numpy as np
-from scipy.special import eval_hermite      # physicists' Hermite
+
+# wrapper around astropy matching kernel that handles padding and recentering
+def matching_kernel(
+    psf_hi: np.ndarray,
+    psf_lo: np.ndarray,
+    *,
+    window: object | None = None,
+    recenter: bool = True,
+) -> np.ndarray:
+    """Compute a convolution kernel matching ``psf_hi`` to ``psf_lo``.
+
+    The kernel ``k`` is defined such that ``psf_hi * k \approx psf_lo`` when
+    convolved. ``photutils.psf.matching.create_matching_kernel`` is used under
+    the hood. If the two PSFs have different shapes they are zero padded to a
+    common grid before computing the kernel.
+
+    Parameters
+    ----------
+    psf_hi, psf_lo:
+        High- and low-resolution PSF arrays normalized to unit sum. They may
+        have different shapes.
+    window : optional
+        Window function passed to ``create_matching_kernel``. Defaults to SplitCosineBellWindow.
+    recenter : bool, optional
+        If ``True`` the resulting kernel is shifted to its centroid using
+        bicubic interpolation. Defaults to ``True``.
+
+    Returns
+    -------
+    kernel: ``np.ndarray``
+        Convolution kernel with shape equal to the larger of the two input PSFs.
+    """
+    if psf_hi.shape != psf_lo.shape:
+        ny = max(psf_hi.shape[0], psf_lo.shape[0])
+        nx = max(psf_hi.shape[1], psf_lo.shape[1])
+        shape = (ny, nx)
+        psf_hi = pad_to_shape(psf_hi, shape)
+        psf_lo = pad_to_shape(psf_lo, shape)
+
+    if not np.isfinite(psf_hi).all():
+        logger.warning(
+            "psf 1 contains non-finite values, setting elements to zero ")
+        psf_hi[~np.isfinite(psf_hi)] = 0.0
+
+    if not np.isfinite(psf_lo).all():
+        logger.warning(
+            "psf 2 contains non-finite values, setting elements to zero ")
+        psf_lo[~np.isfinite(psf_lo)] = 0.0
+
+    if window is None:
+         window = matching.SplitCosineBellWindow(alpha=0.4, beta=0.1)
+#        window = matching.TukeyWindow(alpha=0.4)
+
+    kernel = matching.create_matching_kernel(psf_hi, psf_lo, window=window)
+    kernel = np.asarray(kernel)
+
+    if not np.isfinite(kernel).all():
+        logger.warning(
+            "Kernel contains non-finite values, returning zero kernel.")
+        return np.zeros_like(kernel)
+
+    if recenter:
+        cy = (kernel.shape[0] - 1) / 2
+        cx = (kernel.shape[1] - 1) / 2
+        ycen, xcen = centroid_quadratic(kernel,
+                                        xpeak=cx,
+                                        ypeak=cy,
+                                        fit_boxsize=5)
+        if not np.isnan(ycen) and not np.isnan(xcen):
+            kernel = shift(kernel, (cy - ycen, cx - xcen),
+                           order=3,
+                           mode="nearest")
+        else:
+            logger.warning("Centroiding failed, kernel not recentered.")
+
+    return kernel
+
 
 # ------------------------------------------------------------------
 # 2. Fourier-space kernel fit
@@ -230,7 +372,7 @@ def fit_kernel_fourier(img_hi, img_lo, basis, method="lstsq"):
         "nnls" uses non-negative least squares. Default is "lstsq".
     """
     from scipy.optimize import nnls
-    
+
     n_pix = img_hi.size                    # = size²
 
     # 1.  Shift arrays so that the PSF/basis centre is at pixel (0,0) **before** FFT
@@ -279,30 +421,30 @@ def regularized_pixel_kernel_central(psf_hi, psf_lo, kernel_size=20, alpha=0.01,
     """
     from scipy.optimize import minimize
     from scipy.ndimage import laplace, sobel
-    
+
     full_size = psf_hi.shape[0]
-    
+
     # Create full kernel with central region to optimize
     def make_full_kernel(central_params):
         kernel = np.zeros((full_size, full_size))
         center = full_size // 2
         half_k = kernel_size // 2
-        
+
         central_kernel = central_params.reshape((kernel_size, kernel_size))
         kernel[center-half_k:center+half_k, center-half_k:center+half_k] = central_kernel
         return kernel
-    
+
     # Initial guess: delta function in center
     x0 = np.zeros(kernel_size * kernel_size)
     x0[len(x0)//2] = 1.0
-    
+
     def objective(x):
         kernel = make_full_kernel(x)
-        
+
         # Data fidelity term
         conv = convolve2d(psf_hi, kernel)
         data_term = np.sum((conv - psf_lo)**2)
-        
+
         # Regularization on central region only
         central = x.reshape((kernel_size, kernel_size))
         if method == "ridge":
@@ -316,13 +458,13 @@ def regularized_pixel_kernel_central(psf_hi, psf_lo, kernel_size=20, alpha=0.01,
             reg_term = alpha * np.sum(np.sqrt(grad_x**2 + grad_y**2))
         else:
             reg_term = 0
-            
+
         return data_term + reg_term
-    
+
     # Optimize with positivity constraint
     bounds = [(0, None) for _ in range(len(x0))]
     result = minimize(objective, x0, method='L-BFGS-B', bounds=bounds)
-    
+
     kernel = make_full_kernel(result.x)
     kernel /= kernel.sum()
     return kernel
@@ -334,13 +476,13 @@ def regularized_lstsq_kernel_central(psf_hi, psf_lo, kernel_size=20, alpha=0.01,
     full_size = psf_hi.shape[0]
     center = full_size // 2
     half_k = kernel_size // 2
-    
+
     # Only fit central region
     n_central = kernel_size * kernel_size
-    
+
     # Build convolution matrix for central pixels only
     A = np.zeros((full_size * full_size, n_central))
-    
+
     idx = 0
     for i in range(kernel_size):
         for j in range(kernel_size):
@@ -349,12 +491,12 @@ def regularized_lstsq_kernel_central(psf_hi, psf_lo, kernel_size=20, alpha=0.01,
             ki = center - half_k + i
             kj = center - half_k + j
             kernel_test[ki, kj] = 1.0
-            
+
             # Convolve and store
             conv = convolve2d(psf_hi, kernel_test)
             A[:, idx] = conv.flatten()
             idx += 1
-    
+
     # Build regularization matrix for central region
     if smooth_type == "laplacian":
         L = np.zeros((n_central, n_central))
@@ -370,24 +512,24 @@ def regularized_lstsq_kernel_central(psf_hi, psf_lo, kernel_size=20, alpha=0.01,
         L = np.eye(n_central)
     else:
         L = np.zeros((n_central, n_central))
-    
+
     # Solve regularized system
     AtA = A.T @ A
     LtL = L.T @ L
     b = psf_lo.flatten()
     Atb = A.T @ b
-    
+
     central_flat = np.linalg.solve(AtA + alpha * LtL, Atb)
-    
+
     # Construct full kernel
     kernel = np.zeros((full_size, full_size))
     central_kernel = central_flat.reshape((kernel_size, kernel_size))
     kernel[center-half_k:center+half_k, center-half_k:center+half_k] = central_kernel
-    
+
     # Ensure positivity and normalize
     kernel = np.maximum(kernel, 0)
     kernel /= kernel.sum()
-    
+
     return kernel
 
 # ------------------------------------------------------------------
@@ -570,17 +712,17 @@ def radial_bspline_basis(
     y, x = np.mgrid[:size, :size]
     cy = cx = (size - 1) / 2
     r = np.hypot(x - cx, y - cy)
-    
+
     # Use provided rmax or default to maximum radius
     if rmax is None:
         rmax = r.max()
-    
+
     r = np.where(r == 0, rmin / 10, r)
-    
+
     if spacing == "log":
         log_r = np.log10(r)
         knots = np.linspace(np.log10(rmin), np.log10(rmax), n_knots)
-        if verbose: 
+        if verbose:
             print("Knot radii:", 10**knots)
         t = np.pad(knots, (degree, degree), mode="edge")
         design = BSpline.design_matrix(log_r.ravel(), t, degree, extrapolate=True).toarray()
@@ -592,7 +734,7 @@ def radial_bspline_basis(
         design = BSpline.design_matrix(r.ravel(), t, degree, extrapolate=True).toarray()
     else:
         raise ValueError(f"spacing must be 'log' or 'linear', got '{spacing}'")
-    
+
     basis = design.reshape(size, size, -1)
     for i in range(basis.shape[-1]):
         if i == 0:
@@ -679,7 +821,7 @@ def starlet_basis(size: int, n_scales: int = 5) -> np.ndarray:
             step = 2 ** j
             # Create dilated kernel by upsampling with zeros
             kernel = np.kron(h, np.ones((step, step))) / (step * step)
-        
+
         sm = convolve(c, kernel, mode="nearest")
         w = c - sm
         w -= w.mean()
@@ -865,23 +1007,21 @@ class CircularApertureProfile(RadialProfile):
         :class:`photutils.profiles.CurveOfGrowth`.
     """
 
-    def __init__(
-        self,
-        data: np.ndarray,
-        xycen: tuple[float, float] | None = None,
-        radii: np.ndarray | None = None,
-        *,
-        cog_radii: np.ndarray | None = None,
-        recenter: bool = False,
-        centroid_kwargs: dict = None,
-        error: np.ndarray | None = None,
-        mask: np.ndarray | None = None,
-        method: str = "exact",
-        subpixels: int = 5,
-        name: str | None = None,
-        norm_radius: float | None = None,
-        pixel_scale: float
-    ) -> None:
+    def __init__(self,
+                 data: np.ndarray,
+                 xycen: tuple[float, float] | None = None,
+                 radii: np.ndarray | None = None,
+                 *,
+                 cog_radii: np.ndarray | None = None,
+                 recenter: bool = False,
+                 centroid_kwargs: dict = None,
+                 error: np.ndarray | None = None,
+                 mask: np.ndarray | None = None,
+                 method: str = "exact",
+                 subpixels: int = 5,
+                 name: str | None = None,
+                 norm_radius: float | None = None,
+                 pixel_scale: float | None = None) -> None:
         from photutils.centroids import centroid_quadratic
 
         # Set centroid kwargs defaults
@@ -896,7 +1036,10 @@ class CircularApertureProfile(RadialProfile):
         # Optionally recenter using centroid_quadratic
         if recenter:
             xp, yp = xycen
-            xycen = centroid_quadratic(data, xpeak=xp, ypeak=yp, **centroid_kwargs)
+            xycen = centroid_quadratic(data,
+                                       xpeak=xp,
+                                       ypeak=yp,
+                                       **centroid_kwargs)
 
         # Default radii: logarithmic bins from 0, 0.5, 1, 2, 4, ... up to edge of image
         if radii is None:
@@ -906,8 +1049,7 @@ class CircularApertureProfile(RadialProfile):
                 np.concatenate([
                     np.array([0, 0.5, 1]),
                     np.logspace(np.log10(2), np.log10(maxrad), num=101)
-                ])
-            )
+                ]))
             radii = radii[radii <= maxrad]
 
         # Always set cog_radii = radii[1:] if not provided
@@ -918,7 +1060,7 @@ class CircularApertureProfile(RadialProfile):
             data,
             xycen,
             radii,
-            error=error,    
+            error=error,
             mask=mask,
             method=method,
             subpixels=subpixels,
@@ -937,7 +1079,7 @@ class CircularApertureProfile(RadialProfile):
         self.name = name
         self.pixel_scale = pixel_scale
 
-        # save indices into data 
+        # save indices into data
         yidx, xidx = np.indices(self.data.shape)
         radii = np.hypot(xidx - self.xycen[0], yidx - self.xycen[1])
         mask = radii <= np.max(self.radii)
@@ -946,6 +1088,7 @@ class CircularApertureProfile(RadialProfile):
         if self.pixel_scale is not None:
             norm_radius = norm_radius / pixel_scale
 
+        self.norm_radius = None
         if norm_radius is not None:
             self.normalize(norm_radius)
 
@@ -959,18 +1102,21 @@ class CircularApertureProfile(RadialProfile):
             raise ValueError("norm_radius must be provided")
 
         # Use standard linear interpolation instead of PchipInterpolator
+
+
 #        rp_val = np.interp(self.norm_radius, self.radius, self.profile)
-        cog_val = np.interp(self.norm_radius, self.cog.radius, self.cog.profile)
+        cog_val = np.interp(self.norm_radius, self.cog.radius,
+                            self.cog.profile)
         if np.isfinite(cog_val) and cog_val != 0:
             self.cog.normalization_value *= cog_val
             self.cog.__dict__["profile"] = self.cog.profile / cog_val
-            self.cog.__dict__["profile_error"] = self.cog.profile_error / cog_val
+            self.cog.__dict__[
+                "profile_error"] = self.cog.profile_error / cog_val
 
             self.normalization_value *= cog_val
             self.__dict__["profile"] = self.profile / cog_val
             self.__dict__["profile_error"] = self.profile_error / cog_val
 
- 
     @lazyproperty
     def moffat_fit(self):
         """Return a 1D Moffat model fitted to the radial profile."""
@@ -989,14 +1135,14 @@ class CircularApertureProfile(RadialProfile):
         """Full width at half maximum (FWHM) of the fitted Moffat."""
 
         fit = self.moffat_fit
-        return 2 * fit.gamma.value * np.sqrt(2 ** (1 / fit.alpha.value) - 1)
+        return 2 * fit.gamma.value * np.sqrt(2**(1 / fit.alpha.value) - 1)
 
     def cog_ratio(self, other: "CircularApertureProfile") -> np.ndarray:
         """Return the ratio of this curve of growth to another."""
 
-        interp = PchipInterpolator(
-            other.cog.radius, other.cog.profile, extrapolate=False
-        )(self.cog.radius)
+        interp = PchipInterpolator(other.cog.radius,
+                                   other.cog.profile,
+                                   extrapolate=False)(self.cog.radius)
         return self.cog.profile / interp
 
     def _radius_unit(self):
@@ -1010,12 +1156,9 @@ class CircularApertureProfile(RadialProfile):
         radius = self._convert_radius(self.radius)
         ax.plot(radius, self.profile, label=label, color=color, **kwargs)
         # Overplot uncertainty as filled area
-        if (
-            hasattr(self, "profile_error")
-            and self.profile_error is not None
-            and self.profile_error.shape == self.profile.shape
-            and self.profile_error.size > 0
-        ):
+        if (hasattr(self, "profile_error") and self.profile_error is not None
+                and self.profile_error.shape == self.profile.shape
+                and self.profile_error.size > 0):
             ax.fill_between(
                 radius,
                 self.profile - self.profile_error,
@@ -1027,8 +1170,15 @@ class CircularApertureProfile(RadialProfile):
         ax.set_yscale("log")
         ax.set_xlabel(f"Radius ({self._radius_unit()})")
         ax.set_ylabel("Normalized Profile")
+
         gfwhm = self.gaussian_fwhm
-        ax.axvline(self._convert_radius(gfwhm / 2), color=color, ls="--", label=f"Gauss FWHM {self._convert_radius(gfwhm):.2f} {self._radius_unit()}")
+        ax.axvline(
+            self._convert_radius(gfwhm / 2),
+            color=color,
+            ls="--",
+            label=
+            f"Gauss FWHM {self._convert_radius(gfwhm):.2f} {self._radius_unit()}"
+        )
         ax.set_ylim(np.max(self.profile) / 3e5, np.max(self.profile) * 2.0)
         ax.legend()
 
@@ -1037,12 +1187,10 @@ class CircularApertureProfile(RadialProfile):
         radius = self._convert_radius(self.cog.radius)
         ax.plot(radius, self.cog.profile, label=label, color=color, **kwargs)
         # Overplot uncertainty as filled area
-        if (
-            hasattr(self.cog, "profile_error")
-            and self.cog.profile_error is not None
-            and self.cog.profile_error.shape == self.cog.profile.shape
-            and self.cog.profile_error.size > 0
-        ):
+        if (hasattr(self.cog, "profile_error")
+                and self.cog.profile_error is not None
+                and self.cog.profile_error.shape == self.cog.profile.shape
+                and self.cog.profile_error.size > 0):
             ax.fill_between(
                 radius,
                 self.cog.profile - self.cog.profile_error,
@@ -1056,12 +1204,29 @@ class CircularApertureProfile(RadialProfile):
         if self.norm_radius is not None:
             r20 = self.cog.calc_radius_at_ee(0.2)
             r80 = self.cog.calc_radius_at_ee(0.8)
-            ax.axvline(self._convert_radius(r20), color=color, ls=":", label=f"R20 {self._convert_radius(r20):.2f} {self._radius_unit()}", **kwargs)
-            ax.axvline(self._convert_radius(r80), color=color, ls="--", label=f"R80 {self._convert_radius(r80):.2f} {self._radius_unit()}", **kwargs)
+            ax.axvline(
+                self._convert_radius(r20),
+                color=color,
+                ls=":",
+                label=
+                f"R20 {self._convert_radius(r20):.2f} {self._radius_unit()}",
+                **kwargs)
+            ax.axvline(
+                self._convert_radius(r80),
+                color=color,
+                ls="--",
+                label=
+                f"R80 {self._convert_radius(r80):.2f} {self._radius_unit()}",
+                **kwargs)
         ax.set_ylim(0, 1.05)
         ax.legend()
 
-    def _plot_ratio(self, other: "CircularApertureProfile", ax, ylabel='', color='k', **kwargs) -> None:
+    def _plot_ratio(self,
+                    other: "CircularApertureProfile",
+                    ax,
+                    ylabel='',
+                    color='k',
+                    **kwargs) -> None:
         ratio = self.cog_ratio(other)
         radius = self._convert_radius(self.cog.radius)
         ax.plot(radius, ratio, color=color, label=ylabel, **kwargs)
@@ -1069,25 +1234,27 @@ class CircularApertureProfile(RadialProfile):
         err1 = getattr(self.cog, "profile_error", None)
         err2 = getattr(other.cog, "profile_error", None)
         val1 = self.cog.profile
-        interp_val2 = PchipInterpolator(other.cog.radius, other.cog.profile, extrapolate=False)(self.cog.radius)
+        interp_val2 = PchipInterpolator(other.cog.radius,
+                                        other.cog.profile,
+                                        extrapolate=False)(self.cog.radius)
         err_ratio = None
-        if (
-            err1 is not None and err1.shape == val1.shape and err1.size > 0
-        ) and (
-            err2 is not None and err2.shape == interp_val2.shape and err2.size > 0
-        ):
+        if (err1 is not None and err1.shape == val1.shape and err1.size
+                > 0) and (err2 is not None and err2.shape == interp_val2.shape
+                          and err2.size > 0):
             # Both have errors: propagate
-            interp_err2 = PchipInterpolator(other.cog.radius, err2, extrapolate=False)(self.cog.radius)
-            err_ratio = ratio * np.sqrt(
-                (err1 / val1) ** 2 +
-                (interp_err2 / interp_val2) ** 2
-            )
+            interp_err2 = PchipInterpolator(other.cog.radius,
+                                            err2,
+                                            extrapolate=False)(self.cog.radius)
+            err_ratio = ratio * np.sqrt((err1 / val1)**2 +
+                                        (interp_err2 / interp_val2)**2)
         elif err1 is not None and err1.shape == val1.shape and err1.size > 0:
             # Only self has error
             err_ratio = ratio * (err1 / val1)
         elif err2 is not None and err2.shape == interp_val2.shape and err2.size > 0:
             # Only other has error
-            interp_err2 = PchipInterpolator(other.cog.radius, err2, extrapolate=False)(self.cog.radius)
+            interp_err2 = PchipInterpolator(other.cog.radius,
+                                            err2,
+                                            extrapolate=False)(self.cog.radius)
             err_ratio = ratio * (interp_err2 / interp_val2)
         # Plot error band if available
         if err_ratio is not None:
@@ -1101,29 +1268,35 @@ class CircularApertureProfile(RadialProfile):
             )
         ax.axhline(1.0, ls="-", color='gray')
         gfwhm = self.gaussian_fwhm
-        ax.axvline(self._convert_radius(gfwhm / 2), color=color, ls="--", label=f"Gauss FWHM {self._convert_radius(gfwhm):.2f} {self._radius_unit()}", **kwargs)
+        ax.axvline(
+            self._convert_radius(gfwhm / 2),
+            color=color,
+            ls="--",
+            label=
+            f"Gauss FWHM {self._convert_radius(gfwhm):.2f} {self._radius_unit()}",
+            **kwargs)
         ax.set_xlabel(f"Radius ({self._radius_unit()})")
         ax.set_ylabel("COG Ratio " + ylabel)
         ax.set_ylim(0.8, 1.2)
 
-    def plot(
-        self,
-        *,
-        ax: list | None = None,
-        cog_ratio: bool = True,
-        **kwargs: dict
-    ) -> tuple["matplotlib.figure.Figure", list]:
+    def plot(self,
+             *,
+             ax: list | None = None,
+             cog_ratio: bool = True,
+             **kwargs: dict) -> tuple["matplotlib.figure.Figure", list]:
         """Plot radial profile and curve of growth."""
 
         import matplotlib.pyplot as plt
 
-#        ncols = 3 if cog_ratio else 2
+        #        ncols = 3 if cog_ratio else 2
         if ax is None:
-            fig, ax = plt.subplots(1, 2 + cog_ratio, figsize=(4 * (2 + cog_ratio), 4))
+            fig, ax = plt.subplots(1,
+                                   2 + cog_ratio,
+                                   figsize=(4 * (2 + cog_ratio), 4))
             ax = ax.flatten()
         else:
             fig = ax[0].figure
-        
+
         # Main profile: blue
         self._plot_radial_profile(ax[0], color='C0')
         self._plot_cog(ax[1], color='C0')
@@ -1131,19 +1304,30 @@ class CircularApertureProfile(RadialProfile):
         fig.tight_layout()
         return fig, ax
 
-    def plot_other(self, other_profile, ax=None, color='C4', cog_ratio=True, **kwargs):
+    def plot_other(self,
+                   other_profile,
+                   ax=None,
+                   color='C4',
+                   cog_ratio=True,
+                   **kwargs):
         """
         Plot only the other CircularApertureProfile on the provided axes.
         """
         if ax is None:
-            fig, ax = plt.subplots(1, 2 + cog_ratio, figsize=(5 * (1+ cog_ratio), 3))
+            fig, ax = plt.subplots(1,
+                                   2 + cog_ratio,
+                                   figsize=(5 * (1 + cog_ratio), 3))
             ax = ax.flatten()
         else:
             fig = ax[0].figure
-        
+
         other_profile._plot_radial_profile(ax[0], color=color, **kwargs)
         other_profile._plot_cog(ax[1], color=color, **kwargs)
-        self._plot_ratio(other_profile, ax[2], ylabel=self.name + " / " + other_profile.name, color=color, **kwargs)
+        self._plot_ratio(other_profile,
+                         ax[2],
+                         ylabel=self.name + " / " + other_profile.name,
+                         color=color,
+                         **kwargs)
         fig.tight_layout()
 
         return ax
@@ -1193,14 +1377,14 @@ def clean_stamp(
     import matplotlib.pyplot as plt
     from mophongo.catalog import safe_dilate_segmentation
     from photutils.segmentation import detect_sources, SegmentationImage
-    from astropy.stats import sigma_clipped_stats 
+    from astropy.stats import sigma_clipped_stats
 
     detimg = data.copy()
     if weight is not None:
         detimg *= np.sqrt(weight)
     detimg = convolve2d(detimg, np.ones((w, w)) / w**2)
     det_mean, det_median, det_std = sigma_clipped_stats(detimg, sigma=3)
-    
+
     detimg -= det_median
 
     if verbose:
@@ -1291,8 +1475,8 @@ def compare_psf_to_star(
         error = None
 
     # shift align PSF to cutout centroid
-    psf_data = psf_data_in.copy() 
-    if register_psf:   
+    psf_data = psf_data_in.copy()
+    if register_psf:
         from scipy.ndimage import shift
         from photutils.centroids import centroid_quadratic
         psf_xycen = centroid_quadratic(psf_data, xpeak=psf_data.shape[1]//2, ypeak=psf_data.shape[0]//2)
@@ -1303,7 +1487,7 @@ def compare_psf_to_star(
     # --- Scale PSF to data ---
     if Rnorm is None:
         Rnorm = 2.0 * pixel_scale * (cutout_data.shape[0] // 2)
-    
+
     mask = np.hypot(*np.indices(cutout_data.shape) - cutout_data.shape[0]//2) < (Rnorm / pixel_scale)
     scl = (cutout_data * psf_data)[mask].sum() / (psf_data[mask]**2).sum()
 
@@ -1336,7 +1520,7 @@ def compare_psf_to_star(
     ax1[0].imshow(np.log10(cutout_data/scl + offset), **kws)
     ax1[1].imshow(np.log10(psf_data + offset), **kws)
     ax1[2].imshow(np.log10(cutout_data/scl - psf_data + offset), **kws)
-    if kernel is not None: 
+    if kernel is not None:
         ax1[3].imshow(np.log10(cutout_data/scl - conv + offset), **kws)
         ax1[4].imshow(np.log10(pad_to_shape(kernel,conv.shape) + offset), **kws)
         ax1[3].set_title('data - psf x kernel')
@@ -1361,7 +1545,7 @@ def compare_psf_to_star(
         _ = rp_data.plot_other(rp_conv, ax=ax2, color='C2', alpha=0.5)
     for a, title in zip(ax2, ['profile', 'growthcurve', 'ratio of growthcurves']):
         a.set_title(title)
-    
+
     plt.tight_layout()
     if to_file is not None:
         fig.savefig(to_file, dpi=150)

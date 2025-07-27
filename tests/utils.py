@@ -791,16 +791,17 @@ def make_testdata():
 # %%
 
 
-data_dir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/'
+if __name__ == "__main__":
+    data_dir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/'
 
-from astropy.wcs import WCS
-from astropy.io import fits
+    from astropy.wcs import WCS
+    from astropy.io import fits
 
-hdr = fits.getheader(data_dir+'uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_sci.fits')
-wcs_40mas = WCS(hdr)
-wcs_80mas = wcs_40mas.slice((slice(None, None, 2), slice(None, None, 2)))
+    hdr = fits.getheader(data_dir+'uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_sci.fits')
+    wcs_40mas = WCS(hdr)
+    wcs_80mas = wcs_40mas.slice((slice(None, None, 2), slice(None, None, 2)))
 
-# create a new WCS that corresponds to slicing every 2nd pixel in both Y and X
-#wcs2 = wcs.slice((slice(None, None, 2), slice(None, None, 2)))
+    # create a new WCS that corresponds to slicing every 2nd pixel in both Y and X
+    #wcs2 = wcs.slice((slice(None, None, 2), slice(None, None, 2)))
 
 # %%

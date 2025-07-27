@@ -246,27 +246,21 @@ def test_deblend_sources(tmp_path):
 def test_catalog(tmp_path):
     sci = Path("data/uds-test-f444w_sci.fits")
     wht = Path("data/uds-test-f444w_wht.fits")
-    out = tmp_path / "uds-test-f444w_ivar.fits"
     params = {
         "kernel_size": 4.0,
         "detect_threshold": 1.0,
-        "dilate_segmap": 3,
+        "dilate_segmap": 2,
         "deblend_mode": "exponential",
         "detect_npixels": 5,
         "deblend_nlevels": 32,
         "deblend_contrast": 1e-3,
     }
-    cat = Catalog.from_fits(sci, wht, ivar_outfile=out, params=params)
-    cat.catalog["x"] = cat.catalog["xcentroid"]
-    cat.catalog["y"] = cat.catalog["ycentroid"]
+    cat = Catalog.from_fits(sci, wht, params=params)
 
     assert cat.segmap.shape == cat.sci.shape
     assert cat.ivar.shape == cat.sci.shape
-    assert len(cat.catalog) > 0
+    assert len(cat.table) > 0
     assert np.all(np.isfinite(cat.ivar))
-    assert out.exists()
-    hdr = fits.getheader(out)
-    assert "CRPIX1" in hdr
 
     #    segimage = fits.getdata('data/uds-test-f444w_seg.fits')
     #    seg = SegmentationImage(segimage)
@@ -278,7 +272,7 @@ def test_catalog(tmp_path):
     ax.imshow(cat.det_img, origin="lower", cmap="gray", norm=lupton_norm(cat.det_img))
     ax.imshow(segmap.data, origin="lower", cmap=cmap_seg, alpha=0.3)
     if len(cat.catalog) < 50:
-        label_segmap(ax, segmap.data, cat.catalog, fontsize=5)
+        label_segmap(ax, segmap.data, cat.table, fontsize=5)
 
         for aper in cat.catalog.kron_aperture:
             aper.plot(ax=ax, color="white", lw=0.4, alpha=0.6)
@@ -289,7 +283,7 @@ def test_catalog(tmp_path):
     assert diag.exists()
 
     # Verify that small unweighted aperture errors reflect the weight map
-    positions = np.column_stack([cat.catalog["x"], cat.catalog["y"]])
+    positions = np.column_stack([cat.table["x"], cat.table["y"]])
     apertures = CircularAperture(positions, r=4.0)
     phot = aperture_photometry(cat.sci, apertures, error=np.sqrt(1.0 / cat.ivar))
     measured_err = phot["aperture_sum_err"].data

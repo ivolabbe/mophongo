@@ -114,7 +114,7 @@ def make_simple_data(
 
     seg = detect_sources(detimg, threshold=sigthresh * noise_std, npixels=5)
     if ndilate > 0:
-        seg.data = safe_dilate_segmentation(seg.data, selem=disk(ndilate))
+        seg.data = safe_dilate_segmentation(seg, selem=disk(ndilate))
 
     segm = deblend_sources(
         detimg,
@@ -631,6 +631,63 @@ def label_segmap(ax, segmap, catalog, fontsize=10):
         ax.text(x, y, str(idx), color="white", fontsize=fontsize, ha="center", va="center", weight="medium", alpha=0.7)
 
 #%%
+import copy
+from astropy.wcs import WCS
+
+def rebin_wcs(wcs: WCS, n: int) -> WCS:
+    """
+    Up‐ or down‐sample a WCS by a power of two, *exactly* preserving the
+    tangent point (CRVALs), and updating CRPIX and NAXIS accordingly.
+
+    Parameters
+    ----------
+    wcs : astropy.wcs.WCS
+        Original WCS.
+    n : int
+        Power of two to scale by:
+          - n > 0 : down‐bin by 2**n  (pixels get larger)
+          - n < 0 : up‐sample by 2**|n| (pixels get smaller)
+
+    Returns
+    -------
+    new_wcs : astropy.wcs.WCS
+        The rebinned WCS.
+    """
+    factor = 2 ** n
+    new_wcs = copy.deepcopy(wcs)
+
+    # — scale the CD or CDELT matrix
+    if getattr(new_wcs.wcs, 'cd', None) is not None:
+        new_wcs.wcs.cd = new_wcs.wcs.cd / factor
+    else:
+        new_wcs.wcs.cdelt = new_wcs.wcs.cdelt / factor
+
+    # — shift CRPIX so that CRVAL stays fixed on the sky:
+    #    new_crpix = (old_crpix - 0.5)/factor + 0.5
+    old_crpix = new_wcs.wcs.crpix.copy()
+    new_wcs.wcs.crpix = (old_crpix - 0.5) / factor + 0.5
+
+    # — update the “NAXIS” so to_header() will emit the right shape
+    #    (Astropy uses .pixel_shape if present, else _naxis1/_naxis2)
+    if hasattr(new_wcs, 'pixel_shape') and new_wcs.pixel_shape is not None:
+        ny, nx = new_wcs.pixel_shape
+        new_wcs.pixel_shape = (int(ny // factor), int(nx // factor))
+    else:
+        # fallback into the private attributes
+        if hasattr(new_wcs.wcs, '_naxis1'):
+            new_wcs.wcs._naxis1 = int(new_wcs.wcs._naxis1 // factor)
+            new_wcs.wcs._naxis2 = int(new_wcs.wcs._naxis2 // factor)
+        if hasattr(new_wcs.wcs, '_naxis'):
+            na = new_wcs.wcs._naxis
+            new_wcs.wcs._naxis = [int(na[0] // factor), int(na[1] // factor)]
+
+    # re‐initialize internally computed stuff
+    new_wcs.wcs.set()
+
+    return new_wcs
+
+
+#%%
 def make_testdata():
     from astropy.io import fits
     from astropy.wcs import WCS
@@ -638,20 +695,24 @@ def make_testdata():
     from astropy.nddata import Cutout2D
     from astropy.table import Table
     from reproject import reproject_interp
+    from reproject import reproject_adaptive
     import numpy as np
     """Create cutouts for UDS images based on user-defined parameters."""
     indir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/'
     outdir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/testdata/'
 
     # --- User parameters from the pasted image ---
-    center_x_40mas = 23243
+    center_ra, center_dec = 34.3032414, -5.1113316
+    center_x_40mas = 23242
     center_y_40mas = 19388
-    #    size_x_40mas = 1144
-    #    size_y_40mas = 878
-    size_x_40mas = 4144
-    size_y_40mas = 2978
 
-    center = (center_x_40mas, center_y_40mas)
+    size_x_40mas = 1000
+    size_y_40mas = 820
+    #   size_x_40mas = 4144
+    #   size_y_40mas = 2978
+
+    center_radec = SkyCoord(center_ra, center_dec, unit='deg')
+    #  center = (center_x_40mas, center_y_40mas)
     size = (size_y_40mas, size_x_40mas)  # Cutout2D expects (ny, nx)
 
     # --- File lists ---
@@ -665,8 +726,8 @@ def make_testdata():
         ("uds-grizli-v8.0-minerva-v1.0-40mas-f115w-clear_drc_wht.fits",
          "uds-test-f115w_wht.fits"),
         ("LW_f277w-f356w-f444w_SEGMAP.fits", "uds-test-LW_seg.fits"),
-        ("LW_f277w-f356w-f444w_opterr.fits", "uds-test-f444w_opterr.fits"),
-        ("LW_f277w-f356w-f444w_optavg.fits", "uds-test-f444w_optavg.fits"),
+        #       ("LW_f277w-f356w-f444w_opterr.fits", "uds-test-f444w_opterr.fits"),
+        #       ("LW_f277w-f356w-f444w_optavg.fits", "uds-test-f444w_optavg.fits"),
     ]
 
     # --- Extract cutouts for 40mas images ---
@@ -675,23 +736,11 @@ def make_testdata():
             data = hdul[0].data
             hdr = hdul[0].header
             wcs = WCS(hdr)
-            center_radec = SkyCoord(*wcs.all_pix2world(center_x_40mas,
-                                                       center_y_40mas, 0),
-                                    unit='deg')
             cutout = Cutout2D(data, position=center_radec, size=size, wcs=wcs)
             hdr.update(cutout.wcs.to_header())
             hdu = fits.PrimaryHDU(cutout.data, header=hdr)
             hdu.writeto(outdir + outfile, overwrite=True)
             print(f"Saved {outdir+outfile}")
-
-    # --- Extract cutout for 80mas image (2x2 binned), reproject to 40mas grid ---
-    # THESE ARE 160mas !!
-
-
-#    files_80mas = [
-#        ("uds-lowres-all-f770w_drz_sci.fits", "uds-test-f770w_sci.fits"),
-#        ("uds-lowres-all-f770w_drz_wht.fits", "uds-test-f770w_wht.fits"),
-#    ]
 
     files_80mas = [
         ('uds-sbkgsub-v0.3-80mas-f770w_drz_sci.fits',
@@ -706,15 +755,23 @@ def make_testdata():
         target_wcs = WCS(target_header)
         target_shape = ref_hdul[0].data.shape
 
+#              output_projection=target_wcs,
+    target_80mas = rebin_wcs(target_wcs, n=1)  # Downsample by a factor of 2
+
     for infile, outfile in files_80mas:
         with fits.open(indir + infile) as hdul:
             data = hdul[0].data
             hdr = hdul[0].header
-            hdr['KERNEL'] = ('square', 'Drizzle kernel')
-            hdr['PIXFRAC'] = (0.75, 'Drizzle pixfrac')
-
+            # https://drizzlepac.readthedocs.io/en/deployment/adrizzle.html
+            hdr['KERNEL'] = ('square', 'Drizzle kernel'
+                             )  # also turbo -> speed up
+            hdr['PIXFRAC'] = (1.0, 'Drizzle pixfrac')
+            # NOTE this is on the 80mas grid, so does not correspond to the 40mas pixel scale
+            # PIXFRAC =                  1.0 / Drizzle parameter describing pixel shrinking
+            # PXSCLRT =   0.7251965743873189 / Pixel scale ratio relative to native detector s
             # Extract the cutout at the 80mas scale
-            size_80mas = (size[0] // 2, size[1] // 2)
+            # make it slightly larger to avoid edge effects
+            size_80mas = (size[0] // 2 + 4, size[1] // 2 + 4)
             cutout_80mas = Cutout2D(data,
                                     position=center_radec,
                                     size=size_80mas,
@@ -723,12 +780,27 @@ def make_testdata():
             reprojected_data, _ = reproject_interp(
                 (cutout_80mas.data, cutout_80mas.wcs),
                 output_projection=target_wcs,
-                shape_out=target_shape)
+                shape_out=target_shape, order='bicubic')
             # update hdr with new wcs
             hdr.update(target_wcs.to_header())
             hdu = fits.PrimaryHDU(reprojected_data.astype(np.float32),
                                   header=hdr)
             hdu.writeto(outdir + outfile, overwrite=True)
             print(f"Saved {outdir + outfile} (registered to 40mas grid)")
+
+# %%
+
+
+data_dir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/'
+
+from astropy.wcs import WCS
+from astropy.io import fits
+
+hdr = fits.getheader(data_dir+'uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_sci.fits')
+wcs_40mas = WCS(hdr)
+wcs_80mas = wcs_40mas.slice((slice(None, None, 2), slice(None, None, 2)))
+
+# create a new WCS that corresponds to slicing every 2nd pixel in both Y and X
+#wcs2 = wcs.slice((slice(None, None, 2), slice(None, None, 2)))
 
 # %%

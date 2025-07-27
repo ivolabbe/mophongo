@@ -10,25 +10,26 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from .kernels import KernelLookup
-
 import numpy as np
 from astropy.table import Table
+from astropy.wcs import WCS
 
 # The ``templates`` and ``fit`` modules are expected to provide the following
 # functions. They are imported lazily inside :func:`run_photometry` so that this
 # module can be imported even if those modules are not yet implemented.
 
 
-def run_photometry(
+def run(
     images: Sequence[np.ndarray],
     segmap: np.ndarray,
-    catalog: Table,
-    psfs: Sequence[np.ndarray],
-    wht_images: Sequence[np.ndarray] | None = None,
     *,
+    catalog: Table | None = None,
+    psfs: Sequence[np.ndarray] | None = None,
+    weights: Sequence[np.ndarray] | None = None,
+    kernels: Sequence[np.ndarray | PSFRegionMap] | None = None,
+    wcs: Sequence[WCS] | None = None,
+    window: Window | None = None,
     extend_templates: str | None = None,
-    kernels: Sequence[np.ndarray | KernelLookup] | None = None,
 ) -> tuple[Table, np.ndarray]:
     """Run photometry on a set of images.
 
@@ -38,12 +39,14 @@ def run_photometry(
         Sequence of image arrays. The first image defines the high-resolution
         detection plane used to build templates.
     segmap
-        Segmentation map aligned with the images.
+        Segmentation map aligned with the images. If not catalog provided, all sources are fit.
     catalog
-        Source catalog. Must provide ``y`` and ``x`` columns giving pixel
-        positions. New flux columns will be added to a copy of this table.
+        Optional source catalog. Must provide ``y`` and ``x`` columns giving pixel
+        positions. Performs only fitting of these sources, not all sources in Segmentation image. 
     psfs
         Point-spread functions matching each image.
+    weights
+        Optional sequence of weight arrays corresponding to ``images``.
     kernels
         Optional sequence of precomputed kernels or :class:`~mophongo.kernels.KernelLookup`
         objects corresponding to ``images``. If ``None``, matching kernels are
@@ -59,48 +62,64 @@ def run_photometry(
         image. The array has shape ``(n_images, ny, nx)``.
     """
 
-    if len(images) != len(psfs):
-        raise ValueError("Number of images and PSFs must match")
-    if wht_images is not None and len(wht_images) != len(images):
-        raise ValueError("Number of RMS images must match number of images")
+    if psfs is not None:
+        if len(images) != len(psfs):
+            raise ValueError("Number of images and PSFs must match")
+    if weights is not None and len(weights) != len(images):
+        raise ValueError("Number of weight images must match number of images")
 
     from .psf import PSF
     from .templates import Templates
     from .fit import SparseFitter
+    from .psf_map import PSFRegionMap
+    from . import utils
     import warnings
 
-    catalog = catalog.copy()
+    if catalog is None:
+        segm = SegmentationImage(segmap)
+        catalog = SourceCatalog(
+            images[0],
+            SegmentationImage(segmap),
+            error=np.sqrt(1.0 / weights[0]),
+            wcs=WCS(header) if header is not None else None,
+        )
+
+    cat = catalog.copy()
     positions = list(zip(catalog["x"], catalog["y"]))
 
     # Step 1: Extract templates from the first image (alternatively, use models)
-    tmpl_psf = PSF.from_array(psfs[0])
-
     tmpls = Templates()
-    tmpls.extract_templates(images[0], segmap, positions)
-    if extend_templates == 'psf':
-        tmpls.extend_with_psf_wings(tmpl_psf.array, inplace=True)
+    tmpls.extract_templates(images[0], segmap, positions, wcs=wcs[0])
+
+    if extend_templates == 'psf' and psfs is not None:
+        tmpls.extend_with_psf_wings(psfs[0], inplace=True)
 
     residuals = []
     for idx in range(1, len(images)):
 
+        kernel = None
         if kernels is not None and kernels[idx] is not None:
             kernel = kernels[idx]
-        else:
-            kernel = tmpl_psf.matching_kernel(psfs[idx])
+            if isinstance(kernel, PSFRegionMap):
+                print(f"Using kernel lookup table {kernel.name}")
+
+        wcs_i = wcs[idx] if wcs is not None else None
 
         templates = tmpls.convolve_templates(kernel, inplace=False)
 
         # assume weights are dominated by photometry image (for proper weights see sparse fitter, needes iteration)
-        weights = wht_images[idx] if wht_images is not None else None
-        
-        fitter = SparseFitter(templates, images[idx], weights)
+        weights_i = weights[idx] if weights is not None else None
+
+        fitter = SparseFitter(templates, images[idx], weights_i)
         fluxes, _ = fitter.solve()
         resid = fitter.residual()
         errs = fitter.flux_errors()
 
-        if len(tmpls.templates) != len(catalog):
+        print(f"Done...")
+
+        if len(tmpls.templates) != len(cat):
             warnings.warn(
-                f"Number of templates ({len(tmpls.templates)}) does not match number of sources in catalog ({len(catalog)})."
+                f"Number of templates ({len(tmpls.templates)}) does not match number of sources in catalog ({len(cat)})."
             )
             # Get template IDs from position_original
             tmpl_ids = [
@@ -108,35 +127,35 @@ def run_photometry(
                 for tmpl in tmpls.templates
             ]
             # Map template IDs to their indices in the catalog
-            id_to_index = {id_: i for i, id_ in enumerate(catalog['id'])}
+            id_to_index = {id_: i for i, id_ in enumerate(cat['id'])}
             # Find catalog indices for each template
             tmpl_idx = [id_to_index.get(tid, None) for tid in tmpl_ids]
 
-        if weights is not None:
+        if weights_i is not None:
             pred = fitter.predicted_errors()
 
-        if len(tmpls.templates) == len(catalog):
-            if weights is not None:
-                catalog[f"err_pred_{idx}"] = pred
-            catalog[f"flux_{idx}"] = fluxes
-            catalog[f"err_{idx}"] = errs
-            if weights is not None:
-                catalog[f"err_{idx}"] = pred
+        if len(tmpls.templates) == len(cat):
+            if weights_i is not None:
+                cat[f"err_pred_{idx}"] = pred
+            cat[f"flux_{idx}"] = fluxes
+            cat[f"err_{idx}"] = errs
+            if weights_i is not None:
+                cat[f"err_{idx}"] = pred
         else:
             # fill arrays with NaN and map via tmpl_idx
-            full_flux = np.full(len(catalog), np.nan)
-            full_err = np.full(len(catalog), np.nan)
-            full_pred = np.full(len(catalog), np.nan)
+            full_flux = np.full(len(cat), np.nan)
+            full_err = np.full(len(cat), np.nan)
+            full_pred = np.full(len(cat), np.nan)
             for j, ci in enumerate(tmpl_idx):
                 if ci is not None:
                     full_flux[ci] = fluxes[j]
                     full_err[ci] = errs[j]
-                    if weights is not None:
+                    if weights_i is not None:
                         full_pred[ci] = pred[j]
-            catalog[f"flux_{idx}"] = full_flux
-            catalog[f"err_{idx}"] = full_err
-            if weights is not None:
-                catalog[f"err_pred_{idx}"] = full_pred
+            cat[f"flux_{idx}"] = full_flux
+            cat[f"err_{idx}"] = full_err
+            if weights_i is not None:
+                cat[f"err_pred_{idx}"] = full_pred
         residuals.append(resid)
 
-    return catalog, residuals, tmpls
+    return cat, residuals, tmpls

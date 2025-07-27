@@ -124,6 +124,7 @@ class SparseFitter:
         ata = lil_matrix((n, n))
         atb = np.zeros(n)
 
+#        for i, tmpl_i in tqdm(enumerate(self.templates), total=n, desc="Normal matrix"):
         for i, tmpl_i in enumerate(self.templates):
             sl_i = tmpl_i.slices_original
             data_i = tmpl_i.data[tmpl_i.slices_cutout]

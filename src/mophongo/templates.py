@@ -3,12 +3,14 @@ from typing import Iterable, Iterator, List, Tuple
 
 import numpy as np
 from astropy.nddata import Cutout2D
-from photutils.segmentation import SegmentationImage, SourceCatalog
-from skimage.morphology import binary_erosion, dilation, disk, footprint_rectangle
+from astropy.wcs import WCS
+from photutils.segmentation import SegmentationImage
+from tqdm import tqdm
+from scipy.signal import fftconvolve
 
-from .utils import measure_shape
+from .utils import measure_shape, convolve2d
 from .kernels import KernelLookup
-
+from .psf_map import PSFRegionMap
 
 def _convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     """Convolve ``image`` with ``kernel`` using direct sliding windows."""
@@ -41,7 +43,7 @@ class Template(Cutout2D):
             copy=True,
             **kwargs,
         )
-        # @@@ bug in Cutout2D: shape_input is not set correctly 
+        # @@@ bug in Cutout2D: shape_input is not set correctly
         self.shape_input = data.shape
 
     @property
@@ -105,10 +107,13 @@ class Templates:
         positions: Iterable[Tuple[float, float]],
         kernel: np.ndarray,
         extension: np.ndarray | str | None = None,  # 'psf', 'wings', 'both', None
+        wcs: WCS | None = None,
     ) -> "Templates":
         obj = cls()
+        obj.wcs = wcs
+
         # Step 1: Extract raw cutouts
-        obj.extract_templates(hires_image, segmap, positions)
+        obj.extract_templates(hires_image, segmap, positions, wcs=wcs)
 
         if type(extension) == np.ndarray:
             # Extend templates with PSF wings
@@ -117,18 +122,6 @@ class Templates:
         # Step 2: Convolve with kernel (includes padding)
         obj.convolve_templates(kernel, inplace=True)
 
-        return obj
-
-    @classmethod
-    def from_image_old(
-        cls,
-        hires_image: np.ndarray,
-        segmap: np.ndarray,
-        positions: Iterable[Tuple[float, float]],
-        kernel: np.ndarray,
-    ) -> "Templates":
-        obj = cls()
-        obj.extract_templates_old(hires_image, segmap, positions, kernel)
         return obj
 
     @property
@@ -177,7 +170,8 @@ class Templates:
         psf = psf / psf.sum()
         new_templates: list[Template] = []
 
-        for i, tmpl in enumerate(self._templates):
+        # Add progress bar here
+        for i, tmpl in enumerate(tqdm(self._templates, desc="Extending with PSF wings")):
             data = tmpl.data
             ny, nx = data.shape
 
@@ -235,6 +229,7 @@ class Templates:
         hires_image: np.ndarray,
         segmap: np.ndarray,
         positions: Iterable[Tuple[float, float]],
+        wcs: WCS | None = None,
     ) -> list[Template]:
         """Extract cutout templates around segmentation regions."""
 
@@ -243,7 +238,10 @@ class Templates:
         templates: list[Template] = []
         ny, nx = hires_image.shape
 
-        for pos in positions:
+        # Add progress bar here
+        for pos in tqdm(positions, desc="Extracting templates"):
+            # silently skip invalid positions
+            if not np.isfinite(pos).all(): continue
             x, y = int(round(pos[0])), int(round(pos[1]))
             if y < 0 or y >= ny or x < 0 or x >= nx:
                 continue
@@ -260,7 +258,7 @@ class Templates:
             width = max(x - bbox.ixmin, bbox.ixmax - x) * 2
 
             # Create template cutout
-            cut = Template(hires_image, pos, (height, width))
+            cut = Template(hires_image, pos, (height, width), wcs=wcs)
 
             # zero out all non segment pixels
             cut.data[cut.slices_cutout] *= (
@@ -273,7 +271,7 @@ class Templates:
 
     def convolve_templates(
         self,
-        kernel: np.ndarray | KernelLookup,
+        kernel: np.ndarray | PSFRegionMap,
         inplace: bool = False,
     ) -> list[Template]:
         """Convolve all templates with ``kernel``.
@@ -293,29 +291,28 @@ class Templates:
                 "No templates to convolve. Run extract_templates first.")
 
         # Determine kernel shape from fixed kernel or first lookup entry
-        if isinstance(kernel, KernelLookup):
-            sample_kernel = next(iter(kernel.kernels))
+        if isinstance(kernel, PSFRegionMap):
+            ky, kx = kernel.psfs[0].shape
         else:
-            sample_kernel = kernel
-
-        sample_kernel = sample_kernel 
-        ky, kx = sample_kernel.shape
+            ky,kx = kernel.shape
 
         new_templates: list[Template] = []
-        for tmpl in self._templates:
+        for tmpl in tqdm(self._templates, desc="Convolving templates"):
             new_tmpl = tmpl.pad((ky, kx), self.original_shape, inplace=inplace)
 
-            if isinstance(kernel, KernelLookup):
+            # look up local kernel if using PSFRegionMap
+            if isinstance(kernel, PSFRegionMap):
                 x, y = tmpl.position_original
                 if tmpl.wcs is not None:
                     ra, dec = tmpl.wcs.wcs_pix2world(x, y, 0)
                 else:
                     ra, dec = x, y
-                kern = kernel.get_kernel(ra, dec)
+                kern = kernel.get_psf(ra, dec)
             else:
+                # use fixed kernel
                 kern = kernel
 
-            conv = _convolve2d(new_tmpl.data, kern)
+            conv = fftconvolve(new_tmpl.data, kern, mode='same')
             new_tmpl.data[:] = conv / conv.sum()
 
             if not inplace:

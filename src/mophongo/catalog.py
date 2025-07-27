@@ -64,6 +64,7 @@ def safe_dilate_segmentation(segmap: SegmentationImage, selem=disk(1.5)):
     Efficiently dilate segments in a SegmentationImage, only into background.
     Works on small enlarged slices for each segment for speed.
     """
+
     result = np.zeros_like(segmap.data)
     pad = max(selem.shape) // 2
     arr_shape = segmap.data.shape

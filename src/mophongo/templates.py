@@ -9,7 +9,6 @@ from tqdm import tqdm
 from scipy.signal import fftconvolve
 
 from .utils import measure_shape, convolve2d
-from .kernels import KernelLookup
 from .psf_map import PSFRegionMap
 
 def _convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
@@ -120,7 +119,8 @@ class Templates:
             obj.extend_with_psf_wings(extension, inplace=True)
 
         # Step 2: Convolve with kernel (includes padding)
-        obj.convolve_templates(kernel, inplace=True)
+        if kernel is not None:
+            obj.convolve_templates(kernel, inplace=True)
 
         return obj
 

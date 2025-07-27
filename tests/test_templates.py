@@ -4,6 +4,7 @@ from mophongo.psf import PSF
 from mophongo.templates import Templates, Template
 from utils import make_simple_data, save_template_diagnostic
 import pytest
+from astropy.wcs import WCS
 
 def test_extract_templates_sizes_and_norm(tmp_path):
     images, segmap, catalog, psfs, truth_img, rms = make_simple_data(seed=5,nsrc=15, size=51, ndilate=2, peak_snr=3)
@@ -58,4 +59,4 @@ def test_template_extension_methods(tmp_path):
     assert fname_moff.exists()
 
     return
- 
+

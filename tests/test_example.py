@@ -18,7 +18,7 @@ print(sys.path)
 from mophongo.psf import PSF
 from mophongo.fit import SparseFitter
 from mophongo.templates import Templates, Template
-from utils import make_simple_data, lupton_norm, make_cutouts
+from utils import make_simple_data, lupton_norm
 from mophongo.pipeline import run_photometry
 from photutils.segmentation import SegmentationImage, SourceCatalog
 

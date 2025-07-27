@@ -61,11 +61,10 @@ def enlarge_slice(slc, shape, pad):
     x1 = min(slc[1].stop + pad, shape[1])
     return (slice(y0, y1), slice(x0, x1))
 
-def safe_dilate_segmentation(segmap: SegmentationImage, selem=disk(1.5)):
-    """
-    Efficiently dilate segments in a SegmentationImage, only into background.
-    Works on small enlarged slices for each segment for speed.
-    """
+def safe_dilate_segmentation(segmap: SegmentationImage | np.ndarray, selem=disk(1.5)):
+    """Dilate segmentation labels without merging distinct segments."""
+    if isinstance(segmap, np.ndarray):
+        segmap = SegmentationImage(segmap)
     result = np.zeros_like(segmap.data)
     pad = max(selem.shape) // 2
     arr_shape = segmap.data.shape
@@ -235,7 +234,7 @@ class Catalog:
         )
         from astropy.convolution import convolve
 
-        print(f"Convolving with kernel size {self.params["kernel_size"]} pixels")
+        print(f"Convolving with kernel size {self.params['kernel_size']} pixels")
         smooth = convolve(self.det_img, kernel, normalize_kernel=True)
         print("Detecting sources...")
         seg = detect_sources(

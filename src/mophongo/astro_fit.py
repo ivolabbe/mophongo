@@ -74,9 +74,15 @@ class GlobalAstroFitter(SparseFitter):
         if cfg.fit_astrometry and cfg.reg_astrom is not None:
             start = self.n_flux
             diag_idx = np.arange(start, start + 2 * self.n_alpha)
-            ata = ata.tolil()
-            ata[diag_idx, diag_idx] += cfg.reg_astrom
-            ata = ata.tocsr()
+            # Fix: Create regularization matrix properly
+            from scipy.sparse import csr_matrix
+
+            reg_data = np.zeros(ata.shape[0])
+            reg_data[diag_idx] = cfg.reg_astrom
+            reg_matrix = csr_matrix(
+                (reg_data, (np.arange(ata.shape[0]), np.arange(ata.shape[0]))), shape=ata.shape
+            )
+            ata = ata + reg_matrix
         x, info = cg(ata, atb, **cfg.cg_kwargs)
         if cfg.positivity:
             x = np.where(x < 0, 0, x)
@@ -84,8 +90,10 @@ class GlobalAstroFitter(SparseFitter):
             alpha = x[self.n_flux : self.n_flux + self.n_alpha]
             beta = x[self.n_flux + self.n_alpha : self.n_flux + 2 * self.n_alpha]
             self._apply_shifts(alpha, beta)
-            flux_only, _ = super().solve(cfg)
-            x[: self.n_flux] = flux_only
+            # Return only flux components
+            flux_only = x[: self.n_flux]
+            self.solution = x  # Store full solution including astrometry
+            return flux_only, info
         self.solution = x
         return x, info
 

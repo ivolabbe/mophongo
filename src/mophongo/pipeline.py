@@ -95,7 +95,7 @@ def run(
 
     # Step 1: Extract templates from the first image (alternatively, use models)
     tmpls = Templates()
-    tmpls.extract_templates(images[0], segmap, positions, wcs=wcs[0])
+    tmpls.extract_templates(images[0], segmap, positions, wcs=wcs[0] if wcs is not None else None)
 
     if extend_templates == 'psf' and psfs is not None:
         tmpls.extend_with_psf_wings(psfs[0], inplace=True)

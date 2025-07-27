@@ -33,8 +33,6 @@ import matplotlib.pyplot as plt
 
 __all__ = [
     "Catalog",
-    "estimate_background",
-    "calibrate_wht",
 ]
 
 def enlarge_slice(slc, shape, pad):
@@ -94,14 +92,16 @@ def measure_background(sci: np.ndarray, nbin: int = 4) -> float:
 
 def measure_ivar(
     sci: np.ndarray,
-    wht: np.ndarray,
     *,
+    wht: np.ndarray | None = None,
     background: float = 0.0,
     nbin: int = 3,
     ndilate: int = 3,
 ) -> np.ndarray:
     """Calibrate weight map using noise estimates from the image."""
     print("Measuring inverse variance map...") 
+    if wht is None:
+        wht = np.ones_like(sci, dtype=np.float32)
     sci_sub = sci - background
     sci_bin = block_reduce(sci_sub, (nbin, nbin), func=np.mean)
     wht_bin = block_reduce(wht, (nbin, nbin), func=np.mean)
@@ -205,13 +205,14 @@ class Catalog:
 
     background: float = 0.0
     ivar: np.ndarray | None = None
-    segmap: np.ndarray | None = None
-    catalog: Table | None = None
-    det_catalog: SourceCatalog | None = None
+    segmap: SegmentationImage | None = None
+    catalog: SourceCatalog | None = None
+    table: Table | None = None
     det_img: np.ndarray | None = None
     params: dict[str, float | int] = field(default_factory=dict)
-    default_columns: list[str] = field(default_factory=lambda: DEFAULT_COLUMNS)
+    header: fits.Header | None = None
     wcs: WCS | None = None
+    default_columns: list[str] = field(default_factory=lambda: DEFAULT_COLUMNS)
 
     def __post_init__(self) -> None:
         defaults = {
@@ -227,6 +228,45 @@ class Catalog:
         defaults.update(self.params)
         self.params = defaults
 
+    @classmethod
+    def from_fits(
+        cls,
+        sci: str | Path | np.ndarray,
+        wht: str | Path | np.ndarray,
+        *,
+        segmap: str | Path | np.ndarray | SegmentationImage | None = None,
+        header: fits.Header | None = None,
+        **kwargs,
+    ) -> "Catalog":
+        # Load sci and wht if they are file paths
+        if isinstance(sci, (str, Path)):
+            sci_data = fits.getdata(sci)
+            header = fits.getheader(sci)
+        else:
+            sci_data = np.asarray(sci)
+
+        if isinstance(wht, (str, Path)):
+            wht_data = fits.getdata(wht)
+        else:
+            wht_data = np.asarray(wht)
+
+        # Handle segmap
+        segmap_obj = None
+        if segmap is not None:
+            if isinstance(segmap, (str, Path)):
+                segmap_obj = SegmentationImage(fits.getdata(segmap))
+            elif isinstance(segmap, np.ndarray):
+                segmap_obj = SegmentationImage(segmap)
+            elif isinstance(segmap, SegmentationImage):
+                segmap_obj = segmap
+            else:
+                raise ValueError("segmap must be a filename, ndarray, or SegmentationImage")
+
+        obj = cls(sci_data, wht_data, segmap=segmap_obj, header=header, **kwargs)
+        obj.run()
+        return obj
+
+
     def _detect(self) -> None:
         self.det_img = (self.sci - self.background) * np.sqrt(self.ivar)
         kernel_pix = int(2 * self.params["kernel_size"]) | 1 # ensure odd size
@@ -238,7 +278,7 @@ class Catalog:
         print(f"Convolving with kernel size {self.params["kernel_size"]} pixels")
         smooth = convolve(self.det_img, kernel, normalize_kernel=True)
         print("Detecting sources...")
-        seg = detect_sources(
+        segmap = detect_sources(
             smooth,
             threshold=float(self.params["detect_threshold"]),
             npixels=self.params["detect_npixels"],
@@ -246,13 +286,13 @@ class Catalog:
         # Dilate the segmentation map to include more pixels
         if self.params["dilate_segmap"] > 0:
             print(f"Dilating segmentation map with size {self.params['dilate_segmap']}")
-            seg.data = safe_dilate_segmentation(
-                seg, disk(self.params["dilate_segmap"])
+            segmap.data = safe_dilate_segmentation(
+                segmap, disk(self.params["dilate_segmap"])
             )
         if self.params["deblend_mode"] is not None:
-            seg = deblend_sources(
+            segmap = deblend_sources(
                 self.det_img,
-                seg,
+                segmap,
                 npixels=self.params["detect_npixels"],
                 mode=self.params["deblend_mode"],
                 nlevels=int(self.params["deblend_nlevels"]),
@@ -261,32 +301,14 @@ class Catalog:
                 progress_bar=False,
     #            compactness=float(self.params.get("deblend_compactness", 0.0)),
             )
-        self.segmap = seg
-        self.catalog = SourceCatalog(
-            self.sci,
-            seg,
-            error=np.sqrt(1.0 / self.ivar),
-            wcs=self.wcs
-        )
-        # Compute r50 and sharpness for each source and add to table
-        self.table = self.catalog.to_table(self.default_columns)
-        self.table['r50'] = self.catalog.fluxfrac_radius(0.5).value
-#        self.table.rename_column('label', 'id')
-        self.table['eccentricity'] = self.catalog.eccentricity.value
-        self.table['sharpness'] =  (self.catalog.max_value * np.pi * self.table['r50']**2 / self.catalog.segment_flux).value        
-        self.table['snr'] = self.table['segment_flux'] / self.table['segment_fluxerr']
-        self.table.rename_columns(['label','xcentroid', 'ycentroid'],['id','x', 'y'])  
-        if 'sky_centroid' in self.table.colnames:
-            self.table['ra'] = [sc.ra.deg if sc is not None else np.nan for sc in self.table['sky_centroid']]
-            self.table['dec'] = [sc.dec.deg if sc is not None else np.nan for sc in self.table['sky_centroid']]
-            self.table.remove_column('sky_centroid')
+        self.segmap = segmap
+
      
-    def run(
-        self, ivar_outfile: str | Path | None = None, header: fits.Header | None = None
-    ) -> None:
+    def run(self) -> None:
         if self.estimate_background:
             self.background = measure_background(self.sci, self.nbin)
             self.sci = self.sci - self.background
+
         if self.estimate_ivar:
             self.ivar = measure_ivar(
                 self.sci,
@@ -295,17 +317,32 @@ class Catalog:
                 nbin=self.nbin,
                 ndilate=self.params["dilate_segmap"],
             )
-        else:
-            # assume wht is inverse variance
+        else: # assume wht is inverse variance
             self.ivar = self.wht
-        if ivar_outfile is not None:
-            fits.writeto(
-                ivar_outfile,
-                self.ivar.astype(np.float32),
-                header=header,
-                overwrite=True,
-            )
-        self._detect()
+
+        if self.segmap is None: 
+            self._detect()
+
+        if self.wcs is None and self.header is not None:
+            self.wcs = WCS(self.header)
+
+        self.catalog = SourceCatalog(
+            self.sci,
+            self.segmap,
+            error=np.sqrt(1.0 / self.ivar),
+            wcs=self.wcs
+        )
+        # Compute r50 and sharpness for each source and add to table
+        self.table = self.catalog.to_table(self.default_columns)
+        self.table['r50'] = self.catalog.fluxfrac_radius(0.5).value
+        self.table['eccentricity'] = self.catalog.eccentricity.value
+        self.table['sharpness'] =  (self.catalog.max_value * np.pi * self.table['r50']**2 / self.catalog.segment_flux).value        
+        self.table['snr'] = self.table['segment_flux'] / self.table['segment_fluxerr']
+        self.table.rename_columns(['label','xcentroid', 'ycentroid'],['id','x', 'y'])  
+        if 'sky_centroid' in self.table.colnames:
+            self.table['ra'] = [sc.ra.deg if sc is not None else np.nan for sc in self.table['sky_centroid']]
+            self.table['dec'] = [sc.dec.deg if sc is not None else np.nan for sc in self.table['sky_centroid']]
+            self.table.remove_column('sky_centroid')
 
     def find_stars(
         self,
@@ -360,21 +397,6 @@ class Catalog:
 
         return table, idx_stars
 
-    @classmethod
-    def from_fits(
-        cls,
-        sci_file: str | Path,
-        wht_file: str | Path,
-        *,
-        ivar_outfile: str | Path | None = None,
-        **kwargs,
-    ) -> "Catalog":
-        sci = fits.getdata(sci_file)
-        wht = fits.getdata(wht_file)
-        header = fits.getheader(sci_file)
-        obj = cls(np.asarray(sci, dtype=float), np.asarray(wht, dtype=float), wcs=WCS(header), **kwargs)
-        obj.run(ivar_outfile=ivar_outfile, header=header)
-        return obj
 
     def show_stamp(
         self,

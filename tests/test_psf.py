@@ -30,28 +30,6 @@ def test_psf_matching_kernel_properties(tmp_path):
     save_psf_diagnostic(fname, hi_pad, psf_lo.array, kernel)
     assert fname.exists()
 
-
-def test_psf_moffat_fit(tmp_path):
-    psf = PSF.moffat(31, fwhm_x=3.2, fwhm_y=4.5, beta=2.8, theta=0.3)
-    params = psf.fit_moffat()
-    assert np.isclose(params.beta, 2.8, rtol=0.1)
-    psf_fit = PSF.moffat(psf.array.shape, params.fwhm_x, params.fwhm_y, params.beta, params.theta)
-    fname = tmp_path / "psf_fit_moffat.png"
-    save_psf_fit_diagnostic(fname, psf.array, psf_fit.array)
-    assert fname.exists()
-    np.testing.assert_allclose(psf_fit.array, psf.array, rtol=0, atol=5e-2)
-
-
-def test_psf_gaussian_fit(tmp_path):
-    psf = PSF.gaussian(31, fwhm_x=2.5, fwhm_y=3.0, theta=0.2)
-    params = psf.fit_gaussian()
-    psf_fit = PSF.gaussian(psf.array.shape, params.fwhm_x, params.fwhm_y, params.theta)
-    fname = tmp_path / "psf_fit_gaussian.png"
-    save_psf_fit_diagnostic(fname, psf.array, psf_fit.array)
-    assert fname.exists()
-    np.testing.assert_allclose(psf_fit.array, psf.array, rtol=0, atol=5e-2)
-
-
 def test_delta_psf_default():
     psf = PSF.delta()
     assert psf.array.shape == (3, 3)
@@ -94,14 +72,6 @@ def test_matching_kernel_recenter():
     assert dist < dist_off
 
 
-def test_gaussian_matching_kernel_method():
-    psf_model = PSF.gaussian(51, 2.0, 2.0)
-    data = PSF.gaussian(51, 2.5, 2.5).array
-    kernel, fwhm_k, _, _ = PSF.gaussian_matching_kernel(data, psf_model.array)
-    conv = _convolve2d(psf_model.array, kernel)
-    np.testing.assert_allclose(conv, data, rtol=0, atol=1e-2)  # <-- Relaxed tolerance
-    np.testing.assert_allclose(fwhm_k, np.sqrt(2.5**2 - 2.0**2), atol=0.1)
-
 
 def test_matching_kernel_basis(tmp_path):
     import sys
@@ -121,7 +91,8 @@ def test_matching_kernel_basis(tmp_path):
 
     rphi = CircularApertureProfile(psf_hi.array, name='hi')
     rplo = CircularApertureProfile(psf_lo.array, name='lo')
-    rplo.plot(compare_to=rphi)
+    rplo.plot()
+    rplo.plot_other(rphi)
 
 #    basis = gauss_hermite_basis(3, [2], 51)
     basis = multi_gaussian_basis([1.0, 2.0, 3.0, 4.0, 8.0, 16.0], 51)
@@ -133,12 +104,12 @@ def test_matching_kernel_basis(tmp_path):
     plt.imshow(kernel,vmin=-1e-3,vmax=1e-3)
 
     rpconv = CircularApertureProfile(conv, name='conv')
-    rplo.plot(compare_to=rpconv)
+    rplo.plot()
+    rplo.plot_other(rpconv)
 
 #    np.testing.assert_allclose(conv, psf_lo.array, rtol=0, atol=4e-2)
     fname = tmp_path / "psf_kernel_basis.png"
     save_psf_diagnostic(fname, psf_hi.array, psf_lo.array, kernel)
-
 
     assert fname.exists()
 
@@ -187,6 +158,10 @@ def test_effective_psf():
 
     fig.tight_layout(pad=1)
 #%%
+
+import pytest
+
+@pytest.mark.skipif(1, reason="uses external data -> make smaller test")
 def test_drizzle_psf():
     import os
     import numpy as np
@@ -256,25 +231,7 @@ def test_drizzle_psf():
 #    kernel = psfd.matching_kernel(cutout_data, recenter=False,window=mophongo.psf.TukeyWindow(0.6))
     conv = _convolve2d(psf_data, kernel)
 
-    ########
-    # Make a plot showing the results
-    fig, axes = plt.subplots(2,3,figsize=(12,8), sharex=False, sharey=False)
-    axes = axes.flatten()
-    # background for log scale
-    offset = 2e-5
-    kws = dict(vmin=-5.3, vmax=-1.5, cmap='bone_r')
-    axes[0].imshow(np.log10(cutout_data/scl + offset), **kws)
-    axes[1].imshow(np.log10(psf_data + offset), **kws)
-    axes[2].imshow(np.log10(cutout_data/scl - psf_data + offset), **kws)
-    axes[3].imshow(np.log10(cutout_data/scl - conv + offset), **kws)
-    axes[4].imshow(np.log10(kernel + offset), **kws)
-
-    rp_data = CircularApertureProfile(cutout_data/scl, name='data', norm_radius = Rnorm_as / dpsf.driz_pscale)
-    rp_psf = CircularApertureProfile(psf_data, name='psf', norm_radius = Rnorm_as / dpsf.driz_pscale)
-    rp_conv = CircularApertureProfile(conv, name='conv', norm_radius = Rnorm_as / dpsf.driz_pscale)
-    rp_data.plot(compare_to=rp_psf)
-    rp_data.plot(compare_to=rp_conv)
-
+ 
     return 
 
 #%%

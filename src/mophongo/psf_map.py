@@ -13,7 +13,9 @@ import shapely
 from shapely.geometry import Polygon, Point
 from shapely.strtree import STRtree
 from astropy.wcs import WCS
+import logging
 
+logger = logging.getLogger(__name__)
 
 # ────────────────────────────────────────────────────────────────────
 #  Main public dataclass
@@ -83,9 +85,9 @@ class PSFRegionMap:
         footprints: Mapping[Hashable, Polygon],
         *,
         crs: str | None = "EPSG:4326",
-        snap_tol: float = 0.2 / 3600,
+        snap_tol: float = 0.5 / 3600,
         buffer_tol: float = 1.0 / 3600,
-        area_factor: float = 200.0,
+        area_factor: float = 100.0,
         wcs: Mapping[Hashable, WCS] | None = None,
         pa_tol: float = 0.0,
         name: str | None = None,

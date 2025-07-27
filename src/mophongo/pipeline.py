@@ -11,6 +11,8 @@ from __future__ import annotations
 from typing import Sequence
 
 from .kernels import KernelLookup
+from .astro_fit import GlobalAstroFitter
+from .fit import FitConfig, SparseFitter
 
 import numpy as np
 from astropy.table import Table
@@ -29,6 +31,8 @@ def run_photometry(
     *,
     extend_templates: str | None = None,
     kernels: Sequence[np.ndarray | KernelLookup] | None = None,
+    fit_astrometry: bool = False,
+    astrom_order: int = 3,
 ) -> tuple[Table, np.ndarray]:
     """Run photometry on a set of images.
 
@@ -48,6 +52,11 @@ def run_photometry(
         Optional sequence of precomputed kernels or :class:`~mophongo.kernels.KernelLookup`
         objects corresponding to ``images``. If ``None``, matching kernels are
         computed from ``psfs``.
+    fit_astrometry
+        If ``True`` fit a smooth astrometric shift field simultaneously with
+        fluxes.
+    astrom_order
+        Order of the 2-D Chebyshev basis used for the shift model.
 
     Returns
     -------
@@ -66,7 +75,6 @@ def run_photometry(
 
     from .psf import PSF
     from .templates import Templates
-    from .fit import SparseFitter
     import warnings
 
     catalog = catalog.copy()
@@ -80,6 +88,11 @@ def run_photometry(
     if extend_templates == 'psf':
         tmpls.extend_with_psf_wings(tmpl_psf.array, inplace=True)
 
+    cfg = FitConfig(
+        fit_astrometry=fit_astrometry,
+        astrom_basis_order=astrom_order,
+    )
+
     residuals = []
     for idx in range(1, len(images)):
 
@@ -89,14 +102,22 @@ def run_photometry(
             kernel = tmpl_psf.matching_kernel(psfs[idx])
 
         templates = tmpls.convolve_templates(kernel, inplace=False)
+        nflux = len(templates)
 
         # assume weights are dominated by photometry image (for proper weights see sparse fitter, needes iteration)
         weights = wht_images[idx] if wht_images is not None else None
         
-        fitter = SparseFitter(templates, images[idx], weights)
-        fluxes, _ = fitter.solve()
+        fitter_cls = GlobalAstroFitter if cfg.fit_astrometry else SparseFitter
+        if fitter_cls is GlobalAstroFitter:
+            fitter = fitter_cls(templates, images[idx], weights, segmap, cfg)
+        else:
+            fitter = fitter_cls(templates, images[idx], weights, cfg)
+        fluxes, _ = fitter.solve(cfg)
         resid = fitter.residual()
         errs = fitter.flux_errors()
+        if cfg.fit_astrometry:
+            fluxes = fluxes[:nflux]
+            errs = errs[:nflux]
 
         if len(tmpls.templates) != len(catalog):
             warnings.warn(
@@ -114,6 +135,8 @@ def run_photometry(
 
         if weights is not None:
             pred = fitter.predicted_errors()
+            if cfg.fit_astrometry:
+                pred = pred[:nflux]
 
         if len(tmpls.templates) == len(catalog):
             if weights is not None:

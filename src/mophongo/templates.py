@@ -44,6 +44,8 @@ class Template(Cutout2D):
         )
         # @@@ bug in Cutout2D: shape_input is not set correctly
         self.shape_input = data.shape
+        # record shift from original position here
+        self.shift = np.array([0.0, 0.0], dtype=float)
 
     @property
     def bbox(

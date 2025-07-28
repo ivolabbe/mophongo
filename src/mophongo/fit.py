@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 from scipy.sparse import lil_matrix, eye
 from scipy.sparse.linalg import cg, splu
+from tqdm import tqdm
 
 from .templates import Template
 
@@ -32,8 +33,8 @@ class FitConfig:
     cg_kwargs: Dict[str, Any] = field(default_factory=dict)
     fit_astrometry: bool = False
     astrom_basis_order: int = 3
-    reg_astrom: float | None = None
-
+    reg_astrom: float = 1e-3 
+    snr_thresh_astrom: float = 10.0   # 0 → keep all sources (current behaviour)
 
 class SparseFitter:
     """Build and solve sparse normal equations for photometry."""
@@ -73,44 +74,6 @@ class SparseFitter:
         y0, y1, x0, x1 = bbox
         return slice(y0, y1), slice(x0, x1)
 
-    def build_normal_matrix_old(self) -> None:
-        """Construct A^T A and A^T b from templates and image."""
-        n = len(self.templates)
-        ata = lil_matrix((n, n))
-        atb = np.zeros(n)
-
-        for i, tmpl_i in enumerate(self.templates):
-            sl_i = self._bbox_to_slices(tmpl_i.bbox)
-            w_i = self.weights[sl_i]
-            img_i = self.image[sl_i]
-            temp_i = tmpl_i.data
-            atb[i] = np.sum(temp_i * w_i * img_i)
-
-            ata[i, i] = np.sum(temp_i * w_i * temp_i)
-
-            for j in range(i + 1, n):
-                tmpl_j = self.templates[j]
-                inter = self._intersection(tmpl_i.bbox, tmpl_j.bbox)
-                if inter is None:
-                    continue
-                y0, y1, x0, x1 = inter
-                sl_inter = self._bbox_to_slices(inter)
-                sl_i_local = (
-                    slice(y0 - tmpl_i.bbox[0], y1 - tmpl_i.bbox[0]),
-                    slice(x0 - tmpl_i.bbox[2], x1 - tmpl_i.bbox[2]),
-                )
-                sl_j_local = (
-                    slice(y0 - tmpl_j.bbox[0], y1 - tmpl_j.bbox[0]),
-                    slice(x0 - tmpl_j.bbox[2], x1 - tmpl_j.bbox[2]),
-                )
-                w = self.weights[sl_inter]
-                val = np.sum(tmpl_i.data[sl_i_local] * tmpl_j.data[sl_j_local] * w)
-                if val != 0.0:
-                    ata[i, j] = val
-                    ata[j, i] = val
-        self._ata = ata.tocsr()
-        self._atb = atb
-
     @staticmethod
     def _slice_intersection(a: tuple[slice, slice], b: tuple[slice, slice]) -> tuple[slice, slice] | None:
         y0 = max(a[0].start, b[0].start)
@@ -126,9 +89,9 @@ class SparseFitter:
         n = len(self.templates)
         ata = lil_matrix((n, n))
         atb = np.zeros(n)
-
-#        for i, tmpl_i in tqdm(enumerate(self.templates), total=n, desc="Normal matrix"):
-        for i, tmpl_i in enumerate(self.templates):
+        print('Building normal matrix...')
+        for i, tmpl_i in enumerate(tqdm(self.templates, total=n, desc="Normal matrix")):
+#        for i, tmpl_i in enumerate(self.templates):
             sl_i = tmpl_i.slices_original
             data_i = tmpl_i.data[tmpl_i.slices_cutout]
             w_i = self.weights[sl_i]

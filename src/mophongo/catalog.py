@@ -103,17 +103,28 @@ def measure_ivar(
     print("Measuring inverse variance map...") 
     if wht is None:
         wht = np.ones_like(sci, dtype=np.float32)
-    sci_sub = sci - background
+    
+    # Handle NaNs in input arrays
+    sci_clean = np.where(np.isfinite(sci), sci, 0.0)
+    wht_clean = np.where(np.isfinite(wht) & (wht > 0), wht, 0.0)
+    
+    sci_sub = sci_clean - background
     sci_bin = block_reduce(sci_sub, (nbin, nbin), func=np.mean)
-    wht_bin = block_reduce(wht, (nbin, nbin), func=np.mean)
-    det_bin = sci_bin * np.sqrt(wht_bin)
+    wht_bin = block_reduce(wht_clean, (nbin, nbin), func=np.mean)
+    
+    # Only compute detection image where weight is positive
+    det_bin = np.where(wht_bin > 0, sci_bin * np.sqrt(wht_bin), 0.0)
+    
     clipped = SigmaClip(sigma=3.0)(det_bin)
     mask = clipped.mask
     if ndilate > 0:
         mask = binary_dilation(mask, disk(ndilate))
 
+    # Add additional mask for zero weights
+    mask = mask | (wht_bin <= 0)
+    
     std = MADStdBackgroundRMS()(det_bin[~mask])
-    sqrt_wht = np.sqrt(wht_bin) / std
+    sqrt_wht = np.where(wht_bin > 0, np.sqrt(wht_bin) / std, 0.0)
     wht_bin_cal = sqrt_wht**2
     expanded = block_replicate(wht_bin_cal, (nbin, nbin), conserve_sum=False)
     ny, nx = sci.shape
@@ -313,7 +324,7 @@ class Catalog:
         if self.estimate_ivar:
             self.ivar = measure_ivar(
                 self.sci,
-                self.wht,
+                wht = self.wht,
                 background=self.background,
                 nbin=self.nbin,
                 ndilate=self.params["dilate_segmap"],

@@ -32,7 +32,7 @@ def run(
     window: Window | None = None,
     extend_templates: str | None = None,
     fit_astrometry: bool = False,
-    astrom_order: int = 3,
+    astrom_order: int = 1,
 ) -> tuple[Table, np.ndarray]:
     """Run photometry on a set of images.
 
@@ -100,7 +100,7 @@ def run(
     if extend_templates == 'psf' and psfs is not None:
         tmpls.extend_with_psf_wings(psfs[0], inplace=True)
 
-    residuals = [np.zeros_like(images[0], dtype=float)]
+    residuals = []
     for idx in range(1, len(images)):
 
         kernel = None
@@ -111,14 +111,14 @@ def run(
 
         wcs_i = wcs[idx] if wcs is not None else None
 
-        templates = tmpls.convolve_templates(kernel, inplace=False)
+        templates = tmpls.convolve_templates(kernel, inplace=True)
 
         # assume weights are dominated by photometry image (for proper weights see sparse fitter, needes iteration)
         weights_i = weights[idx] if weights is not None else None
 
         fitter_cls = GlobalAstroFitter if fit_astrometry else SparseFitter
         if fit_astrometry:
-            fitter = fitter_cls(templates, images[idx], weights_i, segmap, FitConfig(fit_astrometry=True, astrom_basis_order=astrom_order))
+            fitter = fitter_cls(templates, images[idx], weights_i, FitConfig(fit_astrometry=True, astrom_basis_order=astrom_order))
         else:
             fitter = fitter_cls(templates, images[idx], weights_i, FitConfig())
         fluxes, _ = fitter.solve()
@@ -169,4 +169,4 @@ def run(
                 cat[f"err_pred_{idx}"] = full_pred
         residuals.append(resid)
 
-    return cat, residuals, tmpls
+    return cat, residuals, fitter

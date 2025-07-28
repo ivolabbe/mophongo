@@ -100,7 +100,7 @@ def run(
     if extend_templates == 'psf' and psfs is not None:
         tmpls.extend_with_psf_wings(psfs[0], inplace=True)
 
-    residuals = []
+    residuals = [np.zeros_like(images[0], dtype=float)]
     for idx in range(1, len(images)):
 
         kernel = None

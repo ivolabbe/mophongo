@@ -31,6 +31,7 @@ def make_simple_data(
     seed: int = 11,
     nsrc: int = 100,
     size: int = 201,
+    max_amplitude: float = 200.0,
     det_fwhm: float = 0,
     sigthresh: float = 2.0,
     peak_snr: float = 1.0,
@@ -54,7 +55,7 @@ def make_simple_data(
 
     nx = ny = size
     hi_fwhm = 2.0
-    lo_fwhm = 5.0 * hi_fwhm
+    lo_fwhm = 4.5 * hi_fwhm
 
     # Use Moffat PSFs instead of Gaussian
     psf_hi = PSF.moffat(41, hi_fwhm, hi_fwhm, beta=3.0)  # Typical ground-based seeing
@@ -71,9 +72,9 @@ def make_simple_data(
         min_separation=int(hi_fwhm * 6),
         border_size=border_size,
         seed=rng,
-        amplitude=(1.0, 100),
-        x_stddev=(0.5, 4.0),
-        y_stddev=(0.5, 4.0),
+        amplitude=(1.0, max_amplitude),
+        x_stddev=(0.4, 4.0),
+        y_stddev=(0.4, 4.0),
         theta=(0, np.pi),
     )
 

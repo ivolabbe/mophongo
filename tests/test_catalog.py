@@ -1,5 +1,6 @@
 import numpy as np
 from pathlib import Path
+import pytest
 from astropy.io import fits
 
 from mophongo.catalog import Catalog, safe_dilate_segmentation
@@ -246,6 +247,8 @@ def test_deblend_sources(tmp_path):
 def test_catalog(tmp_path):
     sci = Path("data/uds-test-f444w_sci.fits")
     wht = Path("data/uds-test-f444w_wht.fits")
+    if not sci.exists() or not wht.exists():
+        pytest.skip("Test data not available")
     params = {
         "kernel_size": 4.0,
         "detect_threshold": 1.0,

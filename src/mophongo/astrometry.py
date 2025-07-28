@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.polynomial.chebyshev import chebval
+from copy import deepcopy
 
 
 def cheb_basis(x: float, y: float, order: int) -> np.ndarray:
@@ -24,36 +25,37 @@ def n_terms(order: int) -> int:
     return (order + 1) * (order + 2) // 2
 
 
-def make_gradients(templates, shape):
+def make_gradients(templates):
     """Return per-template gradient images on the full frame."""
     gx, gy = [], []
     for tmpl in templates:
         dy, dx = np.gradient(tmpl.data.astype(float))
-        gxi = np.zeros(shape, dtype=float)
-        gyi = np.zeros(shape, dtype=float)
-        gxi[tmpl.slices_original] = dx[tmpl.slices_cutout]
-        gyi[tmpl.slices_original] = dy[tmpl.slices_cutout]
+        gxi = deepcopy(tmpl)
+        gyi = deepcopy(tmpl)
+        gxi.data = dx
+        gyi.data = dy
         gx.append(gxi)
         gy.append(gyi)
     return gx, gy
 
 
-def basis_matrix(templates, segmap, order):
+def basis_matrix(templates, shape, order):
     """Evaluate basis functions at template centres."""
-    h, w = segmap.shape
+    h, w = shape
     mat = np.zeros((len(templates), n_terms(order)), dtype=float)
     for i, tmpl in enumerate(templates):
-        x, y = tmpl.position_original
+        x, y = tmpl.input_position_original
         mat[i] = cheb_basis(x / (w - 1), y / (h - 1), order)
     return mat
 
 
-def collapse_gradients(gx, gy, phi, k, shape):
-    """Collapse per-object gradients into global templates."""
-    GX = [np.zeros(shape, dtype=float) for _ in range(k)]
-    GY = [np.zeros(shape, dtype=float) for _ in range(k)]
-    for i in range(len(gx)):
-        for j in range(k):
-            GX[j] += phi[i, j] * gx[i]
-            GY[j] += phi[i, j] * gy[i]
-    return GX, GY
+# def collapse_gradients(gx, gy, phi, k, shape):
+#     """Collapse per-object gradients into global templates."""
+#     GX = [np.zeros(shape, dtype=float) for _ in range(k)]
+#     GY = [np.zeros(shape, dtype=float) for _ in range(k)]
+#     for i in range(len(gx)):
+#         for j in range(k):
+#             GX[j] += phi[i, j] * gx[i]
+#             GY[j] += phi[i, j] * gy[i]
+#     return GX, GY
+

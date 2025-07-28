@@ -39,7 +39,7 @@ def test_pipeline_flux_recovery(tmp_path):
    
     kernel = [mutils.matching_kernel(psfs[0], psf) for psf in psfs]
     kernel[0] =  kernel[1] = dirac(3)  # no kernel for the first image, it is the hires image                                
-    table, resid, templates = pipeline.run(images, segmap, catalog=catalog,  wht_images=wht, kernels=kernel)
+    table, resid, templates = pipeline.run(images, segmap, catalog=catalog,  weights=wht, kernels=kernel)
 
     # @@@ sometimes flux_true is NEGATIVE?
     table["flux_true"] = catalog["flux_true"]  # add flux_true to the table
@@ -85,7 +85,7 @@ def test_pipeline_flux_recovery(tmp_path):
 #images, segmap, catalog=catalog, psfs=psfs,  wht_images=wht)
     table_true, resid_hi, templates_true = pipeline.run(
         [truth_img, images[1]], segmap, catalog=catalog, kernels=[dirac(3),psfs[1]],
-        wht_images=[np.zeros(wht[0].shape), wht[1]])
+        weights=[np.zeros(wht[0].shape), wht[1]])
     # Plot for high-res (flux_0) vs truth
     flux_true_plot = tmp_path / "flux_hi_vs_true_truemodel.png"
     save_flux_vs_truth_plot(

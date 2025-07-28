@@ -11,13 +11,31 @@ from skimage.registration import phase_cross_correlation
 from .templates import Template
 from . import astrometry
 
+def shifts_at_positions(
+    positions: np.ndarray,  # shape (N, 2) with (x, y) coordinates
+    coeff_x: np.ndarray, 
+    coeff_y: np.ndarray, 
+    order: int,
+    shape: tuple[int, int]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reconstruct shifts at multiple positions."""
+    
+    phi = np.array([
+        astrometry.cheb_basis(x / (shape[1] - 1), y / (shape[0] - 1), order)
+        for x, y in positions
+    ])
+    
+    dx = phi @ coeff_x  # Matrix multiplication
+    dy = phi @ coeff_y
+    
+    return dx, dy
 
-def _normalized_cross_correlation(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Return the normalized cross-correlation of ``a`` and ``b``."""
-    fa = np.fft.fft2(a)
-    fb = np.fft.fft2(b)
-    cc = np.fft.ifft2(fa * np.conj(fb))
-    return np.abs(np.fft.fftshift(cc))
+# def _normalized_cross_correlation(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+#     """Return the normalized cross-correlation of ``a`` and ``b``."""
+#     fa = np.fft.fft2(a)
+#     fb = np.fft.fft2(b)
+#     cc = np.fft.ifft2(fa * np.conj(fb))
+#     return np.abs(np.fft.fftshift(cc))
 
 
 def _compute_snr(cc: np.ndarray) -> float:
@@ -27,8 +45,9 @@ def _compute_snr(cc: np.ndarray) -> float:
 
 def measure_template_shifts(
     templates: Sequence[Template],
+    weighted_residual: np.ndarray,
     residual: np.ndarray,
-    box_size: int = 9,
+    box_size: int = 11,
     snr_threshold: float = 5.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Measure per-template shifts via phase cross-correlation.
@@ -60,7 +79,7 @@ def measure_template_shifts(
     dy = []
     weights = []
 
-    for tmpl in templates:
+    for j,tmpl in enumerate(templates):
         x_pix, y_pix = [int(round(v)) for v in tmpl.position_original]
         y0 = max(y_pix - half, 0)
         y1 = min(y_pix + half + 1, ny)
@@ -90,11 +109,25 @@ def measure_template_shifts(
         stamp_res = stamp_res[:mny, :mnx]
         stamp_tmp = stamp_tmp[:mny, :mnx]
 
-        shift_est, _, _ = phase_cross_correlation(
-            stamp_tmp, stamp_res, upsample_factor=50
-        )
-        cc = _normalized_cross_correlation(stamp_tmp, stamp_res)
-        snr = _compute_snr(cc)
+        # DO SIMPLE SHIFT ESTIMATE 
+        # 1. calculate SNR from weight  + image 
+        # 1. only keep sources with SNR > fitconfig.snr_thresh_astrom
+        # 2. construct the model + residual for each stamp res + coeff * tmpl.data
+        # 3. measure centroid on the model + residual
+        # 4. measure centroid on the template
+        # 5. calculate the shift as the difference of the centroids
+        # 6. apply that shift to the template data in place, record shift in template.shift
+        # 7 double check the SIGN of the shift. 
+
+    # m = t.data[t.slices_cutout] * coeff
+    # r = resid0[t.slices_original]
+    # mr = m +r 
+    # rm_xy = centroid_quadratic(r+m)
+    # m_xy = centroid_quadratic(m)
+    # print(f"Shifted residual centroid: {rm_xy}, model centroid: {m_xy} shift: {m_xy- rm_xy}")
+
+
+        print(f"Template at  {j} ({x_pix}, {y_pix}) S/N: {snr:.2f}")
         if snr < snr_threshold:
             continue
         positions.append((x_pix, y_pix))

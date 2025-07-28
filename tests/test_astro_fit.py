@@ -301,6 +301,10 @@ def test_global_astro_fitter_initialization():
     # Create templates
     positions = list(zip(catalog["x"], catalog["y"]))
     tmpls = Templates.from_image(images[0], segmap, positions, kernel=None)
+    config = FitConfig(fit_astrometry=True, astrom_basis_order=1)
+    fitter = GlobalAstroFitter(tmpls.templates, images[1], wht[1], segmap, config)
+    fitter.build_normal_matrix()
+    solution, _ = fitter.solve()
 
     config = FitConfig(fit_astrometry=True, astrom_basis_order=1, reg_astrom=1e-2)
     fitter = GlobalAstroFitter(tmpls.templates, images[1], wht[1], segmap, config)

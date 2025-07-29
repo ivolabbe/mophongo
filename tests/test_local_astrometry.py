@@ -11,7 +11,7 @@ from utils import make_simple_data
 from mophongo.psf import PSF
 from mophongo.templates import Templates
 from mophongo.fit import SparseFitter, FitConfig
-from mophongo.local_astrometry import correct_astrometry_polynomial, shifts_at_positions, _normalized_cross_correlation
+from mophongo.local_astrometry import correct_astrometry_polynomial, shifts_at_positions
 from utils import save_diagnostic_image, lupton_norm
 from skimage.registration import phase_cross_correlation
 from photutils.centroids import centroid_quadratic
@@ -37,7 +37,12 @@ def test_polynomial_astrometry_reduces_residual(tmp_path):
     resid0 = fitter.residual()
 
     coeff_x, coeff_y = correct_astrometry_polynomial(
-        tmpls.templates, resid0, order=1, box_size=11, snr_threshold=1.5
+        tmpls.templates,
+        resid0,
+        fitter.solution,
+        order=1,
+        box_size=11,
+        snr_threshold=1.5,
     )
 
     rhx,rhy = shifts_at_positions([[50,50]], coeff_x, coeff_y, 
@@ -48,6 +53,7 @@ def test_polynomial_astrometry_reduces_residual(tmp_path):
     print(f"Reconstructed shifts: {rhx}, {rhy}")
 
     tmp_path = Path('../tmp')
+    tmp_path.mkdir(exist_ok=True)
     fname = tmp_path / "diagnostic_poly_shift.png"
     model = images[1] - resid0
     save_diagnostic_image(fname,

@@ -31,6 +31,7 @@ class Template(Cutout2D):
         data: np.ndarray,
         position: tuple[float, float],
         size: tuple[int, int],
+        id: int | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -46,6 +47,8 @@ class Template(Cutout2D):
         self.shape_input = data.shape
         # record shift from original position here
         self.shift = np.array([0.0, 0.0], dtype=float)
+        self.scale = 1.0
+        self.id = id
 
     @property
     def bbox(
@@ -79,6 +82,7 @@ class Template(Cutout2D):
         new_template.data[ony:ony + ny, onx:onx + nx] = self.data
 
         # if inplace is True, update the current instance
+        # @@@ input_position_original is not updated, so this is not a true inplace operation
         if inplace:
             self.__dict__.update(new_template.__dict__)
 
@@ -315,7 +319,9 @@ class Templates:
                 kern = kernel
 
             conv = fftconvolve(new_tmpl.data, kern, mode='same')
-            new_tmpl.data[:] = conv / conv.sum()
+            new_tmpl.data[:] = conv / conv.sum()     #  normalizing to 1.0 makes astrofitter bomb
+                                                     #  needs to pre-whiten sparse matrix.
+#            new_tmpl.data[:] = conv                 
 
             if not inplace:
                 new_templates.append(new_tmpl)

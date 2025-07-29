@@ -31,8 +31,9 @@ def run(
     wcs: Sequence[WCS] | None = None,
     window: Window | None = None,
     extend_templates: str | None = None,
-    fit_astrometry: bool = False,
-    astrom_order: int = 1,
+#    fit_astrometry: bool = False,
+#    astrom_order: int = 1,
+    config: FitConfig | None = None,
 ) -> tuple[Table, np.ndarray]:
     """Run photometry on a set of images.
 
@@ -65,6 +66,9 @@ def run(
         image. The array has shape ``(n_images, ny, nx)``.
     """
 
+
+
+
     if psfs is not None:
         if len(images) != len(psfs):
             raise ValueError("Number of images and PSFs must match")
@@ -81,8 +85,12 @@ def run(
     from . import utils
     import warnings
 
+    if config is None:
+        config = FitConfig()    
+
     if catalog is None:
         segm = SegmentationImage(segmap)
+        # check x,y, names
         catalog = SourceCatalog(
             images[0],
             SegmentationImage(segmap),
@@ -112,18 +120,27 @@ def run(
         wcs_i = wcs[idx] if wcs is not None else None
 
         templates = tmpls.convolve_templates(kernel, inplace=True)
+        print('Pipepline:',len(templates), 'orig templates')
 
         # assume weights are dominated by photometry image (for proper weights see sparse fitter, needes iteration)
         weights_i = weights[idx] if weights is not None else None
 
-        fitter_cls = GlobalAstroFitter if fit_astrometry else SparseFitter
-        if fit_astrometry:
-            fitter = fitter_cls(templates, images[idx], weights_i, FitConfig(fit_astrometry=True, astrom_basis_order=astrom_order))
+        fitter_cls = GlobalAstroFitter if config.fit_astrometry else SparseFitter
+
+        if config.fit_astrometry:
+            # every iteration will scale and shift the tmpl images 
+            # accumulated the shifts and scale are recorded in template attributes
+            for j in range(config.fit_astrometry_niter):
+                print(f"Running iteration {j+1} of {config.fit_astrometry_niter} for astrometry fitting")
+                fitter = fitter_cls(templates, images[idx], weights_i, config)
+                fluxes, _ = fitter.solve()
+                res = fitter.residual()
+                errs = fitter.flux_errors()
         else:
             fitter = fitter_cls(templates, images[idx], weights_i, FitConfig())
-        fluxes, _ = fitter.solve()
-        resid = fitter.residual()
-        errs = fitter.flux_errors()
+            fluxes, _ = fitter.solve()
+            res = fitter.residual()
+            errs = fitter.flux_errors()
 
         print(f"Done...")
 
@@ -145,11 +162,12 @@ def run(
             pred = fitter.predicted_errors()
             pred = pred[: len(cat)]      # guard against length drift
 
+        #pred = pred[: len(cat)]        # truncate if necessary
         if len(tmpls.templates) == len(cat):
             if weights_i is not None:
                 cat[f"err_pred_{idx}"] = pred
             cat[f"flux_{idx}"] = fluxes
-            cat[f"err_{idx}"] = errs
+            cat[f"err_{idx}"] = errs    
             if weights_i is not None:
                 cat[f"err_{idx}"] = pred
         else:
@@ -167,6 +185,7 @@ def run(
             cat[f"err_{idx}"] = full_err
             if weights_i is not None:
                 cat[f"err_pred_{idx}"] = full_pred
-        residuals.append(resid)
+
+        residuals.append(res)
 
     return cat, residuals, fitter

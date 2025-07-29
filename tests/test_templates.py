@@ -61,48 +61,4 @@ def test_template_extension_methods(tmp_path):
     return
 
 def test_kernel_padding():
-import numpy as np
-from mophongo.psf import PSF
-from mophongo.astrometry import make_gradients
-from mophongo.templates import Templates, Template
-from utils import make_simple_data, save_template_diagnostic
-import pytest
-from astropy.wcs import WCS
-from matplotlib import pyplot as plt
-
-#    images, segmap, catalog, psfs, truth, wht = make_simple_data(nsrc=150, size=301, peak_snr=0.5, seed=11)
-images, segmap, catalog, psfs, truth, wht = make_simple_data(nsrc=100, size=301, peak_snr=0.5, seed=11, border_size=40)
-
-dirac = lambda n: ((np.arange(n)[:,None] == n//2) & (np.arange(n) == n//2)).astype(float)
-
-from scipy.ndimage import shift as nd_shift, map_coordinates
-h, w = images[0].shape
-y, x = np.mgrid[0:h, 0:w]
-
-# @@ fitting is ok, but goes nuts when kernel is applied. 
-# probably to do with enlarging the template and offsets of the positions 
-positions = list(zip(catalog["x"], catalog["y"]))
-tmpls = Templates.from_image(truth, segmap, positions, kernel=None)
-
-tmpls_c = Templates.from_image(truth, segmap, positions, kernel=dirac(3))
-
-i = 0
-for (k1,v1),(d2,v2) in zip(tmpls[i].__dict__.items(), tmpls_c[i].__dict__.items()):
-    if k1 != 'data':
-        print(k1,v1,v2)
-
-
-offset = 3e-5
-scl = images[1].sum()
-kws = dict(vmin=-5.3, vmax=-1.5, cmap='bone_r', origin='lower')
-plt.imshow(np.log10(tmpls[i].data + offset), **kws)
-plt.imshow(np.log10(tmpls_c[i].data+ offset), **kws)
-
-gx,gy = make_gradients(tmpls[0:1])
-
-gx_c,gy_c = make_gradients(tmpls_c[0:1])
-
-plt.imshow(gx[i].data,vmin=-1,vmax=1)
-plt.imshow(gx_c[i].data,vmin=-1,vmax=1)
-
-# %%
+    return

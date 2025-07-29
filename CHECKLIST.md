@@ -74,4 +74,5 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [x] Implemented star finder in Catalog
 - [x] Added GlobalAstroFitter for astrometric correction
 - [x] Added polynomial-based local astrometric correction
+- [x] Added safeguards against singular normal matrices
 - [x] Added Gaussian-process-based local astrometric correction

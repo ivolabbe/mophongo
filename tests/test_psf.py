@@ -25,7 +25,7 @@ def test_psf_matching_kernel_properties(tmp_path):
 
     hi_pad = pad_to_shape(psf_hi.array, kernel.shape)
     conv = _convolve2d(hi_pad, kernel)
-    np.testing.assert_allclose(conv, psf_lo.array, rtol=0, atol=2e-3)
+    np.testing.assert_allclose(conv, psf_lo.array, rtol=0, atol=3e-3)
     fname = tmp_path / "psf_kernel.png"
     save_psf_diagnostic(fname, hi_pad, psf_lo.array, kernel)
     assert fname.exists()

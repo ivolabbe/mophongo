@@ -37,8 +37,15 @@ class GlobalAstroFitter(SparseFitter):
         templates: list[Template],
         image: np.ndarray,
         weights: np.ndarray | None,
-        config: FitConfig,
+        segmap: np.ndarray | FitConfig | None = None,
+        config: FitConfig | None = None,
     ):
+        if isinstance(segmap, FitConfig) and config is None:
+            config = segmap
+            segmap = None
+        if config is None:
+            config = FitConfig()
+
         # ---------- flux part ----------
         super().__init__(list(templates), image, weights, config)
         self.n_flux = len(templates)
@@ -56,10 +63,13 @@ class GlobalAstroFitter(SparseFitter):
         rms = self.predicted_errors()[0:self.n_flux]  
         
         # 1. per-object S/N estimate        
-        if config.snr_thresh_astrom > 0: 
-            good = (flux / rms) >= config.snr_thresh_astrom 
-        else: 
-            np.ones(self.n_flux, dtype=bool)
+        if config.snr_thresh_astrom > 0:
+            good = (flux / rms) >= config.snr_thresh_astrom
+        else:
+            good = np.ones(self.n_flux, dtype=bool)
+
+        if not np.any(good):
+            good[:] = True
         
         print(f"GlobalAstroFitter: {self.n_flux} templates and {np.sum(good)} with S/N >= {config.snr_thresh_astrom} used for astrometry")
 

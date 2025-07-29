@@ -52,13 +52,16 @@ class GlobalAstroFitter(SparseFitter):
         self.basis_order = order
         self.n_alpha = K        # α_k  (β_k shares the same K)
 
-        if config.snr_thresh_astrom > 0:
-            snr = np.array([estimate_snr(t, self.weights) for t in templates])
-            good = snr >= config.snr_thresh_astrom
-        else:
-            good = np.ones(len(templates), dtype=bool)  
+        flux = self.quick_flux()[0:self.n_flux]
+        rms = self.predicted_errors()[0:self.n_flux]  
         
-        print(f"GlobalAstroFitter: {np.sum(good)} templates with S/N >= {config.snr_thresh_astrom} used for astrometry")
+        # 1. per-object S/N estimate        
+        if config.snr_thresh_astrom > 0: 
+            good = (flux / rms) >= config.snr_thresh_astrom 
+        else: 
+            np.ones(self.n_flux, dtype=bool)
+        
+        print(f"GlobalAstroFitter: {self.n_flux} templates and {np.sum(good)} with S/N >= {config.snr_thresh_astrom} used for astrometry")
 
         # 1. per-object gradients
         gx_i, gy_i = astrometry.make_gradients(templates)
@@ -74,20 +77,19 @@ class GlobalAstroFitter(SparseFitter):
         # locations of the stamps in the big matrix, and then we can collapse them later
         # collapsing meaning that we trace their entrix in the sparse matrix and sum over 
         # all objects and fit for a global polynomial shift at each Chebyshev term
+        # note we need to scale the gradients by the initial flux estimate
         for k in range(K):
-            # gather GX_k and GY_k tiles (one per object)
             for i in np.where(good)[0]:
-                tile = deepcopy(gx_i[i])
-                tile.data *= Φ[i, k]
-                self.templates.append(tile)
-                # register this column belongs to α_k
+                f_est = flux[i]                     # per-object scale
+
+                gx_tile = deepcopy(gx_i[i])
+                gx_tile.data *= f_est * Φ[i, k]           # *** SCALE ***
+                self.templates.append(gx_tile)
                 self._big2small_col.append(self.n_flux + k)
 
-            for i in np.where(good)[0]:
-                tile = deepcopy(gy_i[i])
-                tile.data *= Φ[i, k]
-                self.templates.append(tile)
-                # register belongs to β_k
+                gy_tile = deepcopy(gy_i[i])
+                gy_tile.data *= f_est * Φ[i, k]           # *** SCALE ***
+                self.templates.append(gy_tile)
                 self._big2small_col.append(self.n_flux + K + k)
 
         # map of first-seen compact column for every parameter index
@@ -144,7 +146,18 @@ class GlobalAstroFitter(SparseFitter):
             d[self.n_flux:] = cfg.reg_astrom     # only α_k , β_k rows/cols
             A = A + diags(d, 0, format="csr")
 
-        x, info = cg(A, b, **cfg.cg_kwargs)
+        # ------------------------------------------------------------------
+        # symmetric column-and-row whitening  (A → D⁻¹ A D⁻¹,  b → D⁻¹ b)
+        # ------------------------------------------------------------------
+        d = np.sqrt(A.diagonal())               # √(Ajj)  (never negative)
+        d[d == 0.0] = 1.0                       # protect empty columns
+        Dinv = diags(1.0 / d, 0, format="csr")  # D⁻¹
+
+        A_w = Dinv @ A @ Dinv                   # still sparse, still SPD
+        b_w = Dinv @ b
+
+        y, info = cg(A_w, b_w, **cfg.cg_kwargs) # solve whitened system
+        x = Dinv @ y                            # un-whiten
 
         # positivity on fluxes only
         if cfg.positivity:
@@ -162,7 +175,6 @@ class GlobalAstroFitter(SparseFitter):
             self._apply_shifts()             # <── one call, no duplication
         else:
             self.alpha = self.beta = None
-
 
         return self.solution, info
 
@@ -206,7 +218,7 @@ class GlobalAstroFitter(SparseFitter):
         if self.alpha is None:
             return
 
-        for tmpl in self.templates[: self.n_flux]:
+        for i, tmpl in enumerate(self.templates[: self.n_flux]):
             x0, y0 = tmpl.input_position_original
             dx, dy = self.shift_at(x0, y0)
             if abs(dx) < 1e-3 and abs(dy) < 1e-3:
@@ -219,45 +231,9 @@ class GlobalAstroFitter(SparseFitter):
                 order=3, mode="constant", cval=0.0, 
                 prefilter=True
             )
+    
             tmpl.shifted_position_original = (x0 - dx, y0 - dy)
+            
+            # accumulate the shift and scale in the template, in case of iterative fitting
             tmpl.shift += [-dx, -dy]
-
-
-
-#------  OBSOLETE 
-# 
-# 
-#   # ------------------------------------------------------------
-    # 2.  collapse big → compact matrix / rhs
-    # ------------------------------------------------------------
-    def _collapse_slow(self):
-        """Collapse identical columns/rows (α_k, β_k tiles) into one."""
-        A_big = self._ata.tocsr()
-        b_big = self._atb
-
-        P = self._param_size                   # N + 2K
-        A_cmp = lil_matrix((P, P))
-        b_cmp = np.zeros(P, dtype=float)
-
-        # flux columns are unique already
-        A_cmp[:self.n_flux, :self.n_flux] = A_big[:self.n_flux, :self.n_flux]
-        b_cmp[:self.n_flux]              = b_big[:self.n_flux]
-
-        # accumulate tiles
-        for big, small in enumerate(self._big2small_col, start=self.n_flux):
-            # rows
-            b_cmp[small] += b_big[big]
-            # columns (symmetric)
-
-            # diagonal ------------------------------------------------------
-            A_cmp[small, small]        += A_big[big, big]      # ← NEW
-            # off-diagonals with the flux block
-            A_cmp[small, :self.n_flux]               += A_big[big, :self.n_flux]
-            A_cmp[:self.n_flux, small]               += A_big[:self.n_flux, big]
-            for big2, small2 in enumerate(self._big2small_col, start=self.n_flux):
-                if small2 < small:      # lower triangle as well
-                    A_cmp[small, small2] += A_big[big, big2]
-                    A_cmp[small2, small] += A_big[big2, big]
-
-        self._ata_comp = A_cmp.tocsr()
-        self._atb_comp = b_cmp
+            tmpl.scale *= self.solution[i]   

@@ -55,7 +55,7 @@ def make_simple_data(
 
     nx = ny = size
     hi_fwhm = 2.0
-    lo_fwhm = 4.5 * hi_fwhm
+    lo_fwhm = 3.0 * hi_fwhm
 
     # Use Moffat PSFs instead of Gaussian
     psf_hi = PSF.moffat(41, hi_fwhm, hi_fwhm, beta=3.0)  # Typical ground-based seeing

@@ -32,8 +32,9 @@ class FitConfig:
     reg: float = 0.0
     cg_kwargs: Dict[str, Any] = field(default_factory=dict)
     fit_astrometry: bool = False
-    astrom_basis_order: int = 3
-    reg_astrom: float = 1e-3 
+    fit_astrometry_niter: int = 2     # Two passes for astrometry fitting
+    astrom_basis_order: int = 1
+    reg_astrom: float = 1e-4 
     snr_thresh_astrom: float = 10.0   # 0 → keep all sources (current behaviour)
 
 class SparseFitter:
@@ -166,6 +167,16 @@ class SparseFitter:
     def residual(self) -> np.ndarray:
         return self.image - self.model_image()
 
+    def quick_flux(self) -> np.ndarray:
+        """Return quick flux estimates based on template data and image."""
+        flux = np.zeros(len(self.templates), dtype=float)
+        for i, tmpl in enumerate(self.templates):
+            tt = tmpl.data[tmpl.slices_cutout]
+            img = self.image[tmpl.slices_original]
+            ttsqs = np.sum(tt ** 2)
+            flux[i] = np.sum(img * tt) / ttsqs if ttsqs > 0 else 0.0
+        return flux
+    
     def predicted_errors(self) -> np.ndarray:
         """Return per-source uncertainties ignoring template covariance."""
         pred = np.empty(len(self.templates), dtype=float)

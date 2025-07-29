@@ -707,8 +707,12 @@ def make_testdata():
     center_x_40mas = 23242
     center_y_40mas = 19388
 
-    size_x_40mas = 1000
-    size_y_40mas = 820
+#    size_x_40mas = 1000
+#    size_y_40mas = 820
+#    postfix = 'test'
+    size_x_40mas = 3500
+    size_y_40mas = 2520
+    postfix = 'medium'
     #   size_x_40mas = 4144
     #   size_y_40mas = 2978
 
@@ -719,14 +723,14 @@ def make_testdata():
     # --- File lists ---
     files_40mas = [
         ("uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_sci_skysubvar.fits",
-         "uds-test-f444w_sci.fits"),
+         f"uds-{postfix}-f444w_sci.fits"),
         ("uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_wht.fits",
-         "uds-test-f444w_wht.fits"),
+         f"uds-{postfix}-f444w_wht.fits"),
         ("uds-grizli-v8.0-minerva-v1.0-40mas-f115w-clear_drc_sci_skysubvar.fits",
-         "uds-test-f115w_sci.fits"),
+         f"uds-{postfix}-f115w_sci.fits"),
         ("uds-grizli-v8.0-minerva-v1.0-40mas-f115w-clear_drc_wht.fits",
-         "uds-test-f115w_wht.fits"),
-        ("LW_f277w-f356w-f444w_SEGMAP.fits", "uds-test-LW_seg.fits"),
+         f"uds-{postfix}-f115w_wht.fits"),
+        ("LW_f277w-f356w-f444w_SEGMAP.fits", f"uds-{postfix}-LW_seg.fits"),
         #       ("LW_f277w-f356w-f444w_opterr.fits", "uds-test-f444w_opterr.fits"),
         #       ("LW_f277w-f356w-f444w_optavg.fits", "uds-test-f444w_optavg.fits"),
     ]
@@ -745,9 +749,9 @@ def make_testdata():
 
     files_80mas = [
         ('uds-sbkgsub-v0.3-80mas-f770w_drz_sci.fits',
-         "uds-test-f770w_sci.fits"),
+         f"uds-{postfix}-f770w_sci.fits"),
         ('uds-sbkgsub-v0.3-80mas-f770w_drz_wht.fits',
-         "uds-test-f770w_wht.fits"),
+         f"uds-{postfix}-f770w_wht.fits"),
     ]
     # Use the WCS and shape from one of the 40mas cutouts as the target
     ref_cutout_file = outdir + files_40mas[0][1]

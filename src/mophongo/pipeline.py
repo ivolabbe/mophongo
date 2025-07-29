@@ -81,7 +81,10 @@ def run(
     from .templates import Templates
     from .fit import SparseFitter, FitConfig
     from .astro_fit import GlobalAstroFitter
-    from .local_astrometry import correct_astrometry_polynomial
+    from .local_astrometry import (
+        correct_astrometry_polynomial,
+        correct_astrometry_gp,
+    )
     from .psf_map import PSFRegionMap
     from . import utils
     import warnings
@@ -143,14 +146,25 @@ def run(
 
                 if not config.fit_astrometry_joint:
                     print('fitting astrometry separately')
-                    # this also applies the shifts to the templates
-                    coeff_x, coeff_y = correct_astrometry_polynomial(
+                    if config.astrom_model == "gp":
+                        correct_astrometry_gp(
+                            tmpls.templates,
+                            res,
+                            fitter.solution,
+                            box_size=5,
+                            snr_threshold=config.snr_thresh_astrom,
+                            length_scale=500.0,
+                        )
+                    else:
+                        # this also applies the shifts to the templates
+                        correct_astrometry_polynomial(
                             tmpls.templates,
                             res,
                             fitter.solution,
                             order=config.astrom_basis_order,
                             box_size=5,
-                            snr_threshold=config.snr_thresh_astrom)
+                            snr_threshold=config.snr_thresh_astrom,
+                        )
         else:
             fitter = fitter_cls(templates, images[idx], weights_i, FitConfig())
             fluxes, _ = fitter.solve()

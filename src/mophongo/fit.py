@@ -34,6 +34,7 @@ class FitConfig:
     fit_astrometry: bool = False
     fit_astrometry_niter: int = 2     # Two passes for astrometry fitting
     astrom_basis_order: int = 1
+    fit_astrometry_joint: bool = False  # Use joint astrometry fitting, or separate step
     reg_astrom: float = 1e-4 
     snr_thresh_astrom: float = 10.0   # 0 → keep all sources (current behaviour)
 
@@ -90,9 +91,7 @@ class SparseFitter:
         n = len(self.templates)
         ata = lil_matrix((n, n))
         atb = np.zeros(n)
-        print('Building normal matrix...')
-        for i, tmpl_i in enumerate(tqdm(self.templates, total=n, desc="Normal matrix")):
-#        for i, tmpl_i in enumerate(self.templates):
+        for i, tmpl_i in enumerate(tqdm(self.templates, total=n, desc="Building Normal matrix")):
             sl_i = tmpl_i.slices_original
             data_i = tmpl_i.data[tmpl_i.slices_cutout]
             w_i = self.weights[sl_i]
@@ -162,6 +161,10 @@ class SparseFitter:
         if cfg.positivity:
             x = np.where(x < 0, 0, x)
         self.solution = x
+
+        for i, t in enumerate(self.templates):  # Store the solution in each template
+            t.flux = self.solution[i] 
+
         return x, info
 
     def residual(self) -> np.ndarray:
@@ -175,6 +178,7 @@ class SparseFitter:
             img = self.image[tmpl.slices_original]
             ttsqs = np.sum(tt ** 2)
             flux[i] = np.sum(img * tt) / ttsqs if ttsqs > 0 else 0.0
+            tmpl.quick_flux = flux[i]  # Store quick flux in the template for later use
         return flux
     
     def predicted_errors(self) -> np.ndarray:
@@ -183,6 +187,7 @@ class SparseFitter:
         for i, tmpl in enumerate(self.templates):
             w = self.weights[tmpl.slices_original]
             pred[i] = 1.0 / np.sqrt(np.sum(w * tmpl.data[tmpl.slices_cutout] ** 2))
+            tmpl.pred_err = pred[i]  # Store RMS in the template for later use
         return pred
 
     def flux_errors(self) -> np.ndarray:
@@ -199,6 +204,7 @@ class SparseFitter:
             e[i] = 1.0
             x = solver.solve(e)
             diag[i] = x[i]
+            self.templates[i].err = np.sqrt(diag[i])  # Store error in the template for later use
         return np.sqrt(diag)
 
     @classmethod

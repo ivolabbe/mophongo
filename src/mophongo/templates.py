@@ -47,7 +47,7 @@ class Template(Cutout2D):
         self.shape_input = data.shape
         # record shift from original position here
         self.shift = np.array([0.0, 0.0], dtype=float)
-        self.scale = 1.0
+        self.scale = None
         self.id = id
 
     @property

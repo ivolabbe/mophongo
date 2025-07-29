@@ -109,6 +109,8 @@ def run(
     if extend_templates == 'psf' and psfs is not None:
         tmpls.extend_with_psf_wings(psfs[0], inplace=True)
 
+    tmpls.deduplicate()
+
     residuals = []
     for idx in range(1, len(images)):
 

@@ -7,6 +7,7 @@ from typing import Sequence, Tuple
 import numpy as np
 from scipy.ndimage import shift as nd_shift
 from skimage.registration import phase_cross_correlation
+from astropy.nddata import Cutout2D
 
 from .templates import Template
 from . import astrometry
@@ -43,14 +44,14 @@ def _compute_snr(cc: np.ndarray) -> float:
     return (cc.max() - np.median(cc)) / (cc.std() + 1e-12)
 
 
-from photutils.centroids import centroid_quadratic
+from photutils.centroids import centroid_quadratic, centroid_com
 
 
 def measure_template_shifts(
     templates: Sequence[Template],
     coeffs: np.ndarray,
     residual: np.ndarray,
-    box_size: int = 11,
+    box_size: int = 5,
     snr_threshold: float = 5.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Estimate template shifts from residual centroids.
@@ -83,79 +84,35 @@ def measure_template_shifts(
     weights = []
 
     for j, (tmpl, coeff) in enumerate(zip(templates, coeffs)):
-        x_pix, y_pix = [int(round(v)) for v in tmpl.position_original]
-        y0 = max(y_pix - half, 0)
-        y1 = min(y_pix + half + 1, ny)
-        x0 = max(x_pix - half, 0)
-        x1 = min(x_pix + half + 1, nx)
-        if y0 >= y1 or x0 >= x1:
-            continue
 
-        sl_res = (slice(y0, y1), slice(x0, x1))
-        sl_tmp = (
-            slice(
-                tmpl.slices_cutout[0].start + y0 - tmpl.slices_original[0].start,
-                tmpl.slices_cutout[0].start + y1 - tmpl.slices_original[0].start,
-            ),
-            slice(
-                tmpl.slices_cutout[1].start + x0 - tmpl.slices_original[1].start,
-                tmpl.slices_cutout[1].start + x1 - tmpl.slices_original[1].start,
-            ),
-        )
+        x_pix, y_pix = tmpl.input_position_original
+        x_stamp, y_stamp = tmpl.input_position_cutout
 
-        stamp_res = residual[sl_res]
-        stamp_tmp = tmpl.data[sl_tmp]
-        mny = min(stamp_res.shape[0], stamp_tmp.shape[0])
-        mnx = min(stamp_res.shape[1], stamp_tmp.shape[1])
-        if mny <= 1 or mnx <= 1:
-            continue
-        stamp_res = stamp_res[:mny, :mnx]
-        stamp_tmp = stamp_tmp[:mny, :mnx]
-
-        model = coeff * stamp_tmp + stamp_res
-        try:
-            cy_model, cx_model = centroid_quadratic(model)
-            cy_tmp, cx_tmp = centroid_quadratic(stamp_tmp)
-        except Exception:
-            continue
-
-        shift_est = np.array([cx_model - cx_tmp, cy_model - cy_tmp])
-
-        # estimate S/N from coefficient and local residual dispersion
-        noise = np.std(stamp_res)
-        snr = 0.0 if noise == 0 else abs(coeff) / noise
-
-        # DO SIMPLE SHIFT ESTIMATE 
-        # 1. calculate SNR from weight  + image 
-        # 1. only keep sources with SNR > fitconfig.snr_thresh_astrom
-        # 2. construct the model + residual for each stamp res + coeff * tmpl.data
-        # 3. measure centroid on the model + residual
-        # 4. measure centroid on the template
-        # 5. calculate the shift as the difference of the centroids
-        # 6. apply that shift to the template data in place, record shift in template.shift
-        # 7 double check the SIGN of the shift. 
-
-    # m = t.data[t.slices_cutout] * coeff
-    # r = resid0[t.slices_original]
-    # mr = m +r 
-    # rm_xy = centroid_quadratic(r+m)
-    # m_xy = centroid_quadratic(m)
-    # print(f"Shifted residual centroid: {rm_xy}, model centroid: {m_xy} shift: {m_xy- rm_xy}")
-
-
+        snr = (tmpl.flux/tmpl.err)
         if snr < snr_threshold:
             continue
 
-        tmpl.data = nd_shift(
-            tmpl.data,
-            (-shift_est[1], -shift_est[0]),
-            order=3,
-            mode="constant",
-            cval=0.0,
-            prefilter=True,
-        )
-        tmpl.position_original = (x_pix - shift_est[0], y_pix - shift_est[1])
-        tmpl.shift += [-shift_est[0], -shift_est[1]]
+        cutout_res = Cutout2D(residual, position=(x_pix, y_pix), size=3*box_size+1, mode='partial')            
+        cutout_tmpl = Cutout2D(tmpl.data, position=(x_stamp, y_stamp), size=3*box_size+1, mode='partial')            
+
+        # measure shift in residual + best-fit, relative to the template 
+        model = coeff * cutout_tmpl.data + cutout_res.data
+        xc, yc = cutout_tmpl.input_position_cutout
+
+        cx_model, cy_model = centroid_quadratic(model, xpeak=xc, ypeak=yc, fit_boxsize=box_size)
+        cx_tmp, cy_tmp = centroid_quadratic(cutout_tmpl.data, xpeak=xc, ypeak=yc, fit_boxsize=box_size)
+        shift_est = np.array([cx_model - cx_tmp, cy_model - cy_tmp])
+#        print(j,snr,shift_est)
+
+        if np.isnan(shift_est).any():
+#            print(f"NaN shift estimate for template {j} at position ({x_pix}, {y_pix}) remeasure:")
+            cx_model, cy_model = centroid_com(model)
+            cx_tmp, cy_tmp = centroid_com(cutout_tmpl.data)
+            shift_est = np.array([cx_model - cx_tmp, cy_model - cy_tmp])
+  #          print(j,snr,shift_est)
+            if np.isnan(shift_est).any():
+ #               print(f"NaN shift: SKIP")
+                continue
 
         positions.append((x_pix, y_pix))
         dx.append(shift_est[0])
@@ -217,7 +174,8 @@ def apply_polynomial_correction(
             cval=0.0,
             prefilter=True,
         )
-        tmpl.position_original = (x_pix - dx, y_pix - dy)
+        tmpl.shifted_position_original = (x_pix - dx, y_pix - dy)
+        tmpl.shift += [dx, dy]
 
 
 def correct_astrometry_polynomial(
@@ -230,12 +188,15 @@ def correct_astrometry_polynomial(
     snr_threshold: float = 5.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Measure and correct local astrometric offsets with polynomials."""
+
     pos, dx, dy, weights = measure_template_shifts(
         templates, coeffs, residual, box_size, snr_threshold
     )
     if len(pos) == 0:
         n = astrometry.n_terms(order)
         return np.zeros(n), np.zeros(n)
+    
     coeff_x, coeff_y = fit_polynomial_field(pos, dx, dy, weights, order, residual.shape)
     apply_polynomial_correction(templates, coeff_x, coeff_y, order, residual.shape)
+
     return coeff_x, coeff_y

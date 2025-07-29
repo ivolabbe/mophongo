@@ -50,6 +50,42 @@ def test_ata_symmetry():
     assert np.allclose(ata, ata.T)
 
 
+def test_zero_weight_template_dropped():
+    img = np.zeros((4, 4))
+    weights = np.ones_like(img)
+    weights[2:4, 2:4] = 0
+
+    t1 = Template(img, (1, 1), (2, 2))
+    t1.data[:] = 1.0
+    t2 = Template(img, (3, 3), (2, 2))
+    t2.data[:] = 1.0
+
+    fitter = SparseFitter([t1, t2], img, weights, FitConfig())
+    fitter.build_normal_matrix()
+
+    assert len(fitter.templates) == 1
+
+
+def test_flux_errors_regularized():
+    img = np.zeros((3, 3))
+    weights = np.ones_like(img)
+    tmpl_data = np.zeros((3, 3))
+    tmpl_data[1, 1] = 1.0
+
+    t1 = Template(img, (1, 1), (3, 3))
+    t1.data[:] = tmpl_data
+    t2 = Template(img, (1, 1), (3, 3))
+    t2.data[:] = tmpl_data
+
+    fitter = SparseFitter([t1, t2], img, weights, FitConfig())
+    fitter.build_normal_matrix()
+    fitter.solve()
+    err = fitter.flux_errors()
+
+    assert err.size == 2
+    assert np.all(np.isfinite(err))
+
+
 def test_build_normal_matrix_new_equivalence():
     return
     images, segmap, catalog, psfs, _, rms = make_simple_data()

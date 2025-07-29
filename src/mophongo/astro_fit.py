@@ -236,4 +236,3 @@ class GlobalAstroFitter(SparseFitter):
             
             # accumulate the shift and scale in the template, in case of iterative fitting
             tmpl.shift += [-dx, -dy]
-            tmpl.scale *= self.solution[i]   

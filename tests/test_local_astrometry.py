@@ -2,6 +2,7 @@ import os
 import sys
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(os.path.join(os.path.dirname(__file__), "."))
 
 import numpy as np
 from scipy.ndimage import shift as nd_shift
@@ -18,14 +19,14 @@ from photutils.centroids import centroid_quadratic
 
 def test_polynomial_astrometry_reduces_residual(tmp_path):
     images, segmap, catalog, psfs, truth, wht = make_simple_data(
-        nsrc=10, size=151, peak_snr=50, seed=42
+        nsrc=10, size=151, peak_snr=5, seed=42
     )
 
     psf_hi = PSF.from_array(psfs[0])
     psf_lo = PSF.from_array(psfs[1])
     kernel = psf_hi.matching_kernel(psf_lo)
 
-    shx, shy = 0.4, -0.8
+    shx, shy = 0.6, -0.5
     images[1] = nd_shift(images[1], (shy, shx))
 
     positions = list(zip(catalog["x"], catalog["y"]))
@@ -33,18 +34,22 @@ def test_polynomial_astrometry_reduces_residual(tmp_path):
 
     fitter = SparseFitter(tmpls.templates, images[1], wht[1], FitConfig())
     fitter.build_normal_matrix()
-    fitter.solve()
-    resid0 = fitter.residual()
+    flux, _ = fitter.solve()
+    err = fitter.flux_errors()
+    perr = fitter.predicted_errors()
+    res = fitter.residual()
+    
+    res0 = fitter.residual()
 
     coeff_x, coeff_y = correct_astrometry_polynomial(
         tmpls.templates,
-        resid0,
+        res0,
         fitter.solution,
         order=1,
         box_size=11,
-        snr_threshold=1.5,
+        snr_threshold=20,
     )
-
+  
     rhx,rhy = shifts_at_positions([[50,50]], coeff_x, coeff_y, 
                                   order=1, shape=images[1].shape)
 
@@ -55,13 +60,13 @@ def test_polynomial_astrometry_reduces_residual(tmp_path):
     tmp_path = Path('../tmp')
     tmp_path.mkdir(exist_ok=True)
     fname = tmp_path / "diagnostic_poly_shift.png"
-    model = images[1] - resid0
+    model = images[1] - res0
     save_diagnostic_image(fname,
                           truth,
                           images[0],
                           images[1],
                           model,
-                          resid0,
+                          res0,
                           segmap=segmap,
                           catalog=catalog)
     

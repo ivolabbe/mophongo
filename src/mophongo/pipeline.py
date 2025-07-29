@@ -81,6 +81,7 @@ def run(
     from .templates import Templates
     from .fit import SparseFitter, FitConfig
     from .astro_fit import GlobalAstroFitter
+    from .local_astrometry import correct_astrometry_polynomial
     from .psf_map import PSFRegionMap
     from . import utils
     import warnings
@@ -125,17 +126,29 @@ def run(
         # assume weights are dominated by photometry image (for proper weights see sparse fitter, needes iteration)
         weights_i = weights[idx] if weights is not None else None
 
-        fitter_cls = GlobalAstroFitter if config.fit_astrometry else SparseFitter
+        fitter_cls = GlobalAstroFitter if (config.fit_astrometry and config.fit_astrometry_joint) else SparseFitter
 
         if config.fit_astrometry:
             # every iteration will scale and shift the tmpl images 
             # accumulated the shifts and scale are recorded in template attributes
             for j in range(config.fit_astrometry_niter):
                 print(f"Running iteration {j+1} of {config.fit_astrometry_niter} for astrometry fitting")
+
                 fitter = fitter_cls(templates, images[idx], weights_i, config)
                 fluxes, _ = fitter.solve()
                 res = fitter.residual()
                 errs = fitter.flux_errors()
+
+                if not config.fit_astrometry_joint:
+                    print('fitting astrometry separately')
+                    # this also applies the shifts to the templates
+                    coeff_x, coeff_y = correct_astrometry_polynomial(
+                            tmpls.templates,
+                            res,
+                            fitter.solution,
+                            order=config.astrom_basis_order,
+                            box_size=5,
+                            snr_threshold=config.snr_thresh_astrom)
         else:
             fitter = fitter_cls(templates, images[idx], weights_i, FitConfig())
             fluxes, _ = fitter.solve()

@@ -35,8 +35,9 @@ class FitConfig:
     fit_astrometry_niter: int = 2     # Two passes for astrometry fitting
     astrom_basis_order: int = 1
     fit_astrometry_joint: bool = False  # Use joint astrometry fitting, or separate step
-    reg_astrom: float = 1e-4 
+    reg_astrom: float = 1e-4
     snr_thresh_astrom: float = 10.0   # 0 → keep all sources (current behaviour)
+    astrom_model: str = "polynomial"  # 'polynomial' or 'gp'
 
 class SparseFitter:
     """Build and solve sparse normal equations for photometry."""

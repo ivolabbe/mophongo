@@ -12,7 +12,11 @@ from utils import make_simple_data
 from mophongo.psf import PSF
 from mophongo.templates import Templates
 from mophongo.fit import SparseFitter, FitConfig
-from mophongo.local_astrometry import correct_astrometry_polynomial, shifts_at_positions
+from mophongo.local_astrometry import (
+    correct_astrometry_polynomial,
+    correct_astrometry_gp,
+    shifts_at_positions,
+)
 from utils import save_diagnostic_image, lupton_norm
 from skimage.registration import phase_cross_correlation
 from photutils.centroids import centroid_quadratic
@@ -98,3 +102,39 @@ def test_polynomial_astrometry_reduces_residual(tmp_path):
     stamp_xy = ((np.array(ccr.shape)-1)/2)[::-1]
     print(f"Cross-correlation centroid: {ccr_xy}, stamp centroid: {stamp_xy} shift: {ccr_xy - stamp_xy}")
     assert coeff_x.shape[0] == coeff_y.shape[0]
+
+
+def test_gp_astrometry_returns_models():
+    images, segmap, catalog, psfs, truth, wht = make_simple_data(
+        nsrc=5, size=101, peak_snr=5, seed=1
+    )
+
+    psf_hi = PSF.from_array(psfs[0])
+    psf_lo = PSF.from_array(psfs[1])
+    kernel = psf_hi.matching_kernel(psf_lo)
+
+    images[1] = nd_shift(images[1], (-0.5, 0.6))
+
+    tmpls = Templates.from_image(
+        images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel
+    )
+
+    fitter = SparseFitter(tmpls.templates, images[1], wht[1], FitConfig())
+    fitter.build_normal_matrix()
+    fitter.solve()
+    fitter.flux_errors()
+    res = fitter.residual()
+
+    gp_x, gp_y = correct_astrometry_gp(
+        tmpls.templates,
+        res,
+        fitter.solution,
+        box_size=7,
+        snr_threshold=5,
+        length_scale=30.0,
+    )
+
+    pred_dx = gp_x.predict(np.array([[50.0, 50.0]]))[0]
+    pred_dy = gp_y.predict(np.array([[50.0, 50.0]]))[0]
+    assert isinstance(pred_dx, float)
+    assert isinstance(pred_dy, float)

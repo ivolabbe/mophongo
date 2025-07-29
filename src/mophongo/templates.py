@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Iterable, Iterator, List, Tuple
 
+import logging
 import numpy as np
 from astropy.nddata import Cutout2D
 from astropy.wcs import WCS
@@ -10,6 +11,8 @@ from scipy.signal import fftconvolve
 
 from .utils import measure_shape, convolve2d
 from .psf_map import PSFRegionMap
+
+logger = logging.getLogger(__name__)
 
 def _convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     """Convolve ``image`` with ``kernel`` using direct sliding windows."""
@@ -133,6 +136,35 @@ class Templates:
     @property
     def templates(self) -> List[Template]:
         """Return the list of templates."""
+        return self._templates
+
+    def deduplicate(self, threshold: float = 0.999) -> List[Template]:
+        """Remove nearly identical templates based on correlation."""
+        if len(self._templates) < 2:
+            return self._templates
+
+        keep: list[int] = []
+        data_arrays = [t.data[t.slices_cutout].ravel() for t in self._templates]
+        norms = [np.sqrt(np.sum(d * d)) for d in data_arrays]
+        for i, (arr_i, norm_i) in enumerate(zip(data_arrays, norms)):
+            if norm_i == 0:
+                continue
+            duplicate = False
+            for j in keep:
+                arr_j = data_arrays[j]
+                if arr_j.size != arr_i.size:
+                    continue
+                corr = np.dot(arr_i, arr_j) / (norm_i * norms[j])
+                if corr > threshold:
+                    duplicate = True
+                    break
+            if not duplicate:
+                keep.append(i)
+
+        dropped = len(self._templates) - len(keep)
+        if dropped > 0:
+            logger.warning("Dropped %d duplicate templates", dropped)
+        self._templates = [self._templates[i] for i in keep]
         return self._templates
 
     # put this in PSF class?

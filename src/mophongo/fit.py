@@ -3,12 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple
 
+import logging
 import numpy as np
 from scipy.sparse import lil_matrix, eye
 from scipy.sparse.linalg import cg, splu
 from tqdm import tqdm
 
 from .templates import Template
+
+logger = logging.getLogger(__name__)
 
 # full weights need to be calcuate like
 #template_var = scipy.signal.fftconvolve(K**2, 1 / wht1, mode='same')  # same shape as template
@@ -89,6 +92,22 @@ class SparseFitter:
 
     def build_normal_matrix(self) -> None:
         """Construct normal matrix using :class:`Template` objects."""
+        # Drop templates that have zero weighted power
+        valid: list[Template] = []
+        norms: list[float] = []
+        for tmpl in self.templates:
+            sl = tmpl.slices_original
+            data = tmpl.data[tmpl.slices_cutout]
+            w = self.weights[sl]
+            norm = float(np.sum(data * w * data))
+            if norm == 0:
+                logger.warning("Dropping template with zero weight")
+                continue
+            norms.append(norm)
+            valid.append(tmpl)
+
+        self.templates = valid
+
         n = len(self.templates)
         ata = lil_matrix((n, n))
         atb = np.zeros(n)
@@ -98,7 +117,7 @@ class SparseFitter:
             w_i = self.weights[sl_i]
             img_i = self.image[sl_i]
             atb[i] = np.sum(data_i * w_i * img_i)
-            ata[i, i] = np.sum(data_i * w_i * data_i)
+            ata[i, i] = norms[i]
 
             for j in range(i + 1, n):
                 tmpl_j = self.templates[j]
@@ -196,16 +215,36 @@ class SparseFitter:
         if self.solution is None:
             raise ValueError("Solve system first")
         ata = self.ata.tocsc()
-        solver = splu(ata)
+        # make positive definite to avoid singularities
+        ata = ata + 1e-8 * eye(ata.shape[0], format="csc")
+        try:
+            solver = splu(ata)
+        except RuntimeError:
+            logger.warning("Normal matrix singular; using CG fallback for variances")
+            return self._cg_variances()
+
         n = ata.shape[0]
         diag = np.empty(n, dtype=float)
         e = np.zeros(n, dtype=float)
         for i in range(n):
-            e[:] = 0.0
             e[i] = 1.0
             x = solver.solve(e)
             diag[i] = x[i]
-            self.templates[i].err = np.sqrt(diag[i])  # Store error in the template for later use
+            e[i] = 0.0
+            self.templates[i].err = np.sqrt(diag[i])
+        return np.sqrt(diag)
+
+    def _cg_variances(self) -> np.ndarray:
+        """Compute variances using conjugate gradient solves."""
+        ata = self.ata
+        n = ata.shape[0]
+        diag = np.empty(n, dtype=float)
+        e = np.zeros(n)
+        for i in range(n):
+            e[i] = 1.0
+            x, _ = cg(ata, e)
+            diag[i] = x[i]
+            e[i] = 0.0
         return np.sqrt(diag)
 
     @classmethod

@@ -43,14 +43,17 @@ def _compute_snr(cc: np.ndarray) -> float:
     return (cc.max() - np.median(cc)) / (cc.std() + 1e-12)
 
 
+from photutils.centroids import centroid_quadratic
+
+
 def measure_template_shifts(
     templates: Sequence[Template],
-    weighted_residual: np.ndarray,
+    coeffs: np.ndarray,
     residual: np.ndarray,
     box_size: int = 11,
     snr_threshold: float = 5.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Measure per-template shifts via phase cross-correlation.
+    """Estimate template shifts from residual centroids.
 
     Parameters
     ----------
@@ -79,7 +82,7 @@ def measure_template_shifts(
     dy = []
     weights = []
 
-    for j,tmpl in enumerate(templates):
+    for j, (tmpl, coeff) in enumerate(zip(templates, coeffs)):
         x_pix, y_pix = [int(round(v)) for v in tmpl.position_original]
         y0 = max(y_pix - half, 0)
         y1 = min(y_pix + half + 1, ny)
@@ -109,6 +112,19 @@ def measure_template_shifts(
         stamp_res = stamp_res[:mny, :mnx]
         stamp_tmp = stamp_tmp[:mny, :mnx]
 
+        model = coeff * stamp_tmp + stamp_res
+        try:
+            cy_model, cx_model = centroid_quadratic(model)
+            cy_tmp, cx_tmp = centroid_quadratic(stamp_tmp)
+        except Exception:
+            continue
+
+        shift_est = np.array([cx_model - cx_tmp, cy_model - cy_tmp])
+
+        # estimate S/N from coefficient and local residual dispersion
+        noise = np.std(stamp_res)
+        snr = 0.0 if noise == 0 else abs(coeff) / noise
+
         # DO SIMPLE SHIFT ESTIMATE 
         # 1. calculate SNR from weight  + image 
         # 1. only keep sources with SNR > fitconfig.snr_thresh_astrom
@@ -127,12 +143,23 @@ def measure_template_shifts(
     # print(f"Shifted residual centroid: {rm_xy}, model centroid: {m_xy} shift: {m_xy- rm_xy}")
 
 
-        print(f"Template at  {j} ({x_pix}, {y_pix}) S/N: {snr:.2f}")
         if snr < snr_threshold:
             continue
+
+        tmpl.data = nd_shift(
+            tmpl.data,
+            (-shift_est[1], -shift_est[0]),
+            order=3,
+            mode="constant",
+            cval=0.0,
+            prefilter=True,
+        )
+        tmpl.position_original = (x_pix - shift_est[0], y_pix - shift_est[1])
+        tmpl.shift += [-shift_est[0], -shift_est[1]]
+
         positions.append((x_pix, y_pix))
-        dy.append(shift_est[0])
-        dx.append(shift_est[1])
+        dx.append(shift_est[0])
+        dy.append(shift_est[1])
         weights.append(snr**2)
 
     return (
@@ -196,6 +223,7 @@ def apply_polynomial_correction(
 def correct_astrometry_polynomial(
     templates: Sequence[Template],
     residual: np.ndarray,
+    coeffs: np.ndarray,
     *,
     order: int = 3,
     box_size: int = 9,
@@ -203,7 +231,7 @@ def correct_astrometry_polynomial(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Measure and correct local astrometric offsets with polynomials."""
     pos, dx, dy, weights = measure_template_shifts(
-        templates, residual, box_size, snr_threshold
+        templates, coeffs, residual, box_size, snr_threshold
     )
     if len(pos) == 0:
         n = astrometry.n_terms(order)

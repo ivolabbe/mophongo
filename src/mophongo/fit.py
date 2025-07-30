@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Tuple
 import logging
 import numpy as np
 from scipy.sparse import lil_matrix, eye
-from scipy.sparse.linalg import cg, splu
+from scipy.sparse.linalg import cg, splu, spilu, LinearOperator
 from tqdm import tqdm
 
 from .templates import Template
@@ -32,8 +32,9 @@ class FitConfig:
     """Configuration options for :class:`SparseFitter`."""
 
     positivity: bool = False
-    reg: float = 0.0
-    cg_kwargs: Dict[str, Any] = field(default_factory=dict)
+    reg: float = 1e-8
+    bad_value: float = np.nan
+    cg_kwargs: Dict[str, Any] = field(default_factory=lambda: {'M':None,"maxiter": 500, "atol": 1e-8})
     fit_astrometry: bool = False
     fit_astrometry_niter: int = 2     # Two passes for astrometry fitting
     astrom_basis_order: int = 1
@@ -41,6 +42,7 @@ class FitConfig:
     reg_astrom: float = 1e-4
     snr_thresh_astrom: float = 10.0   # 0 → keep all sources (current behaviour)
     astrom_model: str = "polynomial"  # 'polynomial' or 'gp'
+
 
 class SparseFitter:
     """Build and solve sparse normal equations for photometry."""
@@ -64,8 +66,8 @@ class SparseFitter:
 
     @staticmethod
     def _intersection(
-        a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]
-    ) -> Tuple[int, int, int, int] | None:
+            a: Tuple[int, int, int, int],
+            b: Tuple[int, int, int, int]) -> Tuple[int, int, int, int] | None:
         y0 = max(a[0], b[0])
         y1 = min(a[1], b[1])
         x0 = max(a[2], b[2])
@@ -75,13 +77,16 @@ class SparseFitter:
         return y0, y1, x0, x1
 
     @staticmethod
-    def _bbox_to_slices(bbox: Tuple[int, int, int, int]) -> Tuple[slice, slice]:
+    def _bbox_to_slices(
+            bbox: Tuple[int, int, int, int]) -> Tuple[slice, slice]:
         """Convert integer bounding box to slices for array indexing."""
         y0, y1, x0, x1 = bbox
         return slice(y0, y1), slice(x0, x1)
 
     @staticmethod
-    def _slice_intersection(a: tuple[slice, slice], b: tuple[slice, slice]) -> tuple[slice, slice] | None:
+    def _slice_intersection(
+            a: tuple[slice, slice],
+            b: tuple[slice, slice]) -> tuple[slice, slice] | None:
         y0 = max(a[0].start, b[0].start)
         y1 = min(a[0].stop, b[0].stop)
         x0 = max(a[1].start, b[1].start)
@@ -101,7 +106,7 @@ class SparseFitter:
             w = self.weights[sl]
             norm = float(np.sum(data * w * data))
             if norm == 0:
-                logger.warning("Dropping template with zero weight")
+#                logger.warning("Dropping template with zero weight")
                 continue
             norms.append(norm)
             valid.append(tmpl)
@@ -111,7 +116,8 @@ class SparseFitter:
         n = len(self.templates)
         ata = lil_matrix((n, n))
         atb = np.zeros(n)
-        for i, tmpl_i in enumerate(tqdm(self.templates, total=n, desc="Building Normal matrix")):
+        for i, tmpl_i in enumerate(
+                tqdm(self.templates, total=n, desc="Building Normal matrix")):
             sl_i = tmpl_i.slices_original
             data_i = tmpl_i.data[tmpl_i.slices_cutout]
             w_i = self.weights[sl_i]
@@ -121,25 +127,35 @@ class SparseFitter:
 
             for j in range(i + 1, n):
                 tmpl_j = self.templates[j]
-                inter = self._slice_intersection(tmpl_i.slices_original, tmpl_j.slices_original)
+                inter = self._slice_intersection(tmpl_i.slices_original,
+                                                 tmpl_j.slices_original)
                 if inter is None:
                     continue
                 w = self.weights[inter]
                 sl_i_local = (
-                    slice(inter[0].start - sl_i[0].start + tmpl_i.slices_cutout[0].start,
-                          inter[0].stop - sl_i[0].start + tmpl_i.slices_cutout[0].start),
-                    slice(inter[1].start - sl_i[1].start + tmpl_i.slices_cutout[1].start,
-                          inter[1].stop - sl_i[1].start + tmpl_i.slices_cutout[1].start),
+                    slice(
+                        inter[0].start - sl_i[0].start +
+                        tmpl_i.slices_cutout[0].start, inter[0].stop -
+                        sl_i[0].start + tmpl_i.slices_cutout[0].start),
+                    slice(
+                        inter[1].start - sl_i[1].start +
+                        tmpl_i.slices_cutout[1].start, inter[1].stop -
+                        sl_i[1].start + tmpl_i.slices_cutout[1].start),
                 )
                 sl_j_local = (
-                    slice(inter[0].start - tmpl_j.slices_original[0].start + tmpl_j.slices_cutout[0].start,
-                          inter[0].stop - tmpl_j.slices_original[0].start + tmpl_j.slices_cutout[0].start),
-                    slice(inter[1].start - tmpl_j.slices_original[1].start + tmpl_j.slices_cutout[1].start,
-                          inter[1].stop - tmpl_j.slices_original[1].start + tmpl_j.slices_cutout[1].start),
+                    slice(
+                        inter[0].start - tmpl_j.slices_original[0].start +
+                        tmpl_j.slices_cutout[0].start,
+                        inter[0].stop - tmpl_j.slices_original[0].start +
+                        tmpl_j.slices_cutout[0].start),
+                    slice(
+                        inter[1].start - tmpl_j.slices_original[1].start +
+                        tmpl_j.slices_cutout[1].start,
+                        inter[1].stop - tmpl_j.slices_original[1].start +
+                        tmpl_j.slices_cutout[1].start),
                 )
-                val = np.sum(
-                    tmpl_i.data[sl_i_local] * tmpl_j.data[sl_j_local] * w
-                )
+                val = np.sum(tmpl_i.data[sl_i_local] *
+                             tmpl_j.data[sl_j_local] * w)
                 if val != 0.0:
                     ata[i, j] = val
                     ata[j, i] = val
@@ -152,7 +168,8 @@ class SparseFitter:
             raise ValueError("Solve system first")
         model = np.zeros_like(self.image, dtype=float)
         for coeff, tmpl in zip(self.solution, self.templates):
-            model[tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
+            model[
+                tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
         return model
 
     @property
@@ -177,13 +194,23 @@ class SparseFitter:
         atb = self.atb
         if cfg.reg and cfg.reg > 0:
             ata = ata + eye(ata.shape[0]) * cfg.reg
+
+        # @@@ need to test
+        # preconditioner
+        if "M" not in cfg.cg_kwargs:
+            ilu = spilu(ata, drop_tol=1e-5, fill_factor=10)
+            M = LinearOperator(ata.shape, ilu.solve)
+            print('preconditioner:', M.shape)
+
         x, info = cg(ata, atb, **cfg.cg_kwargs)
+
         if cfg.positivity:
             x = np.where(x < 0, 0, x)
         self.solution = x
 
-        for i, t in enumerate(self.templates):  # Store the solution in each template
-            t.flux = self.solution[i] 
+        for i, t in enumerate(
+                self.templates):  # Store the solution in each template
+            t.flux = self.solution[i]
 
         return x, info
 
@@ -196,17 +223,19 @@ class SparseFitter:
         for i, tmpl in enumerate(self.templates):
             tt = tmpl.data[tmpl.slices_cutout]
             img = self.image[tmpl.slices_original]
-            ttsqs = np.sum(tt ** 2)
+            ttsqs = np.sum(tt**2)
             flux[i] = np.sum(img * tt) / ttsqs if ttsqs > 0 else 0.0
-            tmpl.quick_flux = flux[i]  # Store quick flux in the template for later use
+            tmpl.quick_flux = flux[
+                i]  # Store quick flux in the template for later use
         return flux
-    
+
     def predicted_errors(self) -> np.ndarray:
         """Return per-source uncertainties ignoring template covariance."""
         pred = np.empty(len(self.templates), dtype=float)
         for i, tmpl in enumerate(self.templates):
             w = self.weights[tmpl.slices_original]
-            pred[i] = 1.0 / np.sqrt(np.sum(w * tmpl.data[tmpl.slices_cutout] ** 2))
+            pred[i] = 1.0 / np.sqrt(
+                np.sum(w * tmpl.data[tmpl.slices_cutout]**2))
             tmpl.pred_err = pred[i]  # Store RMS in the template for later use
         return pred
 
@@ -220,7 +249,8 @@ class SparseFitter:
         try:
             solver = splu(ata)
         except RuntimeError:
-            logger.warning("Normal matrix singular; using CG fallback for variances")
+            logger.warning(
+                "Normal matrix singular; using CG fallback for variances")
             return self._cg_variances()
 
         n = ata.shape[0]

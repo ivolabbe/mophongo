@@ -276,7 +276,6 @@ class Templates:
         templates: list[Template] = []
         ny, nx = hires_image.shape
 
-        # Add progress bar here
         for pos in tqdm(positions, desc="Extracting templates"):
             # silently skip invalid positions
             if not np.isfinite(pos).all(): continue
@@ -296,7 +295,7 @@ class Templates:
             width = max(x - bbox.ixmin, bbox.ixmax - x) * 2
 
             # Create template cutout
-            cut = Template(hires_image, pos, (height, width), wcs=wcs)
+            cut = Template(hires_image, pos, (height, width), wcs=wcs, id=label)
 
             # zero out all non segment pixels
             cut.data[cut.slices_cutout] *= (

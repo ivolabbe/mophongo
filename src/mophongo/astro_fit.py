@@ -156,6 +156,7 @@ class GlobalAstroFitter(SparseFitter):
             d[self.n_flux:] = cfg.reg_astrom     # only α_k , β_k rows/cols
             A = A + diags(d, 0, format="csr")
 
+        # should we whiten SparseFitter too?
         # ------------------------------------------------------------------
         # symmetric column-and-row whitening  (A → D⁻¹ A D⁻¹,  b → D⁻¹ b)
         # ------------------------------------------------------------------
@@ -165,6 +166,12 @@ class GlobalAstroFitter(SparseFitter):
 
         A_w = Dinv @ A @ Dinv                   # still sparse, still SPD
         b_w = Dinv @ b
+        
+        # preconditioner
+        if "M" not in cfg.cg_kwargs:
+            ilu = spilu(A_w, drop_tol=1e-5, fill_factor=10)
+            M = LinearOperator(A_w.shape, ilu.solve)
+            print('preconditioner:', M.shape)
 
         y, info = cg(A_w, b_w, **cfg.cg_kwargs) # solve whitened system
         x = Dinv @ y                            # un-whiten

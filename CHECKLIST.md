@@ -19,14 +19,19 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 
 ## Core Modules
 - [x] **PSF utilities** (`src/mophongo/psf.py`)
-  - `moffat_psf` Generate Moffat PSF images (ellipticity/FWHM/beta parameters).
-  - `psf_matching_kernel` to Compute convolution kernels to transform the high‑resolution PSF into the low‑resolution PSF (Fourier domain or direct numerical solution)
+  - [x] `moffat_psf` Generate Moffat PSF images (ellipticity/FWHM/beta parameters).
+  - [x] `matching_kernel` to Compute convolution kernels to transform the high‑resolution PSF into the low‑resolution PSF (Fourier domain or direct numerical solution)
   - [x] Added `recenter` option to `psf_matching_kernel` to shift kernels to their centroid
   - [x] Add methods to fit Moffat and Gaussian profiles to existing PSF arrays
   - [x] Added `PSF.delta` for symmetric delta-function PSFs
   - [x] Added `PSF.from_star` constructor for extracting PSFs from images
   - [x] Added `PSF.gaussian_matching_kernel` and `DrizzlePSF.register`
   - [x] Added `matching_kernel_basis` with Gauss–Hermite and multi-Gaussian basis sets
+  - [x] Added `CircularApertureProfile` utility for radial profile and curve of growth
+  - [x] Implement JWST STDPSF extension utility
+  - [x] Build PSF region map from exposure footprints
+  - [x] Add PA-based coarsening option to PSFRegionMap
+  - [x] Added spatially varying kernel support in `run` and template convolution
 - [x] **Template builder** (`src/mophongo/templates.py`)
   - `extract_templates` to create PSF-matched templates
   - Extract per-object cutouts from the high‑res image using the detection segmentation.
@@ -37,42 +42,52 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
   - Solve for fluxes with scipy.sparse.linalg.cg (plus optional positivity and residual regularization).
   - Create the modeled low‑res image and residual map.
  - [x] **Pipeline orchestrator** (`src/mophongo/pipeline.py`)
-  - `run` to tie all pieces together
-  - don't implement source detection just yet: assume detection + segmentation image + catalog are available.
-  - Load or receive arrays for the images, catalog, and PSFs.
-  - Call template builder, construct sparse system, solve for fluxes, and return a table of measurements plus residuals.
+  - [x] `run` to tie all pieces together
+  - [x] don't implement source detection just yet: assume detection + segmentation image + catalog are available.
+  - [x] Load or receive arrays for the images, catalog, and PSFs.
+  - [x] Call template builder, construct sparse system, solve for fluxes, and return a table of measurements plus residuals.
   - [x] Propagate RMS images as weights to compute flux uncertainties
  - [x] **Simulation utilities for tests** (`tests/utils.py`)
   - [x] Create fake catalogs and images with Moffat sources of varying size and ellipticity. positions are ra,dec
-  - Produce matching high‑res and low‑res PSFs, with low res PSF at least 5x high res PSF.
-  - max 20 sources, max 400 x 400 pixel high resolution image
-  - Convolve with a kernel derived from different PSFs to obtain the low‑resolution image and add Gaussian noise.
-  - Run the pipeline with the known PSFs and verify recovered fluxes agree with input fluxes within ≈5%.
-  - Check that the residual image contains only noise (no strong artifacts).
-  - Test failure modes (e.g., negative flux regularization) on a subset of sources.
+  - [x] Produce matching high‑res and low‑res PSFs, with low res PSF at least 5x high res PSF.
+  - [x] max 50 sources, max 300 x 300 pixel high resolution image
+  - [x] Convolve with a kernel derived from different PSFs to obtain the low‑resolution image and add Gaussian noise.
+  - [x] Run the pipeline with the known PSFs and verify recovered fluxes agree with input fluxes within ≈5%.
+  - [x] Check that the residual image contains only noise (no strong artifacts).
+  - [x] Test failure modes (e.g., negative flux regularization) on a subset of sources.
+  - [x] Add simulated data utilities in `tests/utils.py`  
+  - [x] Create end-to-end tests in `tests/test_pipeline.py`
     
 ## Testing
- - [x] Add simulated data utilities in `tests/utils.py`
-- [x] Create end-to-end tests in `tests/test_pipeline.py`
 - [x] Run `pytest` to ensure all tests pass
 - [x] Save diagnostic plot during pipeline test
 - [x] Save diagnostic plots for PSF, fitter and template tests
 - [x] Save output catalog to disk during pipeline test
-
-- [x] Implement template extension methods (Moffat fit and PSF dilation)
 - [x] Added selectable template extension method in `run` and consolidated analytic profiles
 - [x] Benchmarked key pipeline steps in `tests/test_benchmark.py`
 - [x] Introduced Cutout2D-based template extraction and normal matrix helpers
 - [x] Implemented basic `Catalog` for source detection
 - [x] Added configurable detection parameters in `Catalog`
- - [x] Added `CircularApertureProfile` utility for radial profile and curve of growth
- - [x] Implement JWST STDPSF extension utility
- - [x] Build PSF region map from exposure footprints
- - [x] Add PA-based coarsening option to PSFRegionMap
- - [x] Added spatially varying kernel support in `run` and template convolution
- - [x] End-to-end test with realistic mosaic data using `make_mosaic_dataset`
-- [x] Implemented star finder in Catalog
+ 
+ - [x] Implemented star finder in Catalog
 - [x] Added GlobalAstroFitter for astrometric correction
 - [x] Added polynomial-based local astrometric correction
 - [x] Added safeguards against singular normal matrices
 - [x] Added Gaussian-process-based local astrometric correction
+
+## TODO
+- [ ] scan for bug fixes / robustness improvements
+- [ ] Investigate template extension methods (Moffat fit and PSF dilation)
+- [ ] End-to-end test with realistic mosaic data using `make_mosaic_dataset`
+- [ ] Profiling speed + memory usage
+- [ ] optimizations
+  - [ ] adaptive kernel size depending on SNR
+  - [ ] tracking is_dirty on templates
+  - [ ] partial normal matrix rebuilding / deleting / refactoring
+  - [ ] conditioning matrix   
+- [ ]  wavelength dependent morphonology: only where residuals are significant.
+  - [ ] Add point source (start with marginally sampled Gaussian?  
+  - [ ] add second bluer band
+- [ ] refactoring for readibility and modularity
+  - [ ] split off PSF map / drizzle PSF / PSFs module, make submodule
+  - [ ] split off real data as submodule? 

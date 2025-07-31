@@ -22,7 +22,7 @@ pip install -e .
 from astropy.io import fits
 from astropy.table import Table
 
-from mophongo.pipeline import run_photometry
+from mophongo.pipeline import run
 
 images = [fits.getdata("image1.fits"), fits.getdata("image2.fits")]
 segmap = fits.getdata("segmap.fits")

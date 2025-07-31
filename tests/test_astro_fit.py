@@ -56,6 +56,28 @@ def test_global_astro_fitter_n_flux_attribute():
     if hasattr(fitter_no_astro, 'n_flux'):
         assert fitter_no_astro.n_flux == len(tmpls.templates)
 
+
+def test_global_astro_fitter_repeated_build(tmp_path):
+    """GlobalAstroFitter remains stable after template pruning."""
+
+    images, segmap, catalog, psfs, truth, wht = make_simple_data(nsrc=5, size=51)
+    positions = list(zip(catalog["x"], catalog["y"]))
+    tmpls = Templates.from_image(images[0], segmap, positions, kernel=None)
+
+    config = FitConfig(fit_astrometry=True, astrom_basis_order=1)
+    fitter = GlobalAstroFitter(tmpls.templates, images[1], wht[1], segmap, config)
+
+    # First solve builds the normal matrix
+    fitter.solve()
+
+    # Zero out weights to prune templates and force rebuild
+    fitter.weights[:] = 0.0
+    fitter._ata = None
+    fitter._atb = None
+
+    # Second solve should not raise an error
+    fitter.solve()
+
 def test_solve_return_shapes_with_actual_templates(tmp_path):
     """Test solve method shapes using actual template counts."""
 

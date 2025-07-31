@@ -14,6 +14,7 @@ from .templates import Template
 from . import astrometry
 from copy import deepcopy
 
+
 # 0. quick per-source S/N directly from the measurement image
 def estimate_snr(tmpl, weights):
     sl = tmpl.slices_original
@@ -50,6 +51,10 @@ class GlobalAstroFitter(SparseFitter):
         super().__init__(list(templates), image, weights, config)
         self.n_flux = len(templates)
 
+        for i, tmpl in enumerate(self.templates):
+            tmpl.is_flux = True
+            tmpl.pidx = i
+
         if not config.fit_astrometry:
             return      # nothing more to do
 
@@ -81,7 +86,6 @@ class GlobalAstroFitter(SparseFitter):
 
         # 3. build tiny templates for each term & each object
         self._big2small_col = []     # length = len(self.templates) after extension
-        self._param_size    = self.n_flux + 2 * K   # compact column count
 
         # We want to keep the matrix sparse, so we need to keep track of 
         # locations of the stamps in the big matrix, and then we can collapse them later
@@ -94,40 +98,36 @@ class GlobalAstroFitter(SparseFitter):
 
                 gx_tile = deepcopy(gx_i[i])
                 gx_tile.data *= f_est * Φ[i, k]           # *** SCALE ***
+                gx_tile.is_flux = False
+                gx_tile.pidx = self.n_flux + k
                 self.templates.append(gx_tile)
                 self._big2small_col.append(self.n_flux + k)
 
                 gy_tile = deepcopy(gy_i[i])
                 gy_tile.data *= f_est * Φ[i, k]           # *** SCALE ***
+                gy_tile.is_flux = False
+                gy_tile.pidx = self.n_flux + K + k
                 self.templates.append(gy_tile)
                 self._big2small_col.append(self.n_flux + K + k)
-
-        # map of first-seen compact column for every parameter index
-        self._keep_col = {}
-        for big, small in enumerate(self._big2small_col, start=self.n_flux):
-            self._keep_col.setdefault(small, big)
 
 
     def _collapse(self):
         A_big = self._ata.tocsr()
         b_big = self._atb
-        P     = self._param_size
-        M     = A_big.shape[0]
 
-        # selector S:  shape (M , P) , one 1 per row
-        data  = np.ones(M, dtype=np.float64)
-        rows  = np.arange(M)
-        cols  = np.concatenate((
-                    np.arange(self.n_flux),          # flux → same index
-                    np.asarray(self._big2small_col)  # gradient tiles
-                ))
-        S = csr_matrix((data, (rows, cols)), shape=(M, P))
+        rows = np.arange(A_big.shape[0])
+        cols = np.fromiter((t.pidx for t in self.templates), dtype=int)
 
-        A_cmp = S.T @ A_big @ S           # still sparse
-        b_cmp = S.T @ b_big
+        P = cols.max() + 1 if cols.size else 0
 
-        self._ata_comp = A_cmp.tocsr()
-        self._atb_comp = np.asarray(b_cmp).ravel()
+        S = csr_matrix(
+            (np.ones_like(rows), (rows, cols)), shape=(A_big.shape[0], P)
+        )
+
+        self._ata_comp = (S.T @ A_big @ S).tocsr()
+        self._atb_comp = (S.T @ b_big).ravel()
+
+        self.n_flux = int(sum(t.is_flux for t in self.templates))
         
     # ------------------------------------------------------------
     # 3.  solve

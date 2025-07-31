@@ -90,6 +90,9 @@ def measure_template_shifts(
         x_pix, y_pix = tmpl.input_position_original
         x_stamp, y_stamp = tmpl.input_position_cutout
 
+        if tmpl.flux <= 0 or tmpl.err <= 0:
+            continue
+
         snr = (tmpl.flux/tmpl.err)
         if snr < snr_threshold:
             continue

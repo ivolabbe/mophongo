@@ -9,7 +9,7 @@ from scipy.sparse import lil_matrix, eye
 from scipy.sparse.linalg import cg, splu, spilu, LinearOperator
 from tqdm import tqdm
 
-from .templates import Template
+from .templates import Template, Templates
 
 logger = logging.getLogger(__name__)
 
@@ -219,25 +219,12 @@ class SparseFitter:
 
     def quick_flux(self) -> np.ndarray:
         """Return quick flux estimates based on template data and image."""
-        flux = np.zeros(len(self.templates), dtype=float)
-        for i, tmpl in enumerate(self.templates):
-            tt = tmpl.data[tmpl.slices_cutout]
-            img = self.image[tmpl.slices_original]
-            ttsqs = np.sum(tt**2)
-            flux[i] = np.sum(img * tt) / ttsqs if ttsqs > 0 else 0.0
-            tmpl.quick_flux = flux[
-                i]  # Store quick flux in the template for later use
-        return flux
-
+        return Templates.quick_flux(self.templates, self.image)
+        
     def predicted_errors(self) -> np.ndarray:
         """Return per-source uncertainties ignoring template covariance."""
-        pred = np.empty(len(self.templates), dtype=float)
-        for i, tmpl in enumerate(self.templates):
-            w = self.weights[tmpl.slices_original]
-            pred[i] = 1.0 / np.sqrt(
-                np.sum(w * tmpl.data[tmpl.slices_cutout]**2))
-            tmpl.pred_err = pred[i]  # Store RMS in the template for later use
-        return pred
+        return Templates.predicted_errors(self.templates, self.weights)
+
 
     def flux_errors(self) -> np.ndarray:
         """Return 1-sigma uncertainties for the fitted fluxes."""
@@ -261,7 +248,7 @@ class SparseFitter:
             x = solver.solve(e)
             diag[i] = x[i]
             e[i] = 0.0
-            self.templates[i].err = np.sqrt(diag[i])
+            if i < len(self.templates): self.templates[i].err = np.sqrt(diag[i])
         return np.sqrt(diag)
 
     def _cg_variances(self) -> np.ndarray:

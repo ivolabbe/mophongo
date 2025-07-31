@@ -88,16 +88,17 @@ def run(
 
     if config is None:
         config = FitConfig()
+    print(f"Pipeline config: {config}")
 
-    if catalog is None:
-        segm = SegmentationImage(segmap)
-        # check x,y, names
-        catalog = SourceCatalog(
-            images[0],
-            SegmentationImage(segmap),
-            error=np.sqrt(1.0 / weights[0]),
-            wcs=WCS(header) if header is not None else None,
-        )
+    # if catalog is None:
+    #     segm = SegmentationImage(segmap)
+    #     # check x,y, names
+    #     catalog = SourceCatalog(
+    #         images[0],
+    #         SegmentationImage(segmap),
+    #         error=np.sqrt(1.0 / weights[0]),
+    #         wcs=WCS(header) if header is not None else None,
+    #     )
 
     cat = catalog.copy()
     positions = list(zip(catalog["x"], catalog["y"]))
@@ -111,7 +112,6 @@ def run(
 
     if extend_templates == 'psf' and psfs is not None:
         tmpls.extend_with_psf_wings(psfs[0], inplace=True)
-
 
 #   tmpls.deduplicate()
 
@@ -136,52 +136,51 @@ def run(
             config.fit_astrometry
             and config.fit_astrometry_joint) else SparseFitter
 
+        # every iteration will scale and shift the tmpl images
+        # accumulated the shifts and scale are recorded in template attributes
+
         if config.fit_astrometry:
-            # every iteration will scale and shift the tmpl images
-            # accumulated the shifts and scale are recorded in template attributes
-            for j in range(config.fit_astrometry_niter):
-                print(
-                    f"Running iteration {j+1} of {config.fit_astrometry_niter} for astrometry fitting"
-                )
-
-                fitter = fitter_cls(templates, images[idx], weights_i, config)
-                fluxes, _ = fitter.solve()
-                res = fitter.residual()
-                errs = fitter.flux_errors()
-
-                if not config.fit_astrometry_joint:
-                    print('fitting astrometry separately')
-                    if config.astrom_model == "gp":
-                        correct_astrometry_gp(
-                            tmpls.templates,
-                            res,
-                            fitter.solution,
-                            box_size=5,
-                            snr_threshold=config.snr_thresh_astrom,
-                            length_scale=500.0,
-                        )
-                    else:
-                        # this also applies the shifts to the templates
-                        correct_astrometry_polynomial(
-                            tmpls.templates,
-                            res,
-                            fitter.solution,
-                            order=config.astrom_basis_order,
-                            box_size=5,
-                            snr_threshold=config.snr_thresh_astrom)
+            niter = config.fit_astrometry_niter + 1 - config.fit_astrometry_joint
         else:
-            fitter = fitter_cls(templates, images[idx], weights_i, FitConfig())
+            niter = 1
+    
+        for j in range(niter):
+            print( f"Running iteration {j+1+config.fit_astrometry_joint} of {config.fit_astrometry_niter} for astrometry fitting"  )
+
+            fitter = fitter_cls(templates, images[idx], weights_i, config)
             fluxes, _ = fitter.solve()
             res = fitter.residual()
             errs = fitter.flux_errors()
+            pred = fitter.predicted_errors()
+
+            if config.fit_astrometry and not config.fit_astrometry_joint:
+                print('fitting astrometry separately')
+                if config.astrom_model == "gp":
+                    correct_astrometry_gp(
+                        tmpls.templates,
+                        res,
+                        fitter.solution,
+                        box_size=5,
+                        snr_threshold=config.snr_thresh_astrom,
+                        length_scale=500.0)
+                else:
+                    # this also applies the shifts to the templates
+                    correct_astrometry_polynomial(
+                        tmpls.templates,
+                        res,
+                        fitter.solution,
+                        order=config.astrom_basis_order,
+                        box_size=5,
+                        snr_threshold=config.snr_thresh_astrom)
+
         print(f"Done...")
 
         fit_templates = fitter.templates
         # put fluxes into catalog based on template IDs
-        tmpl_ids = [tmpl.id for tmpl in fit_templates]
+        tmpl_ids = [tmpl.id for tmpl in fit_templates if tmpl.id is not None]
         id_to_index = {id_: i for i, id_ in enumerate(cat['id'])}
         tmpl_idx = [id_to_index.get(tid, None) for tid in tmpl_ids]
-
+        
         # fill arrays with bad_value
         full_flux = np.full(len(cat), config.bad_value)
         full_err = np.full(len(cat), config.bad_value)

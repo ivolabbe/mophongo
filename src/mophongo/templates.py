@@ -34,7 +34,7 @@ class Template(Cutout2D):
         data: np.ndarray,
         position: tuple[float, float],
         size: tuple[int, int],
-        id: int | None = None,
+        label: int | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -49,9 +49,10 @@ class Template(Cutout2D):
         # @@@ bug in Cutout2D: shape_input is not set correctly
         self.shape_input = data.shape
         # record shift from original position here
+        self.id = label
+        self.flux = 0.0
+        self.err = 0.0
         self.shift = np.array([0.0, 0.0], dtype=float)
-        self.scale = None
-        self.id = id
 
     @property
     def bbox(
@@ -79,16 +80,17 @@ class Template(Cutout2D):
             position=self.input_position_original,
             size=(ny + pady, nx + padx),
             wcs=self.wcs,
+            label=self.id,
         )
 
         # Now place the old data in our padded version
         new_template.data[ony:ony + ny, onx:onx + nx] = self.data
 
         # if inplace is True, update the current instance
-        # @@@ input_position_original is not updated, so this is not a true inplace operation
         if inplace:
+            # overwrite the current attributes with the new one
             self.__dict__.update(new_template.__dict__)
-
+ 
         return new_template
 
 
@@ -123,15 +125,37 @@ class Templates:
         # Step 1: Extract raw cutouts
         obj.extract_templates(hires_image, segmap, positions, wcs=wcs)
 
-        if type(extension) == np.ndarray:
+        #if type(extension) == np.ndarray:
             # Extend templates with PSF wings
-            obj.extend_with_psf_wings(extension, inplace=True)
+            #obj.extend_with_psf_wings(extension, inplace=True)
 
         # Step 2: Convolve with kernel (includes padding)
         if kernel is not None:
             obj.convolve_templates(kernel, inplace=True)
 
         return obj
+
+    @staticmethod
+    def quick_flux(templates: List[Template], image: np.ndarray) -> np.ndarray:
+        """Return quick flux estimates based on template data and image."""
+        flux = np.zeros(len(templates), dtype=float)
+        for i, tmpl in enumerate(templates):
+            tt = tmpl.data[tmpl.slices_cutout]
+            img = image[tmpl.slices_original]
+            ttsqs = np.sum(tt**2)
+            flux[i] = np.sum(img * tt) / ttsqs if ttsqs > 0 else 0.0
+            tmpl.quick_flux = flux[i]  # Store quick flux in the template for later use
+        return flux
+
+    @staticmethod
+    def predicted_errors(templates: List[Template], weights: np.ndarray) -> np.ndarray:
+        """Return per-source uncertainties ignoring template covariance."""
+        pred = np.empty(len(templates), dtype=float)
+        for i, tmpl in enumerate(templates):
+            w = weights[tmpl.slices_original]
+            pred[i] = 1.0 / np.sqrt(np.sum(w * tmpl.data[tmpl.slices_cutout]**2))
+            tmpl.pred_err = pred[i]  # Store RMS in the template for later use
+        return pred
 
     @property
     def templates(self) -> List[Template]:
@@ -295,7 +319,7 @@ class Templates:
             width = max(x - bbox.ixmin, bbox.ixmax - x) * 2
 
             # Create template cutout
-            cut = Template(hires_image, pos, (height, width), wcs=wcs, id=label)
+            cut = Template(hires_image, pos, (height, width), wcs=wcs, label=label)
 
             # zero out all non segment pixels
             cut.data[cut.slices_cutout] *= (

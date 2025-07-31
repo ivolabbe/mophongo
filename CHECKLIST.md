@@ -76,6 +76,7 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
 
 ## TODO
 - [ ] scan for bug fixes / robustness improvements
+  - [ ] automated way of determining optimal convolution kernels for PSF  
 - [ ] validate output catalogs on MIRI data
   - [ ] color color, color mag
   - [ ] SEDs of stars, photo-z

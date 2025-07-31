@@ -92,4 +92,6 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
   - [ ] add second bluer band
 - [ ] refactoring for readibility and modularity
   - [ ] split off PSF map / drizzle PSF / PSFs module, make submodule
-  - [ ] split off real data as submodule? 
+  - [ ] split off real data as submodule?
+  - [ ] other code review, misc refactoring, consolidation
+  - [ ] remove unused modules, orphan code

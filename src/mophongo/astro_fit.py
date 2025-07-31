@@ -37,20 +37,20 @@ class GlobalAstroFitter(SparseFitter):
         templates: list[Template],
         image: np.ndarray,
         weights: np.ndarray | None,
-        segmap: np.ndarray | FitConfig | None = None,
-        config: FitConfig | None = None,
+        config: FitConfig 
     ):
-        if isinstance(segmap, FitConfig) and config is None:
-            config = segmap
-            segmap = None
-        if config is None:
-            config = FitConfig()
 
         # ---------- flux part ----------
-        super().__init__(list(templates), image, weights, config)
+        super().__init__(list(templates), image, weights)
+        self.config = config 
+        
         self.n_flux = len(templates)
+        print('GlobalAstroFitter: templates in', len(templates))
+        self.templates = [tmpl for tmpl in self.templates if tmpl.id is not None]
+        self.n_flux = len(self.templates)  # update n_flux to match the templates
+        print('GlobalAstroFitter: templates which are flux tempaltes: ', len(templates))
 
-        if not config.fit_astrometry:
+        if not self.config.fit_astrometry:
             return      # nothing more to do
 
         # ---------- astrometry part ----------
@@ -59,19 +59,23 @@ class GlobalAstroFitter(SparseFitter):
         self.basis_order = order
         self.n_alpha = K        # α_k  (β_k shares the same K)
 
-        flux = self.quick_flux()[0:self.n_flux]
+        # get estimate for the flux and errors to scale the gradients and keep only high S/N sources for astrometry
+        if self.templates[0].flux != 0:
+            flux = [t.flux for t in self.templates]
+        else:
+            flux = self.quick_flux()[0:self.n_flux]
         rms = self.predicted_errors()[0:self.n_flux]  
         
         # 1. per-object S/N estimate        
-        if config.snr_thresh_astrom > 0:
-            good = (flux / rms) >= config.snr_thresh_astrom
+        if self.config.snr_thresh_astrom > 0:
+            good = (flux / rms) >= self.config.snr_thresh_astrom
         else:
             good = np.ones(self.n_flux, dtype=bool)
 
         if not np.any(good):
             good[:] = True
         
-        print(f"GlobalAstroFitter: {self.n_flux} templates and {np.sum(good)} with S/N >= {config.snr_thresh_astrom} used for astrometry")
+        print(f"GlobalAstroFitter: {self.n_flux} templates and {np.sum(good)} with S/N >= {self.config.snr_thresh_astrom} used for astrometry")
 
         # 1. per-object gradients
         gx_i, gy_i = astrometry.make_gradients(templates)
@@ -130,7 +134,7 @@ class GlobalAstroFitter(SparseFitter):
         self._atb_comp = np.asarray(b_cmp).ravel()
         
     # ------------------------------------------------------------
-    # 3.  solve
+    # 3.  solve   # keep track of valid fluxes through ID, not n_flux
     # ------------------------------------------------------------
     def solve(self, config: FitConfig | None = None):
         cfg   = config or self.config
@@ -176,6 +180,10 @@ class GlobalAstroFitter(SparseFitter):
         y, info = cg(A_w, b_w, **cfg.cg_kwargs) # solve whitened system
         x = Dinv @ y                            # un-whiten
 
+        # fit is done, junk the astrometry templates 
+#        self.n_flux = np.sum([1 for tmpl in self.templates if tmpl.id is not None])
+        # update n_flux to match the templates
+
         # positivity on fluxes only
         if cfg.positivity:
             x[:self.n_flux] = np.maximum(0, x[:self.n_flux])
@@ -192,6 +200,7 @@ class GlobalAstroFitter(SparseFitter):
             self._apply_shifts()             # <── one call, no duplication
         else:
             self.alpha = self.beta = None
+
 
         return self.solution, info
 

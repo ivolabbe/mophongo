@@ -76,6 +76,9 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
 
 ## TODO
 - [ ] scan for bug fixes / robustness improvements
+- [ ] validate output catalogs on MIRI data
+  - [ ] color color, color mag
+  - [ ] SEDs of stars, photo-z
 - [ ] Investigate template extension methods (Moffat fit and PSF dilation)
 - [ ] End-to-end test with realistic mosaic data using `make_mosaic_dataset`
 - [ ] Profiling speed + memory usage

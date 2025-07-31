@@ -1,6 +1,6 @@
 # Project Checklist
 
-This checklist tracks tasks for building the Standalone Photometry Pipeline using Poetry and pytest.
+This checklist tracks tasks for building the photometry pipeline using Poetry and pytest.
 
 ## Setup
 - [x] Initialize repository with `pyproject.toml` and Poetry
@@ -13,9 +13,9 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [x] Added `nbformat` for generating example notebooks
 
 ## assumptions input data
-- [ ] input data are images + wcs that are multiextention fits files with first extention the SCI image, and second extention the ERR image
-- [ ] input catalog is catalog of sources positions: id, ra, dec
-- [ ] detection image, and associated segmentation map image, where each pixel can only belong to a source of a certain id.
+- [x] input data are images + wcs, and weights that are proportional to variance
+- [x] input catalog is catalog of sources positions: id, ra, dec
+- [x] detection image, and associated segmentation map image, where each pixel can only belong to a source of a certain id.
 
 ## Core Modules
 - [x] **PSF utilities** (`src/mophongo/psf.py`)
@@ -28,26 +28,35 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
   - [x] Added `PSF.gaussian_matching_kernel` and `DrizzlePSF.register`
   - [x] Added `matching_kernel_basis` with Gauss–Hermite and multi-Gaussian basis sets
   - [x] Added `CircularApertureProfile` utility for radial profile and curve of growth
-  - [x] Implement JWST STDPSF extension utility
+  - [x] Implement JWST STDPSF extension utility for STPSF / Webb PSF
+  - [x] Implement drizzling PSF
   - [x] Build PSF region map from exposure footprints
   - [x] Add PA-based coarsening option to PSFRegionMap
   - [x] Added spatially varying kernel support in `run` and template convolution
+  - [x] Implemented basic `Catalog` for source detection
+  - [x] Added configurable detection parameters in `Catalog`
+  - [x] Implemented star finder in Catalog
 - [x] **Template builder** (`src/mophongo/templates.py`)
-  - `extract_templates` to create PSF-matched templates
-  - Extract per-object cutouts from the high‑res image using the detection segmentation.
-  - Normalize cutouts to unit flux and convolve each with the PSF kernel to produce a template in the low‑res pixel grid.
-  - Store bounding box coordinates for later overlap calculations.
+  - [x] `extract_templates` to create PSF-matched templates
+  - [x] Extract per-object cutouts from the high‑res image using the detection segmentation.
+  - [x] Normalize cutouts to unit flux and convolve each with the PSF kernel to produce a template in the low‑res pixel grid.
+  - [x] Store bounding box coordinates for later overlap calculations.
+  - [x] Introduced Cutout2D-based template extraction and normal matrix helpers
 - [x] **Sparse fitter** (`src/mophongo/fit.py`)
   - Build sparse normal matrix AᵀA and vector Aᵀb using the templates and low‑res image (weights from inverse variance).
   - Solve for fluxes with scipy.sparse.linalg.cg (plus optional positivity and residual regularization).
   - Create the modeled low‑res image and residual map.
- - [x] **Pipeline orchestrator** (`src/mophongo/pipeline.py`)
+  - [x] Added GlobalAstroFitter for astrometric correction
+  - [x] Added polynomial-based local astrometric correction
+  - [x] Added safeguards against singular normal matrices
+  - [x] Added Gaussian-process-based local astrometric correction
+- [x] **Pipeline orchestrator** (`src/mophongo/pipeline.py`)
   - [x] `run` to tie all pieces together
   - [x] don't implement source detection just yet: assume detection + segmentation image + catalog are available.
   - [x] Load or receive arrays for the images, catalog, and PSFs.
   - [x] Call template builder, construct sparse system, solve for fluxes, and return a table of measurements plus residuals.
   - [x] Propagate RMS images as weights to compute flux uncertainties
- - [x] **Simulation utilities for tests** (`tests/utils.py`)
+- [x] **Simulation utilities for tests** (`tests/utils.py`)
   - [x] Create fake catalogs and images with Moffat sources of varying size and ellipticity. positions are ra,dec
   - [x] Produce matching high‑res and low‑res PSFs, with low res PSF at least 5x high res PSF.
   - [x] max 50 sources, max 300 x 300 pixel high resolution image
@@ -63,17 +72,7 @@ This checklist tracks tasks for building the Standalone Photometry Pipeline usin
 - [x] Save diagnostic plot during pipeline test
 - [x] Save diagnostic plots for PSF, fitter and template tests
 - [x] Save output catalog to disk during pipeline test
-- [x] Added selectable template extension method in `run` and consolidated analytic profiles
 - [x] Benchmarked key pipeline steps in `tests/test_benchmark.py`
-- [x] Introduced Cutout2D-based template extraction and normal matrix helpers
-- [x] Implemented basic `Catalog` for source detection
-- [x] Added configurable detection parameters in `Catalog`
- 
- - [x] Implemented star finder in Catalog
-- [x] Added GlobalAstroFitter for astrometric correction
-- [x] Added polynomial-based local astrometric correction
-- [x] Added safeguards against singular normal matrices
-- [x] Added Gaussian-process-based local astrometric correction
 
 ## TODO
 - [ ] scan for bug fixes / robustness improvements

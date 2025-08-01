@@ -8,16 +8,13 @@ template extraction and sparse fitting are delegated to the ``templates`` and
 
 from __future__ import annotations
 
+import os
+import psutil
 from typing import Sequence
-
 import numpy as np
+
 from astropy.table import Table
 from astropy.wcs import WCS
-
-# The ``templates`` and ``fit`` modules are expected to provide the following
-# functions. They are imported lazily inside :func:`run_photometry` so that this
-# module can be imported even if those modules are not yet implemented.
-
 
 def run(
     images: Sequence[np.ndarray],
@@ -86,22 +83,15 @@ def run(
     from . import utils
     import warnings
 
+    print(f'Pipeline (start) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB')
+
     if config is None:
         config = FitConfig()
     print(f"Pipeline config: {config}")
 
-    # if catalog is None:
-    #     segm = SegmentationImage(segmap)
-    #     # check x,y, names
-    #     catalog = SourceCatalog(
-    #         images[0],
-    #         SegmentationImage(segmap),
-    #         error=np.sqrt(1.0 / weights[0]),
-    #         wcs=WCS(header) if header is not None else None,
-    #     )
-
     cat = catalog.copy()
     positions = list(zip(catalog["x"], catalog["y"]))
+
 
     # Step 1: Extract templates from the first image (alternatively, use models)
     tmpls = Templates()
@@ -109,11 +99,14 @@ def run(
                             segmap,
                             positions,
                             wcs=wcs[0] if wcs is not None else None)
+    print('Pipepline:', len(tmpls.templates), f'extracted templates, dropped {len(positions)-len(tmpls.templates)}.')
+    print(f'Pipeline (templates) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB')
 
     if extend_templates == 'psf' and psfs is not None:
         tmpls.extend_with_psf_wings(psfs[0], inplace=True)
 
 #   tmpls.deduplicate()
+    print(f'Templates: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB')
 
     residuals = []
     for idx in range(1, len(images)):
@@ -127,7 +120,7 @@ def run(
         wcs_i = wcs[idx] if wcs is not None else None
 
         templates = tmpls.convolve_templates(kernel, inplace=True)
-        print('Pipepline:', len(templates), 'orig templates')
+        print(f'Pipeline (convolved) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB')
 
         # assume weights are dominated by photometry image (for proper weights see sparse fitter, needes iteration)
         weights_i = weights[idx] if weights is not None else None
@@ -138,20 +131,16 @@ def run(
 
         # every iteration will scale and shift the tmpl images
         # accumulated the shifts and scale are recorded in template attributes
+        niter = config.fit_astrometry_niter if config.fit_astrometry else 1
 
-        if config.fit_astrometry:
-            niter = config.fit_astrometry_niter + 1 - config.fit_astrometry_joint
-        else:
-            niter = 1
-    
         for j in range(niter):
-            print( f"Running iteration {j+1+config.fit_astrometry_joint} of {config.fit_astrometry_niter} for astrometry fitting"  )
+            print( f"Running iteration {j+1} of {config.fit_astrometry_niter}")
 
             fitter = fitter_cls(templates, images[idx], weights_i, config)
-            fluxes, _ = fitter.solve()
+            fluxes, errs, info = fitter.solve()
+            print(f'Pipeline (solve) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB')
             res = fitter.residual()
-            errs = fitter.flux_errors()
-            pred = fitter.predicted_errors()
+            print(f'Pipeline (residual) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB')
 
             if config.fit_astrometry and not config.fit_astrometry_joint:
                 print('fitting astrometry separately')
@@ -172,29 +161,29 @@ def run(
                         order=config.astrom_basis_order,
                         box_size=5,
                         snr_threshold=config.snr_thresh_astrom)
+                    
+                # check if this call is ok, only makes sense if we rebuild the normal matrix
+                # TODO: track this from the templates is_dirty flag
+                fitter._ata = None  # @@@ do this properly
+                fluxes, errs, info = fitter.solve()   
 
+        err_pred = fitter.predicted_errors()
+ 
         print(f"Done...")
-
-        fit_templates = fitter.templates
+ 
         # put fluxes into catalog based on template IDs
-        tmpl_ids = [tmpl.id for tmpl in fit_templates if tmpl.id is not None]
+        tmpl_ids = [tmpl.id for tmpl in templates if tmpl.id is not None]
         id_to_index = {id_: i for i, id_ in enumerate(cat['id'])}
         tmpl_idx = [id_to_index.get(tid, None) for tid in tmpl_ids]
-        
-        # fill arrays with bad_value
-        full_flux = np.full(len(cat), config.bad_value)
-        full_err = np.full(len(cat), config.bad_value)
-        full_pred = np.full(len(cat), config.bad_value)
-        for j, ci in enumerate(tmpl_idx):
-            if ci is not None:
-                full_flux[ci] = fluxes[j]
-                full_err[ci] = errs[j]
-                if weights_i is not None:
-                    full_pred[ci] = pred[j]
-        cat[f"flux_{idx}"] = full_flux
-        cat[f"err_{idx}"] = full_err
-        cat[f"err_pred_{idx}"] = full_pred
+        cat[f"flux_{idx}"] = config.bad_value
+        cat[f"err_{idx}"] = config.bad_value
+        cat[f"err_pred_{idx}"] = config.bad_value
+        cat[f"flux_{idx}"][tmpl_idx] = fluxes
+        cat[f"err_{idx}"][tmpl_idx] = errs
+        cat[f"err_pred_{idx}"][tmpl_idx] = err_pred
 
         residuals.append(res)
+
+    print(f'Pipeline (end) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB')
 
     return cat, residuals, fitter

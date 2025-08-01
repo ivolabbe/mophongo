@@ -706,7 +706,6 @@ def make_testdata():
     center_ra, center_dec = 34.3032414, -5.1113316
     center_x_40mas = 23242
     center_y_40mas = 19388
-
 #    size_x_40mas = 1000
 #    size_y_40mas = 820
 #    postfix = 'test'
@@ -715,6 +714,11 @@ def make_testdata():
     postfix = 'medium'
     #   size_x_40mas = 4144
     #   size_y_40mas = 2978
+
+    center_ra, center_dec = 34.303612, -5.1203157
+    size_x_40mas = 7000
+    size_y_40mas = 3520
+    postfix = 'large'
 
     center_radec = SkyCoord(center_ra, center_dec, unit='deg')
     #  center = (center_x_40mas, center_y_40mas)

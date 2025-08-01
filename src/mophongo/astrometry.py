@@ -34,8 +34,6 @@ def make_gradients(templates):
         gyi = deepcopy(tmpl)
         gxi.data = dx
         gyi.data = dy
-        gxi.id = None        # to avoid confusion with template IDs
-        gyi.id = None
         gx.append(gxi)
         gy.append(gyi)
     return gx, gy

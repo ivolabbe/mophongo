@@ -2,25 +2,21 @@
 
 from __future__ import annotations
 
-from typing import List
+
+import os
+from copy import deepcopy
+from typing import List, Tuple
 
 import numpy as np
+
 from scipy.ndimage import shift as nd_shift
-from scipy.sparse import eye, diags, lil_matrix, csr_matrix
+from scipy.sparse import eye, diags, csr_matrix
 from scipy.sparse.linalg import cg
 
 from .fit import SparseFitter, FitConfig
 from .templates import Template
 from . import astrometry
-from copy import deepcopy
 
-
-# 0. quick per-source S/N directly from the measurement image
-def estimate_snr(tmpl, weights):
-    sl = tmpl.slices_original
-    flux = np.sum(tmpl.data[tmpl.slices_cutout] * weights[sl])          # matched-filter sum
-    noise = np.sqrt(np.sum(weights[sl]))                                # inverse-variance weights
-    return flux / noise
 
 class GlobalAstroFitter(SparseFitter):
     """
@@ -42,27 +38,17 @@ class GlobalAstroFitter(SparseFitter):
     ):
 
         # ---------- flux part ----------
-        super().__init__(list(templates), image, weights)
-        self.config = config 
-        
-        self.n_flux = len(templates)
+        super().__init__(list(templates), image, weights, config)
+
         print('GlobalAstroFitter: templates in', len(templates))
-        self.templates = [tmpl for tmpl in self.templates if tmpl.id is not None]
-        self.n_flux = len(self.templates)  # update n_flux to match the templates
-        print('GlobalAstroFitter: templates which are flux tempaltes: ', len(templates))
-
-        for i, tmpl in enumerate(self.templates):
-            tmpl.is_flux = True
-            tmpl.pidx = i
-
-        if not config.fit_astrometry:
+        if not self.config.fit_astrometry:
+            print("WARNING: GlobalAstroFitter was created without astrometry enabled.")
             return      # nothing more to do
 
         # ---------- astrometry part ----------
         order = config.astrom_basis_order
-        K     = astrometry.n_terms(order)
         self.basis_order = order
-        self.n_alpha = K        # α_k  (β_k shares the same K)
+        self.n_alpha = astrometry.n_terms(order)   # α_k  (β_k shares the same K)
 
         # get estimate for the flux and errors to scale the gradients and keep only high S/N sources for astrometry
         if self.templates[0].flux != 0:
@@ -76,11 +62,10 @@ class GlobalAstroFitter(SparseFitter):
             good = (flux / rms) >= self.config.snr_thresh_astrom
         else:
             good = np.ones(self.n_flux, dtype=bool)
-
-        if not np.any(good):
-            good[:] = True
         
         print(f"GlobalAstroFitter: {self.n_flux} templates and {np.sum(good)} with S/N >= {self.config.snr_thresh_astrom} used for astrometry")
+        if not np.any(good): 
+            good[:] = True   # fall back
 
         # 1. per-object gradients
         gx_i, gy_i = astrometry.make_gradients(templates)
@@ -96,56 +81,51 @@ class GlobalAstroFitter(SparseFitter):
         # collapsing meaning that we trace their entrix in the sparse matrix and sum over 
         # all objects and fit for a global polynomial shift at each Chebyshev term
         # note we need to scale the gradients by the initial flux estimate
-        for k in range(K):
+        for k in range(self.n_alpha):
             for i in np.where(good)[0]:
                 f_est = flux[i]                     # per-object scale
 
                 gx_tile = deepcopy(gx_i[i])
                 gx_tile.data *= f_est * Φ[i, k]           # *** SCALE ***
                 gx_tile.is_flux = False
-                gx_tile.pidx = self.n_flux + k
+                gx_tile.col_idx = self.n_flux + k
                 self.templates.append(gx_tile)
-                self._big2small_col.append(self.n_flux + k)
+                self._big2small_col.append(gx_tile.col_idx)
 
                 gy_tile = deepcopy(gy_i[i])
                 gy_tile.data *= f_est * Φ[i, k]           # *** SCALE ***
                 gy_tile.is_flux = False
-                gy_tile.pidx = self.n_flux + K + k
+                gy_tile.col_idx = self.n_flux + self.n_alpha + k
                 self.templates.append(gy_tile)
-                self._big2small_col.append(self.n_flux + K + k)
+                self._big2small_col.append(gy_tile.col_idx)
 
 
     def _collapse(self):
-        A_big = self._ata.tocsr()
-        b_big = self._atb
+        """Sum columns that share the same compact parameter index."""
+        A_big, b_big = self._ata.tocsr(), self._atb
+        cols_full    = np.fromiter((t.col_idx for t in self.templates), int)
+        uniq, inv    = np.unique(cols_full, return_inverse=True)   # <— mapping
 
-        rows = np.arange(A_big.shape[0])
-        cols = np.fromiter((t.pidx for t in self.templates), dtype=int)
-
-        P = cols.max() + 1 if cols.size else 0
-
-        S = csr_matrix(
-            (np.ones_like(rows), (rows, cols)), shape=(A_big.shape[0], P)
-        )
+        S = csr_matrix((np.ones_like(inv), (np.arange(inv.size), inv)),
+                    shape=(inv.size, uniq.size))                # selector
 
         self._ata_comp = (S.T @ A_big @ S).tocsr()
-        self._atb_comp = (S.T @ b_big).ravel()
-
-        self.n_flux = int(sum(t.is_flux for t in self.templates))
+        self._atb_comp = (S.T @ b_big).ravel()          # 1-D
+        self._compact2full = uniq                  # keep for scatter-back
         
     # ------------------------------------------------------------
     # 3.  solve   # keep track of valid fluxes through ID, not n_flux
     # ------------------------------------------------------------
-    def solve(self, config: FitConfig | None = None):
+    def solve(self, 
+              config: FitConfig | None = None
+    ) -> Tuple[np.ndarray, np.ndarray, int]:
         cfg   = config or self.config
 
         # build big normal matrix once, this as a shift entry for every template
         _ = self.ata, self.atb          # triggers build_normal_matrix()
 
-        # compact it the first time we call solve(), summing over all objects
-        # and leaving only the chebyshev terms
-        if not hasattr(self, "_ata_comp"):
-            self._collapse()
+        # compact it leaving only the chebyshev terms
+        self._collapse()
 
         A = self._ata_comp.copy()
         b = self._atb_comp.copy()
@@ -155,12 +135,14 @@ class GlobalAstroFitter(SparseFitter):
             A = A + cfg.reg * eye(A.shape[0])
 
         if cfg.reg_astrom:
-            # build one dense 1-D vector, then convert to a diagonal sparse matrix
-            d = np.zeros(A.shape[0], dtype=float)
-            d[self.n_flux:] = cfg.reg_astrom     # only α_k , β_k rows/cols
-            A = A + diags(d, 0, format="csr")
+            # Parameters live in the *compact* space; map them back to their original
+            # labels (stored in ``self._compact2full``).  Anything whose original label
+            # is  ≥ n_flux  is a Chebyshev-shift coefficient.
+            mask_non_flux = self._compact2full >= self.n_flux        # boolean array
+            r = np.zeros(A.shape[0], dtype=float)
+            r[mask_non_flux] = cfg.reg_astrom                        # α_k, β_k only
+            A = A + diags(r, 0, format="csr")
 
-        # should we whiten SparseFitter too?
         # ------------------------------------------------------------------
         # symmetric column-and-row whitening  (A → D⁻¹ A D⁻¹,  b → D⁻¹ b)
         # ------------------------------------------------------------------
@@ -171,49 +153,43 @@ class GlobalAstroFitter(SparseFitter):
         A_w = Dinv @ A @ Dinv                   # still sparse, still SPD
         b_w = Dinv @ b
         
-        # preconditioner
-        if "M" not in cfg.cg_kwargs:
-            ilu = spilu(A_w, drop_tol=1e-5, fill_factor=10)
-            M = LinearOperator(A_w.shape, ilu.solve)
-            print('preconditioner:', M.shape)
+        # if "M" not in cfg.cg_kwargs:
+        #     ilu = spilu(A_w, drop_tol=1e-5, fill_factor=10)
+        #     M = LinearOperator(A_w.shape, ilu.solve)
+        #     print('preconditioner:', M.shape)
 
         y, info = cg(A_w, b_w, **cfg.cg_kwargs) # solve whitened system
-        x = Dinv @ y                            # un-whiten
+        self.x = y
 
-        # fit is done, junk the astrometry templates 
-#        self.n_flux = np.sum([1 for tmpl in self.templates if tmpl.id is not None])
-        # update n_flux to match the templates
+        # ---------- expand back to the *full* parameter space -------------------
+        P_full     = self.n_flux + 2 * self.n_alpha        # N + 2K
+        x_full     = np.zeros(P_full, dtype=float)
+        e_full     = np.zeros(P_full, dtype=float)
+
+        x_full[self._compact2full] = y / d        # un-whiten + scatter
+        e_full[self._compact2full] = self._flux_errors(A_w) / d     # un-whiten errors ? 
 
         # positivity on fluxes only
         if cfg.positivity:
-            x[:self.n_flux] = np.maximum(0, x[:self.n_flux])
+            x_full[:self.n_flux] = np.maximum(0, x_full[:self.n_flux])
 
-        # keep the flux vector for caller-side inspection
-        self.x = x 
-        self.solution = x[:self.n_flux]
+        self.solution = x_full[:self.n_flux]             # fluxes, corresponds to original templates
+        self.solution_err = e_full[:self.n_flux]  # flux errors, corresponds to original templates
 
         # apply sub-pixel shifts so residual() uses updated templates
         if cfg.fit_astrometry:
-            K          = self.n_alpha
-            self.alpha = x[self.n_flux       : self.n_flux + K]
-            self.beta  = x[self.n_flux + K   : ]
+            self.alpha    = x_full[self.n_flux : self.n_flux + self.n_alpha]  # α_k  (size K)
+            self.beta     = x_full[self.n_flux + self.n_alpha : ]             # β_k  (size K)
             self._apply_shifts()             # <── one call, no duplication
         else:
             self.alpha = self.beta = None
 
+        # update the templates with the fitted fluxes, errors     
+        for tmpl, flux, err in zip(self._orig_templates, self.solution, self.solution_err):
+            tmpl.flux = flux 
+            tmpl.err = err
 
-        return self.solution, info
-
-
-    # ------------------------------------------------------------------ #
-    # override to return only the flux-component uncertainties
-    def predicted_errors(self):
-        errs = super().predicted_errors()
-        return errs[: self.n_flux]
-
-    def flux_errors(self):
-        errs = super().flux_errors()
-        return errs[: self.n_flux]
+        return self.solution, self.solution_err, info
 
     # ------------------------------------------------------------
     # helper – evaluate polynomial at any point
@@ -234,7 +210,7 @@ class GlobalAstroFitter(SparseFitter):
 
 
     # ------------------------------------------------------------
-    # private – apply the stored shifts to all *flux* templates
+    # private – apply the stored shifts to all *original flux* templates
     # ------------------------------------------------------------
     def _apply_shifts(self) -> None:
         """
@@ -244,7 +220,10 @@ class GlobalAstroFitter(SparseFitter):
         if self.alpha is None:
             return
 
-        for i, tmpl in enumerate(self.templates[: self.n_flux]):
+        # note: shift all templates in original list
+        # are also referenced by the solution templates list 
+        # so this can be fed into the next iteration
+        for i, tmpl in enumerate(self._orig_templates):
             x0, y0 = tmpl.input_position_original
             dx, dy = self.shift_at(x0, y0)
             if abs(dx) < 1e-3 and abs(dy) < 1e-3:

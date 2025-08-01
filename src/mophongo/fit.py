@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 import logging
 import numpy as np
-from scipy.sparse import lil_matrix, eye
+from scipy.sparse import lil_matrix, eye, diags, csr_matrix
+
 from scipy.sparse.linalg import cg, splu, spilu, LinearOperator
 from tqdm import tqdm
 
@@ -56,13 +57,22 @@ class SparseFitter:
     ) -> None:
         if weights is None:
             weights = np.ones_like(image)
-        self.templates = templates
+
+        self._orig_templates = templates  # keep original templates List object
+        self.templates = templates.copy() # work in copy for fitting, modifying 
+
+        self.n_flux = len(templates)
+        for i, tmpl in enumerate(self.templates):
+            tmpl.is_flux = True
+            tmpl.col_idx = i
+
         self.image = image
         self.weights = weights
         self.config = config or FitConfig()
         self._ata = None
         self._atb = None
         self.solution: np.ndarray | None = None
+
 
     @staticmethod
     def _intersection(
@@ -167,9 +177,8 @@ class SparseFitter:
         if self.solution is None:
             raise ValueError("Solve system first")
         model = np.zeros_like(self.image, dtype=float)
-        for coeff, tmpl in zip(self.solution, self.templates):
-            model[
-                tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
+        for coeff, tmpl in zip(self.solution, self._orig_templates):
+            model[tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
         return model
 
     @property
@@ -187,60 +196,85 @@ class SparseFitter:
     def solve(
         self,
         config: FitConfig | None = None,
-    ) -> Tuple[np.ndarray, int]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Solve for template fluxes using conjugate gradient."""
         cfg = config or self.config
-        ata = self.ata
-        atb = self.atb
-        if cfg.reg and cfg.reg > 0:
-            ata = ata + eye(ata.shape[0]) * cfg.reg
+        
+        # build big normal matrix once, this as a shift entry for every template
+        A, b = self.ata, self.atb          # triggers build_normal_matrix()
 
+        if cfg.reg and cfg.reg > 0:
+            A = A + eye(A.shape[0]) * cfg.reg
+
+        d = np.sqrt(A.diagonal())  
+        d[d == 0.0] = 1.0
+        Dinv = diags(1.0 / d, 0, format="csr")
+
+        A_w  = Dinv @ A @ Dinv
+        b_w  = Dinv @ b
+        
         # @@@ need to test
         # preconditioner
-        if "M" not in cfg.cg_kwargs:
-            ilu = spilu(ata, drop_tol=1e-5, fill_factor=10)
-            M = LinearOperator(ata.shape, ilu.solve)
-            print('preconditioner:', M.shape)
+        # if "M" not in cfg.cg_kwargs:
+        #     ilu = spilu(A_w, drop_tol=1e-5, fill_factor=10)
+        #     M = LinearOperator(ata.shape, ilu.solve)
+        #     print('preconditioner:', M.shape)
 
-        x, info = cg(ata, atb, **cfg.cg_kwargs)
+        # expand to full solution vector corresponding to _orig_templates
+        idx = [t.col_idx for t in self.templates]
+
+        y, info = cg(A_w, b_w, **cfg.cg_kwargs)
+        self.x = y
+
+        # n_flux is always the full input length of the templates
+        x_full     = np.zeros(self.n_flux, dtype=float)
+        e_full     = np.zeros(self.n_flux, dtype=float)
+
+        x_full[idx] = y / d                   # un-whiten + scatter
+        e_full[idx] = self._flux_errors(A_w) / d  # un-whiten errors
 
         if cfg.positivity:
-            x = np.where(x < 0, 0, x)
-        self.solution = x
+            x_full[:self.n_flux] = np.maximum(0, x_full[:self.n_flux])
 
-        for i, t in enumerate(
-                self.templates):  # Store the solution in each template
-            t.flux = self.solution[i]
+        self.solution = x_full[:self.n_flux]      # fluxes, corresponds to original templates
+        self.solution_err = e_full[:self.n_flux]  # flux errors, corresponds to original templates
 
-        return x, info
+        # update the templates with the fitted fluxes, errors     
+        for tmpl, flux, err in zip(self._orig_templates, self.solution, self.solution_err):
+            tmpl.flux = flux 
+            tmpl.err = err
+
+        return self.solution, self.solution_err, info
 
     def residual(self) -> np.ndarray:
         return self.image - self.model_image()
 
-    def quick_flux(self) -> np.ndarray:
+    def quick_flux(self, templates: Optional[List[Template]] = None) -> np.ndarray:
         """Return quick flux estimates based on template data and image."""
-        return Templates.quick_flux(self.templates, self.image)
+        if templates is None:
+            templates = self._orig_templates
+        return Templates.quick_flux(templates, self.image)
         
-    def predicted_errors(self) -> np.ndarray:
+
+    def predicted_errors(self, templates: Optional[List[Template]] = None) -> np.ndarray:
         """Return per-source uncertainties ignoring template covariance."""
-        return Templates.predicted_errors(self.templates, self.weights)
+        if templates is None:
+            templates = self._orig_templates
+        return Templates.predicted_errors(templates, self.weights)
 
-
-    def flux_errors(self) -> np.ndarray:
+    def _flux_errors(self, A_csr: csr_matrix) -> np.ndarray:
         """Return 1-sigma uncertainties for the fitted fluxes."""
-        if self.solution is None:
-            raise ValueError("Solve system first")
-        ata = self.ata.tocsc()
         # make positive definite to avoid singularities
-        ata = ata + 1e-8 * eye(ata.shape[0], format="csc")
+        A = A_csr.tocsc()  # ensure CSC format for splu
+        A = A + 1e-8 * eye(A.shape[0], format="csc")
         try:
-            solver = splu(ata)
+            solver = splu(A)
         except RuntimeError:
             logger.warning(
-                "Normal matrix singular; using CG fallback for variances")
-            return self._cg_variances()
+                "flux_error: Normal matrix singular; using CG fallback for variances")
+            return self._cg_variances(A)
 
-        n = ata.shape[0]
+        n = A.shape[0]
         diag = np.empty(n, dtype=float)
         e = np.zeros(n, dtype=float)
         for i in range(n):
@@ -248,18 +282,16 @@ class SparseFitter:
             x = solver.solve(e)
             diag[i] = x[i]
             e[i] = 0.0
-            if i < len(self.templates): self.templates[i].err = np.sqrt(diag[i])
         return np.sqrt(diag)
 
-    def _cg_variances(self) -> np.ndarray:
+    def _cg_variances(self, A) -> np.ndarray:
         """Compute variances using conjugate gradient solves."""
-        ata = self.ata
-        n = ata.shape[0]
+        n = A.shape[0]
         diag = np.empty(n, dtype=float)
         e = np.zeros(n)
         for i in range(n):
             e[i] = 1.0
-            x, _ = cg(ata, e)
+            x, _ = cg(A, e)
             diag[i] = x[i]
             e[i] = 0.0
         return np.sqrt(diag)
@@ -274,6 +306,6 @@ class SparseFitter:
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Convenience method to solve for fluxes and return residuals."""
         fitter = cls(templates, image, weights, config)
-        fluxes, _ = fitter.solve()
+        fluxes, _, _ = fitter.solve()
         resid = fitter.residual()
         return fluxes, resid

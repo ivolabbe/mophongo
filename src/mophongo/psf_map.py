@@ -374,7 +374,8 @@ class PSFRegionMap:
             snap_tol=self.snap_tol,
             buffer_tol=self.buffer_tol,
             area_factor=self.area_factor,
-            footprints=None
+            footprints=None,
+            name = f"{self.name}" + (f" overlay with {other.name}" if isinstance(other, PSFRegionMap) else "")
         )
         new_map.tree = STRtree(new_map.regions.geometry.to_list())
         return new_map
@@ -454,6 +455,7 @@ class PSFRegionMap:
             fig = ax.figure
 
         self.regions.plot(column=column, ax=ax, edgecolor=edgecolor, cmap=cmap, **kwargs)
+        ax.set_title(self.name or "PSF Regions")
         ax.invert_xaxis()
         return fig, ax
 

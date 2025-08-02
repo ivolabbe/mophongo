@@ -38,7 +38,7 @@ def test_polynomial_astrometry_reduces_residual(tmp_path):
 
     fitter = SparseFitter(tmpls.templates, images[1], wht[1], FitConfig())
     fitter.build_normal_matrix()
-    flux, _ = fitter.solve()
+    flux, _, _ = fitter.solve()
     err = fitter.flux_errors()
     perr = fitter.predicted_errors()
     res = fitter.residual()

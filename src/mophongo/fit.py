@@ -313,17 +313,28 @@ class SparseFitter:
         return self.solution_err
                                                                                                                                                                                                                                                                                                                                                                                                                                                          
     def _flux_errors(self, A_csr: csr_matrix) -> np.ndarray:
-        """Return 1-sigma uncertainties for the fitted fluxes."""
+        """Return 1-sigma uncertainties for the fitted fluxes.
+
+        This computes the diagonal of ``A``\ :sup:`-1` using a SuperLU
+        factorization when possible and falls back to a Hutchinson
+        trace estimator otherwise.
+        """
         eps = 1e-8
         A = A_csr + eps * eye(A_csr.shape[0], format="csr")
-        try:  # Prefer sparse Cholesky if available
-            from sksparse.cholmod import cholesky
+        try:  # Prefer SuperLU factorization if available
+            from scipy.sparse.linalg import splu
 
-            factor = cholesky(A, beta=eps)
-            inv_diag = factor.inv().diagonal()
+            lu = splu(A.tocsc())
+            inv_diag = np.empty(A.shape[0], dtype=float)
+            e_i = np.zeros(A.shape[0], dtype=float)
+            for i in range(A.shape[0]):
+                e_i[:] = 0.0
+                e_i[i] = 1.0
+                x = lu.solve(e_i)
+                inv_diag[i] = x[i]
             return np.sqrt(inv_diag)
         except Exception as err:  # pragma: no cover - exercised in fallback
-            logger.warning("cholmod failed (%s); falling back to SLQ", err)
+            logger.warning("splu failed (%s); falling back to SLQ", err)
 
         # Hutchinson stochastic trace estimator
         k = 32

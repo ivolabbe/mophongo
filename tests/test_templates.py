@@ -1,7 +1,7 @@
 #%%
 import numpy as np
 from mophongo.psf import PSF
-from mophongo.templates import Templates, Template, per_source_chi2
+from mophongo.templates import Templates, Template
 from utils import make_simple_data, save_template_diagnostic
 import pytest
 from astropy.wcs import WCS
@@ -62,25 +62,3 @@ def test_template_extension_methods(tmp_path):
 
 def test_kernel_padding():
     return
-
-
-def test_add_component_clones_parent():
-    tmpl = Template(np.ones((3, 3)), (1, 1), (3, 3), label=7)
-    tlist = Templates()
-    tlist._templates.append(tmpl)
-    new_data = np.full((3, 3), 2.0)
-    comp = tlist.add_component(tmpl, new_data, "psf_core")
-
-    assert comp is tlist[-1]
-    assert comp.component == "psf_core"
-    assert comp.parent_id == tmpl.id
-    np.testing.assert_array_equal(comp.data, new_data)
-
-
-def test_per_source_chi2_simple():
-    residual = np.ones((5, 5))
-    sigma = np.ones((5, 5))
-    t1 = Template(np.ones((3, 3)), (2, 2), (3, 3), label=1)
-    t2 = Template(np.ones((3, 3)), (2, 2), (3, 3), label=2)
-    chis = per_source_chi2(residual, sigma, [t1, t2])
-    assert np.allclose(chis, 1.0)

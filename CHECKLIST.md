@@ -96,3 +96,4 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
   - [ ] split off real data as submodule?
   - [ ] other code review, misc refactoring, consolidation
   - [ ] remove unused modules, orphan code
+- [ ] support multi-component templates based on per-source \(\chi^2\)

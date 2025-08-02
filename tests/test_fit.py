@@ -23,7 +23,7 @@ def test_flux_recovery(tmp_path):
 
     fitter = SparseFitter(tmpls.templates, images[1], 1.0 / rms[1] ** 2, FitConfig())
     fitter.build_normal_matrix()
-    x, info = fitter.solve()
+    x, err, info = fitter.solve()
 
     assert info == 0
 #    assert np.allclose(x, np.array(catalog['flux_true']), rtol=1e-1)
@@ -75,11 +75,13 @@ def test_flux_errors_regularized():
     t1 = Template(img, (1, 1), (3, 3))
     t1.data[:] = tmpl_data
     t2 = Template(img, (1, 1), (3, 3))
-    t2.data[:] = tmpl_data
+    tmpl_data2 = tmpl_data.copy()
+    tmpl_data2[0, 0] = 0.1  # break perfect degeneracy
+    t2.data[:] = tmpl_data2
 
     fitter = SparseFitter([t1, t2], img, weights, FitConfig())
     fitter.build_normal_matrix()
-    fitter.solve()
+    _, _, _ = fitter.solve()
     err = fitter.flux_errors()
 
     assert err.size == 2

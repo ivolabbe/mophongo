@@ -137,8 +137,7 @@ def run(
             print( f"Running iteration {j+1} of {config.fit_astrometry_niter}")
 
             fitter = fitter_cls(templates, images[idx], weights_i, config)
-            fluxes, info = fitter.solve()
-            errs = fitter.flux_errors()
+            fluxes, errs, info = fitter.solve()
             print(f'Pipeline (solve) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB')
             res = fitter.residual()
             print(f'Pipeline (residual) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB')
@@ -166,8 +165,7 @@ def run(
                 # check if this call is ok, only makes sense if we rebuild the normal matrix
                 # TODO: track this from the templates is_dirty flag
                 fitter._ata = None  # @@@ do this properly
-                fluxes, info = fitter.solve()
-                errs = fitter.flux_errors()
+                fluxes, errs, info = fitter.solve()   
 
         err_pred = fitter.predicted_errors()
  

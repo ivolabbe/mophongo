@@ -50,12 +50,14 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
   - [x] Added polynomial-based local astrometric correction
   - [x] Added safeguards against singular normal matrices
   - [x] Added Gaussian-process-based local astrometric correction
+  - [x] Added ILU preconditioner and Cholesky-based flux error estimation with Hutchinson fallback
 - [x] **Pipeline orchestrator** (`src/mophongo/pipeline.py`)
   - [x] `run` to tie all pieces together
   - [x] don't implement source detection just yet: assume detection + segmentation image + catalog are available.
   - [x] Load or receive arrays for the images, catalog, and PSFs.
   - [x] Call template builder, construct sparse system, solve for fluxes, and return a table of measurements plus residuals.
   - [x] Propagate RMS images as weights to compute flux uncertainties
+  - [x] Enabled template deduplication after extraction
 - [x] **Simulation utilities for tests** (`tests/utils.py`)
   - [x] Create fake catalogs and images with Moffat sources of varying size and ellipticity. positions are ra,dec
   - [x] Produce matching high‑res and low‑res PSFs, with low res PSF at least 5x high res PSF.

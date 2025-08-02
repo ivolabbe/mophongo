@@ -91,34 +91,18 @@ class SparseFitter:
             return None
         return y0, y1, x0, x1
 
-    @staticmethod
-    def _bbox_to_slices(
-            bbox: Tuple[int, int, int, int]) -> Tuple[slice, slice]:
-        """Convert integer bounding box to slices for array indexing."""
-        y0, y1, x0, x1 = bbox
-        return slice(y0, y1), slice(x0, x1)
-
-    @staticmethod
-    def _slice_intersection(
-            a: tuple[slice, slice],
-            b: tuple[slice, slice]) -> tuple[slice, slice] | None:
-        y0 = max(a[0].start, b[0].start)
-        y1 = min(a[0].stop, b[0].stop)
-        x0 = max(a[1].start, b[1].start)
-        x1 = min(a[1].stop, b[1].stop)
-        if y0 >= y1 or x0 >= x1:
-            return None
-        return slice(y0, y1), slice(x0, x1)
-
     def _weighted_norm(self, tmpl: Template) -> float:
         """Return the weighted L2 norm of ``tmpl``.
 
         The norm is computed by summing ``data * weight * data`` over the
         template support in the image space.
         """
-        sl = tmpl.slices_original
-        data = tmpl.data[tmpl.slices_cutout]
-        w = self.weights[sl]
+        y0, y1, x0, x1 = tmpl.bbox
+        (yc0, yc1), (xc0, xc1) = tmpl.bbox_cutout
+        yc0, yc1 = int(yc0), int(yc1) + 1
+        xc0, xc1 = int(xc0), int(xc1) + 1
+        data = tmpl.data[yc0:yc1, xc0:xc1]
+        w = self.weights[y0:y1, x0:x1]
         return float(np.sum(data * w * data))
 
     def build_normal_matrix(self) -> None:
@@ -152,10 +136,15 @@ class SparseFitter:
                 tqdm(self.templates, total=n, desc="Building Normal matrix")):
             if duplicate[i]:
                 continue
-            sl_i = tmpl_i.slices_original
-            data_i = tmpl_i.data[tmpl_i.slices_cutout]
-            w_i = self.weights[sl_i]
-            img_i = self.image[sl_i]
+            bbox_i = tmpl_i.bbox
+            y0_i, y1_i, x0_i, x1_i = bbox_i
+            (yc0_i, yc1_i), (xc0_i, xc1_i) = tmpl_i.bbox_cutout
+            yc0_i, yc1_i = int(yc0_i), int(yc1_i) + 1
+            xc0_i, xc1_i = int(xc0_i), int(xc1_i) + 1
+            start_y_i, start_x_i = yc0_i, xc0_i
+            data_i = tmpl_i.data[yc0_i:yc1_i, xc0_i:xc1_i]
+            w_i = self.weights[y0_i:y1_i, x0_i:x1_i]
+            img_i = self.image[y0_i:y1_i, x0_i:x1_i]
             atb[i] = np.sum(data_i * w_i * img_i)
             ata[i, i] = norms[i]
 
@@ -163,37 +152,22 @@ class SparseFitter:
                 if duplicate[j]:
                     continue
                 tmpl_j = self.templates[j]
-                inter = self._slice_intersection(sl_i, tmpl_j.slices_original)
+                bbox_j = tmpl_j.bbox
+                inter = self._intersection(bbox_i, bbox_j)
                 if inter is None:
                     continue
-                w = self.weights[inter]
+                y0, y1, x0, x1 = inter
+                w = self.weights[y0:y1, x0:x1]
+                (yc0_j, yc1_j), (xc0_j, xc1_j) = tmpl_j.bbox_cutout
+                yc0_j = int(yc0_j)
+                xc0_j = int(xc0_j)
                 sl_i_local = (
-                    slice(
-                        inter[0].start - sl_i[0].start +
-                        tmpl_i.slices_cutout[0].start,
-                        inter[0].stop - sl_i[0].start +
-                        tmpl_i.slices_cutout[0].start,
-                    ),
-                    slice(
-                        inter[1].start - sl_i[1].start +
-                        tmpl_i.slices_cutout[1].start,
-                        inter[1].stop - sl_i[1].start +
-                        tmpl_i.slices_cutout[1].start,
-                    ),
+                    slice(start_y_i + y0 - y0_i, start_y_i + y1 - y0_i),
+                    slice(start_x_i + x0 - x0_i, start_x_i + x1 - x0_i),
                 )
                 sl_j_local = (
-                    slice(
-                        inter[0].start - tmpl_j.slices_original[0].start +
-                        tmpl_j.slices_cutout[0].start,
-                        inter[0].stop - tmpl_j.slices_original[0].start +
-                        tmpl_j.slices_cutout[0].start,
-                    ),
-                    slice(
-                        inter[1].start - tmpl_j.slices_original[1].start +
-                        tmpl_j.slices_cutout[1].start,
-                        inter[1].stop - tmpl_j.slices_original[1].start +
-                        tmpl_j.slices_cutout[1].start,
-                    ),
+                    slice(yc0_j + y0 - bbox_j[0], yc0_j + y1 - bbox_j[0]),
+                    slice(xc0_j + x0 - bbox_j[2], xc0_j + x1 - bbox_j[2]),
                 )
                 arr_i = tmpl_i.data[sl_i_local]
                 arr_j = tmpl_j.data[sl_j_local]
@@ -218,7 +192,11 @@ class SparseFitter:
             raise ValueError("Solve system first")
         model = np.zeros_like(self.image, dtype=float)
         for coeff, tmpl in zip(self.solution, self._orig_templates):
-            model[tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
+            y0, y1, x0, x1 = tmpl.bbox
+            (yc0, yc1), (xc0, xc1) = tmpl.bbox_cutout
+            yc0, yc1 = int(yc0), int(yc1) + 1
+            xc0, xc1 = int(xc0), int(xc1) + 1
+            model[y0:y1, x0:x1] += coeff * tmpl.data[yc0:yc1, xc0:xc1]
         return model
 
     @property

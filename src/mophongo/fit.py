@@ -197,6 +197,7 @@ class SparseFitter:
                         inter[1].stop - tmpl_j.slices_original[1].start +
                         tmpl_j.slices_cutout[1].start),
                 )
+# do we want to cull here ? or is that done in the fitting? 
                 val = np.sum(tmpl_i.data[sl_i_local] *
                              tmpl_j.data[sl_j_local] * w)
                 if val != 0.0:
@@ -314,7 +315,6 @@ class SparseFitter:
                                                                                                                                                                                                                                                                                                                                                                                                                                                          
     def _flux_errors(self, A_csr: csr_matrix) -> np.ndarray:
         """Return 1-sigma uncertainties for the fitted fluxes.
-
         This computes the diagonal of ``A``\ :sup:`-1` using a SuperLU
         factorization when possible and falls back to a Hutchinson
         trace estimator otherwise.

@@ -66,6 +66,36 @@ def test_zero_weight_template_dropped():
     assert len(fitter.templates) == 1
 
 
+def test_nonoverlapping_templates_not_deduplicated():
+    img = np.zeros((10, 10))
+    weights = np.ones_like(img)
+
+    t1 = Template(img, (2, 2), (3, 3))
+    t1.data[:] = 1.0
+    t2 = Template(img, (7, 7), (3, 3))
+    t2.data[:] = 1.0
+
+    fitter = SparseFitter([t1, t2], img, weights, FitConfig())
+    fitter.build_normal_matrix()
+
+    assert len(fitter.templates) == 2
+
+
+def test_overlapping_duplicate_templates_dropped():
+    img = np.zeros((10, 10))
+    weights = np.ones_like(img)
+
+    t1 = Template(img, (2, 2), (3, 3))
+    t1.data[:] = 1.0
+    t2 = Template(img, (2, 2), (3, 3))
+    t2.data[:] = 1.0
+
+    fitter = SparseFitter([t1, t2], img, weights, FitConfig())
+    fitter.build_normal_matrix()
+
+    assert len(fitter.templates) == 1
+
+
 def test_flux_errors_regularized():
     img = np.zeros((3, 3))
     weights = np.ones_like(img)

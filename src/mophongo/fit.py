@@ -110,15 +110,21 @@ class SparseFitter:
             return None
         return slice(y0, y1), slice(x0, x1)
 
+    def _weighted_norm(self, tmpl: Template) -> float:
+        """Return the weighted L2 norm of ``tmpl``.
+
+        The norm is computed by summing ``data * weight * data`` over the
+        template support in the image space.
+        """
+        sl = tmpl.slices_original
+        data = tmpl.data[tmpl.slices_cutout]
+        w = self.weights[sl]
+        return float(np.sum(data * w * data))
+
     def build_normal_matrix(self) -> None:
         """Construct normal matrix using :class:`Template` objects."""
         # Compute weighted norms for all templates first
-        norms_all: list[float] = []
-        for tmpl in self.templates:
-            sl = tmpl.slices_original
-            data = tmpl.data[tmpl.slices_cutout]
-            w = self.weights[sl]
-            norms_all.append(float(np.sum(data * w * data)))
+        norms_all = [self._weighted_norm(t) for t in self.templates]
 
         tol = 0.0
 
@@ -136,31 +142,16 @@ class SparseFitter:
             valid.append(tmpl)
             norms.append(norm)
 
-        # Screen for highly correlated templates (duplicates)
-        keep: list[int] = []
-        data_arrays = [t.data[t.slices_cutout].ravel() for t in valid]
-        for i, (arr_i, norm_i) in enumerate(zip(data_arrays, norms)):
-            duplicate = False
-            for j in keep:
-                arr_j = data_arrays[j]
-                if arr_j.size != arr_i.size:
-                    continue
-                cos_ij = float(np.dot(arr_i, arr_j) / (norm_i * norms[j]))
-                if cos_ij > 0.999:
-                    duplicate = True
-                    logger.warning("Dropping nearly duplicate template %d", i)
-                    break
-            if not duplicate:
-                keep.append(i)
-
-        self.templates = [valid[i] for i in keep]
-        norms = [norms[i] for i in keep]
+        self.templates = valid
 
         n = len(self.templates)
+        duplicate = [False] * n
         ata = lil_matrix((n, n))
         atb = np.zeros(n)
         for i, tmpl_i in enumerate(
                 tqdm(self.templates, total=n, desc="Building Normal matrix")):
+            if duplicate[i]:
+                continue
             sl_i = tmpl_i.slices_original
             data_i = tmpl_i.data[tmpl_i.slices_cutout]
             w_i = self.weights[sl_i]
@@ -169,42 +160,58 @@ class SparseFitter:
             ata[i, i] = norms[i]
 
             for j in range(i + 1, n):
+                if duplicate[j]:
+                    continue
                 tmpl_j = self.templates[j]
-                inter = self._slice_intersection(tmpl_i.slices_original,
-                                                 tmpl_j.slices_original)
+                inter = self._slice_intersection(sl_i, tmpl_j.slices_original)
                 if inter is None:
                     continue
                 w = self.weights[inter]
                 sl_i_local = (
                     slice(
                         inter[0].start - sl_i[0].start +
-                        tmpl_i.slices_cutout[0].start, inter[0].stop -
-                        sl_i[0].start + tmpl_i.slices_cutout[0].start),
+                        tmpl_i.slices_cutout[0].start,
+                        inter[0].stop - sl_i[0].start +
+                        tmpl_i.slices_cutout[0].start,
+                    ),
                     slice(
                         inter[1].start - sl_i[1].start +
-                        tmpl_i.slices_cutout[1].start, inter[1].stop -
-                        sl_i[1].start + tmpl_i.slices_cutout[1].start),
+                        tmpl_i.slices_cutout[1].start,
+                        inter[1].stop - sl_i[1].start +
+                        tmpl_i.slices_cutout[1].start,
+                    ),
                 )
                 sl_j_local = (
                     slice(
                         inter[0].start - tmpl_j.slices_original[0].start +
                         tmpl_j.slices_cutout[0].start,
                         inter[0].stop - tmpl_j.slices_original[0].start +
-                        tmpl_j.slices_cutout[0].start),
+                        tmpl_j.slices_cutout[0].start,
+                    ),
                     slice(
                         inter[1].start - tmpl_j.slices_original[1].start +
                         tmpl_j.slices_cutout[1].start,
                         inter[1].stop - tmpl_j.slices_original[1].start +
-                        tmpl_j.slices_cutout[1].start),
+                        tmpl_j.slices_cutout[1].start,
+                    ),
                 )
-                val = np.sum(tmpl_i.data[sl_i_local] *
-                             tmpl_j.data[sl_j_local] * w)
-                if val != 0.0:
-                    ata[i, j] = val
-                    ata[j, i] = val
+                arr_i = tmpl_i.data[sl_i_local]
+                arr_j = tmpl_j.data[sl_j_local]
+                val = np.sum(arr_i * arr_j * w)
+                if val == 0.0:
+                    continue
+                cos_ij = val / np.sqrt(norms[i] * norms[j])
+                if cos_ij > 0.999:
+                    duplicate[j] = True
+                    logger.warning("Dropping nearly duplicate template %d", j)
+                    continue
+                ata[i, j] = val
+                ata[j, i] = val
 
-        self._ata = ata.tocsr()
-        self._atb = atb
+        keep = [k for k, dup in enumerate(duplicate) if not dup]
+        self.templates = [self.templates[k] for k in keep]
+        self._ata = ata.tocsr()[keep][:, keep]
+        self._atb = atb[keep]
 
     def model_image(self) -> np.ndarray:
         if self.solution is None:

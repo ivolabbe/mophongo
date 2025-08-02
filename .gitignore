@@ -6,3 +6,4 @@ data/*
 !data/PSF/
 !data/PSF/*OS4_GRID25*
 !data/PSF/*OS4_GRID9*
+examples/*fits

@@ -24,7 +24,7 @@ def test_global_astro_fitter_with_correct_template_count():
     actual_template_count = len(tmpls.templates)
     
     config = FitConfig(fit_astrometry=True, astrom_basis_order=2)
-    fitter = GlobalAstroFitter(tmpls.templates, images[1], wht[1], segmap, config)
+    fitter = GlobalAstroFitter(tmpls.templates, images[1], wht[1], config)
     
     # Check that astrometry parameters are set up correctly
     expected_n_alpha = (config.astrom_basis_order + 1) * (config.astrom_basis_order + 2) // 2
@@ -45,13 +45,13 @@ def test_global_astro_fitter_n_flux_attribute():
     
     # With astrometry enabled
     config_astro = FitConfig(fit_astrometry=True, astrom_basis_order=1)
-    fitter_astro = GlobalAstroFitter(tmpls.templates, images[1], wht[1], segmap, config_astro)
+    fitter_astro = GlobalAstroFitter(tmpls.templates, images[1], wht[1], config_astro)
     assert hasattr(fitter_astro, 'n_flux')
     assert fitter_astro.n_flux == len(tmpls.templates)
     
     # Without astrometry enabled
     config_no_astro = FitConfig(fit_astrometry=False)
-    fitter_no_astro = GlobalAstroFitter(tmpls.templates, images[1], wht[1], segmap, config_no_astro)
+    fitter_no_astro = GlobalAstroFitter(tmpls.templates, images[1], wht[1], config_no_astro)
     # n_flux might not be set when astrometry is disabled
     if hasattr(fitter_no_astro, 'n_flux'):
         assert fitter_no_astro.n_flux == len(tmpls.templates)
@@ -65,7 +65,7 @@ def test_global_astro_fitter_repeated_build(tmp_path):
     tmpls = Templates.from_image(images[0], segmap, positions, kernel=None)
 
     config = FitConfig(fit_astrometry=True, astrom_basis_order=1)
-    fitter = GlobalAstroFitter(tmpls.templates, images[1], wht[1], segmap, config)
+    fitter = GlobalAstroFitter(tmpls.templates, images[1], wht[1], config)
 
     # First solve builds the normal matrix
     fitter.solve()
@@ -105,13 +105,13 @@ def test_solve_return_shapes_with_actual_templates(tmp_path):
     
     sf_cfg  = FitConfig(fit_astrometry=False,reg=1e-4)     # <- no α/β any more
     fitter0 = SparseFitter(tmpls.templates, images[1], wht[1], sf_cfg)
-    solution0, info0 = fitter0.solve()
+    solution0, err0, info0 = fitter0.solve()
     res0 = fitter0.residual()
 
 #    config = FitConfig(fit_astrometry=True, astrom_basis_order=1, reg_astrom=1e-3)
     config = FitConfig(fit_astrometry=True, astrom_basis_order=1, reg_astrom=1e-4, snr_thresh_astrom=10.0)
     fitter = GlobalAstroFitter(tmpls.templates, images[1], wht[1], config)
-    solution1, info = fitter.solve()
+    solution1, err1, info = fitter.solve()
     res1 = fitter.residual()
     
     i=2
@@ -123,7 +123,7 @@ def test_solve_return_shapes_with_actual_templates(tmp_path):
 
     # 2ms / source 
     fitter2 = GlobalAstroFitter(tmpls.templates, images[1], wht[1], config)
-    solution2, info2 = fitter2.solve()
+    solution2, err2, info2 = fitter2.solve()
     res2 = fitter2.residual()
 
 # 864.55753 331.42455 -> 864.66969 331.87318   444 to 770 fraction of pixel shift

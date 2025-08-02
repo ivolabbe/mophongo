@@ -43,6 +43,9 @@ class FitConfig:
     reg_astrom: float = 1e-4
     snr_thresh_astrom: float = 10.0   # 0 → keep all sources (current behaviour)
     astrom_model: str = "polynomial"  # 'polynomial' or 'gp'
+    multi_tmpl_chi2_thresh: float = 5.0
+    multi_tmpl_psf_core: bool = True
+    multi_tmpl_colour: bool = True
 
 
 class SparseFitter:
@@ -244,10 +247,16 @@ class SparseFitter:
             tmpl.flux = flux 
             tmpl.err = err
 
-        return self.solution, self.solution_err, info
+        return self.solution, info
 
     def residual(self) -> np.ndarray:
         return self.image - self.model_image()
+
+    def flux_errors(self) -> np.ndarray:
+        """Return 1σ uncertainties on the fitted fluxes."""
+        if self.solution_err is None:
+            raise ValueError("Call solve() before requesting flux errors")
+        return self.solution_err
 
     def quick_flux(self, templates: Optional[List[Template]] = None) -> np.ndarray:
         """Return quick flux estimates based on template data and image."""

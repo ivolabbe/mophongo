@@ -1,5 +1,7 @@
 from dataclasses import dataclass
-from typing import Iterable, Iterator, List, Tuple
+from typing import Iterable, Iterator, List, Tuple, Sequence
+from collections import defaultdict
+from copy import deepcopy
 
 import logging
 import numpy as np
@@ -35,6 +37,9 @@ class Template(Cutout2D):
         position: tuple[float, float],
         size: tuple[int, int],
         label: int | None = None,
+        *,
+        component: str = "main",
+        parent_id: int | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -50,6 +55,8 @@ class Template(Cutout2D):
         self.shape_input = data.shape
         # record shift from original position here
         self.id = label
+        self.parent_id = parent_id
+        self.component = component
         self.flux = 0.0
         self.err = 0.0
         self.shift = np.array([0.0, 0.0], dtype=float)
@@ -108,6 +115,38 @@ class Templates:
 
     def __iter__(self) -> Iterator[Template]:
         return iter(self._templates)
+
+    def add_component(
+        self,
+        parent: Template,
+        data: np.ndarray,
+        component: str,
+        **kwargs,
+    ) -> Template:
+        """Append a new component template cloned from ``parent``.
+
+        Parameters
+        ----------
+        parent
+            Template providing spatial metadata.
+        data
+            Pixel data for the new component.
+        component
+            Descriptive name for the component (e.g. ``"psf_core"``).
+
+        Returns
+        -------
+        Template
+            The newly created template which is also stored internally.
+        """
+
+        t = deepcopy(parent)
+        t.data = data
+        t.component = component
+        t.parent_id = parent.parent_id or parent.id
+        self._templates.append(t)
+        return t
+
 
     @classmethod
     def from_image(
@@ -286,6 +325,7 @@ class Templates:
         else:
             return self._templates
 
+
     def extract_templates(
         self,
         hires_image: np.ndarray,
@@ -385,3 +425,20 @@ class Templates:
             return new_templates
         else:
             return self._templates
+
+def per_source_chi2(
+    residual: np.ndarray,
+    sigma: np.ndarray,
+    templates: Sequence[Template],
+) -> np.ndarray:
+    """Compute reduced chi^2 for each source."""
+
+    src_ids = [t.parent_id if t.parent_id is not None else t.id for t in templates]
+    chi2 = defaultdict(float)
+    nn = defaultdict(int)
+    for tmpl, sid in zip(templates, src_ids):
+        sl = tmpl.slices_original
+        res = residual[sl] / sigma[sl]
+        chi2[sid] += float(np.sum(res**2))
+        nn[sid] += res.size
+    return np.array([chi2[i] / nn[i] if nn[i] else np.nan for i in src_ids], dtype=float)

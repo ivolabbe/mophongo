@@ -34,11 +34,17 @@ class GlobalAstroFitter(SparseFitter):
         templates: list[Template],
         image: np.ndarray,
         weights: np.ndarray | None,
-        config: FitConfig 
+        segmap_or_config: np.ndarray | FitConfig | None = None,
+        config: FitConfig | None = None
     ):
-
+        if isinstance(segmap_or_config, FitConfig) and config is None:
+            cfg = segmap_or_config
+            segmap = None
+        else:
+            segmap = segmap_or_config
+            cfg = config or FitConfig()
         # ---------- flux part ----------
-        super().__init__(list(templates), image, weights, config)
+        super().__init__(list(templates), image, weights, cfg)
 
         print('GlobalAstroFitter: templates in', len(templates))
         if not self.config.fit_astrometry:
@@ -46,7 +52,7 @@ class GlobalAstroFitter(SparseFitter):
             return      # nothing more to do
 
         # ---------- astrometry part ----------
-        order = config.astrom_basis_order
+        order = cfg.astrom_basis_order
         self.basis_order = order
         self.n_alpha = astrometry.n_terms(order)   # α_k  (β_k shares the same K)
 
@@ -116,9 +122,10 @@ class GlobalAstroFitter(SparseFitter):
     # ------------------------------------------------------------
     # 3.  solve   # keep track of valid fluxes through ID, not n_flux
     # ------------------------------------------------------------
-    def solve(self, 
-              config: FitConfig | None = None
-    ) -> Tuple[np.ndarray, np.ndarray, int]:
+    def solve(
+        self,
+        config: FitConfig | None = None,
+    ) -> Tuple[np.ndarray, int]:
         cfg   = config or self.config
 
         # build big normal matrix once, this as a shift entry for every template
@@ -189,7 +196,7 @@ class GlobalAstroFitter(SparseFitter):
             tmpl.flux = flux 
             tmpl.err = err
 
-        return self.solution, self.solution_err, info
+        return self.solution, info
 
     # ------------------------------------------------------------
     # helper – evaluate polynomial at any point

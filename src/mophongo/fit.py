@@ -7,7 +7,7 @@ import logging
 import numpy as np
 from scipy.sparse import lil_matrix, eye, diags, csr_matrix
 
-from scipy.sparse.linalg import cg, splu, spilu, LinearOperator
+from scipy.sparse.linalg import cg, spilu, LinearOperator
 from tqdm import tqdm
 
 from .templates import Template, Templates
@@ -33,9 +33,14 @@ class FitConfig:
     """Configuration options for :class:`SparseFitter`."""
 
     positivity: bool = False
-    reg: float = 1e-8
+    # ``reg`` is interpreted as an absolute value when > 0. When set to 0 the
+    # fitter will compute a default regularisation strength based on the median
+    # of the normal matrix diagonal.
+    reg: float = 0.0
     bad_value: float = np.nan
-    cg_kwargs: Dict[str, Any] = field(default_factory=lambda: {'M':None,"maxiter": 500, "atol": 1e-8})
+    cg_kwargs: Dict[str, Any] = field(
+        default_factory=lambda: {"M": None, "maxiter": 500, "atol": 1e-6}
+    )
     fit_astrometry: bool = False
     fit_astrometry_niter: int = 2     # Two passes for astrometry fitting
     astrom_basis_order: int = 1
@@ -107,21 +112,47 @@ class SparseFitter:
 
     def build_normal_matrix(self) -> None:
         """Construct normal matrix using :class:`Template` objects."""
-        # Drop templates that have zero weighted power
-        valid: list[Template] = []
-        norms: list[float] = []
+        # Compute weighted norms for all templates first
+        norms_all: list[float] = []
         for tmpl in self.templates:
             sl = tmpl.slices_original
             data = tmpl.data[tmpl.slices_cutout]
             w = self.weights[sl]
-            norm = float(np.sum(data * w * data))
-            if norm == 0:
-#                logger.warning("Dropping template with zero weight")
-                continue
-            norms.append(norm)
-            valid.append(tmpl)
+            norms_all.append(float(np.sum(data * w * data)))
 
-        self.templates = valid
+        tol = 0.0
+        if norms_all:
+            tol = 1e-12 * max(norms_all)
+
+        # Prune templates with near-zero norm
+        valid: list[Template] = []
+        norms: list[float] = []
+        for tmpl, norm in zip(self.templates, norms_all):
+            if norm < tol:
+                logger.warning("Dropping template with low norm %.2e", norm)
+                continue
+            valid.append(tmpl)
+            norms.append(norm)
+
+        # Screen for highly correlated templates (duplicates)
+        keep: list[int] = []
+        data_arrays = [t.data[t.slices_cutout].ravel() for t in valid]
+        for i, (arr_i, norm_i) in enumerate(zip(data_arrays, norms)):
+            duplicate = False
+            for j in keep:
+                arr_j = data_arrays[j]
+                if arr_j.size != arr_i.size:
+                    continue
+                cos_ij = float(np.dot(arr_i, arr_j) / (norm_i * norms[j]))
+                if cos_ij > 0.999:
+                    duplicate = True
+                    logger.warning("Dropping nearly duplicate template %d", i)
+                    break
+            if not duplicate:
+                keep.append(i)
+
+        self.templates = [valid[i] for i in keep]
+        norms = [norms[i] for i in keep]
 
         n = len(self.templates)
         ata = lil_matrix((n, n))
@@ -203,27 +234,31 @@ class SparseFitter:
         # build big normal matrix once, this as a shift entry for every template
         A, b = self.ata, self.atb          # triggers build_normal_matrix()
 
-        if cfg.reg and cfg.reg > 0:
-            A = A + eye(A.shape[0]) * cfg.reg
+        reg = cfg.reg
+        if reg <= 0:
+            reg = 1e-4 * np.median(A.diagonal())
+        if reg > 0:
+            A = A + eye(A.shape[0], format="csr") * reg
 
-        d = np.sqrt(A.diagonal())  
-        d[d == 0.0] = 1.0
+        eps = reg or 1e-10
+        d = np.sqrt(np.maximum(A.diagonal(), eps))
         Dinv = diags(1.0 / d, 0, format="csr")
 
-        A_w  = Dinv @ A @ Dinv
-        b_w  = Dinv @ b
-        
-        # @@@ need to test
-        # preconditioner
-        # if "M" not in cfg.cg_kwargs:
-        #     ilu = spilu(A_w, drop_tol=1e-5, fill_factor=10)
-        #     M = LinearOperator(ata.shape, ilu.solve)
-        #     print('preconditioner:', M.shape)
+        A_w = Dinv @ A @ Dinv
+        b_w = Dinv @ b
+
+        cg_kwargs = dict(cfg.cg_kwargs)
+        if cg_kwargs.get("M") is None and A_w.nnz > 10 * A_w.shape[0]:
+            try:
+                ilu = spilu(A_w.tocsc(), drop_tol=1e-4, fill_factor=10)
+                cg_kwargs["M"] = LinearOperator(A_w.shape, ilu.solve)
+            except Exception as err:
+                logger.warning("ILU preconditioner failed: %s", err)
 
         # expand to full solution vector corresponding to _orig_templates
         idx = [t.col_idx for t in self.templates]
 
-        y, info = cg(A_w, b_w, **cfg.cg_kwargs)
+        y, info = cg(A_w, b_w, **cg_kwargs)
         self.x = y
 
         # n_flux is always the full input length of the templates
@@ -254,7 +289,7 @@ class SparseFitter:
         if templates is None:
             templates = self._orig_templates
         return Templates.quick_flux(templates, self.image)
-        
+
 
     def predicted_errors(self, templates: Optional[List[Template]] = None) -> np.ndarray:
         """Return per-source uncertainties ignoring template covariance."""
@@ -262,39 +297,35 @@ class SparseFitter:
             templates = self._orig_templates
         return Templates.predicted_errors(templates, self.weights)
 
+    def flux_errors(self) -> np.ndarray:
+        """Return the 1-sigma flux uncertainties from the last solution."""
+        if self.solution_err is None:
+            raise ValueError("Solve system first")
+        return self.solution_err
+
     def _flux_errors(self, A_csr: csr_matrix) -> np.ndarray:
         """Return 1-sigma uncertainties for the fitted fluxes."""
-        # make positive definite to avoid singularities
-        A = A_csr.tocsc()  # ensure CSC format for splu
-        A = A + 1e-8 * eye(A.shape[0], format="csc")
-        try:
-            solver = splu(A)
-        except RuntimeError:
-            logger.warning(
-                "flux_error: Normal matrix singular; using CG fallback for variances")
-            return self._cg_variances(A)
+        eps = 1e-8
+        A = A_csr + eps * eye(A_csr.shape[0], format="csr")
+        try:  # Prefer sparse Cholesky if available
+            from sksparse.cholmod import cholesky
 
-        n = A.shape[0]
-        diag = np.empty(n, dtype=float)
-        e = np.zeros(n, dtype=float)
-        for i in range(n):
-            e[i] = 1.0
-            x = solver.solve(e)
-            diag[i] = x[i]
-            e[i] = 0.0
-        return np.sqrt(diag)
+            factor = cholesky(A, beta=eps)
+            inv_diag = factor.inv().diagonal()
+            return np.sqrt(inv_diag)
+        except Exception as err:  # pragma: no cover - exercised in fallback
+            logger.warning("cholmod failed (%s); falling back to SLQ", err)
 
-    def _cg_variances(self, A) -> np.ndarray:
-        """Compute variances using conjugate gradient solves."""
-        n = A.shape[0]
-        diag = np.empty(n, dtype=float)
-        e = np.zeros(n)
-        for i in range(n):
-            e[i] = 1.0
-            x, _ = cg(A, e)
-            diag[i] = x[i]
-            e[i] = 0.0
-        return np.sqrt(diag)
+        # Hutchinson stochastic trace estimator
+        k = 32
+        rng = np.random.default_rng(0)
+        diag_est = np.zeros(A.shape[0])
+        for _ in range(k):
+            v = rng.choice([-1.0, 1.0], size=A.shape[0])
+            x, _ = cg(A, v, tol=1e-6)
+            diag_est += v * x
+        diag_est = np.abs(diag_est / k)
+        return np.sqrt(diag_est)
 
     @classmethod
     def fit(

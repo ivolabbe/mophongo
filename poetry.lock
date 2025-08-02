@@ -3669,6 +3669,21 @@ maintenance = ["conda-lock (==3.0.1)"]
 tests = ["matplotlib (>=3.5.0)", "mypy (>=1.15)", "numpydoc (>=1.2.0)", "pandas (>=1.4.0)", "polars (>=0.20.30)", "pooch (>=1.6.0)", "pyamg (>=4.2.1)", "pyarrow (>=12.0.0)", "pytest (>=7.1.2)", "pytest-cov (>=2.9.0)", "ruff (>=0.11.7)", "scikit-image (>=0.19.0)"]
 
 [[package]]
+name = "scikit-sparse"
+version = "0.4.16"
+description = "Scikit sparse matrix package"
+optional = false
+python-versions = ">=3.6"
+groups = ["main"]
+files = [
+    {file = "scikit_sparse-0.4.16.tar.gz", hash = "sha256:3baf49ac98ae8cc4357005af49a0df93a6a53f4e61708705da2942ea4fa61a56"},
+]
+
+[package.dependencies]
+numpy = ">=1.13.3"
+scipy = ">=0.19"
+
+[[package]]
 name = "scipy"
 version = "1.16.0"
 description = "Fundamental algorithms for scientific computing in Python"
@@ -4571,4 +4586,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.13"
-content-hash = "0261da0d8915cd4b52b79f9bd14550ffdc0348cf3db5ee883c604ad964155afd"
+content-hash = "7d6dceab6067279898c27f1200014c2ee62aee179c88db8a39c4070dac937fbf"

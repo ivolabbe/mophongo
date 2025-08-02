@@ -237,7 +237,7 @@ class GlobalAstroFitter(SparseFitter):
                 prefilter=True
             )
     
-            tmpl.shifted_position_original = (x0 - dx, y0 - dy)
+            tmpl.input_position_original = (x0 - dx, y0 - dy)
             
             # accumulate the shift and scale in the template, in case of iterative fitting
             tmpl.shift += [-dx, -dy]

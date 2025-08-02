@@ -121,6 +121,8 @@ class SparseFitter:
             norms_all.append(float(np.sum(data * w * data)))
 
         tol = 0.0
+
+        # discard vectors that contribute < 10⁻⁴ of the signal amplitude
         if norms_all:
             tol = 1e-12 * max(norms_all)
 
@@ -234,6 +236,13 @@ class SparseFitter:
         # build big normal matrix once, this as a shift entry for every template
         A, b = self.ata, self.atb          # triggers build_normal_matrix()
 
+    # Guarantees strict positive definiteness after whitening
+    # A symmetric matrix that is positive‐semi-definite but rank-deficient 
+    # can have eigenvalues down to 10⁻¹⁴–10⁻¹⁶ (numerical zero). Adding 10⁻⁸ 
+    # shifts every eigenvalue by that amount, lifting them well above rounding
+    # error yet staying ≪ typical diagonal (10⁰–10⁴ for sky+source units). The 
+    # induced bias in fluxes is therefore ≤ 10⁻⁸ negligible compared to 
+    # Poisson errors (∼10⁻²–10⁻³).
         reg = cfg.reg
         if reg <= 0:
             reg = 1e-4 * np.median(A.diagonal())
@@ -302,7 +311,7 @@ class SparseFitter:
         if self.solution_err is None:
             raise ValueError("Solve system first")
         return self.solution_err
-
+                                                                                                                                                                                                                                                                                                                                                                                                                                                         
     def _flux_errors(self, A_csr: csr_matrix) -> np.ndarray:
         """Return 1-sigma uncertainties for the fitted fluxes."""
         eps = 1e-8

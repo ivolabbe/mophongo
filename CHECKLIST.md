@@ -50,7 +50,7 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
   - [x] Added polynomial-based local astrometric correction
   - [x] Added safeguards against singular normal matrices
   - [x] Added Gaussian-process-based local astrometric correction
-  - [x] Added ILU preconditioner and Cholesky-based flux error estimation with Hutchinson fallback
+  - [x] Added ILU preconditioner and SuperLU-based flux error estimation with Hutchinson fallback
 - [x] **Pipeline orchestrator** (`src/mophongo/pipeline.py`)
   - [x] `run` to tie all pieces together
   - [x] don't implement source detection just yet: assume detection + segmentation image + catalog are available.

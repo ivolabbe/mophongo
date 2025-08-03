@@ -41,7 +41,7 @@ class GlobalAstroFitter(SparseFitter):
         super().__init__(list(templates), image, weights, config)
 
         print('GlobalAstroFitter: templates in', len(templates))
-        if not self.config.fit_astrometry:
+        if not self.config.fit_astrometry_niter > 0:
             print("WARNING: GlobalAstroFitter was created without astrometry enabled.")
             return      # nothing more to do
 
@@ -151,17 +151,17 @@ class GlobalAstroFitter(SparseFitter):
         A_w = Dinv @ A @ Dinv                   # still sparse, still SPD
         b_w = Dinv @ b
         
-        cg_kwargs = dict(cfg.cg_kwargs)
-        if cg_kwargs.get("M") is None and A_w.nnz > 10 * A_w.shape[0]:
-            try:
-                ilu = spilu(A_w.tocsc(), drop_tol=1e-4, fill_factor=10)
-                cg_kwargs["M"] = LinearOperator(A_w.shape, ilu.solve)
-            except Exception as err:
-                logger.warning("ILU preconditioner failed: %s", err)
+        # cg_kwargs = dict(cfg.cg_kwargs)
+        # if cg_kwargs.get("M") is None and A_w.nnz > 10 * A_w.shape[0]:
+        #     try:
+        #         ilu = spilu(A_w.tocsc(), drop_tol=1e-4, fill_factor=10)
+        #         cg_kwargs["M"] = LinearOperator(A_w.shape, ilu.solve)
+        #     except Exception as err:
+        #         logger.warning("ILU preconditioner failed: %s", err)
 
         # WARNING: this is a warm start: but only useful if the templates are the same
         x_w0 = getattr(self, "x_w0", None)  
-        x_w, info = cg(A_w, b_w, x0=x_w0, **cg_kwargs)
+        x_w, info = cg(A_w, b_w, x0=x_w0, **cfg.cg_kwargs)
         self.x_w = x_w
 
         # ---------- expand back to the *full* parameter space -------------------
@@ -180,12 +180,9 @@ class GlobalAstroFitter(SparseFitter):
         self.solution_err = e_full[:self.n_flux]  # flux errors, corresponds to original templates
 
         # apply sub-pixel shifts so residual() uses updated templates
-        if cfg.fit_astrometry:
-            self.alpha    = x_full[self.n_flux : self.n_flux + self.n_alpha]  # α_k  (size K)
-            self.beta     = x_full[self.n_flux + self.n_alpha : ]             # β_k  (size K)
-            self._apply_shifts()             # <── one call, no duplication
-        else:
-            self.alpha = self.beta = None
+        self.alpha    = x_full[self.n_flux : self.n_flux + self.n_alpha]  # α_k  (size K)
+        self.beta     = x_full[self.n_flux + self.n_alpha : ]             # β_k  (size K)
+        self._apply_shifts()             # <── one call, no duplication
 
         # update the templates with the fitted fluxes, errors     
         for tmpl, flux, err in zip(self._orig_templates, self.solution, self.solution_err):

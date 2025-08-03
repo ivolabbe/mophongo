@@ -7,7 +7,7 @@ import logging
 import numpy as np
 from scipy.sparse import lil_matrix, eye, diags, csr_matrix
 
-from scipy.sparse.linalg import cg, spilu, LinearOperator
+from scipy.sparse.linalg import cg, minres
 from tqdm import tqdm
 
 from .templates import Template, Templates
@@ -42,7 +42,6 @@ class FitConfig:
         default_factory=lambda: {"M": None, "maxiter": 500, "atol": 1e-6}
     )
     # condense fit astrometry flags into one: fit_astrometry_niter = 0, means not fitting astrometry
-    fit_astrometry: bool = False
     fit_astrometry_niter: int = 2     # Two passes for astrometry fitting
     astrom_basis_order: int = 1
     fit_astrometry_joint: bool = False  # Use joint astrometry fitting, or separate step
@@ -263,7 +262,7 @@ class SparseFitter:
         # detecting bad rows.
         bad = np.where(np.abs(A.diagonal()) < 1e-14*np.max(A.diagonal()))[0]
         if bad.size:
-            logger.warning("Eliminating %d nearly-zero diagonal rows before ILU", bad.size)
+            print(f"Eliminating {bad.size} nearly-zero diagonal rows before ILU", bad.size)
 
         eps = reg or 1e-10
         d = np.sqrt(np.maximum(A.diagonal(), eps))
@@ -272,22 +271,22 @@ class SparseFitter:
         A_w = Dinv @ A @ Dinv
         b_w = Dinv @ b
 
-        cg_kwargs = dict(cfg.cg_kwargs)
-        if cg_kwargs.get("M") is None and A_w.nnz > 10 * A_w.shape[0]:
-            eps_pc = 1e-6 * np.mean(A_w.diagonal())   # ~10× larger than the eps you use in CG
-            A_pc   = A_w + eps_pc*eye(A_w.shape[0], format="csr")
-            try:
-                ilu = spilu(A_pc.tocsc(), drop_tol=1e-3, fill_factor=15)
-                cg_kwargs["M"] = LinearOperator(A_w.shape, ilu.solve, diag_pivot_thresh=0.0)
-            except Exception as err:
-                logger.warning("ILU preconditioner failed: %s", err)
+        # cg_kwargs = dict(cfg.cg_kwargs)
+        # if cg_kwargs.get("M") is None and A_w.nnz > 10 * A_w.shape[0]:
+        #     eps_pc = 1e-6 * np.mean(A_w.diagonal())   # ~10× larger than the eps you use in CG
+        #     A_pc   = A_w + eps_pc*eye(A_w.shape[0], format="csr")
+        #     try:
+        #         ilu = spilu(A_pc.tocsc(), drop_tol=1e-3, fill_factor=15)
+        #         cg_kwargs["M"] = LinearOperator(A_w.shape, ilu.solve, diag_pivot_thresh=0.0)
+        #     except Exception as err:
+        #         logger.warning("ILU preconditioner failed: %s", err)
 
         # expand to full solution vector corresponding to _orig_templates
         idx = [t.col_idx for t in self.templates]
 
         # reuse prevous solution if available
         x_w0 = getattr(self, "x_w0", None)  
-        x_w, info = cg(A_w, b_w, x0=x_w0, **cg_kwargs)
+        x_w, info = cg(A_w, b_w, x0=x_w0, **cfg.cg_kwargs)
         self.x_w = x_w
  
         # n_flux is always the full input length of the templates
@@ -358,40 +357,66 @@ class SparseFitter:
         if self.solution_err is None:
             raise ValueError("Solve system first")
         return self.solution_err
-                                                                                                                                                                                                                                                                                                                                                                                                                                                         
-    def _flux_errors(self, A_csr: csr_matrix) -> np.ndarray:
+
+    import numpy as np
+    from scipy.sparse.linalg import minres
+
+    def _diag_inv_hutch_minres(self, A, k=32, rtol=1e-6, seed=0):
+        """
+        Estimate diag(A^{-1}) for a symmetric (possibly singular) sparse matrix
+        using Hutchinson + SciPy's MINRES (no preconditioner required).
+
+        Parameters
+        ----------
+        A : csr_matrix
+            Symmetric positive-*semi*-definite matrix.
+        k : int
+            Number of random ±1 probe vectors (≈ 1/√k relative RMS error).
+        rtol : float
+            Relative tolerance passed to MINRES.
+        seed : int
+            RNG seed for reproducibility.
+
+        Returns
+        -------
+        sigma : ndarray
+            1-sigma uncertainties = sqrt(diag(A^{-1})).
+        """
+        rng       = np.random.default_rng(seed)
+        acc       = np.zeros(A.shape[0])
+        for _ in range(k):
+            z            = rng.choice((-1.0, 1.0), size=A.shape[0])
+            x, exit_code = minres(A, z, rtol=rtol, maxiter=4*A.shape[0])
+            if exit_code:        # non-zero means MINRES hit maxiter
+                raise RuntimeError(f"minres did not converge (code {exit_code})")
+            acc += z * x         # Hutchinson trace accumulation
+
+        return np.sqrt(np.abs(acc / k))
+
+    def _flux_errors(self, A: csr_matrix) -> np.ndarray:
         """Return 1-sigma uncertainties for the fitted fluxes.
         This computes the diagonal of ``A`` :sup:`-1` using a SuperLU
         factorization when possible and falls back to a Hutchinson
         trace estimator otherwise.
         """
-        eps = 1e-8
-        A = A_csr + eps * eye(A_csr.shape[0], format="csr")
-        try:  # Prefer SuperLU factorization if available
-            from scipy.sparse.linalg import splu
+        eps_pd = 1e-6 * np.median(A.diagonal())
+        A      = A + eps_pd*eye(A.shape[0], format="csr")    # ensure PD
 
-            lu = splu(A.tocsc())
-            inv_diag = np.empty(A.shape[0], dtype=float)
-            e_i = np.zeros(A.shape[0], dtype=float)
-            for i in range(A.shape[0]):
-                e_i[:] = 0.0
-                e_i[i] = 1.0
-                x = lu.solve(e_i)
-                inv_diag[i] = x[i]
-            return np.sqrt(inv_diag)
-        except Exception as err:  # pragma: no cover - exercised in fallback
-            logger.warning("splu failed (%s); falling back to SLQ", err)
+        # 0. cheap independent-pixel approximation?
+        off = A.copy()
+        off.setdiag(0)
+        if np.sqrt((off.data**2).sum()) / A.diagonal().sum() < 1e-3:
+            return 1/np.sqrt(A.diagonal())
+        # 1. SuperLU factorization
+        return self._diag_inv_hutch_minres(A, k=16, rtol=1e-6)
 
-        # Hutchinson stochastic trace estimator
-        k = 32
-        rng = np.random.default_rng(0)
-        diag_est = np.zeros(A.shape[0])
-        for _ in range(k):
-            v = rng.choice([-1.0, 1.0], size=A.shape[0])
-            x, _ = cg(A, v, atol=1e-6)
-            diag_est += v * x
-        diag_est = np.abs(diag_est / k)
-        return np.sqrt(diag_est)
+        # try:
+        #     return _chol_diag_inv(A, eps=1e-6)
+        # except Exception as err:
+        #     logger.info("CHOLMOD unavailable (%s); Hutchinson fallback", err)
+        # 2. Hutchinson + MINRES-QLP
+#        return _diag_inv_hutch(A, k=32, tol=1e-6)
+ 
 
     @classmethod
     def fit(

@@ -59,7 +59,8 @@ def downsample_psf(psf: np.ndarray, k: int) -> np.ndarray:
     if k == 1:
         return psf
 
-    if k % 2 == 0:
+    # only shift center if k a multiple of 2 and psf.shape is odd 
+    if (k % 2 == 0) and (psf.shape[0] % 2 == 1):
         shift_hi = (k - 1) / 2.0
         psf = shift(
             psf,

@@ -52,7 +52,6 @@ class FitConfig:
     multi_tmpl_chi2_thresh: float = 5.0
     multi_tmpl_psf_core: bool = True
     multi_tmpl_colour: bool = False
-    max_bin_factor: int = 4  # safeguard – raise if k exceeds this
 
 
 class SparseFitter:
@@ -261,6 +260,11 @@ class SparseFitter:
         if reg > 0:
             A = A + eye(A.shape[0], format="csr") * reg
 
+        # detecting bad rows.
+        bad = np.where(np.abs(A.diagonal()) < 1e-14*np.max(A.diagonal()))[0]
+        if bad.size:
+            logger.warning("Eliminating %d nearly-zero diagonal rows before ILU", bad.size)
+
         eps = reg or 1e-10
         d = np.sqrt(np.maximum(A.diagonal(), eps))
         Dinv = diags(1.0 / d, 0, format="csr")
@@ -270,9 +274,11 @@ class SparseFitter:
 
         cg_kwargs = dict(cfg.cg_kwargs)
         if cg_kwargs.get("M") is None and A_w.nnz > 10 * A_w.shape[0]:
+            eps_pc = 1e-6 * np.mean(A_w.diagonal())   # ~10× larger than the eps you use in CG
+            A_pc   = A_w + eps_pc*eye(A_w.shape[0], format="csr")
             try:
-                ilu = spilu(A_w.tocsc(), drop_tol=1e-4, fill_factor=10)
-                cg_kwargs["M"] = LinearOperator(A_w.shape, ilu.solve)
+                ilu = spilu(A_pc.tocsc(), drop_tol=1e-3, fill_factor=15)
+                cg_kwargs["M"] = LinearOperator(A_w.shape, ilu.solve, diag_pivot_thresh=0.0)
             except Exception as err:
                 logger.warning("ILU preconditioner failed: %s", err)
 
@@ -382,7 +388,7 @@ class SparseFitter:
         diag_est = np.zeros(A.shape[0])
         for _ in range(k):
             v = rng.choice([-1.0, 1.0], size=A.shape[0])
-            x, _ = cg(A, v, tol=1e-6)
+            x, _ = cg(A, v, atol=1e-6)
             diag_est += v * x
         diag_est = np.abs(diag_est / k)
         return np.sqrt(diag_est)

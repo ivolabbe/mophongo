@@ -9,6 +9,9 @@ from scipy.sparse import lil_matrix, eye, diags, csr_matrix
 
 from scipy.sparse.linalg import cg, minres
 from tqdm import tqdm
+from scipy.sparse.linalg import cg, minres
+from numpy.random import default_rng
+import numpy as np
 
 from .templates import Template, Templates
 
@@ -38,9 +41,8 @@ class FitConfig:
     # of the normal matrix diagonal.
     reg: float = 0.0
     bad_value: float = np.nan
-    cg_kwargs: Dict[str, Any] = field(
-        default_factory=lambda: {"M": None, "maxiter": 500, "atol": 1e-6}
-    )
+    cg_kwargs: Dict[str, Any] = field(default_factory=lambda: {"M": None, "maxiter": 500, "atol": 1e-6})
+    fit_covariances: bool = False  # Use simple fitting errors from diagonal of normal matrix
     # condense fit astrometry flags into one: fit_astrometry_niter = 0, means not fitting astrometry
     fit_astrometry_niter: int = 2     # Two passes for astrometry fitting
     astrom_basis_order: int = 1
@@ -51,6 +53,44 @@ class FitConfig:
     multi_tmpl_chi2_thresh: float = 5.0
     multi_tmpl_psf_core: bool = True
     multi_tmpl_colour: bool = False
+
+
+def _diag_inv_hutch(A, k=32, rtol=1e-4, maxiter=None, seed=0):
+    """
+    Robust Hutchinson estimator of diag(A^{-1}).
+
+    Strategy:
+    1.   Try CG (fastest) with loose `rtol`; works if A is PD enough.
+    2.   Fall back to MINRES (handles indef | singular) *without*
+         raising on non-convergence – we just take the last iterate.
+    3.   If both stall, add a ×10 diagonal jitter and restart *once*.
+    """
+    n   = A.shape[0]
+    maxiter = maxiter or 6*n
+    rng = default_rng(seed)
+    acc = np.zeros(n)
+
+    def _solve(rhs):
+        # --- 1. CG attempt ------------------------------------------------
+        x, flag = cg(A, rhs, rtol=rtol, atol=0, maxiter=maxiter)
+        if flag == 0:
+            return x
+        # --- 2. MINRES rescue --------------------------------------------
+        x, flag = minres(A, rhs, rtol=rtol, maxiter=maxiter)  # never raises
+        if flag in (0, 1):                                   # converged or hit maxiter
+            return x
+        # --- 3. add jitter & restart once --------------------------------
+        diag_boost = 1e-4 * np.median(A.diagonal())
+        x, _ = cg(A + diag_boost*np.eye(n), rhs,
+                  rtol=rtol, atol=0, maxiter=maxiter)
+        return x                                              # accept whatever we get
+
+    for _ in range(k):
+        z  = rng.choice((-1.0, 1.0), size=n)
+        x  = _solve(z)
+        acc += z * x
+
+    return np.sqrt(np.abs(acc / k))
 
 
 class SparseFitter:
@@ -67,7 +107,8 @@ class SparseFitter:
             weights = np.ones_like(image)
 
         self._orig_templates = templates  # keep original templates List object
-        self.templates = templates.copy() # work in copy for fitting, modifying 
+        self.templates = templates.copy(
+        )  # work in copy for fitting, modifying
 
         self.n_flux = len(templates)
         for i, tmpl in enumerate(self.templates):
@@ -80,7 +121,6 @@ class SparseFitter:
         self._ata = None
         self._atb = None
         self.solution: np.ndarray | None = None
-
 
     @staticmethod
     def _intersection(
@@ -185,7 +225,8 @@ class SparseFitter:
             raise ValueError("Solve system first")
         model = np.zeros_like(self.image, dtype=float)
         for coeff, tmpl in zip(self.solution, self._orig_templates):
-            model[tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
+            model[
+                tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
         return model
 
     @property
@@ -207,17 +248,17 @@ class SparseFitter:
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Solve for template fluxes using conjugate gradient."""
         cfg = config or self.config
-        
-        # build big normal matrix once, this as a shift entry for every template
-        A, b = self.ata, self.atb          # triggers build_normal_matrix()
 
-    # Guarantees strict positive definiteness after whitening
-    # A symmetric matrix that is positive‐semi-definite but rank-deficient 
-    # can have eigenvalues down to 10⁻¹⁴–10⁻¹⁶ (numerical zero). Adding 10⁻⁸ 
-    # shifts every eigenvalue by that amount, lifting them well above rounding
-    # error yet staying ≪ typical diagonal (10⁰–10⁴ for sky+source units). The 
-    # induced bias in fluxes is therefore ≤ 10⁻⁸ negligible compared to 
-    # Poisson errors (∼10⁻²–10⁻³).
+        # build big normal matrix once, this as a shift entry for every template
+        A, b = self.ata, self.atb  # triggers build_normal_matrix()
+
+        # Guarantees strict positive definiteness after whitening
+        # A symmetric matrix that is positive‐semi-definite but rank-deficient
+        # can have eigenvalues down to 10⁻¹⁴–10⁻¹⁶ (numerical zero). Adding 10⁻⁸
+        # shifts every eigenvalue by that amount, lifting them well above rounding
+        # error yet staying ≪ typical diagonal (10⁰–10⁴ for sky+source units). The
+        # induced bias in fluxes is therefore ≤ 10⁻⁸ negligible compared to
+        # Poisson errors (∼10⁻²–10⁻³).
         reg = cfg.reg
         if reg <= 0:
             reg = 1e-4 * np.median(A.diagonal())
@@ -225,9 +266,11 @@ class SparseFitter:
             A = A + eye(A.shape[0], format="csr") * reg
 
         # detecting bad rows.
-        bad = np.where(np.abs(A.diagonal()) < 1e-14*np.max(A.diagonal()))[0]
+        bad = np.where(np.abs(A.diagonal()) < 1e-14 * np.max(A.diagonal()))[0]
         if bad.size:
-            print(f"Eliminating {bad.size} nearly-zero diagonal rows before ILU", bad.size)
+            print(
+                f"Eliminating {bad.size} nearly-zero diagonal rows before ILU",
+                bad.size)
 
         eps = reg or 1e-10
         d = np.sqrt(np.maximum(A.diagonal(), eps))
@@ -250,13 +293,13 @@ class SparseFitter:
         idx = [t.col_idx for t in self.templates]
 
         # reuse prevous solution if available
-        x_w0 = getattr(self, "x_w0", None)  
+        x_w0 = getattr(self, "x_w0", None)
         x_w, info = cg(A_w, b_w, x0=x_w0, **cfg.cg_kwargs)
         self.x_w = x_w
- 
+
         # n_flux is always the full input length of the templates
-        x_full     = np.zeros(self.n_flux, dtype=float)
-        e_full     = np.zeros(self.n_flux, dtype=float)
+        x_full = np.zeros(self.n_flux, dtype=float)
+        e_full = np.zeros(self.n_flux, dtype=float)
 
         x_full[idx] = x_w / d                   # un-whiten + scatter
         try:
@@ -268,12 +311,15 @@ class SparseFitter:
         if cfg.positivity:
             x_full[:self.n_flux] = np.maximum(0, x_full[:self.n_flux])
 
-        self.solution = x_full[:self.n_flux]      # fluxes, corresponds to original templates
-        self.solution_err = e_full[:self.n_flux]  # flux errors, corresponds to original templates
+        self.solution = x_full[:self.
+                               n_flux]  # fluxes, corresponds to original templates
+        self.solution_err = e_full[:self.
+                                   n_flux]  # flux errors, corresponds to original templates
 
-        # update the templates with the fitted fluxes, errors     
-        for tmpl, flux, err in zip(self._orig_templates, self.solution, self.solution_err):
-            tmpl.flux = flux 
+        # update the templates with the fitted fluxes, errors
+        for tmpl, flux, err in zip(self._orig_templates, self.solution,
+                                   self.solution_err):
+            tmpl.flux = flux
             tmpl.err = err
 
         return self.solution, self.solution_err, info
@@ -281,21 +327,24 @@ class SparseFitter:
     def residual(self) -> np.ndarray:
         return self.image - self.model_image()
 
-    def quick_flux(self, templates: Optional[List[Template]] = None) -> np.ndarray:
+    def quick_flux(self,
+                   templates: Optional[List[Template]] = None) -> np.ndarray:
         """Return quick flux estimates based on template data and image."""
         if templates is None:
             templates = self._orig_templates
         return Templates.quick_flux(templates, self.image)
 
-
-    def predicted_errors(self, templates: Optional[List[Template]] = None) -> np.ndarray:
+    def predicted_errors(self,
+                         templates: Optional[List[Template]] = None
+                         ) -> np.ndarray:
         """Return per-source uncertainties ignoring template covariance."""
         if templates is None:
             templates = self._orig_templates
         return Templates.predicted_errors(templates, self.weights)
 
     def flux_and_rms(
-        self, templates: Optional[List[Template]] = None
+        self,
+        templates: Optional[List[Template]] = None
     ) -> tuple[np.ndarray, np.ndarray]:
         """Return flux estimates and RMS errors for templates.
 
@@ -314,11 +363,11 @@ class SparseFitter:
             templates = self._orig_templates
 
         if templates and templates[0].flux != 0:
-            flux = np.array([t.flux for t in templates[: self.n_flux]])
+            flux = np.array([t.flux for t in templates[:self.n_flux]])
         else:
-            flux = self.quick_flux(templates)[: self.n_flux]
+            flux = self.quick_flux(templates)[:self.n_flux]
 
-        rms = self.predicted_errors(templates)[: self.n_flux]
+        rms = self.predicted_errors(templates)[:self.n_flux]
         return flux, rms
 
     def flux_errors(self) -> np.ndarray:
@@ -327,41 +376,6 @@ class SparseFitter:
             raise ValueError("Solve system first")
         return self.solution_err
 
-    import numpy as np
-    from scipy.sparse.linalg import minres
-
-    def _diag_inv_hutch_minres(self, A, k=32, rtol=1e-6, seed=0):
-        """
-        Estimate diag(A^{-1}) for a symmetric (possibly singular) sparse matrix
-        using Hutchinson + SciPy's MINRES (no preconditioner required).
-
-        Parameters
-        ----------
-        A : csr_matrix
-            Symmetric positive-*semi*-definite matrix.
-        k : int
-            Number of random ±1 probe vectors (≈ 1/√k relative RMS error).
-        rtol : float
-            Relative tolerance passed to MINRES.
-        seed : int
-            RNG seed for reproducibility.
-
-        Returns
-        -------
-        sigma : ndarray
-            1-sigma uncertainties = sqrt(diag(A^{-1})).
-        """
-        rng       = np.random.default_rng(seed)
-        acc       = np.zeros(A.shape[0])
-        for _ in range(k):
-            z            = rng.choice((-1.0, 1.0), size=A.shape[0])
-            x, exit_code = minres(A, z, rtol=rtol, maxiter=4*A.shape[0])
-            if exit_code:        # non-zero means MINRES hit maxiter
-                raise RuntimeError(f"minres did not converge (code {exit_code})")
-            acc += z * x         # Hutchinson trace accumulation
-
-        return np.sqrt(np.abs(acc / k))
-
     def _flux_errors(self, A: csr_matrix) -> np.ndarray:
         """Return 1-sigma uncertainties for the fitted fluxes.
         This computes the diagonal of ``A`` :sup:`-1` using a SuperLU
@@ -369,23 +383,16 @@ class SparseFitter:
         trace estimator otherwise.
         """
         eps_pd = 1e-6 * np.median(A.diagonal())
-        A      = A + eps_pd*eye(A.shape[0], format="csr")    # ensure PD
+        A = A + eps_pd * eye(A.shape[0], format="csr")  # ensure PD
 
         # 0. cheap independent-pixel approximation?
         off = A.copy()
         off.setdiag(0)
-        if np.sqrt((off.data**2).sum()) / A.diagonal().sum() < 1e-3:
-            return 1/np.sqrt(A.diagonal())
-        # 1. SuperLU factorization
-        return self._diag_inv_hutch_minres(A, k=16, rtol=1e-6)
-
-        # try:
-        #     return _chol_diag_inv(A, eps=1e-6)
-        # except Exception as err:
-        #     logger.info("CHOLMOD unavailable (%s); Hutchinson fallback", err)
-        # 2. Hutchinson + MINRES-QLP
-#        return _diag_inv_hutch(A, k=32, tol=1e-6)
- 
+        covar_power = np.sqrt((off.data**2).sum()) / A.diagonal().sum()
+        if covar_power < 1e-3 or not self.config.fit_covariances:
+            return 1 / np.sqrt(A.diagonal())
+        else:
+            return _diag_inv_hutch(A, k=16, rtol=1e-4)
 
     @classmethod
     def fit(

@@ -112,7 +112,6 @@ class SparseFitter:
 
     def _weighted_norm(self, tmpl: Template) -> float:
         """Return the weighted L2 norm of ``tmpl``.
-
         The norm is computed by summing ``data * weight * data`` over the
         template support in the image space.
         """
@@ -150,8 +149,8 @@ class SparseFitter:
         atb = np.zeros(n)
         for i, tmpl_i in enumerate(
                 tqdm(self.templates, total=n, desc="Building Normal matrix")):
-            if duplicate[i]:
-                continue
+            # if duplicate[i]:
+            #     continue
             sl_i = tmpl_i.slices_original
             data_i = tmpl_i.data[tmpl_i.slices_cutout]
             w_i = self.weights[sl_i]
@@ -160,8 +159,8 @@ class SparseFitter:
             ata[i, i] = norms[i]
 
             for j in range(i + 1, n):
-                if duplicate[j]:
-                    continue
+                # if duplicate[j]:
+                #     continue
                 tmpl_j = self.templates[j]
                 inter = self._slice_intersection(sl_i, tmpl_j.slices_original)
                 if inter is None:
@@ -201,10 +200,10 @@ class SparseFitter:
                 if val == 0.0:
                     continue
                 cos_ij = val / np.sqrt(norms[i] * norms[j])
-                if cos_ij > 0.999:
-                    duplicate[j] = True
-                    logger.warning("Dropping nearly duplicate template %d", j)
-                    continue
+                # if cos_ij > 0.999:
+                #     duplicate[j] = True
+                #     logger.warning("Dropping nearly duplicate template %d", j)
+                #     continue
                 ata[i, j] = val
                 ata[j, i] = val
 

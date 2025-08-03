@@ -112,9 +112,10 @@ class GlobalAstroFitter(SparseFitter):
     # ------------------------------------------------------------
     # 3.  solve   # keep track of valid fluxes through ID, not n_flux
     # ------------------------------------------------------------
-    def solve(self, 
-              config: FitConfig | None = None
-              x_w0: float | None = None
+    def solve(
+        self,
+        config: FitConfig | None = None,
+        x_w0: float | None = None,
     ) -> Tuple[np.ndarray, np.ndarray, int]:
         cfg   = config or self.config
 

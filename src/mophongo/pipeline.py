@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import psutil
 from typing import Sequence
+from copy import deepcopy
 import numpy as np
 from collections import defaultdict
 
@@ -19,6 +20,7 @@ from astropy.wcs import WCS
 from astropy.nddata import Cutout2D
 
 from .psf_map import PSFRegionMap
+from .utils import bin_factor_from_wcs, downsample_psf
 
 
 def _per_source_chi2(residual: np.ndarray, weights: np.ndarray, templates: Sequence[Template]) -> np.ndarray:
@@ -211,11 +213,38 @@ def run(
             if isinstance(kernel, PSFRegionMap):
                 print(f"Using kernel lookup table {kernel.name}")
 
-        wcs_i = wcs[idx] if wcs is not None else None
+        k = 1
+        if wcs is not None:
+            k = bin_factor_from_wcs(wcs[0], wcs[idx])
+            if k > config.max_bin_factor:
+                raise ValueError(
+                    f"bin factor {k} exceeds max_bin_factor {config.max_bin_factor}"
+                )
+
+        # Downsample templates and kernel to match the image resolution
+        tmpls_lo = tmpls
+        if k != 1:
+            tmpls_lo = Templates()
+            tmpls_lo.original_shape = (
+                tmpls.original_shape[0] // k,
+                tmpls.original_shape[1] // k,
+            )
+            tmpls_lo.wcs = wcs[idx] if wcs is not None else getattr(tmpls, "wcs", None)
+            tmpls_lo._templates = [t.downsample(k) for t in tmpls._templates]
+            for t in tmpls_lo._templates:
+                if wcs is not None:
+                    t.wcs = wcs[idx]
+
+        if kernel is not None and k != 1:
+            if isinstance(kernel, PSFRegionMap):
+                kernel = deepcopy(kernel)
+                kernel.psfs = np.array([downsample_psf(psf, k) for psf in kernel.psfs])
+            else:
+                kernel = downsample_psf(kernel, k)
 
         # before convolving templates, drop templates whose 444 footprint falls fully outside the 770 image (ie weight is 0)
 
-        templates = tmpls.convolve_templates(kernel, inplace=False)
+        templates = tmpls_lo.convolve_templates(kernel, inplace=False)
         print(
             f'Pipeline (convolved) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB'
         )
@@ -248,7 +277,7 @@ def run(
                 print('fitting astrometry separately')
                 if config.astrom_model == "gp":
                     correct_astrometry_gp(
-                        tmpls.templates,
+                        templates,
                         res,
                         fitter.solution,
                         box_size=5,
@@ -258,7 +287,7 @@ def run(
                 else:
                     # this also applies the shifts to the templates
                     correct_astrometry_polynomial(
-                        tmpls.templates,
+                        templates,
                         res,
                         fitter.solution,
                         order=config.astrom_basis_order,
@@ -290,7 +319,19 @@ def run(
                         stamp = _extract_psf_at(parent, psfs[idx])
                         tmpls.add_component(parent, stamp, "psf")
                     # Placeholder for additional components (e.g. colour maps)
-                templates = tmpls.templates
+                tmpls_lo = tmpls
+                if k != 1:
+                    tmpls_lo = Templates()
+                    tmpls_lo.original_shape = (
+                        tmpls.original_shape[0] // k,
+                        tmpls.original_shape[1] // k,
+                    )
+                    tmpls_lo.wcs = wcs[idx] if wcs is not None else getattr(tmpls, "wcs", None)
+                    tmpls_lo._templates = [t.downsample(k) for t in tmpls._templates]
+                    for t in tmpls_lo._templates:
+                        if wcs is not None:
+                            t.wcs = wcs[idx]
+                templates = tmpls_lo.convolve_templates(kernel, inplace=False)
                 fitter = fitter_cls(templates, images[idx], weights_i, config)
                 fluxes, errs, info = fitter.solve()
                 res = fitter.residual()

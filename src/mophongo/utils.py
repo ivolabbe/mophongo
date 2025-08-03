@@ -7,9 +7,11 @@ import copy
 import numpy as np
 import scipy
 from scipy.ndimage import shift
+from astropy.nddata import block_reduce
 
 from astropy.io import fits
 from astropy.wcs import WCS
+from astropy.wcs.utils import proj_plane_pixel_scales
 from astropy.table import Table
 from shapely.geometry import Polygon
 from scipy.special import hermite
@@ -27,8 +29,82 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-import copy
-from astropy.wcs import WCS
+def bin2d_mean(arr: np.ndarray, k: int) -> np.ndarray:
+    """Block-average a 2-D array by an integer factor using ``block_reduce``.
+
+    Trailing rows/columns that do not fit an exact ``k``×``k`` block are
+    discarded, matching ``astropy.nddata.block_reduce`` semantics.
+    """
+    if k == 1:
+        return arr
+
+    return block_reduce(arr, k, func=np.mean)
+
+
+def downsample_psf(psf: np.ndarray, k: int) -> np.ndarray:
+    """Downsample a PSF by an integer factor, preserving the centroid.
+
+    Parameters
+    ----------
+    psf : np.ndarray
+        Input PSF array centred at ``(shape-1)/2``.
+    k : int
+        Integer binning factor.
+
+    Returns
+    -------
+    np.ndarray
+        Downsampled and re-centered PSF array.
+    """
+    if k == 1:
+        return psf
+
+    if k % 2 == 0:
+        shift_hi = (k - 1) / 2.0
+        psf = shift(
+            psf,
+            shift=(-shift_hi, -shift_hi),
+            order=3,
+            mode="constant",
+            cval=0.0,
+            prefilter=False,
+        )
+    return block_reduce(psf, k, func=np.mean)
+
+
+def bin_factor_from_wcs(w_det: WCS, w_img: WCS, tol: float = 0.02) -> int:
+    """Return the integer pixel-scale factor between two WCS objects.
+
+    Parameters
+    ----------
+    w_det : WCS
+        WCS of the detection image (higher resolution).
+    w_img : WCS
+        WCS of the target image.
+    tol : float, optional
+        Tolerance on the ratio between the scales to still be considered an
+        integer. Defaults to 0.02.
+
+    Returns
+    -------
+    int
+        Integer binning factor ``k``. Always at least one.
+
+    Raises
+    ------
+    ValueError
+        If the pixel-scale ratio deviates from an integer by more than ``tol``.
+    """
+    s_det = proj_plane_pixel_scales(w_det)[0] * 3600.0
+    s_img = proj_plane_pixel_scales(w_img)[0] * 3600.0
+    ratio = s_img / s_det
+    k = int(round(ratio))
+    if abs(ratio - k) > tol:
+        raise ValueError(
+            f"Pixel-scale ratio {ratio:.3f} not within {tol*100:.1f}% of an integer – "
+            "cannot block-average safely."
+        )
+    return max(k, 1)
 
 def rebin_wcs(wcs: WCS, n: int) -> WCS:
     """

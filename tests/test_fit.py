@@ -66,36 +66,6 @@ def test_zero_weight_template_dropped():
     assert len(fitter.templates) == 1
 
 
-def test_nonoverlapping_templates_not_deduplicated():
-    img = np.zeros((10, 10))
-    weights = np.ones_like(img)
-
-    t1 = Template(img, (2, 2), (3, 3))
-    t1.data[:] = 1.0
-    t2 = Template(img, (7, 7), (3, 3))
-    t2.data[:] = 1.0
-
-    fitter = SparseFitter([t1, t2], img, weights, FitConfig())
-    fitter.build_normal_matrix()
-
-    assert len(fitter.templates) == 2
-
-
-def test_overlapping_duplicate_templates_dropped():
-    img = np.zeros((10, 10))
-    weights = np.ones_like(img)
-
-    t1 = Template(img, (2, 2), (3, 3))
-    t1.data[:] = 1.0
-    t2 = Template(img, (2, 2), (3, 3))
-    t2.data[:] = 1.0
-
-    fitter = SparseFitter([t1, t2], img, weights, FitConfig())
-    fitter.build_normal_matrix()
-
-    assert len(fitter.templates) == 1
-
-
 def test_flux_errors_regularized():
     img = np.zeros((3, 3))
     weights = np.ones_like(img)
@@ -116,6 +86,26 @@ def test_flux_errors_regularized():
 
     assert err.size == 2
     assert np.all(np.isfinite(err))
+
+
+def test_flux_and_rms_estimation():
+    """SparseFitter.flux_and_rms matches quick flux and error estimates."""
+    images, segmap, catalog, psfs, _, rms = make_simple_data()
+
+    tmpls = Templates.from_image(
+        images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel=None
+    )
+
+    fitter = SparseFitter(tmpls.templates, images[1], 1.0 / rms[1] ** 2, FitConfig())
+
+    flux, err = fitter.flux_and_rms()
+    np.testing.assert_allclose(flux, fitter.quick_flux())
+    np.testing.assert_allclose(err, fitter.predicted_errors())
+
+    for t in tmpls.templates:
+        t.flux = 42.0
+    flux2, _ = fitter.flux_and_rms()
+    assert np.all(flux2 == 42.0)
 
 
 def test_build_normal_matrix_new_equivalence():

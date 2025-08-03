@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import Iterable, Iterator, List, Tuple
+from typing import Any, Iterable, Iterator, List, Tuple
+from copy import deepcopy
 
 import logging
 import numpy as np
@@ -50,6 +51,8 @@ class Template(Cutout2D):
         self.shape_input = data.shape
         # record shift from original position here
         self.id = label
+        self.parent_id = label
+        self.component = "main"
         self.flux = 0.0
         self.err = 0.0
         self.shift = np.array([0.0, 0.0], dtype=float)
@@ -108,6 +111,59 @@ class Templates:
 
     def __iter__(self) -> Iterator[Template]:
         return iter(self._templates)
+
+    def add_component(
+        self,
+        parent: Template,
+        data: np.ndarray,
+        component: str,
+        **kwargs: Any,
+    ) -> Template | None:
+        """Clone ``parent`` and append a new component template.
+
+        Parameters
+        ----------
+        parent
+            The template providing spatial metadata.
+        data
+            Pixel data for the new component. Must match the shape of
+            ``parent.data``.
+        component
+            Informational tag describing the component type.
+        **kwargs
+            Additional attributes to set on the cloned template.
+
+        Returns
+        -------
+        Template | None
+            The newly created template or ``None`` if the component was
+            discarded due to high similarity with ``parent``.
+        """
+
+        arr_parent = parent.data[parent.slices_cutout]
+        arr_new = data[parent.slices_cutout]
+        norm_p = np.linalg.norm(arr_parent.ravel())
+        norm_n = np.linalg.norm(arr_new.ravel())
+        if norm_p > 0 and norm_n > 0:
+            corr = float(np.dot(arr_parent.ravel(), arr_new.ravel()) / (norm_p * norm_n))
+            if corr > 0.999:
+                logger.info(
+                    "Skipping component %s for source %s due to high similarity (%.3f)",
+                    component,
+                    parent.id,
+                    corr,
+                )
+                return None
+
+        tmpl = deepcopy(parent)
+        tmpl.data = data
+        tmpl.component = component
+        tmpl.parent_id = parent.parent_id or parent.id
+        for key, val in kwargs.items():
+            setattr(tmpl, key, val)
+
+        self._templates.append(tmpl)
+        return tmpl
 
     @classmethod
     def from_image(

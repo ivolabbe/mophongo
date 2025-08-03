@@ -9,6 +9,7 @@ from astropy.wcs import WCS
 from photutils.segmentation import SegmentationImage
 from tqdm import tqdm
 from scipy.signal import fftconvolve
+from skimage.measure import block_reduce
 
 from .utils import measure_shape, bin2d_mean
 from .psf_map import PSFRegionMap
@@ -137,9 +138,9 @@ class Template(Cutout2D):
 
         for attr in (
             "input_position_cutout",
-            "input_position_original",
+#            "input_position_original",
             "center_cutout",
-            "center_original",
+#            "center_original",
             "y",
             "x",
         ):
@@ -148,6 +149,41 @@ class Template(Cutout2D):
                 setattr(lo, attr, (_map(y), _map(x)))
 
         return lo
+
+    def downsample_wcs(self, image_lo: np.ndarray, wcs_lo, k: int) -> "Template":
+        """
+        Downsample this template to a lower resolution using the target image and WCS.
+
+        Parameters
+        ----------
+        image_lo : np.ndarray
+            The low-resolution image to extract the template from.
+        wcs_lo : astropy.wcs.WCS
+            The WCS of the low-resolution image.
+        k : int
+            Integer downsampling factor.
+
+        Returns
+        -------
+        Template
+            New template extracted from the low-res image using the correct WCS.
+        """
+        # Get the original position in the high-res WCS
+        pos = self.input_position_original
+        ra, dec = self.wcs.wcs_pix2world(*pos, 0)
+
+        # Convert RA/Dec to pixel coordinates in the low-res WCS
+        x_lo, y_lo = wcs_lo.wcs_world2pix(ra, dec, 0)
+
+        # Calculate new size (downsampled)
+        height, width = self.data.shape[0] // k, self.data.shape[1] // k
+
+        # Create the new template using the low-res image and WCS
+        lowres_tmpl = Template(image_lo, (x_lo, y_lo), (height, width), wcs=wcs_lo, label=self.id)
+
+        # Fill the data with block-reduced (averaged) values from the high-res template
+        lowres_tmpl.data[:] = block_reduce(self.data, k, func=np.mean)
+        return lowres_tmpl
 
 
 class Templates:

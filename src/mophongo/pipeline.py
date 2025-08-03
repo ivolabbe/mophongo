@@ -12,9 +12,63 @@ import os
 import psutil
 from typing import Sequence
 import numpy as np
+from collections import defaultdict
 
 from astropy.table import Table
 from astropy.wcs import WCS
+from astropy.nddata import Cutout2D
+
+
+def _per_source_chi2(residual: np.ndarray, sigma: np.ndarray, templates: Sequence[Template]) -> np.ndarray:
+    """Compute reduced chi-square for each template.
+
+    Parameters
+    ----------
+    residual
+        Residual image from the first-pass fit.
+    sigma
+        Standard deviation image (1/sqrt(weights)).
+    templates
+        List of templates used in the fit.
+
+    Returns
+    -------
+    ndarray
+        Array of chi^2/nu values, one per template in ``templates``.
+    """
+
+    chi = np.zeros(len(templates), dtype=float)
+    for i, tmpl in enumerate(templates):
+        y0, y1, x0, x1 = tmpl.bbox
+        res = residual[y0:y1, x0:x1] / sigma[y0:y1, x0:x1]
+        chi[i] = np.mean(res ** 2)
+    return chi
+
+
+def _extract_psf_at(tmpl: Template, psf: np.ndarray) -> np.ndarray:
+    """Return a PSF stamp matching the template size."""
+    from scipy.ndimage import shift
+
+    ny, nx = tmpl.data.shape
+    cx_psf, cy_psf = psf.shape[1] // 2, psf.shape[0] // 2
+
+    xc, yc = tmpl.input_position_cutout
+    dx = xc - (nx // 2)
+    dy = yc - (ny // 2)
+
+    shifted = shift(psf, shift=(dy, dx), order=1, mode="constant", cval=0.0, prefilter=False)
+    cut = Cutout2D(
+        shifted,
+        (cx_psf, cy_psf),
+        tmpl.data.shape,
+        mode="partial",
+        fill_value=0.0,
+    )
+    stamp = cut.data.copy()
+    s = stamp.sum()
+    if s > 0:
+        stamp /= s
+    return stamp
 
 def run(
     images: Sequence[np.ndarray],
@@ -134,7 +188,7 @@ def run(
         niter = config.fit_astrometry_niter if config.fit_astrometry else 1
 
         for j in range(niter):
-            print( f"Running iteration {j+1} of {config.fit_astrometry_niter}")
+            print(f"Running iteration {j+1} of {config.fit_astrometry_niter}")
 
             fitter = fitter_cls(templates, images[idx], weights_i, config)
             fluxes, errs, info = fitter.solve()
@@ -151,7 +205,8 @@ def run(
                         fitter.solution,
                         box_size=5,
                         snr_threshold=config.snr_thresh_astrom,
-                        length_scale=500.0)
+                        length_scale=500.0,
+                    )
                 else:
                     # this also applies the shifts to the templates
                     correct_astrometry_polynomial(
@@ -160,27 +215,67 @@ def run(
                         fitter.solution,
                         order=config.astrom_basis_order,
                         box_size=5,
-                        snr_threshold=config.snr_thresh_astrom)
-                    
+                        snr_threshold=config.snr_thresh_astrom,
+                    )
+
                 # check if this call is ok, only makes sense if we rebuild the normal matrix
                 # TODO: track this from the templates is_dirty flag
                 fitter._ata = None  # @@@ do this properly
-                fluxes, errs, info = fitter.solve()   
+                fluxes, errs, info = fitter.solve()
+                res = fitter.residual()
+
+        # second pass: add extra templates for poor fits
+        if (config.multi_tmpl_psf_core or config.multi_tmpl_colour) and psfs is not None:
+            sigma_img = (
+                np.sqrt(1.0 / weights_i)
+                if weights_i is not None
+                else np.ones_like(images[idx])
+            )
+            chi_nu = _per_source_chi2(res, sigma_img, templates)
+            bad_idx = np.where(chi_nu > config.multi_tmpl_chi2_thresh)[0]
+            if bad_idx.size > 0:
+                for bi in bad_idx:
+                    parent = templates[bi]
+                    if config.multi_tmpl_psf_core and psfs is not None:
+                        stamp = _extract_psf_at(parent, psfs[idx])
+                        tmpls.add_component(parent, stamp, "psf")
+                    # Placeholder for additional components (e.g. colour maps)
+                templates = tmpls.templates
+                fitter = fitter_cls(templates, images[idx], weights_i, config)
+                fluxes, errs, info = fitter.solve()
+                res = fitter.residual()
 
         err_pred = fitter.predicted_errors()
- 
-        print(f"Done...")
- 
+
+        print("Done...")
+
         # put fluxes into catalog based on template IDs
-        tmpl_ids = [tmpl.id for tmpl in templates if tmpl.id is not None]
-        id_to_index = {id_: i for i, id_ in enumerate(cat['id'])}
-        tmpl_idx = [id_to_index.get(tid, None) for tid in tmpl_ids]
+        parent_ids = [
+            tmpl.parent_id if getattr(tmpl, "parent_id", None) is not None else tmpl.id
+            for tmpl in templates
+        ]
+        id_to_index = {id_: i for i, id_ in enumerate(cat["id"])}
         cat[f"flux_{idx}"] = config.bad_value
         cat[f"err_{idx}"] = config.bad_value
         cat[f"err_pred_{idx}"] = config.bad_value
-        cat[f"flux_{idx}"][tmpl_idx] = fluxes
-        cat[f"err_{idx}"][tmpl_idx] = errs
-        cat[f"err_pred_{idx}"][tmpl_idx] = err_pred
+
+        flux_sum: defaultdict[int, float] = defaultdict(float)
+        err_sum: defaultdict[int, float] = defaultdict(float)
+        err_pred_sum: defaultdict[int, float] = defaultdict(float)
+        for pid, fl, er, ep in zip(parent_ids, fluxes, errs, err_pred):
+            if pid is None:
+                continue
+            flux_sum[pid] += fl
+            err_sum[pid] = np.sqrt(err_sum[pid] ** 2 + er ** 2)
+            err_pred_sum[pid] = np.sqrt(err_pred_sum[pid] ** 2 + ep ** 2)
+
+        for pid, fl in flux_sum.items():
+            ci = id_to_index.get(pid)
+            if ci is None:
+                continue
+            cat[f"flux_{idx}"][ci] = fl
+            cat[f"err_{idx}"][ci] = err_sum[pid]
+            cat[f"err_pred_{idx}"][ci] = err_pred_sum[pid]
 
         residuals.append(res)
 

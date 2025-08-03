@@ -52,6 +52,7 @@ class FitConfig:
     multi_tmpl_chi2_thresh: float = 5.0
     multi_tmpl_psf_core: bool = True
     multi_tmpl_colour: bool = False
+    max_bin_factor: int = 4  # safeguard – raise if k exceeds this
 
 
 class SparseFitter:

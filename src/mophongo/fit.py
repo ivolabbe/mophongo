@@ -323,7 +323,7 @@ class SparseFitter:
                                                                                                                                                                                                                                                                                                                                                                                                                                                          
     def _flux_errors(self, A_csr: csr_matrix) -> np.ndarray:
         """Return 1-sigma uncertainties for the fitted fluxes.
-        This computes the diagonal of ``A``\ :sup:`-1` using a SuperLU
+        This computes the diagonal of ``A`` :sup:`-1` using a SuperLU
         factorization when possible and falls back to a Hutchinson
         trace estimator otherwise.
         """

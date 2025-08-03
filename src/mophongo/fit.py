@@ -316,6 +316,33 @@ class SparseFitter:
             templates = self._orig_templates
         return Templates.predicted_errors(templates, self.weights)
 
+    def flux_and_rms(
+        self, templates: Optional[List[Template]] = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return flux estimates and RMS errors for templates.
+
+        Uses existing template fluxes when available; otherwise computes
+        quick fluxes and predicted errors for the first ``n_flux`` templates.
+
+        Args:
+            templates: Optional list of templates to evaluate. Defaults to
+                the original templates supplied to the fitter.
+
+        Returns:
+            Tuple ``(flux, rms)`` containing the flux estimates and
+            corresponding RMS errors for each template.
+        """
+        if templates is None:
+            templates = self._orig_templates
+
+        if templates and templates[0].flux != 0:
+            flux = np.array([t.flux for t in templates[: self.n_flux]])
+        else:
+            flux = self.quick_flux(templates)[: self.n_flux]
+
+        rms = self.predicted_errors(templates)[: self.n_flux]
+        return flux, rms
+
     def flux_errors(self) -> np.ndarray:
         """Return the 1-sigma flux uncertainties from the last solution."""
         if self.solution_err is None:

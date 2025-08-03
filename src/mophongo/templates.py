@@ -302,6 +302,37 @@ class Templates:
             tmpl.err = pred[i]  # Store RMS in the template for later use
         return pred
 
+    def prune_outside_weight(self, weight: np.ndarray) -> List[Template]:
+        """Remove templates with no overlap with the provided ``weight`` map.
+
+        A template is discarded if all pixels belonging to its segmentation
+        footprint fall on non-positive weight values. The check is performed in
+        the original image coordinates using ``tmpl.slices_original``.
+
+        Parameters
+        ----------
+        weight : np.ndarray
+            Weight map aligned with ``self.original_shape``.
+
+        Returns
+        -------
+        list[Template]
+            Remaining templates after pruning.
+        """
+        keep: list[Template] = []
+        for tmpl in self._templates:
+            sl = tmpl.slices_original
+            seg = tmpl.data[tmpl.slices_cutout] > 0
+            w = weight[sl] > 0
+            if np.any(seg & w):
+                keep.append(tmpl)
+
+        dropped = len(self._templates) - len(keep)
+        if dropped:
+            logger.info("Dropped %d templates outside weight map", dropped)
+        self._templates = keep
+        return self._templates
+
     @property
     def templates(self) -> List[Template]:
         """Return the list of templates."""

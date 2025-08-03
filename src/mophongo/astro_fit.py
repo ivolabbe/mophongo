@@ -51,11 +51,7 @@ class GlobalAstroFitter(SparseFitter):
         self.n_alpha = astrometry.n_terms(order)   # α_k  (β_k shares the same K)
 
         # get estimate for the flux and errors to scale the gradients and keep only high S/N sources for astrometry
-        if self.templates[0].flux != 0:
-            flux = [t.flux for t in self.templates]
-        else:
-            flux = self.quick_flux()[0:self.n_flux]
-        rms = self.predicted_errors()[0:self.n_flux]  
+        flux, rms = self.flux_and_rms()
         
         # 1. per-object S/N estimate        
         if self.config.snr_thresh_astrom > 0:

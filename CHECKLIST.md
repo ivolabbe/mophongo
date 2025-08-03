@@ -58,7 +58,8 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
   - [x] Load or receive arrays for the images, catalog, and PSFs.
   - [x] Call template builder, construct sparse system, solve for fluxes, and return a table of measurements plus residuals.
   - [x] Propagate RMS images as weights to compute flux uncertainties
-  - [x] Enabled template deduplication after extraction
+- [x] Enabled template deduplication after extraction
+- [x] Added multi-template second pass for poor-fit sources
 - [x] **Simulation utilities for tests** (`tests/utils.py`)
   - [x] Create fake catalogs and images with Moffat sources of varying size and ellipticity. positions are ra,dec
   - [x] Produce matching high‑res and low‑res PSFs, with low res PSF at least 5x high res PSF.
@@ -79,6 +80,7 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
 
 ## TODO
 - [ ] scan for bug fixes / robustness improvements
+  - [x] align PSF components to fractional template centers
   - [ ] automated way of determining optimal convolution kernels for PSF  
 - [ ] validate output catalogs on MIRI data
   - [ ] color color, color mag

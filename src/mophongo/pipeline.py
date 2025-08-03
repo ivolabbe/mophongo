@@ -213,25 +213,29 @@ def run(
             else:
                 kernel = downsample_psf(kernel, k)
 
+        # assume weights are dominated by photometry image (for proper weights see sparse fitter, needes iteration)
+        weights_i = weights[idx] if weights is not None else None
 
         # Downsample templates and kernel to match the image resolution
-        tmpls_lo = tmpls
         if k > 1:
             tmpls_lo = Templates()
-            tmpls_lo.original_shape = images[idx].shape 
-            tmpls_lo.wcs = wcs[idx]
-            tmpls_lo._templates = [t.downsample_wcs(k, image_lo, wcs) for t in tmpls._templates]
-#            for t in tmpls_lo._templates:
-#                if wcs is not None:
-#                    t.wcs = wcs[idx]
+            tmpls_lo.original_shape = images[idx].shape
+            if wcs is not None:
+                tmpls_lo.wcs = wcs[idx]
+            tmpls_lo._templates = [
+                t.downsample_wcs(images[idx], wcs[idx] if wcs is not None else None, k)
+                for t in tmpls._templates
+            ]
+        else:
+            tmpls_lo = tmpls
+
+        if weights_i is not None:
+            tmpls_lo.prune_outside_weight(weights_i)
 
         # before convolving templates, drop templates whose 444 footprint falls fully outside the 770 image (ie weight is 0)
 
         templates = tmpls_lo.convolve_templates(kernel, inplace=False)
         print( f'Pipeline (convolved) memory: {memory():.1f} GB')
-
-        # assume weights are dominated by photometry image (for proper weights see sparse fitter, needes iteration)
-        weights_i = weights[idx] if weights is not None else None
 
         fitter_cls = GlobalAstroFitter if (
             config.fit_astrometry
@@ -296,6 +300,7 @@ def run(
                     # Placeholder for additional components (e.g. colour maps)
 
 
+                templates = tmpls_lo.convolve_templates(kernel, inplace=False)
                 fitter = fitter_cls(templates, images[idx], weights_i, config)
                 fluxes, errs, info = fitter.solve()
                 res = fitter.residual()

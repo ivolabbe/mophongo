@@ -10,7 +10,7 @@ def test_pipeline_multitemplate_pass():
     images, segmap, catalog, psfs, truth, wht = make_simple_data(nsrc=3, size=51)
     kernel = [mutils.matching_kernel(psfs[0], p) for p in psfs]
     kernel[0] = np.array([[1.0]])
-    config = FitConfig(multi_tmpl_chi2_thresh=0.0)
+    config = FitConfig(multi_tmpl_chi2_thresh=0.0, fit_astrometry_niter=0)
     table, resid, fitter = pipeline.run(
         images,
         segmap,

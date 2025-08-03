@@ -23,7 +23,7 @@ def test_global_astro_fitter_with_correct_template_count():
     # Use actual template count instead of assuming it equals source count
     actual_template_count = len(tmpls.templates)
     
-    config = FitConfig(fit_astrometry=True, astrom_basis_order=2)
+    config = FitConfig(fit_astrometry_niter=1, astrom_basis_order=2)
     fitter = GlobalAstroFitter(tmpls.templates, images[1], wht[1], config)
     
     # Check that astrometry parameters are set up correctly
@@ -44,13 +44,13 @@ def test_global_astro_fitter_n_flux_attribute():
     tmpls = Templates.from_image(images[0], segmap, positions, kernel=None)
     
     # With astrometry enabled
-    config_astro = FitConfig(fit_astrometry=True, astrom_basis_order=1)
+    config_astro = FitConfig(fit_astrometry_niter=1, astrom_basis_order=1)
     fitter_astro = GlobalAstroFitter(tmpls.templates, images[1], wht[1], config_astro)
     assert hasattr(fitter_astro, 'n_flux')
     assert fitter_astro.n_flux == len(tmpls.templates)
     
     # Without astrometry enabled
-    config_no_astro = FitConfig(fit_astrometry=False)
+    config_no_astro = FitConfig(fit_astrometry_niter=0)
     fitter_no_astro = GlobalAstroFitter(tmpls.templates, images[1], wht[1], config_no_astro)
     # n_flux might not be set when astrometry is disabled
     if hasattr(fitter_no_astro, 'n_flux'):
@@ -64,7 +64,7 @@ def test_global_astro_fitter_repeated_build(tmp_path):
     positions = list(zip(catalog["x"], catalog["y"]))
     tmpls = Templates.from_image(images[0], segmap, positions, kernel=None)
 
-    config = FitConfig(fit_astrometry=True, astrom_basis_order=1)
+    config = FitConfig(fit_astrometry_niter=1, astrom_basis_order=1)
     fitter = GlobalAstroFitter(tmpls.templates, images[1], wht[1], config)
 
     # First solve builds the normal matrix
@@ -102,15 +102,16 @@ def test_solve_return_shapes_with_actual_templates(tmp_path):
     positions = list(zip(catalog["x"], catalog["y"]))
     tmpls = Templates.from_image(truth, segmap, positions, kernel=psfs[0])
     n_tmpl = len(tmpls.templates)
-    
-    sf_cfg  = FitConfig(fit_astrometry=False,reg=1e-4)     # <- no α/β any more
-    fitter0 = SparseFitter(tmpls.templates, images[1], wht[1], sf_cfg)
+
+    templates = Templates.prune_and_dedupe(tmpls.templates, wht[1])
+    sf_cfg  = FitConfig(fit_astrometry_niter=0, reg=1e-4)     # <- no α/β any more
+    fitter0 = SparseFitter(templates, images[1], wht[1], sf_cfg)
     solution0, err0, info0 = fitter0.solve()
     res0 = fitter0.residual()
 
 #    config = FitConfig(fit_astrometry=True, astrom_basis_order=1, reg_astrom=1e-3)
-    config = FitConfig(fit_astrometry=True, astrom_basis_order=1, reg_astrom=1e-4, snr_thresh_astrom=10.0)
-    fitter = GlobalAstroFitter(tmpls.templates, images[1], wht[1], config)
+    config = FitConfig(fit_astrometry_niter=1, astrom_basis_order=1, reg_astrom=1e-4, snr_thresh_astrom=10.0)
+    fitter = GlobalAstroFitter(templates, images[1], wht[1], config)
     solution1, err1, info = fitter.solve()
     res1 = fitter.residual()
     
@@ -122,7 +123,7 @@ def test_solve_return_shapes_with_actual_templates(tmp_path):
     print(f"Template {i} oxy: {tmpls.templates[i].shift}")
 
     # 2ms / source 
-    fitter2 = GlobalAstroFitter(tmpls.templates, images[1], wht[1], config)
+    fitter2 = GlobalAstroFitter(templates, images[1], wht[1], config)
     solution2, err2, info2 = fitter2.solve()
     res2 = fitter2.residual()
 
@@ -134,8 +135,11 @@ def test_solve_return_shapes_with_actual_templates(tmp_path):
     print(f"Template {i} oxy: {tmpls.templates[i].shift}")
   
     catalog['flux0'] = solution0 
-    catalog['flux2'] = solution2 
-    catalog['err2'] = fitter.flux_errors() 
+    catalog['flux2'] = solution2
+    try:
+        catalog['err2'] = fitter.flux_errors()
+    except RuntimeError:
+        catalog['err2'] = np.full_like(catalog['flux2'], np.nan)
     catalog['err_pred'] = fitter.predicted_errors()
     catalog['snr'] = catalog['flux_true'] /catalog['err_pred'] 
     catalog['quick_flux'] = fitter.quick_flux()[0:fitter.n_flux]

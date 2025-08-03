@@ -213,6 +213,9 @@ def run(
 
         wcs_i = wcs[idx] if wcs is not None else None
 
+        # before convolving templates, drop sources whose 444 footprint falls fully outside the 770 image (ie weight is 0)
+
+
         templates = tmpls.convolve_templates(kernel, inplace=True)
         print(
             f'Pipeline (convolved) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB'
@@ -267,6 +270,7 @@ def run(
             # perform a final fit with just the fluxes. @@@ could do this as final pass also for joint fitter
             # check if this call is ok, only makes sense if we rebuild the normal matrix
             # TODO: track this from the templates is_dirty flag
+            # dont have to rebuild if we are adding templates for residuals
                 fitter._ata = None  # @@@ do this properly
                 fluxes, errs, info = fitter.solve()
                 res = fitter.residual()

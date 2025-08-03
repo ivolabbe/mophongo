@@ -49,7 +49,7 @@ class FitConfig:
     reg_astrom: float = 1e-4
     snr_thresh_astrom: float = 10.0   # 0 → keep all sources (current behaviour)
     astrom_model: str = "polynomial"  # 'polynomial' or 'gp'
-    multi_tmpl_chi2_thresh: float = 10.0
+    multi_tmpl_chi2_thresh: float = 5.0
     multi_tmpl_psf_core: bool = True
     multi_tmpl_colour: bool = False
 

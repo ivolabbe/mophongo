@@ -10,7 +10,7 @@ from photutils.segmentation import SegmentationImage
 from tqdm import tqdm
 from scipy.signal import fftconvolve
 
-from .utils import measure_shape, convolve2d
+from .utils import measure_shape, bin2d_mean
 from .psf_map import PSFRegionMap
 
 logger = logging.getLogger(__name__)
@@ -93,8 +93,61 @@ class Template(Cutout2D):
         if inplace:
             # overwrite the current attributes with the new one
             self.__dict__.update(new_template.__dict__)
- 
+
         return new_template
+
+    def downsample(self, k: int) -> "Template":
+        """Return a new template averaged by ``k×k`` blocks.
+
+        Parameters
+        ----------
+        k : int
+            Integer downsampling factor.
+
+        Returns
+        -------
+        Template
+            New downsampled template; the original is untouched.
+        """
+        if k == 1:
+            return self
+
+        hi = self
+        lo = deepcopy(hi)
+
+        # pixel data and bounding box
+        lo.data = bin2d_mean(hi.data, k)
+        ny_lo, nx_lo = lo.data.shape
+        y0, _, x0, _ = hi.bbox
+        bbox = (y0 // k, y0 // k + ny_lo, x0 // k, x0 // k + nx_lo)
+
+        from .fit import SparseFitter  # local import to avoid circular dependency
+
+        lo.bbox_original = ((bbox[0], bbox[1] - 1), (bbox[2], bbox[3] - 1))
+        lo.slices_original = SparseFitter._bbox_to_slices(bbox)
+        lo.slices_cutout = (slice(0, ny_lo), slice(0, nx_lo))
+        hi_shape = getattr(hi, "shape_input", hi.data.shape)
+        lo.shape_input = (hi_shape[0] // k, hi_shape[1] // k)
+
+        # centroid-sensitive attributes
+        shift = (k - 1) / 2.0
+
+        def _map(coord: float) -> float:
+            return (coord - shift) / k
+
+        for attr in (
+            "input_position_cutout",
+            "input_position_original",
+            "center_cutout",
+            "center_original",
+            "y",
+            "x",
+        ):
+            if hasattr(lo, attr):
+                y, x = getattr(lo, attr)
+                setattr(lo, attr, (_map(y), _map(x)))
+
+        return lo
 
 
 class Templates:
@@ -293,59 +346,66 @@ class Templates:
 
     def convolve_templates(
         self,
-        kernel: np.ndarray | PSFRegionMap,
+        kernel: np.ndarray | PSFRegionMap | None,
         inplace: bool = False,
     ) -> list[Template]:
         """Convolve all templates with ``kernel``.
 
         Parameters
         ----------
-        kernel
-            Either a fixed convolution kernel or a :class:`~mophongo.kernels.KernelLookup`
-            instance providing spatially varying kernels.
-        inplace
-            If ``True`` update the stored templates. Otherwise return a new
-            list of convolved templates.
+        kernel : np.ndarray or PSFRegionMap or None
+            Convolution kernel matching the template resolution. If ``None``,
+            templates are returned unchanged (aside from optional padding).
+        inplace : bool, optional
+            If ``True``, templates are modified in place and the internal list
+            is returned. Otherwise a new list of convolved templates is
+            produced.
+
+        Returns
+        -------
+        list of Template
+            Convolved templates.
         """
 
         if not self._templates:
-            raise ValueError(
-                "No templates to convolve. Run extract_templates first.")
+            raise ValueError("No templates to convolve. Run extract_templates first.")
 
-        # Determine kernel shape from fixed kernel or first lookup entry
-        if isinstance(kernel, PSFRegionMap):
-            ky, kx = kernel.psfs[0].shape
+        tmpls = self._templates
+        original_shape = self.original_shape
+
+        ker = None
+        if kernel is not None:
+            if isinstance(kernel, PSFRegionMap):
+                ker = kernel
+                ky, kx = ker.psfs[0].shape
+            else:
+                ker = kernel
+                ky, kx = ker.shape
         else:
-            ky,kx = kernel.shape
+            ky = kx = 0
 
         new_templates: list[Template] = []
-        for tmpl in tqdm(self._templates, desc="Convolving templates"):
-            new_tmpl = tmpl.pad((ky, kx), self.original_shape, inplace=inplace)
+        for tmpl in tqdm(tmpls, desc="Convolving templates"):
+            new_tmpl = tmpl.pad((ky, kx), original_shape, inplace=inplace)
 
-            # look up local kernel if using PSFRegionMap
-            if isinstance(kernel, PSFRegionMap):
-                x, y = tmpl.position_original
-                if tmpl.wcs is not None:
-                    ra, dec = tmpl.wcs.wcs_pix2world(x, y, 0)
+            if ker is not None:
+                if isinstance(ker, PSFRegionMap):
+                    x, y = tmpl.position_original
+                    if tmpl.wcs is not None:
+                        ra, dec = tmpl.wcs.wcs_pix2world(x, y, 0)
+                    else:
+                        ra, dec = x, y
+                    kern = ker.get_psf(ra, dec)
                 else:
-                    ra, dec = x, y
-                kern = kernel.get_psf(ra, dec)
-            else:
-                # use fixed kernel
-                kern = kernel
+                    kern = ker
 
-            conv = fftconvolve(new_tmpl.data, kern, mode='same')
-            new_tmpl.data[:] = conv / conv.sum()     #  normalizing to 1.0 makes astrofitter bomb
-                                                     #  needs to pre-whiten sparse matrix.
-#            new_tmpl.data[:] = conv                 
+                conv = fftconvolve(new_tmpl.data, kern, mode="same")
+                new_tmpl.data[:] = conv / conv.sum()
 
             if not inplace:
                 new_templates.append(new_tmpl)
 
-        if not inplace:
-            return new_templates
-        else:
-            return self._templates
+        return new_templates if not inplace else self._templates
 
 
 

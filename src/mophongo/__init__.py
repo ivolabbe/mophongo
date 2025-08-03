@@ -1,6 +1,5 @@
 #from .templates import Template 
 from .fit import SparseFitter
-from .astro_fit import GlobalAstroFitter
 from .local_astrometry import correct_astrometry_polynomial, correct_astrometry_gp
 from .catalog import Catalog
 #from .deblender import deblend_sources_symmetry, deblend_sources_hybrid
@@ -20,7 +19,6 @@ __all__ = [
 #    "Template",
 #    "FitConfig",
     "SparseFitter",
-    "GlobalAstroFitter",
     "correct_astrometry_polynomial",
     "correct_astrometry_gp",
     "Catalog",

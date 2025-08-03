@@ -59,6 +59,7 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
   - [x] Load or receive arrays for the images, catalog, and PSFs.
   - [x] Call template builder, construct sparse system, solve for fluxes, and return a table of measurements plus residuals.
   - [x] Propagate RMS images as weights to compute flux uncertainties
+  - [x] Prune templates lacking weight overlap before convolution
 - [x] Enabled template deduplication after extraction
 - [x] Added multi-template second pass for poor-fit sources
 - [x] Added integer-factor multi-resolution support with template and kernel downsampling

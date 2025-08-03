@@ -247,101 +247,6 @@ class Templates:
         self._templates = [self._templates[i] for i in keep]
         return self._templates
 
-    # put this in PSF class?
-    @staticmethod
-    def _sample_psf(psf: np.ndarray, position: Tuple[float, float],
-                    height: int, width: int) -> np.ndarray:
-        """Sample PSF at all positions in a grid centered at (center_x, center_y)."""
-
-        # Create coordinate grids
-        y_grid, x_grid = np.mgrid[0:height, 0:width]
-        dx = x_grid - position[0]
-        dy = y_grid - position[1]
-
-        # PSF center coordinates
-        cy = (psf.shape[0] - 1) / 2
-        cx = (psf.shape[1] - 1) / 2
-
-        # Calculate PSF indices
-        iy = np.round(cy + dy).astype(int)
-        ix = np.round(cx + dx).astype(int)
-
-        # Check bounds
-        valid = ((iy >= 0)
-                 & (iy < psf.shape[0])
-                 & (ix >= 0)
-                 & (ix < psf.shape[1]))
-
-        # Sample PSF values
-        vals = np.zeros((height, width), dtype=float)
-        vals[valid] = psf[iy[valid], ix[valid]]
-
-        return vals
-
-    def extend_with_psf_wings(self,
-                              psf: np.ndarray,
-                              *,
-                              radius_factor: float = 1.5,
-                              inplace: bool = False) -> List[Template]:
-        """Extend templates using PSF scaled to segment flux, placed where template is zero."""
-
-        psf = psf / psf.sum()
-        new_templates: list[Template] = []
-
-        # Add progress bar here
-        for i, tmpl in enumerate(tqdm(self._templates, desc="Extending with PSF wings")):
-            data = tmpl.data
-            ny, nx = data.shape
-
-            # Measure shape to determine padding needed
-            x_c, y_c, sigma_x, sigma_y, theta = measure_shape(data, data != 0)
-            effective_radius = max(sigma_x, sigma_y)
-
-            # Calculate padding based on radius factor
-            pad_radius = int(np.ceil(effective_radius * radius_factor))
-            pady, padx = int(ny * (radius_factor - 1)), int(nx * (radius_factor - 1))
-
-            # Pad the template
-            new_tmpl = tmpl.pad((pady,padx), self.original_shape, inplace=inplace)
-
-            # Sample PSF at all template positions
-            nh, nw = new_tmpl.data.shape
-            psf_template = self._sample_psf(psf, new_tmpl.position_cutout, nh, nw)
-
-            # Create mask for segment pixels in the padded template
-            # Calculate scaling using only segment pixels
-            segment_mask = new_tmpl.data > 0
-            data_in_segment = np.sum(new_tmpl.data[segment_mask])
-            psf_in_segment = np.sum(psf_template[segment_mask])
-
-            if psf_in_segment > 0:
-                psf_scale = data_in_segment / psf_in_segment
-            else:
-                psf_scale = 0.0
-
-            # Add PSF flux only where the template is currently zero
-            # if inplace, this will modify the original template
-            new_tmpl.data[~segment_mask] += psf_template[~segment_mask] * psf_scale
-
-            # Update the output templates list if not inplace
-            if not inplace:
-                new_templates.append(new_tmpl)
-
-            # Store original flux for diagnostics
-            flux_before = data.sum()
-            flux_after = new_tmpl.data.sum()
-            flux_added =  flux_after - flux_before
-
-            # Print diagnostics
-#            print(f"Source flux: {flux_before:.2f}, PSF scale: {psf_scale:.3f}, "
-#                  f"Flux before: {flux_before:.2f}, after: {flux_after:.2f}, "
-#                  f"added: {flux_added:.2f} ({100*flux_added/flux_before:.1f}%)")
-
-        if not inplace:
-            return new_templates
-        else:
-            return self._templates
-
     def extract_templates(
         self,
         hires_image: np.ndarray,
@@ -436,6 +341,103 @@ class Templates:
 
             if not inplace:
                 new_templates.append(new_tmpl)
+
+        if not inplace:
+            return new_templates
+        else:
+            return self._templates
+
+
+
+    # put this in PSF class?
+    @staticmethod
+    def _sample_psf(psf: np.ndarray, position: Tuple[float, float],
+                    height: int, width: int) -> np.ndarray:
+        """Sample PSF at all positions in a grid centered at (center_x, center_y)."""
+
+        # Create coordinate grids
+        y_grid, x_grid = np.mgrid[0:height, 0:width]
+        dx = x_grid - position[0]
+        dy = y_grid - position[1]
+
+        # PSF center coordinates
+        cy = (psf.shape[0] - 1) / 2
+        cx = (psf.shape[1] - 1) / 2
+
+        # Calculate PSF indices
+        iy = np.round(cy + dy).astype(int)
+        ix = np.round(cx + dx).astype(int)
+
+        # Check bounds
+        valid = ((iy >= 0)
+                 & (iy < psf.shape[0])
+                 & (ix >= 0)
+                 & (ix < psf.shape[1]))
+
+        # Sample PSF values
+        vals = np.zeros((height, width), dtype=float)
+        vals[valid] = psf[iy[valid], ix[valid]]
+
+        return vals
+
+    def extend_with_psf_wings(self,
+                              psf: np.ndarray,
+                              *,
+                              radius_factor: float = 1.5,
+                              inplace: bool = False) -> List[Template]:
+        """Extend templates using PSF scaled to segment flux, placed where template is zero."""
+
+        psf = psf / psf.sum()
+        new_templates: list[Template] = []
+
+        # Add progress bar here
+        for i, tmpl in enumerate(tqdm(self._templates, desc="Extending with PSF wings")):
+            data = tmpl.data
+            ny, nx = data.shape
+
+            # Measure shape to determine padding needed
+            x_c, y_c, sigma_x, sigma_y, theta = measure_shape(data, data != 0)
+            effective_radius = max(sigma_x, sigma_y)
+
+            # Calculate padding based on radius factor
+            pad_radius = int(np.ceil(effective_radius * radius_factor))
+            pady, padx = int(ny * (radius_factor - 1)), int(nx * (radius_factor - 1))
+
+            # Pad the template
+            new_tmpl = tmpl.pad((pady,padx), self.original_shape, inplace=inplace)
+
+            # Sample PSF at all template positions
+            nh, nw = new_tmpl.data.shape
+            psf_template = self._sample_psf(psf, new_tmpl.position_cutout, nh, nw)
+
+            # Create mask for segment pixels in the padded template
+            # Calculate scaling using only segment pixels
+            segment_mask = new_tmpl.data > 0
+            data_in_segment = np.sum(new_tmpl.data[segment_mask])
+            psf_in_segment = np.sum(psf_template[segment_mask])
+
+            if psf_in_segment > 0:
+                psf_scale = data_in_segment / psf_in_segment
+            else:
+                psf_scale = 0.0
+
+            # Add PSF flux only where the template is currently zero
+            # if inplace, this will modify the original template
+            new_tmpl.data[~segment_mask] += psf_template[~segment_mask] * psf_scale
+
+            # Update the output templates list if not inplace
+            if not inplace:
+                new_templates.append(new_tmpl)
+
+            # Store original flux for diagnostics
+            flux_before = data.sum()
+            flux_after = new_tmpl.data.sum()
+            flux_added =  flux_after - flux_before
+
+            # Print diagnostics
+#            print(f"Source flux: {flux_before:.2f}, PSF scale: {psf_scale:.3f}, "
+#                  f"Flux before: {flux_before:.2f}, after: {flux_after:.2f}, "
+#                  f"added: {flux_added:.2f} ({100*flux_added/flux_before:.1f}%)")
 
         if not inplace:
             return new_templates

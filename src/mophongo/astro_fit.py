@@ -11,7 +11,7 @@ import numpy as np
 
 from scipy.ndimage import shift as nd_shift
 from scipy.sparse import eye, diags, csr_matrix
-from scipy.sparse.linalg import cg
+from scipy.sparse.linalg import cg,  spilu, LinearOperator
 
 from .fit import SparseFitter, FitConfig
 from .templates import Template
@@ -153,10 +153,13 @@ class GlobalAstroFitter(SparseFitter):
         A_w = Dinv @ A @ Dinv                   # still sparse, still SPD
         b_w = Dinv @ b
         
-        # if "M" not in cfg.cg_kwargs:
-        #     ilu = spilu(A_w, drop_tol=1e-5, fill_factor=10)
-        #     M = LinearOperator(A_w.shape, ilu.solve)
-        #     print('preconditioner:', M.shape)
+        cg_kwargs = dict(cfg.cg_kwargs)
+        if cg_kwargs.get("M") is None and A_w.nnz > 10 * A_w.shape[0]:
+            try:
+                ilu = spilu(A_w.tocsc(), drop_tol=1e-4, fill_factor=10)
+                cg_kwargs["M"] = LinearOperator(A_w.shape, ilu.solve)
+            except Exception as err:
+                logger.warning("ILU preconditioner failed: %s", err)
 
         y, info = cg(A_w, b_w, **cfg.cg_kwargs) # solve whitened system
         self.x = y

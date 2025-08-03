@@ -56,7 +56,7 @@ def _extract_psf_at(tmpl: Template, psf: np.ndarray) -> np.ndarray:
     dx = xc - (nx // 2)
     dy = yc - (ny // 2)
 
-    shifted = shift(psf, shift=(dy, dx), order=1, mode="constant", cval=0.0, prefilter=False)
+    shifted = shift(psf, shift=(dy, dx), order=3, mode="constant", cval=0.0, prefilter=False)
     cut = Cutout2D(
         shifted,
         (cx_psf, cy_psf),

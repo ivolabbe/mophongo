@@ -1,6 +1,11 @@
+import os
+import sys
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
 from mophongo.utils import gaussian, CircularApertureProfile
 
 

@@ -213,10 +213,9 @@ def run(
 
         wcs_i = wcs[idx] if wcs is not None else None
 
-        # before convolving templates, drop sources whose 444 footprint falls fully outside the 770 image (ie weight is 0)
+        # before convolving templates, drop templates whose 444 footprint falls fully outside the 770 image (ie weight is 0)
 
-
-        templates = tmpls.convolve_templates(kernel, inplace=True)
+        templates = tmpls.convolve_templates(kernel, inplace=False)
         print(
             f'Pipeline (convolved) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB'
         )

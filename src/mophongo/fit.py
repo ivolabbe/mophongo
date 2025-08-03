@@ -239,6 +239,7 @@ class SparseFitter:
     def solve(
         self,
         config: FitConfig | None = None,
+        x_w0: float | None = None
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Solve for template fluxes using conjugate gradient."""
         cfg = config or self.config
@@ -278,8 +279,8 @@ class SparseFitter:
         idx = [t.col_idx for t in self.templates]
 
         # reuse prevous solution if available
-        x_w_prev = getattr(self, "x_w_prev", None)  
-        x_w, info = cg(A_w, b_w, x0=x_w_prev, **cg_kwargs)
+        x_w0 = getattr(self, "x_w0", None)  
+        x_w, info = cg(A_w, b_w, x0=x_w0, **cg_kwargs)
         self.x_w = x_w
  
         # n_flux is always the full input length of the templates

@@ -200,7 +200,7 @@ class Templates:
             img = image[tmpl.slices_original]
             ttsqs = np.sum(tt**2)
             flux[i] = np.sum(img * tt) / ttsqs if ttsqs > 0 else 0.0
-            tmpl.quick_flux = flux[i]  # Store quick flux in the template for later use
+            tmpl.flux = flux[i]  # Store quick flux in the template for later use
         return flux
 
     @staticmethod
@@ -210,7 +210,7 @@ class Templates:
         for i, tmpl in enumerate(templates):
             w = weights[tmpl.slices_original]
             pred[i] = 1.0 / np.sqrt(np.sum(w * tmpl.data[tmpl.slices_cutout]**2))
-            tmpl.pred_err = pred[i]  # Store RMS in the template for later use
+            tmpl.err = pred[i]  # Store RMS in the template for later use
         return pred
 
     @property

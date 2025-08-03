@@ -28,6 +28,16 @@ from photutils.psf import matching
 import logging
 logger = logging.getLogger(__name__)
 
+def intersection(
+        a: Tuple[int, int, int, int],
+        b: Tuple[int, int, int, int]) -> Tuple[int, int, int, int] | None:
+    y0 = max(a[0], b[0])
+    y1 = min(a[1], b[1])
+    x0 = max(a[2], b[2])
+    x1 = min(a[3], b[3])
+    if y0 >= y1 or x0 >= x1:
+        return None
+    return y0, y1, x0, x1
 
 def bin2d_mean(arr: np.ndarray, k: int) -> np.ndarray:
     """Block-average a 2-D array by an integer factor using ``block_reduce``.
@@ -59,7 +69,7 @@ def downsample_psf(psf: np.ndarray, k: int) -> np.ndarray:
     if k == 1:
         return psf
 
-    # only shift center if k a multiple of 2 and psf.shape is odd 
+    # only downsample if k a multiple of 2 and  
     if (k % 2 == 0) and (psf.shape[0] % 2 == 1):
         shift_hi = (k - 1) / 2.0
         psf = shift(

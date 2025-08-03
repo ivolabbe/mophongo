@@ -189,10 +189,8 @@ def run(
                             segmap,
                             positions,
                             wcs=wcs[0] if wcs is not None else None)
-    # @@ put this in extract_templates
-    tmpls.deduplicate()
-    print( 'Pipepline:', len(tmpls.templates),
-        f'extracted templates, dropped {len(positions)-len(tmpls.templates)}.')
+    ndropped = len(positions) - len(tmpls.templates)
+    print(f'Pipepline: {len(tmpls.templates)} extracted templates, dropped {ndropped}.')
     print(f'Pipeline (templates) memory: {memory():.1f} GB')
 
     residuals = []
@@ -209,7 +207,8 @@ def run(
             if isinstance(kernel, PSFRegionMap):
                 print(f"Using kernel lookup table {kernel.name}")
                 if k > 1:
-                    kernel.psfs = np.array([downsample_psf(psf, k) for psf in kernel.psfs])
+                    kernel.psfs = np.array(
+                        [downsample_psf(psf, k) for psf in kernel.psfs])
             else:
                 kernel = downsample_psf(kernel, k)
 
@@ -223,7 +222,8 @@ def run(
             if wcs is not None:
                 tmpls_lo.wcs = wcs[idx]
             tmpls_lo._templates = [
-                t.downsample_wcs(images[idx], wcs[idx] if wcs is not None else None, k)
+                t.downsample_wcs(images[idx],
+                                 wcs[idx] if wcs is not None else None, k)
                 for t in tmpls._templates
             ]
         else:
@@ -235,25 +235,24 @@ def run(
         # before convolving templates, drop templates whose 444 footprint falls fully outside the 770 image (ie weight is 0)
 
         templates = tmpls_lo.convolve_templates(kernel, inplace=False)
-        print( f'Pipeline (convolved) memory: {memory():.1f} GB')
+        print(f'Pipeline (convolved) memory: {memory():.1f} GB')
 
         fitter_cls = GlobalAstroFitter if (
-            config.fit_astrometry
-            and config.fit_astrometry_joint) else SparseFitter
+            config.fit_astrometry_niter > 0 and config.fit_astrometry_joint
+            ) else SparseFitter
 
         # every iteration will scale and shift the tmpl images
         # accumulated the shifts and scale are recorded in template attributes
-        niter = config.fit_astrometry_niter if config.fit_astrometry else 1
-
+        niter = max(config.fit_astrometry_niter, 1)
         for j in range(niter):
-            print(f"Running iteration {j+1} of {config.fit_astrometry_niter}")
+            print(f"Running iteration {j+1} of {niter}")
 
             fitter = fitter_cls(templates, images[idx], weights_i, config)
             fluxes, errs, info = fitter.solve()
             res = fitter.residual()
             print(f'Pipeline (residual) memory: {memory():.1f} GB')
 
-            if config.fit_astrometry and not config.fit_astrometry_joint:
+            if config.fit_astrometry_niter > 0 and not config.fit_astrometry_joint:
                 print('fitting astrometry separately')
                 if config.astrom_model == "gp":
                     correct_astrometry_gp(
@@ -299,8 +298,6 @@ def run(
                         tmpls.add_component(parent, stamp, "psf")
                     # Placeholder for additional components (e.g. colour maps)
 
-
-                templates = tmpls_lo.convolve_templates(kernel, inplace=False)
                 fitter = fitter_cls(templates, images[idx], weights_i, config)
                 fluxes, errs, info = fitter.solve()
                 res = fitter.residual()

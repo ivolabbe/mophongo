@@ -18,7 +18,7 @@ from astropy.utils import lazyproperty
 from astropy.modeling.fitting import TRFLSQFitter
 from astropy.modeling.models import Moffat1D
 from photutils.profiles import RadialProfile, CurveOfGrowth
-from photutils.centroids import centroid_quadratic
+from photutils.centroids import centroid_quadratic, centroid_com
 
 from scipy.special import eval_hermite      # physicists' Hermite
 from photutils.psf import matching
@@ -341,6 +341,10 @@ def matching_kernel(
                                         xpeak=cx,
                                         ypeak=cy,
                                         fit_boxsize=5)
+        if np.isnan(ycen) or np.isnan(xcen):
+            # fallback to centroid_com if quadratic fails
+            ycen, xcen = centroid_com(kernel)
+
         if not np.isnan(ycen) and not np.isnan(xcen):
             kernel = shift(kernel, (cy - ycen, cx - xcen),
                            order=3,

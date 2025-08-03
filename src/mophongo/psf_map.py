@@ -211,7 +211,8 @@ class PSFRegionMap:
         else:
             logging.warning(f"No PSFs found for {geojson_path}, using None.")
 
-        return cls(regions=regions_gdf, psfs=psfs, **kwargs)
+        base_name = os.path.splitext(os.path.basename(geojson_path))[0]
+        return cls(regions=regions_gdf, psfs=psfs, name=base_name, **kwargs)
 
     # =================================================================
     # public grouping methods

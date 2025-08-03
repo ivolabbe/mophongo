@@ -23,7 +23,9 @@ def test_benchmark_pipeline_steps():
 
   
     start = time.perf_counter()
-    fitter = SparseFitter(tmpls.templates, images[1])
+    weight = np.ones_like(images[1])
+    templates = Templates.prune_and_dedupe(tmpls.templates, weight)
+    fitter = SparseFitter(templates, images[1], weight)
     fitter.solve()
     fit_time = time.perf_counter() - start
 

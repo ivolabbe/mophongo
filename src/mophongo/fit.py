@@ -277,14 +277,16 @@ class SparseFitter:
         # expand to full solution vector corresponding to _orig_templates
         idx = [t.col_idx for t in self.templates]
 
-        y, info = cg(A_w, b_w, **cg_kwargs)
-        self.x = y
-
+        # reuse prevous solution if available
+        x_w_prev = getattr(self, "x_w_prev", None)  
+        x_w, info = cg(A_w, b_w, x0=x_w_prev, **cg_kwargs)
+        self.x_w = x_w
+ 
         # n_flux is always the full input length of the templates
         x_full     = np.zeros(self.n_flux, dtype=float)
         e_full     = np.zeros(self.n_flux, dtype=float)
 
-        x_full[idx] = y / d                   # un-whiten + scatter
+        x_full[idx] = x_w / d                   # un-whiten + scatter
         e_full[idx] = self._flux_errors(A_w) / d  # un-whiten errors
 
         if cfg.positivity:

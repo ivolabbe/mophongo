@@ -114,6 +114,7 @@ class GlobalAstroFitter(SparseFitter):
     # ------------------------------------------------------------
     def solve(self, 
               config: FitConfig | None = None
+              x_w0: float | None = None
     ) -> Tuple[np.ndarray, np.ndarray, int]:
         cfg   = config or self.config
 
@@ -157,15 +158,17 @@ class GlobalAstroFitter(SparseFitter):
             except Exception as err:
                 logger.warning("ILU preconditioner failed: %s", err)
 
-        y, info = cg(A_w, b_w, **cfg.cg_kwargs) # solve whitened system
-        self.x = y
+        # WARNING: this is a warm start: but only useful if the templates are the same
+        x_w0 = getattr(self, "x_w0", None)  
+        x_w, info = cg(A_w, b_w, x0=x_w0, **cg_kwargs)
+        self.x_w = x_w
 
         # ---------- expand back to the *full* parameter space -------------------
         P_full     = self.n_flux + 2 * self.n_alpha        # N + 2K
         x_full     = np.zeros(P_full, dtype=float)
         e_full     = np.zeros(P_full, dtype=float)
 
-        x_full[self._compact2full] = y / d        # un-whiten + scatter
+        x_full[self._compact2full] = x_w / d        # un-whiten + scatter
         e_full[self._compact2full] = self._flux_errors(A_w) / d     # un-whiten errors ? 
 
         # positivity on fluxes only

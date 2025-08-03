@@ -7,18 +7,15 @@ import os
 from copy import deepcopy
 from typing import List, Tuple
 
-import logging
 import numpy as np
 
 from scipy.ndimage import shift as nd_shift
 from scipy.sparse import eye, diags, csr_matrix
-from scipy.sparse.linalg import cg, spilu, LinearOperator
+from scipy.sparse.linalg import cg,  spilu, LinearOperator
 
 from .fit import SparseFitter, FitConfig
 from .templates import Template
 from . import astrometry
-
-logger = logging.getLogger(__name__)
 
 
 class GlobalAstroFitter(SparseFitter):
@@ -173,11 +170,7 @@ class GlobalAstroFitter(SparseFitter):
         e_full     = np.zeros(P_full, dtype=float)
 
         x_full[self._compact2full] = x_w / d        # un-whiten + scatter
-        try:
-            e_full[self._compact2full] = self._flux_errors(A_w) / d  # un-whiten errors ?
-        except RuntimeError as err:
-            logger.warning("flux error estimation failed: %s", err)
-            e_full[self._compact2full] = np.nan
+        e_full[self._compact2full] = self._flux_errors(A_w) / d     # un-whiten errors ? 
 
         # positivity on fluxes only
         if cfg.positivity:

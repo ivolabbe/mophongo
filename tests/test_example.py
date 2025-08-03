@@ -109,9 +109,7 @@ if __name__ == "__main__":
 
     tmpls = Templates.from_image(images[0], segmap, positions, kernel)
     print(len(tmpls), len(catalog))
-    weight = 1.0 / rms[1]**2
-    templates = Templates.prune_and_dedupe(tmpls.templates, weight)
-    fitter = SparseFitter(templates, images[1], weight)
+    fitter = SparseFitter(tmpls.templates, images[1], 1.0 / rms[1]**2)
     fluxes, _ = fitter.solve()
     pred = fitter.predicted_errors()
     errs = fitter.flux_errors()

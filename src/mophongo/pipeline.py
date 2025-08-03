@@ -235,9 +235,6 @@ def run(
         # before convolving templates, drop templates whose 444 footprint falls fully outside the 770 image (ie weight is 0)
 
         templates = tmpls_lo.convolve_templates(kernel, inplace=False)
-        weights_prune = weights_i if weights_i is not None else np.ones_like(images[idx])
-        templates = Templates.prune_and_dedupe(templates, weights_prune)
-        tmpls_lo._templates = templates
         print(f'Pipeline (convolved) memory: {memory():.1f} GB')
 
         fitter_cls = GlobalAstroFitter if (

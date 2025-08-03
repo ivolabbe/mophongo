@@ -36,18 +36,17 @@ def test_polynomial_astrometry_reduces_residual(tmp_path):
     positions = list(zip(catalog["x"], catalog["y"]))
     tmpls = Templates.from_image(images[0], segmap, positions, kernel)
 
-    templates = Templates.prune_and_dedupe(tmpls.templates, wht[1])
-    fitter = SparseFitter(templates, images[1], wht[1], FitConfig())
+    fitter = SparseFitter(tmpls.templates, images[1], wht[1], FitConfig())
     fitter.build_normal_matrix()
     flux, _, _ = fitter.solve()
     err = fitter.flux_errors()
     perr = fitter.predicted_errors()
     res = fitter.residual()
-
+    
     res0 = fitter.residual()
 
     coeff_x, coeff_y = correct_astrometry_polynomial(
-        templates,
+        tmpls.templates,
         res0,
         fitter.solution,
         order=1,
@@ -120,15 +119,14 @@ def test_gp_astrometry_returns_models():
         images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel
     )
 
-    templates = Templates.prune_and_dedupe(tmpls.templates, wht[1])
-    fitter = SparseFitter(templates, images[1], wht[1], FitConfig())
+    fitter = SparseFitter(tmpls.templates, images[1], wht[1], FitConfig())
     fitter.build_normal_matrix()
     fitter.solve()
     fitter.flux_errors()
     res = fitter.residual()
 
     gp_x, gp_y = correct_astrometry_gp(
-        templates,
+        tmpls.templates,
         res,
         fitter.solution,
         box_size=7,

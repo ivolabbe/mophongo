@@ -5,7 +5,6 @@ from mophongo.templates import Templates, Template
 from utils import make_simple_data, save_template_diagnostic
 import pytest
 from astropy.wcs import WCS
-from copy import deepcopy
 
 def test_extract_templates_sizes_and_norm(tmp_path):
     images, segmap, catalog, psfs, truth_img, rms = make_simple_data(seed=5,nsrc=15, size=51, ndilate=2, peak_snr=3)
@@ -63,25 +62,3 @@ def test_template_extension_methods(tmp_path):
 
 def test_kernel_padding():
     return
-
-
-def test_prune_and_dedupe():
-    images, segmap, catalog, psfs, _, wht = make_simple_data(nsrc=2, size=51)
-    psf_hi = PSF.from_array(psfs[0])
-    psf_lo = PSF.from_array(psfs[1])
-    kernel = psf_hi.matching_kernel(psf_lo)
-
-    tmpls = Templates.from_image(
-        images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel
-    )
-    templates = tmpls.templates
-
-    dup = deepcopy(templates[0])
-    zero = deepcopy(templates[0])
-    zero.data[:] = 0.0
-    templates = templates + [dup, zero]
-
-    pruned = Templates.prune_and_dedupe(templates, wht[1])
-
-    assert len(pruned) == len(tmpls.templates)
-    assert all(getattr(t, "norm", 0.0) > 0 for t in pruned)

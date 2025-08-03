@@ -21,9 +21,7 @@ def test_flux_recovery(tmp_path):
         images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel
     )
 
-    weight = 1.0 / rms[1] ** 2
-    templates = Templates.prune_and_dedupe(tmpls.templates, weight)
-    fitter = SparseFitter(templates, images[1], weight, FitConfig())
+    fitter = SparseFitter(tmpls.templates, images[1], 1.0 / rms[1] ** 2, FitConfig())
     fitter.build_normal_matrix()
     x, err, info = fitter.solve()
 
@@ -46,9 +44,7 @@ def test_ata_symmetry():
     tmpls = Templates.from_image(
         images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel
     )
-    weight = 1.0 / rms[1] ** 2
-    templates = Templates.prune_and_dedupe(tmpls.templates, weight)
-    fitter = SparseFitter(templates, images[1], weight, FitConfig())
+    fitter = SparseFitter(tmpls.templates, images[1], 1.0 / rms[1] ** 2, FitConfig())
     fitter.build_normal_matrix()
     ata = fitter.ata.toarray()
     assert np.allclose(ata, ata.T)
@@ -64,8 +60,7 @@ def test_zero_weight_template_dropped():
     t2 = Template(img, (3, 3), (2, 2))
     t2.data[:] = 1.0
 
-    templates = Templates.prune_and_dedupe([t1, t2], weights)
-    fitter = SparseFitter(templates, img, weights, FitConfig())
+    fitter = SparseFitter([t1, t2], img, weights, FitConfig())
     fitter.build_normal_matrix()
 
     assert len(fitter.templates) == 1
@@ -84,8 +79,7 @@ def test_flux_errors_regularized():
     tmpl_data2[0, 0] = 0.1  # break perfect degeneracy
     t2.data[:] = tmpl_data2
 
-    templates = Templates.prune_and_dedupe([t1, t2], weights)
-    fitter = SparseFitter(templates, img, weights, FitConfig())
+    fitter = SparseFitter([t1, t2], img, weights, FitConfig())
     fitter.build_normal_matrix()
     _, _, _ = fitter.solve()
     err = fitter.flux_errors()
@@ -102,9 +96,7 @@ def test_flux_and_rms_estimation():
         images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel=None
     )
 
-    weight = 1.0 / rms[1] ** 2
-    templates = Templates.prune_and_dedupe(tmpls.templates, weight)
-    fitter = SparseFitter(templates, images[1], weight, FitConfig())
+    fitter = SparseFitter(tmpls.templates, images[1], 1.0 / rms[1] ** 2, FitConfig())
 
     flux, err = fitter.flux_and_rms()
     np.testing.assert_allclose(flux, fitter.quick_flux())

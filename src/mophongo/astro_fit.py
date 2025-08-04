@@ -61,8 +61,12 @@ class GlobalAstroFitter(SparseFitter):
         
         print(f"GlobalAstroFitter: {self.n_flux} templates and {np.sum(good)} with S/N >= {self.config.snr_thresh_astrom} used for astrometry")
         if not np.any(good): 
-            good[:] = True   # fall back
-
+            print("WARNING: No templates with S/N >= threshold, pick 10 brightest.")
+            # fall back to quick fluxes and errors
+            flux = Template.quick_fluxes(self.templates, self.image, self.weights)
+            good = np.zeros_like(flux, dtype=bool)
+            good[[np.argsort(flux)[-min(10,len(flux)):]]] = True
+            
         # 1. per-object gradients
         gx_i, gy_i = astrometry.make_gradients(templates)
 
@@ -182,12 +186,18 @@ class GlobalAstroFitter(SparseFitter):
         # apply sub-pixel shifts so residual() uses updated templates
         self.alpha    = x_full[self.n_flux : self.n_flux + self.n_alpha]  # α_k  (size K)
         self.beta     = x_full[self.n_flux + self.n_alpha : ]             # β_k  (size K)
-        self._apply_shifts()             # <── one call, no duplication
+        
+        # only apply shifts if no nans in the solution
+        if np.isfinite(self.alpha).any() or np.isfinite(self.beta).any():
+            self._apply_shifts()             # <── one call, no duplication
+        else:            
+            print("WARNING: NaN in astrometric solution, not applying shifts.")
+            self.config.fit_astrometry_niter = 0  # disable further iterations
 
         # update the templates with the fitted fluxes, errors     
         for tmpl, flux, err in zip(self._orig_templates, self.solution, self.solution_err):
-            tmpl.flux = flux 
-            tmpl.err = err
+            if np.isfinite(flux): tmpl.flux = flux 
+            if np.isfinite(err): tmpl.err = err
 
         return self.solution, self.solution_err, info
 

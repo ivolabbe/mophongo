@@ -232,8 +232,6 @@ def run(
         if weights_i is not None:
             tmpls_lo.prune_outside_weight(weights_i)
 
-        # before convolving templates, drop templates whose 444 footprint falls fully outside the 770 image (ie weight is 0)
-
         templates = tmpls_lo.convolve_templates(kernel, inplace=False)
         print(f'Pipeline (convolved) memory: {memory():.1f} GB')
 

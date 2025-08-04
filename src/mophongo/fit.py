@@ -179,11 +179,12 @@ class SparseFitter:
         norms: list[float] = []
         for tmpl, norm in zip(self.templates, norms_all):
             if norm < tol:
-                logger.warning("Dropping template with low norm %.2e", norm)
+               # logger.warning("Dropping template with low norm %.2e", norm)
                 continue
             valid.append(tmpl)
             norms.append(norm)
 
+        print(f"Dropped {len(self.templates)-len(valid)} templates with low norm."   )
         self.templates = valid
 
         n = len(self.templates)
@@ -313,16 +314,6 @@ class SparseFitter:
 
         A_w = Dinv @ A @ Dinv
         b_w = Dinv @ b
-
-        # cg_kwargs = dict(cfg.cg_kwargs)
-        # if cg_kwargs.get("M") is None and A_w.nnz > 10 * A_w.shape[0]:
-        #     eps_pc = 1e-6 * np.mean(A_w.diagonal())   # ~10× larger than the eps you use in CG
-        #     A_pc   = A_w + eps_pc*eye(A_w.shape[0], format="csr")
-        #     try:
-        #         ilu = spilu(A_pc.tocsc(), drop_tol=1e-3, fill_factor=15)
-        #         cg_kwargs["M"] = LinearOperator(A_w.shape, ilu.solve, diag_pivot_thresh=0.0)
-        #     except Exception as err:
-        #         logger.warning("ILU preconditioner failed: %s", err)
 
         # expand to full solution vector corresponding to _orig_templates
         idx = [t.col_idx for t in self.templates]

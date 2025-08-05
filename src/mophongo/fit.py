@@ -45,11 +45,11 @@ class FitConfig:
     fit_covariances: bool = False  # Use simple fitting errors from diagonal of normal matrix
     # condense fit astrometry flags into one: fit_astrometry_niter = 0, means not fitting astrometry
     fit_astrometry_niter: int = 2     # Two passes for astrometry fitting
-    astrom_basis_order: int = 1
     fit_astrometry_joint: bool = False  # Use joint astrometry fitting, or separate step
     reg_astrom: float = 1e-4
     snr_thresh_astrom: float = 10.0   # 0 → keep all sources (current behaviour)
     astrom_model: str = "polynomial"  # 'polynomial' or 'gp'
+    astrom_basis_order: int = 1
     multi_tmpl_chi2_thresh: float = 5.0
     multi_tmpl_psf_core: bool = True
     multi_tmpl_colour: bool = False
@@ -179,16 +179,19 @@ class SparseFitter:
         norms: list[float] = []
         for tmpl, norm in zip(self.templates, norms_all):
             if norm < tol:
-               # logger.warning("Dropping template with low norm %.2e", norm)
+                # logger.warning("Dropping template with low norm %.2e", norm)
                 continue
             valid.append(tmpl)
             norms.append(norm)
 
-        print(f"Dropped {len(self.templates)-len(valid)} templates with low norm."   )
+        print(
+            f"Dropped {len(self.templates)-len(valid)} templates with low norm."
+        )
+        print(f"{np.isnan(norms).sum()} NaN norms found.")
         self.templates = valid
 
         n = len(self.templates)
-        duplicate = [False] * n
+        #        duplicate = [False] * n
         ata = lil_matrix((n, n))
         atb = np.zeros(n)
         for i, tmpl_i in enumerate(
@@ -203,8 +206,6 @@ class SparseFitter:
             ata[i, i] = norms[i]
 
             for j in range(i + 1, n):
-                # if duplicate[j]:
-                #     continue
                 tmpl_j = self.templates[j]
                 inter = self._slice_intersection(sl_i, tmpl_j.slices_original)
                 if inter is None:
@@ -241,20 +242,16 @@ class SparseFitter:
                 arr_i = tmpl_i.data[sl_i_local]
                 arr_j = tmpl_j.data[sl_j_local]
                 val = np.sum(arr_i * arr_j * w)
-                if val == 0.0:
-                    continue
-                cos_ij = val / np.sqrt(norms[i] * norms[j])
-                # if cos_ij > 0.999:
-                #     duplicate[j] = True
-                #     logger.warning("Dropping nearly duplicate template %d", j)
-                #     continue
                 ata[i, j] = val
                 ata[j, i] = val
 
-        keep = [k for k, dup in enumerate(duplicate) if not dup]
-        self.templates = [self.templates[k] for k in keep]
-        self._ata = ata.tocsr()[keep][:, keep]
-        self._atb = atb[keep]
+
+#        keep = [k for k, dup in enumerate(duplicate) if not dup]
+#        self.templates = [self.templates[k] for k in keep]
+#        self._ata = ata.tocsr()[keep][:, keep]
+#        self._atb = atb[keep]
+        self._ata = ata.tocsr()
+        self._atb = atb
 
     def model_image(self) -> np.ndarray:
         if self.solution is None:
@@ -263,6 +260,7 @@ class SparseFitter:
         for coeff, tmpl in zip(self.solution, self._orig_templates):
             model[
                 tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
+        model[self.weights <= 0 | np.isnan(self.weights)] = 0.0
         return model
 
     @property

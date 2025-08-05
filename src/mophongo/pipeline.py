@@ -12,6 +12,7 @@ import os
 import psutil
 from typing import Sequence
 from copy import deepcopy
+import logging
 import numpy as np
 from collections import defaultdict
 
@@ -21,6 +22,8 @@ from astropy.nddata import Cutout2D
 
 from .psf_map import PSFRegionMap
 from .utils import bin_factor_from_wcs, downsample_psf
+
+logger = logging.getLogger(__name__)
 
 
 def _per_source_chi2(residual: np.ndarray, weights: np.ndarray, templates: Sequence[Template]) -> np.ndarray:
@@ -118,7 +121,6 @@ def run(
     wcs: Sequence[WCS] | None = None,
     window: Window | None = None,
     extend_templates: str | None = None,
-    #    fit_astrometry: bool = False,
     #    astrom_order: int = 1,
     config: FitConfig | None = None,
 ) -> tuple[Table, np.ndarray]:
@@ -165,10 +167,7 @@ def run(
     from .templates import Templates
     from .fit import SparseFitter, FitConfig
     from .astro_fit import GlobalAstroFitter
-    from .local_astrometry import (
-        correct_astrometry_polynomial,
-        correct_astrometry_gp,
-    )
+    from .local_astrometry import AstroCorrect
     from . import utils
     import warnings
 
@@ -193,6 +192,7 @@ def run(
     print(f'Pipepline: {len(tmpls.templates)} extracted templates, dropped {ndropped}.')
     print(f'Pipeline (templates) memory: {memory():.1f} GB')
 
+    ac = AstroCorrect(config)
     residuals = []
     for idx in range(1, len(images)):
 
@@ -260,26 +260,8 @@ def run(
             print(f'Pipeline (residual) memory: {memory():.1f} GB')
 
             if config.fit_astrometry_niter > 0 and not config.fit_astrometry_joint:
-                print('fitting astrometry separately')
-                if config.astrom_model == "gp":
-                    correct_astrometry_gp(
-                        templates,
-                        res,
-                        fitter.solution,
-                        box_size=5,
-                        snr_threshold=config.snr_thresh_astrom,
-                        length_scale=500.0,
-                    )
-                else:
-                    # this also applies the shifts to the templates
-                    correct_astrometry_polynomial(
-                        templates,
-                        res,
-                        fitter.solution,
-                        order=config.astrom_basis_order,
-                        box_size=5,
-                        snr_threshold=config.snr_thresh_astrom,
-                    )
+                logger.info("fitting astrometry separately")
+                ac.fit(templates, res, fitter.solution)
 
             # perform a final fit with just the fluxes. @@@ could do this as final pass also for joint fitter
             # check if this call is ok, only makes sense if we rebuild the normal matrix

@@ -233,9 +233,7 @@ def run(
             tmpls_lo.prune_outside_weight(weights_i)
 
         templates = tmpls_lo.convolve_templates(kernel, inplace=False)
-        
-        templates = Templates.prune_and_dedupe(templates, weights_i)
-        tmpls_lo._templates = templates
+#        templates = empls_lo._templates
 
         print(f'Pipeline (convolved) memory: {memory():.1f} GB')
 
@@ -286,7 +284,7 @@ def run(
                     parent = templates[bi]
                     if config.multi_tmpl_psf_core and psfs is not None:
                         stamp = _extract_psf_at(parent, psfs[idx])
-                        tmpls_lo.add_component(parent, stamp, "psf")
+                        tmpls.add_component(parent, stamp, "psf")
                     # Placeholder for additional components (e.g. colour maps)
 
                 fitter = fitter_cls(templates, images[idx], weights_i, config)

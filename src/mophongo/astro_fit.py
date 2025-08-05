@@ -14,7 +14,7 @@ from scipy.sparse import eye, diags, csr_matrix
 from scipy.sparse.linalg import cg,  spilu, LinearOperator
 
 from .fit import SparseFitter, FitConfig
-from .templates import Template
+from .templates import Template, Templates
 from . import astrometry
 
 
@@ -62,10 +62,10 @@ class GlobalAstroFitter(SparseFitter):
         print(f"GlobalAstroFitter: {self.n_flux} templates and {np.sum(good)} with S/N >= {self.config.snr_thresh_astrom} used for astrometry")
         if not np.any(good): 
             print("WARNING: No templates with S/N >= threshold, pick 10 brightest.")
-            # fall back to quick fluxes and errors
-            flux = Template.quick_fluxes(self.templates, self.image, self.weights)
+            # fall back to quick flux estimates
+            flux = Templates.quick_flux(self.templates, self.image)
             good = np.zeros_like(flux, dtype=bool)
-            good[[np.argsort(flux)[-min(10,len(flux)):]]] = True
+            good[np.argsort(flux)[-min(10, len(flux)):]] = True
             
         # 1. per-object gradients
         gx_i, gy_i = astrometry.make_gradients(templates)

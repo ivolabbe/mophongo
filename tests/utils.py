@@ -704,21 +704,18 @@ def make_testdata():
 
     # --- User parameters from the pasted image ---
     center_ra, center_dec = 34.3032414, -5.1113316
-    center_x_40mas = 23242
-    center_y_40mas = 19388
-#    size_x_40mas = 1000
-#    size_y_40mas = 820
-#    postfix = 'test'
-    size_x_40mas = 3500
-    size_y_40mas = 2520
-    postfix = 'medium'
-    #   size_x_40mas = 4144
-    #   size_y_40mas = 2978
+    size_x_40mas = 1000
+    size_y_40mas = 820
+    postfix = 'test'
 
-    center_ra, center_dec = 34.303612, -5.1203157
-    size_x_40mas = 7000
-    size_y_40mas = 3520
-    postfix = 'large'
+    # size_x_40mas = 3500
+    # size_y_40mas = 2520
+    # postfix = 'medium'
+ 
+    # center_ra, center_dec = 34.303612, -5.1203157
+    # size_x_40mas = 7000
+    # size_y_40mas = 3520
+    # postfix = 'large'
 
     center_radec = SkyCoord(center_ra, center_dec, unit='deg')
     #  center = (center_x_40mas, center_y_40mas)
@@ -751,12 +748,6 @@ def make_testdata():
             hdu.writeto(outdir + outfile, overwrite=True)
             print(f"Saved {outdir+outfile}")
 
-    files_80mas = [
-        ('uds-sbkgsub-v0.3-80mas-f770w_drz_sci.fits',
-         f"uds-{postfix}-f770w_sci.fits"),
-        ('uds-sbkgsub-v0.3-80mas-f770w_drz_wht.fits',
-         f"uds-{postfix}-f770w_wht.fits"),
-    ]
     # Use the WCS and shape from one of the 40mas cutouts as the target
     ref_cutout_file = outdir + files_40mas[0][1]
     with fits.open(ref_cutout_file) as ref_hdul:
@@ -764,8 +755,15 @@ def make_testdata():
         target_wcs = WCS(target_header)
         target_shape = ref_hdul[0].data.shape
 
-#              output_projection=target_wcs,
-    target_80mas = rebin_wcs(target_wcs, n=1)  # Downsample by a factor of 2
+    files_80mas = [
+        ('uds-sbkgsub-v0.3-80mas-f770w_drz_sci.fits',
+         f"uds-{postfix}-f770w_sci.fits"),
+        ('uds-sbkgsub-v0.3-80mas-f770w_drz_wht.fits',
+         f"uds-{postfix}-f770w_wht.fits"),
+    ]
+    #target_80mas = rebin_wcs(target_wcs, n=1)  # Downsample by a factor of 2
+
+    from astropy.nddata import block_replicate
 
     for infile, outfile in files_80mas:
         with fits.open(indir + infile) as hdul:
@@ -780,22 +778,49 @@ def make_testdata():
             # PXSCLRT =   0.7251965743873189 / Pixel scale ratio relative to native detector s
             # Extract the cutout at the 80mas scale
             # make it slightly larger to avoid edge effects
-            size_80mas = (size[0] // 2 + 4, size[1] // 2 + 4)
+            size_80mas = (size[0] // 2, size[1] // 2)
             cutout_80mas = Cutout2D(data,
                                     position=center_radec,
                                     size=size_80mas,
                                     wcs=WCS(hdr))
-            # Reproject to 40mas grid
-            reprojected_data, _ = reproject_interp(
-                (cutout_80mas.data, cutout_80mas.wcs),
-                output_projection=target_wcs,
-                shape_out=target_shape, order='bicubic')
-            # update hdr with new wcs
+            cutout_40mas = block_replicate(cutout_80mas.data, 2,  conserve_sum=True)
+
             hdr.update(target_wcs.to_header())
-            hdu = fits.PrimaryHDU(reprojected_data.astype(np.float32),
-                                  header=hdr)
+            hdu = fits.PrimaryHDU(cutout_40mas.astype(np.float32), header=hdr)
             hdu.writeto(outdir + outfile, overwrite=True)
             print(f"Saved {outdir + outfile} (registered to 40mas grid)")
+
+
+    # for infile, outfile in files_80mas:
+    #     with fits.open(indir + infile) as hdul:
+    #         data = hdul[0].data
+    #         hdr = hdul[0].header
+    #         # https://drizzlepac.readthedocs.io/en/deployment/adrizzle.html
+    #         hdr['KERNEL'] = ('square', 'Drizzle kernel'
+    #                          )  # also turbo -> speed up
+    #         hdr['PIXFRAC'] = (1.0, 'Drizzle pixfrac')
+    #         # NOTE this is on the 80mas grid, so does not correspond to the 40mas pixel scale
+    #         # PIXFRAC =                  1.0 / Drizzle parameter describing pixel shrinking
+    #         # PXSCLRT =   0.7251965743873189 / Pixel scale ratio relative to native detector s
+    #         # Extract the cutout at the 80mas scale
+    #         # make it slightly larger to avoid edge effects
+    #         size_80mas = (size[0] // 2 + 4, size[1] // 2 + 4)
+    #         cutout_80mas = Cutout2D(data,
+    #                                 position=center_radec,
+    #                                 size=size_80mas,
+    #                                 wcs=WCS(hdr))
+    #         # Reproject to 40mas grid
+    #         reprojected_data, _ = reproject_interp(
+    #             (cutout_80mas.data, cutout_80mas.wcs),
+    #             output_projection=target_wcs,
+    #             shape_out=target_shape,
+    #             order='bicubic')
+    #         # update hdr with new wcs
+    #         hdr.update(target_wcs.to_header())
+    #         hdu = fits.PrimaryHDU(reprojected_data.astype(np.float32),
+    #                               header=hdr)
+    #         hdu.writeto(outdir + outfile, overwrite=True)
+    #         print(f"Saved {outdir + outfile} (registered to 40mas grid)")
 
 # %%
 
@@ -808,6 +833,7 @@ if __name__ == "__main__":
 
     hdr = fits.getheader(data_dir+'uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_sci.fits')
     wcs_40mas = WCS(hdr)
+# doesnt work -> scaling is not correct
     wcs_80mas = wcs_40mas.slice((slice(None, None, 2), slice(None, None, 2)))
 
     # create a new WCS that corresponds to slicing every 2nd pixel in both Y and X

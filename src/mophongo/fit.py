@@ -5,13 +5,10 @@ from typing import Any, Dict, List, Tuple, Optional
 
 import logging
 import numpy as np
-from scipy.sparse import lil_matrix, eye, diags, csr_matrix
-
-from scipy.sparse.linalg import cg, minres
-from tqdm import tqdm
-from scipy.sparse.linalg import cg, minres
 from numpy.random import default_rng
-import numpy as np
+from scipy.sparse import csr_matrix, diags, eye, lil_matrix
+from scipy.sparse.linalg import LinearOperator, cg, lsqr, minres
+from tqdm import tqdm
 
 from .templates import Template, Templates
 
@@ -336,6 +333,85 @@ class SparseFitter:
             tmpl.err = err
 
         return self.solution, self.solution_err, info
+
+    def solve_lo(
+        self,
+        config: FitConfig | None = None,
+        x0: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, dict]:
+        """Solve for template fluxes with LSQR on a matrix-free ``LinearOperator``.
+
+        Parameters
+        ----------
+        config
+            Optional :class:`FitConfig` overriding the fitter configuration.
+        x0
+            Optional starting vector for the iterative solver.
+
+        Returns
+        -------
+        flux, err, info
+            Best-fit coefficients, their 1-σ uncertainties (predicted-error
+            approximation) and a dictionary with solver diagnostics.
+        """
+
+        cfg = config or self.config
+
+        w_sqrt = np.sqrt(self.weights)
+        n_cols = len(self.templates)
+        img_shape = self.image.shape
+        flat_size = self.image.size
+
+        def _Av(x: np.ndarray) -> np.ndarray:
+            """Apply ``A`` scaled by ``W^{1/2}``."""
+
+            img = np.zeros_like(self.image, dtype=float)
+            for coeff, tmpl in zip(x, self.templates):
+                img[tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
+            return (w_sqrt * img).ravel()
+
+        def _ATv(y: np.ndarray) -> np.ndarray:
+            """Apply ``Aᵀ`` scaled by ``W^{1/2}``."""
+
+            y_img = w_sqrt * y.reshape(img_shape)
+            out = np.zeros(n_cols, dtype=float)
+            for i, tmpl in enumerate(self.templates):
+                out[i] = np.sum(
+                    tmpl.data[tmpl.slices_cutout]
+                    * y_img[tmpl.slices_original]
+                )
+            return out
+
+        Aop = LinearOperator(
+            shape=(flat_size, n_cols),
+            matvec=_Av,
+            rmatvec=_ATv,
+            dtype=float,
+        )
+
+        b = (w_sqrt * self.image).ravel()
+
+        atol = cfg.cg_kwargs.get("atol", 1e-6)
+        maxit = cfg.cg_kwargs.get("maxiter", 500)
+        result = lsqr(Aop, b, atol=atol, btol=atol, iter_lim=maxit, x0=x0)
+        x_hat, istop, itn, resid = result[0], result[1], result[2], result[3]
+
+        x_full = np.zeros(self.n_flux, dtype=float)
+        idx = [t.col_idx for t in self.templates]
+        x_full[idx] = x_hat
+
+        if cfg.positivity:
+            x_full = np.maximum(0.0, x_full)
+
+        err_full = self.predicted_errors()
+
+        self.solution = x_full
+        self.solution_err = err_full
+        for tmpl, f, e in zip(self._orig_templates, x_full, err_full):
+            tmpl.flux, tmpl.err = f, e
+
+        info = dict(istop=istop, itn=itn, resid_norm=resid)
+        return x_full, err_full, info
 
     def residual(self) -> np.ndarray:
         return self.image - self.model_image()

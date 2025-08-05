@@ -62,7 +62,7 @@ class GlobalAstroFitter(SparseFitter):
         print(f"GlobalAstroFitter: {self.n_flux} templates and {np.sum(good)} with S/N >= {self.config.snr_thresh_astrom} used for astrometry")
         if not np.any(good): 
             print("WARNING: No templates with S/N >= threshold, pick 10 brightest.")
-            # fall back to quick fluxes and errors
+            # fall back to quick flux estimates
             flux = Templates.quick_flux(self.templates, self.image)
             good = np.zeros_like(flux, dtype=bool)
             good[np.argsort(flux)[-min(10, len(flux)):]] = True
@@ -193,6 +193,7 @@ class GlobalAstroFitter(SparseFitter):
             self._apply_shifts()             # <── one call, no duplication
         else:            
             print("WARNING: NaN in astrometric solution, not applying shifts.")
+            self.config.fit_astrometry_niter = 0  # disable further iterations
 
         # update the templates with the fitted fluxes, errors     
         for tmpl, flux, err in zip(self._orig_templates, self.solution, self.solution_err):

@@ -34,6 +34,29 @@ def test_flux_recovery(tmp_path):
     assert fname.exists()
 
 
+def test_lsqr_lo_matches_cg():
+    images, segmap, catalog, psfs, _, rms = make_simple_data()
+
+    psf_hi = PSF.from_array(psfs[0])
+    psf_lo = PSF.from_array(psfs[1])
+    kernel = psf_hi.matching_kernel(psf_lo)
+
+    tmpls1 = Templates.from_image(
+        images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel
+    )
+    fitter_lo = SparseFitter(tmpls1.templates, images[1], 1.0 / rms[1] ** 2, FitConfig())
+    flux_lo, err_lo, _ = fitter_lo.solve_lo()
+
+    tmpls2 = Templates.from_image(
+        images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel
+    )
+    fitter_cg = SparseFitter(tmpls2.templates, images[1], 1.0 / rms[1] ** 2, FitConfig())
+    flux_cg, err_cg, _ = fitter_cg.solve()
+
+    np.testing.assert_allclose(flux_lo, flux_cg, rtol=2e-3, atol=2e-3)
+    assert err_lo.shape == err_cg.shape
+
+
 def test_ata_symmetry():
     images, segmap, catalog, psfs, _, rms = make_simple_data()
 

@@ -191,7 +191,10 @@ def test_pipeline_astrometry(tmp_path):
     kern1 = mutils.matching_kernel(psfs[0], psfs[1])
 
     config = FitConfig(
-        fit_astrometry=True, astrom_basis_order=1, reg_astrom=1e-4, snr_thresh_astrom=10.0
+        fit_astrometry_niter=2,
+        astrom_basis_order=1,
+        reg_astrom=1e-4,
+        snr_thresh_astrom=10.0,
     )
     table, res0, fit0 = pipeline.run(
         images, segmap, catalog=catalog, weights=wht, kernels=[None, kern1], config=config

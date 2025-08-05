@@ -12,14 +12,8 @@ from utils import make_simple_data
 from mophongo.psf import PSF
 from mophongo.templates import Templates
 from mophongo.fit import SparseFitter, FitConfig
-from mophongo.local_astrometry import (
-    correct_astrometry_polynomial,
-    correct_astrometry_gp,
-    shifts_at_positions,
-)
-from utils import save_diagnostic_image, lupton_norm
-from skimage.registration import phase_cross_correlation
-from photutils.centroids import centroid_quadratic
+from mophongo.local_astrometry import AstroCorrect
+from utils import save_diagnostic_image
 
 def test_polynomial_astrometry_reduces_residual(tmp_path):
     images, segmap, catalog, psfs, truth, wht = make_simple_data(
@@ -45,64 +39,31 @@ def test_polynomial_astrometry_reduces_residual(tmp_path):
     
     res0 = fitter.residual()
 
-    coeff_x, coeff_y = correct_astrometry_polynomial(
-        tmpls.templates,
-        res0,
-        fitter.solution,
-        order=1,
-        box_size=11,
-        snr_threshold=20,
-    )
-  
-    rhx,rhy = shifts_at_positions([[50,50]], coeff_x, coeff_y, 
-                                  order=1, shape=images[1].shape)
+    ac = AstroCorrect(FitConfig())
+    ac.fit(tmpls.templates, res0, fitter.solution)
 
-    print(f"Astrometry correction coefficients: {coeff_x}, {coeff_y}")
-    print(f'input shifts: {shx}, {shy} ')
-    print(f"Reconstructed shifts: {rhx}, {rhy}")
+    rhx, rhy = ac(np.array([[50.0, 50.0]]))
+
+    print(f"Astrometry correction shifts: {rhx}, {rhy}")
+    print(f"input shifts: {shx}, {shy}")
+
+    assert abs(rhx[0] - shx) < 0.3
+    assert abs(rhy[0] - shy) < 0.3
 
     tmp_path = Path('../tmp')
     tmp_path.mkdir(exist_ok=True)
     fname = tmp_path / "diagnostic_poly_shift.png"
     model = images[1] - res0
-    save_diagnostic_image(fname,
-                          truth,
-                          images[0],
-                          images[1],
-                          model,
-                          res0,
-                          segmap=segmap,
-                          catalog=catalog)
-    
-    return
-
-    from matplotlib import pyplot as plt
-
-    i = 8
-    t = tmpls[i]
-    plt.imshow(t.data, origin='lower', cmap='gray', norm=lupton_norm(t.data))
-    plt.show()
-    d = images[1][t.slices_original]
-    scl = fitter.solution[i]
-    m = t.data[t.slices_cutout]*scl
-    r = resid0[t.slices_original]
-    plt.imshow(d, origin='lower', cmap='gray', norm=lupton_norm(d))
-    plt.imshow(r, origin='lower', cmap='gray', norm=lupton_norm(d))
-    plt.imshow(r+m, origin='lower', cmap='gray', norm=lupton_norm(d))
-    ccr = _normalized_cross_correlation(r+m, m)
-    plt.imshow(m, origin='lower', cmap='gray', norm=lupton_norm(d))
-    plt.imshow(ccr, origin='lower', cmap='gray')
-
-#    sh, esh, _ = phase_cross_correlation( r+m, m, upsample_factor=20)
-
-    rm_xy = centroid_quadratic(r+m)
-    m_xy = centroid_quadratic(m)
-    ccr_xy = centroid_quadratic(ccr)
-    print(f"Shifted residual centroid: {rm_xy}, model centroid: {m_xy} shift: {m_xy- rm_xy}")
-    stamp_xy = ((np.array(ccr.shape)-1)/2)[::-1]
-    print(f"Cross-correlation centroid: {ccr_xy}, stamp centroid: {stamp_xy} shift: {ccr_xy - stamp_xy}")
-    assert coeff_x.shape[0] == coeff_y.shape[0]
-
+    save_diagnostic_image(
+        fname,
+        truth,
+        images[0],
+        images[1],
+        model,
+        res0,
+        segmap=segmap,
+        catalog=catalog,
+    )
 
 def test_gp_astrometry_returns_models():
     images, segmap, catalog, psfs, truth, wht = make_simple_data(
@@ -125,16 +86,10 @@ def test_gp_astrometry_returns_models():
     fitter.flux_errors()
     res = fitter.residual()
 
-    gp_x, gp_y = correct_astrometry_gp(
-        tmpls.templates,
-        res,
-        fitter.solution,
-        box_size=7,
-        snr_threshold=5,
-        length_scale=30.0,
-    )
+    cfg = FitConfig(astrom_model="gp", astrom_kwargs={"gp": {"length_scale": 30.0}})
+    ac = AstroCorrect(cfg)
+    ac.fit(tmpls.templates, res, fitter.solution)
 
-    pred_dx = gp_x.predict(np.array([[50.0, 50.0]]))[0]
-    pred_dy = gp_y.predict(np.array([[50.0, 50.0]]))[0]
-    assert isinstance(pred_dx, float)
-    assert isinstance(pred_dy, float)
+    dx, dy = ac(np.array([[50.0, 50.0]]))
+    assert isinstance(float(dx[0]), float)
+    assert isinstance(float(dy[0]), float)

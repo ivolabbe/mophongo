@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Any, Iterable, Iterator, List, Tuple
 from copy import deepcopy
+from collections import defaultdict
 
 import logging
 import numpy as np
@@ -11,7 +12,7 @@ from tqdm import tqdm
 from scipy.signal import fftconvolve
 from skimage.measure import block_reduce
 
-from .utils import measure_shape, bin2d_mean
+from .utils import measure_shape, bin2d_mean, intersection
 from .psf_map import PSFRegionMap
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,38 @@ def _convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     from numpy.lib.stride_tricks import sliding_window_view
     windows = sliding_window_view(padded, kernel.shape)
     return np.einsum("ijkl,kl->ij", windows, kernel)
+
+
+def _key_window(cy: int, cx: int, radius: int = 2):
+    """Yield integer grid coordinates within a square window."""
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            yield cy + dy, cx + dx
+
+
+def _weighted_norm(tmpl: "Template", wht: np.ndarray) -> float:
+    """Return weighted L2 norm of ``tmpl`` over its support."""
+    sl = tmpl.slices_original
+    data = tmpl.data[tmpl.slices_cutout]
+    w = wht[sl]
+    return float(np.sum(data * w * data))
+
+
+def _weighted_dot(t1: "Template", t2: "Template", wht: np.ndarray) -> float:
+    """Return weighted dot product between two templates."""
+    inter = intersection(t1.bbox, t2.bbox)
+    if inter is None:
+        return 0.0
+    y0, y1, x0, x1 = inter
+    s1 = (
+        slice(y0 - t1.bbox[0], y1 - t1.bbox[0]),
+        slice(x0 - t1.bbox[2], x1 - t1.bbox[2]),
+    )
+    s2 = (
+        slice(y0 - t2.bbox[0], y1 - t2.bbox[0]),
+        slice(x0 - t2.bbox[2], x1 - t2.bbox[2]),
+    )
+    return float(np.sum(t1.data[s1] * t2.data[s2] * wht[y0:y1, x0:x1]))
 
 
 class Template(Cutout2D):
@@ -57,6 +90,7 @@ class Template(Cutout2D):
         self.flux = 0.0
         self.err = 0.0
         self.shift = np.array([0.0, 0.0], dtype=float)
+        self.norm = 0.0
 
     @property
     def bbox(
@@ -301,6 +335,82 @@ class Templates:
             pred[i] = 1.0 / np.sqrt(np.sum(w * tmpl.data[tmpl.slices_cutout]**2))
             tmpl.err = pred[i]  # Store RMS in the template for later use
         return pred
+
+    @staticmethod
+    def prune_and_dedupe(
+        templates: List["Template"],
+        weights: np.ndarray | None,
+        *,
+        radius: int = 2,
+        norm_rel_tol: float = 1e-12,
+        cos_tol: float = 0.999,
+    ) -> List["Template"]:
+        """Prune templates with low power and remove near-duplicates.
+
+        Parameters
+        ----------
+        templates : list[Template]
+            Templates to be filtered.
+        weights : ndarray or None
+            Weight map aligned with the image grid. If ``None``, unit weights
+            are assumed.
+        radius : int, optional
+            Search radius in pixels for the integer-grid neighbourhood used to
+            hash templates. Defaults to 2, corresponding to a 5×5 window.
+        norm_rel_tol : float, optional
+            Relative tolerance for pruning low-norm templates. The absolute
+            threshold is ``norm_rel_tol * max(norm)``. Defaults to ``1e-12``.
+        cos_tol : float, optional
+            Cosine similarity threshold above which two templates are
+            considered duplicates. Defaults to ``0.999``.
+
+        Returns
+        -------
+        list[Template]
+            Filtered template list with ``tmpl.norm`` populated for the kept
+            templates.
+        """
+        if not templates:
+            return []
+
+        if weights is None:
+            ny, nx = templates[0].shape_input
+            weights = np.ones((ny, nx), dtype=float)
+
+        norms = np.array([_weighted_norm(t, weights) for t in templates])
+        tol = norm_rel_tol * norms.max() if norms.size else 0.0
+
+        bucket: defaultdict[Tuple[int, int], list[int]] = defaultdict(list)
+        kept: list[Template] = []
+        kept_norms: list[float] = []
+
+        for tmpl, nrm in zip(templates, norms):
+            if nrm < tol:
+                continue
+
+            cy, cx = map(int, tmpl.position_original)
+            duplicate = False
+            for key in _key_window(cy, cx, radius):
+                for k in bucket[key]:
+                    cos = _weighted_dot(tmpl, kept[k], weights) / np.sqrt(
+                        nrm * kept_norms[k]
+                    )
+                    if cos > cos_tol:
+                        duplicate = True
+                        break
+                if duplicate:
+                    break
+            if duplicate:
+                continue
+
+            tmpl.norm = nrm
+            idx = len(kept)
+            kept.append(tmpl)
+            kept_norms.append(nrm)
+            for key in _key_window(cy, cx, radius):
+                bucket[key].append(idx)
+
+        return kept
 
     def prune_outside_weight(self, weight: np.ndarray) -> List[Template]:
         """Remove templates with no overlap with the provided ``weight`` map.

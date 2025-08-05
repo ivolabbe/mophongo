@@ -172,38 +172,32 @@ class SparseFitter:
     def build_normal_matrix(self) -> None:
         """Construct normal matrix using :class:`Template` objects."""
         # Compute weighted norms for all templates first
-        norms_all = [self._weighted_norm(t) for t in self.templates]
 
-        tol = 0.0
-
-        # discard vectors that contribute < 10⁻⁴ of the signal amplitude
-        if norms_all:
-            tol = 1e-12 * max(norms_all)
+        norms = [self._weighted_norm(t) for t in self.templates]
+        tol = 1e-8 * max(norms)
 
         # Prune templates with near-zero norm
-        valid: list[Template] = []
-        norms: list[float] = []
-        for tmpl, norm in zip(self.templates, norms_all):
-            if norm < tol:
-                # logger.warning("Dropping template with low norm %.2e", norm)
-                continue
-            valid.append(tmpl)
-            norms.append(norm)
+        # valid: list[Template] = []
+        # norms: list[float] = []
+        # for tmpl, norm in zip(self.templates, norms_all):
+        #     if norm < tol:
+        #         valid.append(tmpl)
+        #         norms.append(norm)
 
+        keep = [i for i, n in enumerate(norms) if n > tol]
         print(
-            f"Dropped {len(self.templates)-len(valid)} templates with low norm."
+            f"Dropped {len(self.templates)-len(keep)} templates with low norm."
         )
-        print(f"{np.isnan(norms).sum()} NaN norms found.")
-        self.templates = valid
+
+        self.templates = [self.templates[i] for i in keep]
+        norms = [norms[i] for i in keep]
 
         n = len(self.templates)
-        #        duplicate = [False] * n
         ata = lil_matrix((n, n))
         atb = np.zeros(n)
         for i, tmpl_i in enumerate(
                 tqdm(self.templates, total=n, desc="Building Normal matrix")):
-            # if duplicate[i]:
-            #     continue
+
             sl_i = tmpl_i.slices_original
             data_i = tmpl_i.data[tmpl_i.slices_cutout]
             w_i = self.weights[sl_i]
@@ -248,14 +242,11 @@ class SparseFitter:
                 arr_i = tmpl_i.data[sl_i_local]
                 arr_j = tmpl_j.data[sl_j_local]
                 val = np.sum(arr_i * arr_j * w)
+#                if val == 0: # cant prune < tol, because messes up global astrometry fit
+#                    continue
                 ata[i, j] = val
                 ata[j, i] = val
 
-
-#        keep = [k for k, dup in enumerate(duplicate) if not dup]
-#        self.templates = [self.templates[k] for k in keep]
-#        self._ata = ata.tocsr()[keep][:, keep]
-#        self._atb = atb[keep]
         self._ata = ata.tocsr()
         self._atb = atb
 

@@ -49,7 +49,9 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
   - [x] Added GlobalAstroFitter for astrometric correction
   - [x] Added polynomial-based local astrometric correction
   - [x] Added safeguards against singular normal matrices
-  - [x] Added Gaussian-process-based local astrometric correction
+- [x] Added Gaussian-process-based local astrometric correction
+- [x] Introduced `AstroCorrect` for pluggable local astrometry models
+ - [x] Removed deprecated `fit_astrometry` flag in `FitConfig`; use `fit_astrometry_niter` only
   - [x] Added ILU preconditioner and SuperLU-based flux error estimation with Hutchinson fallback
  - [x] Deduplicate templates using weighted overlap cosine similarity
   - [x] Consolidated flux and RMS estimation into parent `SparseFitter`

@@ -189,10 +189,12 @@ def run(
                             positions,
                             wcs=wcs[0] if wcs is not None else None)
     ndropped = len(positions) - len(tmpls.templates)
-    print(f'Pipepline: {len(tmpls.templates)} extracted templates, dropped {ndropped}.')
+    print(
+        f'Pipepline: {len(tmpls.templates)} extracted templates, dropped {ndropped}.'
+    )
     print(f'Pipeline (templates) memory: {memory():.1f} GB')
 
-    ac = AstroCorrect(config)
+    astro = AstroCorrect(config)
     residuals = []
     for idx in range(1, len(images)):
 
@@ -233,7 +235,7 @@ def run(
             tmpls_lo.prune_outside_weight(weights_i)
 
         templates = tmpls_lo.convolve_templates(kernel, inplace=False)
-#        templates = empls_lo._templates
+        #        templates = empls_lo._templates
 
         print(f'Pipeline (convolved) memory: {memory():.1f} GB')
 
@@ -245,8 +247,8 @@ def run(
             assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
 
         fitter_cls = GlobalAstroFitter if (
-            config.fit_astrometry_niter > 0 and config.fit_astrometry_joint
-            ) else SparseFitter
+            config.fit_astrometry_niter > 0
+            and config.fit_astrometry_joint) else SparseFitter
 
         # every iteration will scale and shift the tmpl images
         # accumulated the shifts and scale are recorded in template attributes
@@ -255,20 +257,27 @@ def run(
             print(f"Running iteration {j+1} of {niter}")
 
             fitter = fitter_cls(templates, images[idx], weights_i, config)
-            fluxes, errs, info = fitter.solve()
+            if config.solve_method == 'ata':
+                fluxes, errs, info = fitter.solve()
+            else:
+                fluxes, errs, info = fitter.solve_lo()
+
             res = fitter.residual()
             print(f'Pipeline (residual) memory: {memory():.1f} GB')
 
             if config.fit_astrometry_niter > 0 and not config.fit_astrometry_joint:
                 logger.info("fitting astrometry separately")
-                ac.fit(templates, res, fitter.solution)
+                astro.fit(templates, res, fitter.solution)
 
-            # perform a final fit with just the fluxes. @@@ could do this as final pass also for joint fitter
-            # check if this call is ok, only makes sense if we rebuild the normal matrix
-            # TODO: track this from the templates is_dirty flag
-            # dont have to rebuild if we are adding templates for residuals
+                # perform a final fit with just the fluxes. @@@ could do this as final pass also for joint fitter
+                # check if this call is ok, only makes sense if we rebuild the normal matrix
+                # TODO: track this from the templates is_dirty flag
+                # dont have to rebuild if we are adding templates for residuals
                 fitter._ata = None  # @@@ do this properly
-                fluxes, errs, info = fitter.solve()
+                if config.solve_method == 'ata':
+                    fluxes, errs, info = fitter.solve()
+                else:
+                    fluxes, errs, info = fitter.solve_lo()
                 res = fitter.residual()
 
         # second pass: add extra templates for poor fits
@@ -329,5 +338,8 @@ def run(
     print(
         f'Pipeline (end) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB'
     )
+
+    if 'astro' in locals():
+        fitter.astro = astro
 
     return cat, residuals, fitter

@@ -237,7 +237,7 @@ class GlobalAstroFitter(SparseFitter):
         for i, tmpl in enumerate(self._orig_templates):
             x0, y0 = tmpl.input_position_original
             dx, dy = self.shift_at(x0, y0)
-            if abs(dx) < 1e-3 and abs(dy) < 1e-3:
+            if abs(dx) < 1e-2 and abs(dy) < 1e-2:
                 continue
 
             # the shifts are those needed to bring the measurement image to the template

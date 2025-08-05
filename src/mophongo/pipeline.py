@@ -233,7 +233,16 @@ def run(
             tmpls_lo.prune_outside_weight(weights_i)
 
         templates = tmpls_lo.convolve_templates(kernel, inplace=False)
+#        templates = empls_lo._templates
+
         print(f'Pipeline (convolved) memory: {memory():.1f} GB')
+
+        # test if images, weights, and templates are all finite
+        assert np.all(np.isfinite(images[idx])), "Image contains NaN values"
+        if weights_i is not None:
+            assert np.all(np.isfinite(weights_i)), "Weights contain NaN values"
+        for t in templates:
+            assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
 
         fitter_cls = GlobalAstroFitter if (
             config.fit_astrometry_niter > 0 and config.fit_astrometry_joint

@@ -43,6 +43,7 @@ class FitConfig:
     bad_value: float = np.nan
     cg_kwargs: Dict[str, Any] = field(default_factory=lambda: {"M": None, "maxiter": 500, "atol": 1e-6})
     fit_covariances: bool = False  # Use simple fitting errors from diagonal of normal matrix
+    fit_astrometry: bool = False
     # condense fit astrometry flags into one: fit_astrometry_niter = 0, means not fitting astrometry
     fit_astrometry_niter: int = 2     # Number of astrometry refinement passes (0 → disabled)
     fit_astrometry_joint: bool = False  # Use joint astrometry fitting, or separate step
@@ -59,6 +60,10 @@ class FitConfig:
     multi_tmpl_chi2_thresh: float = 5.0
     multi_tmpl_psf_core: bool = True
     multi_tmpl_colour: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.fit_astrometry:
+            self.fit_astrometry_niter = 0
 
 
 def _diag_inv_hutch(A, k=32, rtol=1e-4, maxiter=None, seed=0):
@@ -112,11 +117,13 @@ class SparseFitter:
         if weights is None:
             weights = np.ones_like(image)
 
-        self._orig_templates = templates  # keep original templates List object
-        self.templates = templates.copy(
-        )  # work in copy for fitting, modifying
+        if any(getattr(t, "norm", 0.0) == 0.0 for t in templates):
+            templates = Templates.prune_and_dedupe(templates, weights)
 
-        self.n_flux = len(templates)
+        self._orig_templates = templates  # keep original templates List object
+        self.templates = templates.copy()  # work in copy for fitting, modifying
+
+        self.n_flux = len(self.templates)
         for i, tmpl in enumerate(self.templates):
             tmpl.is_flux = True
             tmpl.col_idx = i
@@ -159,51 +166,16 @@ class SparseFitter:
             return None
         return slice(y0, y1), slice(x0, x1)
 
-    def _weighted_norm(self, tmpl: Template) -> float:
-        """Return the weighted L2 norm of ``tmpl``.
-        The norm is computed by summing ``data * weight * data`` over the
-        template support in the image space.
-        """
-        sl = tmpl.slices_original
-        data = tmpl.data[tmpl.slices_cutout]
-        w = self.weights[sl]
-        return float(np.sum(data * w * data))
-
     def build_normal_matrix(self) -> None:
         """Construct normal matrix using :class:`Template` objects."""
-        # Compute weighted norms for all templates first
-        norms_all = [self._weighted_norm(t) for t in self.templates]
-
-        tol = 0.0
-
-        # discard vectors that contribute < 10⁻⁴ of the signal amplitude
-        if norms_all:
-            tol = 1e-12 * max(norms_all)
-
-        # Prune templates with near-zero norm
-        valid: list[Template] = []
-        norms: list[float] = []
-        for tmpl, norm in zip(self.templates, norms_all):
-            if norm < tol:
-                # logger.warning("Dropping template with low norm %.2e", norm)
-                continue
-            valid.append(tmpl)
-            norms.append(norm)
-
-        print(
-            f"Dropped {len(self.templates)-len(valid)} templates with low norm."
-        )
-        print(f"{np.isnan(norms).sum()} NaN norms found.")
-        self.templates = valid
-
+        # assume low norm templates are already pruned
+        norms = [t.norm for t in self.templates]
         n = len(self.templates)
-        #        duplicate = [False] * n
         ata = lil_matrix((n, n))
         atb = np.zeros(n)
         for i, tmpl_i in enumerate(
-                tqdm(self.templates, total=n, desc="Building Normal matrix")):
-            # if duplicate[i]:
-            #     continue
+            tqdm(self.templates, total=n, desc="Building Normal matrix")
+        ):
             sl_i = tmpl_i.slices_original
             data_i = tmpl_i.data[tmpl_i.slices_cutout]
             w_i = self.weights[sl_i]
@@ -219,30 +191,22 @@ class SparseFitter:
                 w = self.weights[inter]
                 sl_i_local = (
                     slice(
-                        inter[0].start - sl_i[0].start +
-                        tmpl_i.slices_cutout[0].start,
-                        inter[0].stop - sl_i[0].start +
-                        tmpl_i.slices_cutout[0].start,
+                        inter[0].start - sl_i[0].start + tmpl_i.slices_cutout[0].start,
+                        inter[0].stop - sl_i[0].start + tmpl_i.slices_cutout[0].start,
                     ),
                     slice(
-                        inter[1].start - sl_i[1].start +
-                        tmpl_i.slices_cutout[1].start,
-                        inter[1].stop - sl_i[1].start +
-                        tmpl_i.slices_cutout[1].start,
+                        inter[1].start - sl_i[1].start + tmpl_i.slices_cutout[1].start,
+                        inter[1].stop - sl_i[1].start + tmpl_i.slices_cutout[1].start,
                     ),
                 )
                 sl_j_local = (
                     slice(
-                        inter[0].start - tmpl_j.slices_original[0].start +
-                        tmpl_j.slices_cutout[0].start,
-                        inter[0].stop - tmpl_j.slices_original[0].start +
-                        tmpl_j.slices_cutout[0].start,
+                        inter[0].start - tmpl_j.slices_original[0].start + tmpl_j.slices_cutout[0].start,
+                        inter[0].stop - tmpl_j.slices_original[0].start + tmpl_j.slices_cutout[0].start,
                     ),
                     slice(
-                        inter[1].start - tmpl_j.slices_original[1].start +
-                        tmpl_j.slices_cutout[1].start,
-                        inter[1].stop - tmpl_j.slices_original[1].start +
-                        tmpl_j.slices_cutout[1].start,
+                        inter[1].start - tmpl_j.slices_original[1].start + tmpl_j.slices_cutout[1].start,
+                        inter[1].stop - tmpl_j.slices_original[1].start + tmpl_j.slices_cutout[1].start,
                     ),
                 )
                 arr_i = tmpl_i.data[sl_i_local]
@@ -250,12 +214,7 @@ class SparseFitter:
                 val = np.sum(arr_i * arr_j * w)
                 ata[i, j] = val
                 ata[j, i] = val
-
-
-#        keep = [k for k, dup in enumerate(duplicate) if not dup]
-#        self.templates = [self.templates[k] for k in keep]
-#        self._ata = ata.tocsr()[keep][:, keep]
-#        self._atb = atb[keep]
+                
         self._ata = ata.tocsr()
         self._atb = atb
 

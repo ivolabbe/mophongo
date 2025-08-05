@@ -180,14 +180,14 @@ class AstroCorrect:
         model = self.cfg.astrom_model.lower()
         kwargs = dict(
             snr_threshold=self.cfg.snr_thresh_astrom,
-            **self.cfg.astrom_kwargs.get(model, {}),
+            **self.cfg.astrom_kwargs,  # Use astrom_kwargs directly
         )
 
         pos, dx, dy, w = measure_template_shifts(
             templates,
             coeffs,
             residual,
-            box_size=kwargs.pop("box_size", 9),
+            box_size=kwargs.pop("box_size", 7),
             snr_threshold=kwargs.pop("snr_threshold"),
         )
 
@@ -195,18 +195,18 @@ class AstroCorrect:
             self._predict = lambda p: (np.zeros(len(p)), np.zeros(len(p)))
             return
 
-        if model == "polynomial":
+        if model == "poly":
             self._predict = self._fit_polynomial(pos, dx, dy, w, shape=residual.shape, **kwargs)
         elif model == "gp":
             self._predict = self._fit_gp(pos, dx, dy, w, **kwargs)
         else:
             raise ValueError(f"Unknown astrom_model '{model}'")
 
-        dxx, dyy = self(np.array([t.position_original for t in templates]))
+        dxx, dyy = self(np.array([t.input_position_original for t in templates]))
         for tmpl, dxi, dyi in zip(templates, dxx, dyy):
-            if abs(dxi) < 1e-3 and abs(dyi) < 1e-3:
+            if abs(dxi) < 1e-2 and abs(dyi) < 1e-2:
                 continue
-            x0, y0 = tmpl.position_original
+            x0, y0 = tmpl.input_position_original
             tmpl.data = nd_shift(
                 tmpl.data,
                 (dyi, dxi),
@@ -215,7 +215,7 @@ class AstroCorrect:
                 cval=0.0,
                 prefilter=True,
             )
-            tmpl.shifted_position_original = (x0 - dxi, y0 - dyi)
+            tmpl.input_position_original = (x0 - dxi, y0 - dyi)
             tmpl.shift += [dxi, dyi]
 
     def _fit_polynomial(
@@ -225,9 +225,10 @@ class AstroCorrect:
         dy: np.ndarray,
         w: np.ndarray,
         *,
-        order: int = 3,
+        order: int = 2,
         shape: tuple[int, int],
     ) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]:
+        print('POLY ORDER:', order)
         phi = np.array(
             [astrometry.cheb_basis(x / (shape[1] - 1), y / (shape[0] - 1), order) for x, y in pos]
         )
@@ -250,8 +251,10 @@ class AstroCorrect:
         dy: np.ndarray,
         w: np.ndarray,
         *,
-        length_scale: float = 500.0,
+        length_scale: float = 300.0,
     ) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]:
+
+        print('GP LENGTH SCALE:', length_scale)
         err = 1 / np.sqrt(w)
         base = ConstantKernel(1.0, (1e-3, 1e3)) * RBF(length_scale, (10.0, 5000.0))
         gpx = GaussianProcessRegressor(

@@ -45,12 +45,18 @@ class FitConfig:
     fit_covariances: bool = False  # Use simple fitting errors from diagonal of normal matrix
     fit_astrometry: bool = False
     # condense fit astrometry flags into one: fit_astrometry_niter = 0, means not fitting astrometry
-    fit_astrometry_niter: int = 2     # Two passes for astrometry fitting
-    astrom_basis_order: int = 1
+    fit_astrometry_niter: int = 2     # Number of astrometry refinement passes (0 → disabled)
     fit_astrometry_joint: bool = False  # Use joint astrometry fitting, or separate step
     reg_astrom: float = 1e-4
     snr_thresh_astrom: float = 10.0   # 0 → keep all sources (current behaviour)
     astrom_model: str = "polynomial"  # 'polynomial' or 'gp'
+    astrom_kwargs: dict[str, dict] = field(
+        default_factory=lambda: {
+            "polynomial": {"order": 1},
+            "gp": {"length_scale": 500.0},
+        }
+    )
+    astrom_basis_order: int = 1
     multi_tmpl_chi2_thresh: float = 5.0
     multi_tmpl_psf_core: bool = True
     multi_tmpl_colour: bool = False
@@ -162,6 +168,7 @@ class SparseFitter:
 
     def build_normal_matrix(self) -> None:
         """Construct normal matrix using :class:`Template` objects."""
+        # assume low norm templates are already pruned
         norms = [t.norm for t in self.templates]
         n = len(self.templates)
         ata = lil_matrix((n, n))
@@ -205,11 +212,9 @@ class SparseFitter:
                 arr_i = tmpl_i.data[sl_i_local]
                 arr_j = tmpl_j.data[sl_j_local]
                 val = np.sum(arr_i * arr_j * w)
-                if val == 0.0:
-                    continue
                 ata[i, j] = val
                 ata[j, i] = val
-
+                
         self._ata = ata.tocsr()
         self._atb = atb
 
@@ -220,6 +225,7 @@ class SparseFitter:
         for coeff, tmpl in zip(self.solution, self._orig_templates):
             model[
                 tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
+        model[self.weights <= 0 | np.isnan(self.weights)] = 0.0
         return model
 
     @property

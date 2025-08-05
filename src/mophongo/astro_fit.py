@@ -65,7 +65,7 @@ class GlobalAstroFitter(SparseFitter):
             # fall back to quick fluxes and errors
             flux = Templates.quick_flux(self.templates, self.image)
             good = np.zeros_like(flux, dtype=bool)
-            good[[np.argsort(flux)[-min(10,len(flux)):]]] = True
+            good[np.argsort(flux)[-min(10, len(flux)):]] = True
             
         # 1. per-object gradients
         gx_i, gy_i = astrometry.make_gradients(templates)
@@ -164,8 +164,9 @@ class GlobalAstroFitter(SparseFitter):
         #         logger.warning("ILU preconditioner failed: %s", err)
 
         # WARNING: this is a warm start: but only useful if the templates are the same
-        x_w0 = getattr(self, "x_w0", None)  
-        x_w, info = cg(A_w, b_w, x0=x_w0, **cfg.cg_kwargs)
+#        x_w0 = getattr(self, "x_w0", None)  
+#        x_w, info = cg(A_w, b_w, x0=x_w0, **cfg.cg_kwargs)
+        x_w, info = cg(A_w, b_w, **cfg.cg_kwargs)
         self.x_w = x_w
 
         # ---------- expand back to the *full* parameter space -------------------

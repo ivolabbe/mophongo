@@ -41,6 +41,7 @@ class FitConfig:
     # of the normal matrix diagonal.
     reg: float = 0.0
     bad_value: float = np.nan
+    solve_method: str = "ata"  # 'ata' or 'lo' (linear operator)
     cg_kwargs: Dict[str, Any] = field(default_factory=lambda: {"M": None, "maxiter": 500, "atol": 1e-6})
     fit_covariances: bool = False  # Use simple fitting errors from diagonal of normal matrix
     # condense fit astrometry flags into one: fit_astrometry_niter = 0, means not fitting astrometry
@@ -48,14 +49,9 @@ class FitConfig:
     fit_astrometry_joint: bool = False  # Use joint astrometry fitting, or separate step
     reg_astrom: float = 1e-4
     snr_thresh_astrom: float = 10.0   # 0 → keep all sources (current behaviour)
-    astrom_model: str = "polynomial"  # 'polynomial' or 'gp'
-    astrom_kwargs: dict[str, dict] = field(
-        default_factory=lambda: {
-            "polynomial": {"order": 1},
-            "gp": {"length_scale": 500.0},
-        }
-    )
-    astrom_basis_order: int = 1
+    astrom_model: str = "poly"  # 'polynomial' or 'gp'
+    astrom_kwargs: dict[str, dict] = field(default_factory=lambda: {"order": 1})
+         # "gp": {"length_scale": 500.0},
     multi_tmpl_chi2_thresh: float = 5.0
     multi_tmpl_psf_core: bool = True
     multi_tmpl_colour: bool = False

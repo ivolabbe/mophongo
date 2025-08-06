@@ -1,49 +1,101 @@
 """
-fft.py ― minimal FFT-convolution helper.
+fft.py ─ fast FFT-based N-D convolution with optional cached FFTs
+=================================================================
 
-Features
---------
-* Same public signature as SciPy’s `fftconvolve`, plus
-  optional `fft1`, `fft2` keyword arguments for pre-computed
-  complex spectra.
-* Works on arbitrary‐dimensional arrays and any subset of axes.
-* Pads to the next “fast” FFT length (uses SciPy’s
-  `next_fast_len` if available, else falls back to powers of two).
-* Chooses r2c / c2c transforms automatically.
+Highlights
+----------
+*   Same results and speed as `scipy.signal.fftconvolve`.
+*   Extra keywords
+        fft1=, fft2=        – pre-computed spectra on the working grid
+        in1_shape=          – shape of the first operand (only needed if you
+                              omit `in1` and still request mode='same'/'valid').
+*   Uses `scipy.fft.next_fast_len` padding and pocketFFT/MKL back-end.
+*   Real inputs automatically use rFFT/irFFT.
 
-Usage
------
+currently seems not worth it, as the speedup is not that great
+
+Image size: (101, 101), kernel size: (101, 101)
+method                                      time [s] per second
+------------------------------------------------------------
+direct (_convolve2d)                         0.01470  68
+mophongo.fftconvolve (normal)                0.00030  3354
+mophongo.fftconvolve (cached fft1, fft2)     0.00016  6312
+scipy.ndimage.convolve                       0.63587  2
+scipy.signal.convolve2d                      0.08689  12
+scipy.signal.fftconvolve                     0.00029  3405
+scipy.signal.oaconvolve                      0.00029  3410
+astropy.convolution.convolve                 0.12900  8
+astropy.convolution.convolve_fft             0.00192  520
+
+Image size: (31, 31), kernel size: (101, 101)
+method                                      time [s] per second
+------------------------------------------------------------
+direct (_convolve2d)                         0.00164  609
+mophongo.fftconvolve (normal)                0.00014  7306
+mophongo.fftconvolve (cached fft1, fft2)     0.00012  8039
+scipy.ndimage.convolve                       0.04872  21
+scipy.signal.convolve2d                      0.00585  171
+scipy.signal.fftconvolve                     0.00014  7177
+scipy.signal.oaconvolve                      0.00014  7029
+astropy.convolution.convolve                 0.01248  80
+astropy.convolution.convolve_fft             0.00097  1033
+
+Example
+-------
+>>> from scipy import fft
+>>> import numpy as np
 >>> from fft import fftconvolve
->>> out = fftconvolve(img, ker, mode="same")                         # normal
->>> F1  = np.fft.rfftn(img, s=shape, axes=axes)                      # cache
->>> out = fftconvolve(None, ker, fft1=F1, mode="same", axes=axes)    # reuse
+>>>
+>>> img   = np.random.randn(512, 512)
+>>> kern  = np.random.randn(64,  64)
+>>> shape = tuple(fft.next_fast_len(n + k - 1)
+...               for n, k in zip(img.shape, kern.shape))
+>>>
+>>> Fimg  = fft.rfftn(img,  shape, axes=(0, 1))
+>>> Fker  = fft.rfftn(kern, shape, axes=(0, 1))
+>>>
+>>> blur  = fftconvolve(None, None,
+...                     fft1=Fimg, fft2=Fker,
+...                     in1_shape=img.shape,
+...                     mode="same", axes=(0, 1))
 """
 from __future__ import annotations
 import numpy as _np
-from numpy.fft import fftn as _fftn, ifftn as _ifftn, rfftn as _rfftn, irfftn as _irfftn
+from scipy import fft as _spfft
+from scipy.signal import fftconvolve as _sc_fftconv  # for the fast fall-back
 
-try:                # SciPy gives faster padding lengths
-    from scipy.fft import next_fast_len as _NFL
-except ModuleNotFoundError:
-    _NFL = lambda n: 1 << (n - 1).bit_length()          # power-of-two fallback
+__all__ = ["fftconvolve"]
+
+_next_fast_len = _spfft.next_fast_len
 
 
-# --------------------------------------------------------------------
-def _as_axes(na: int, axes) -> tuple[int, ...]:
+# ───────────────────────── helper utilities ──────────────────────────
+def _as_axes(ndim: int, axes) -> tuple[int, ...]:
+    """Normalize `axes` to a positive, sorted tuple."""
     if axes is None:
-        return tuple(range(na))
-    axes = (axes,) if _np.isscalar(axes) else tuple(axes)
-    return tuple(a if a >= 0 else na + a for a in axes)
+        return tuple(range(ndim))
+    if _np.isscalar(axes):
+        axes = (axes,)
+    return tuple(a + ndim if a < 0 else a for a in axes)
 
 
 def _pad_shape(s1, s2, axes):
-    shp = list(_np.maximum(s1, s2))
+    """Return padded FFT shape (next_fast_len along `axes`)."""
+    shape = list(_np.maximum(s1, s2))
     for ax in axes:
-        shp[ax] = s1[ax] + s2[ax] - 1
-    return tuple(_NFL(n) for n in shp)
+        shape[ax] = s1[ax] + s2[ax] - 1
+    return tuple(_next_fast_len(n) for n in shape)
 
 
-# --------------------------------------------------------------------
+def _centered(arr: _np.ndarray, newshape):
+    newshape = _np.asarray(newshape)
+    currshape = _np.array(arr.shape)
+    start = (currshape - newshape) // 2
+    end = start + newshape
+    return arr[tuple(slice(s, e) for s, e in zip(start, end))]
+
+
+# ────────────────────────── public routine ───────────────────────────
 def fftconvolve(
     in1: _np.ndarray | None,
     in2: _np.ndarray | None,
@@ -51,71 +103,89 @@ def fftconvolve(
     fft1: _np.ndarray | None = None,
     fft2: _np.ndarray | None = None,
     mode: str = "full",
-    axes: tuple[int, ...] | int | None = None,
+    axes=None,
+    in1_shape: tuple[int, ...] | None = None,
 ):
     """
-    Fast N-D convolution with optional cached FFTs.
+    Fast N-D convolution; accepts cached FFTs.
 
-    Any of `in1`, `in2` may be `None` **iff** you supply the
-    corresponding `fft1`, `fft2` already transformed to the working
-    shape along `axes`.
+    Parameters
+    ----------
+    in1, in2 : array_like or None
+        Spatial operands.  For each operand you may supply either the array
+        itself **or** its FFT via `fft1` / `fft2`.
+    fft1, fft2 : ndarray or None
+        Spectra already padded to the working grid.  Real spectra must be the
+        output of `rfftn`.
+    mode : {'full', 'same', 'valid'}
+    axes : int or sequence of int or None
+    in1_shape : tuple or None
+        Shape of the first operand.  Required only if you omit `in1` *and*
+        request `mode='same'` or `'valid'`.
+
+    Returns
+    -------
+    ndarray
+        Convolution result sliced according to *mode*.
     """
-    if (in1 is None) == (fft1 is None) is False or (in2 is None) == (fft2 is None) is False:
-        raise ValueError("Supply either spatial input OR its FFT, for each operand.")
+    # ---------- fast path: no cached spectra ---------------------------------
+    if fft1 is None and fft2 is None:
+        return _sc_fftconv(in1, in2, mode=mode, axes=axes)
 
-    # --- establish axes & dtype -------------------------------------------------
-    if fft1 is not None:
-        axes = tuple(range(fft1.ndim)) if axes is None else _as_axes(fft1.ndim, axes)
-        work_dtype = fft1.dtype
-    elif fft2 is not None:
-        axes = tuple(range(fft2.ndim)) if axes is None else _as_axes(fft2.ndim, axes)
-        work_dtype = fft2.dtype
-    else:
-        in1 = _np.asarray(in1)
-        in2 = _np.asarray(in2)
-        axes = _as_axes(in1.ndim, axes)
-        work_dtype = _np.result_type(in1.dtype, in2.dtype, _np.float32)
+    # ---------- need reference ndim / axes -----------------------------------
+    ref = fft1 if fft1 is not None else fft2 if fft2 is not None else in1
+    ndim = ref.ndim
+    axes = _as_axes(ndim, axes)
 
-    # --- shapes -----------------------------------------------------------------
+    # ---------- determine padded working shape ------------------------------
     if fft1 is None or fft2 is None:
-        shape = _pad_shape(in1.shape if in1 is not None else fft1.shape,
-                           in2.shape if in2 is not None else fft2.shape,
-                           axes)
+        s1 = fft1.shape if fft1 is not None else in1.shape
+        s2 = fft2.shape if fft2 is not None else in2.shape
+        fshape = _pad_shape(s1, s2, axes)
     else:
-        shape = tuple(fft1.shape)
+        fshape = tuple(fft1.shape)
 
-    # --- transform helpers ------------------------------------------------------
-    is_complex = _np.issubdtype(work_dtype, _np.complexfloating)
+    # ---------- choose rFFT vs cFFT -----------------------------------------
+    # complex_result = ((fft1 is not None and _np.iscomplexobj(fft1))
+    #                   or (fft2 is not None and _np.iscomplexobj(fft2))
+    #                   or (in1 is not None and _np.iscomplexobj(in1))
+    #                   or (in2 is not None and _np.iscomplexobj(in2)))
+    #
+    complex_result = False
+    fftn = _spfft.fftn if complex_result else _spfft.rfftn
+    ifftn = _spfft.ifftn if complex_result else _spfft.irfftn
 
-    def _fwd(x):
-        return _fftn(x, shape, axes=axes) if is_complex else _rfftn(x, shape, axes=axes)
-
-    def _inv(X):
-        out = _ifftn(X, shape, axes=axes) if is_complex else _irfftn(X, shape, axes=axes)
-        return out
-
-    # --- obtain spectra ---------------------------------------------------------
+    # ---------- forward transforms (only if needed) -------------------------
     if fft1 is None:
-        fft1 = _fwd(in1.astype(work_dtype, copy=False))
+        fft1 = fftn(_np.asarray(in1), fshape, axes=axes, workers=-1)
     if fft2 is None:
-        fft2 = _fwd(in2.astype(work_dtype, copy=False))
+        fft2 = fftn(_np.asarray(in2), fshape, axes=axes, workers=-1)
 
-    # --- multiply & back-transform ---------------------------------------------
-    conv = _inv(fft1 * fft2)
+    # ---------- multiply in frequency space & inverse FFT -------------------
+    conv = ifftn(fft1 * fft2, fshape, axes=axes, workers=-1)
 
-    # --- slice according to mode ------------------------------------------------
+    # ---------- slice according to mode -------------------------------------
     if mode == "full":
         return conv
-    elif mode == "same":
-        idx = tuple(slice((s - o) // 2, (s - o) // 2 + o)
-                    for s, o in zip(conv.shape, in1.shape if in1 is not None else fft1.shape))
-        return conv[idx]
-    elif mode == "valid":
-        out_shape = [(o1 - o2 + 1) if ax in axes else o1
-                     for ax, (o1, o2) in enumerate(zip(in1.shape if in1 is not None else fft1.shape,
-                                                        in2.shape if in2 is not None else fft2.shape))]
-        start = [(conv.shape[k] - out_shape[k]) // 2 for k in range(conv.ndim)]
-        idx = tuple(slice(st, st + sz) for st, sz in zip(start, out_shape))
-        return conv[idx]
+
+    # (s1 is needed for cropping)
+    if in1 is not None:
+        s1 = in1.shape
+    elif in1_shape is not None:
+        s1 = in1_shape
     else:
-        raise ValueError("mode must be 'full', 'same' or 'valid'")
+        raise ValueError("For mode 'same' or 'valid', pass `in1` or "
+                         "`in1_shape=` so cropping is defined.")
+
+    if mode == "same":
+        return _centered(conv, s1)
+
+    if mode == "valid":
+        s2 = in2.shape if in2 is not None else fft2.shape
+        valid_shape = [
+            conv.shape[i] if i not in axes else s1[i] - s2[i] + 1
+            for i in range(ndim)
+        ]
+        return _centered(conv, valid_shape)
+
+    raise ValueError("mode must be 'full', 'same', or 'valid'.")

@@ -137,12 +137,12 @@ class Template(Cutout2D):
             return (coord - shift) / k
 
         for attr in (
-            "input_position_cutout",
-#            "input_position_original",
-            "center_cutout",
-#            "center_original",
-            "y",
-            "x",
+                "input_position_cutout",
+                #            "input_position_original",
+                "center_cutout",
+                #            "center_original",
+                "y",
+                "x",
         ):
             if hasattr(lo, attr):
                 y, x = getattr(lo, attr)
@@ -150,7 +150,8 @@ class Template(Cutout2D):
 
         return lo
 
-    def downsample_wcs(self, image_lo: np.ndarray, wcs_lo, k: int) -> "Template":
+    def downsample_wcs(self, image_lo: np.ndarray, wcs_lo,
+                       k: int) -> "Template":
         """
         Downsample this template to a lower resolution using the target image and WCS.
 
@@ -169,17 +170,24 @@ class Template(Cutout2D):
             New template extracted from the low-res image using the correct WCS.
         """
         # Get the original position in the high-res WCS
-        pos = self.input_position_original
+        pos = self.input_position_cutout  # needs to be cutout coordinates
         ra, dec = self.wcs.wcs_pix2world(*pos, 0)
 
         # Convert RA/Dec to pixel coordinates in the low-res WCS
+        # note: x_lo, y_lo are now original coordinates in the low-res image
         x_lo, y_lo = wcs_lo.wcs_world2pix(ra, dec, 0)
 
         # Calculate new size (downsampled)
         height, width = self.data.shape[0] // k, self.data.shape[1] // k
-
-        # Create the new template using the low-res image and WCS
-        lowres_tmpl = Template(image_lo, (x_lo, y_lo), (height, width), wcs=wcs_lo, label=self.id)
+        # print('Original position:', pos)
+        # print(f"Downsampling {self.id} from {self.data.shape} to {height, width} at pos ({x_lo}, {y_lo})")
+        # print('original data shape:', self.shape_input, image_lo.shape)
+        # print(self.wcs)
+        # print(wcs_lo)
+#        Create the new template using the low-res image and WCS
+        lowres_tmpl = Template(image_lo, (x_lo, y_lo), (height, width),
+                               wcs=wcs_lo,
+                               label=self.id)
 
         # Fill the data with block-reduced (averaged) values from the high-res template
         lowres_tmpl.data[:] = block_reduce(self.data, k, func=np.mean)
@@ -188,6 +196,7 @@ class Template(Cutout2D):
 
 class Templates:
     """Container for source templates."""
+    min_size = 8  # minimum size of a template in pixels
 
     def __init__(self) -> None:
         self._templates: List[Template] = []
@@ -271,8 +280,8 @@ class Templates:
         obj.extract_templates(hires_image, segmap, positions, wcs=wcs)
 
         #if type(extension) == np.ndarray:
-            # Extend templates with PSF wings
-            #obj.extend_with_psf_wings(extension, inplace=True)
+        # Extend templates with PSF wings
+        #obj.extend_with_psf_wings(extension, inplace=True)
 
         # Step 2: Convolve with kernel (includes padding)
         if kernel is not None:
@@ -367,8 +376,9 @@ class Templates:
             segm.slices[idx]
 
             # Make bbox symmetric around the center to ensure proper centering
-            height = max(y - bbox.iymin, bbox.iymax - y) * 2
-            width = max(x - bbox.ixmin, bbox.ixmax - x) * 2
+            # enfore minimum size
+            height = max(y - bbox.iymin, bbox.iymax - y, self.min_size//2) * 2 
+            width =  max(x - bbox.ixmin, bbox.ixmax - x, self.min_size//2) * 2 
 
             # Create template cutout
             cut = Template(hires_image, pos, (height, width), wcs=wcs, label=label)

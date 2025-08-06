@@ -46,9 +46,9 @@ class FitConfig:
     fit_astrometry_joint: bool = False  # Use joint astrometry fitting, or separate step
     reg_astrom: float = 1e-4
     snr_thresh_astrom: float = 10.0   # 0 → keep all sources (current behaviour)
-    astrom_model: str = "poly"  # 'polynomial' or 'gp'
-    astrom_kwargs: dict[str, dict] = field(default_factory=lambda: {"order": 1})
-         # "gp": {"length_scale": 500.0},
+    astrom_model: str = "gp"  # 'polynomial' or 'gp'
+    astrom_kwargs: dict[str, dict] = field(default_factory=lambda: {'poly': {'order': 2}, 'gp': {'length_scale': 400}})
+#    astrom_kwargs={'poly': {'order': 2}, 'gp': {'length_scale': 400}}
     multi_tmpl_chi2_thresh: float = 5.0
     multi_tmpl_psf_core: bool = True
     multi_tmpl_colour: bool = False
@@ -334,7 +334,7 @@ class SparseFitter:
 
         return self.solution, self.solution_err, info
 
-    def solve_lo(
+    def solve_linear_operator(
         self,
         config: FitConfig | None = None,
         x0: np.ndarray | None = None,

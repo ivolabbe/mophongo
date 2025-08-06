@@ -708,14 +708,14 @@ def make_testdata():
     size_y_40mas = 820
     postfix = 'test'
 
-    # size_x_40mas = 3500
-    # size_y_40mas = 2520
-    # postfix = 'medium'
+    size_x_40mas = 3500
+    size_y_40mas = 2520
+    postfix = 'medium'
  
-    # center_ra, center_dec = 34.303612, -5.1203157
-    # size_x_40mas = 7000
-    # size_y_40mas = 3520
-    # postfix = 'large'
+    center_ra, center_dec = 34.303612, -5.1203157
+    size_x_40mas = 7000
+    size_y_40mas = 3520
+    postfix = 'large'
 
     center_radec = SkyCoord(center_ra, center_dec, unit='deg')
     #  center = (center_x_40mas, center_y_40mas)
@@ -756,9 +756,9 @@ def make_testdata():
         target_shape = ref_hdul[0].data.shape
 
     files_80mas = [
-        ('uds-sbkgsub-v0.3-80mas-f770w_drz_sci.fits',
+        ('uds-sbkgsub-v1.0-80mas-f770w_drz_sci.fits',
          f"uds-{postfix}-f770w_sci.fits"),
-        ('uds-sbkgsub-v0.3-80mas-f770w_drz_wht.fits',
+        ('uds-sbkgsub-v1.0-80mas-f770w_drz_wht.fits',
          f"uds-{postfix}-f770w_wht.fits"),
     ]
     #target_80mas = rebin_wcs(target_wcs, n=1)  # Downsample by a factor of 2
@@ -783,6 +783,10 @@ def make_testdata():
                                     position=center_radec,
                                     size=size_80mas,
                                     wcs=WCS(hdr))
+            hdr.update(cutout_80mas.wcs.to_header())
+            hdu = fits.PrimaryHDU(cutout_80mas.data.astype(np.float32), header=hdr)
+            hdu.writeto(outdir + outfile.replace(postfix,postfix+'-80mas'), overwrite=True)
+
             cutout_40mas = block_replicate(cutout_80mas.data, 2,  conserve_sum=True)
 
             hdr.update(target_wcs.to_header())

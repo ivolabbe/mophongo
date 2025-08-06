@@ -183,15 +183,16 @@ def run(
     positions = list(zip(catalog["x"], catalog["y"]))
 
     # Step 1: Extract templates from the first image (alternatively, use models)
-    tmpls = Templates()
-    tmpls.extract_templates(images[0],
+    tmpls = Templates()    
+    tmpls.extract_templates(np.nan_to_num(images[0], copy=False, nan=0.0, posinf=0.0, neginf=0.0),
                             segmap,
                             positions,
                             wcs=wcs[0] if wcs is not None else None)
+    for t in templates:
+        assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
+
     ndropped = len(positions) - len(tmpls.templates)
-    print(
-        f'Pipepline: {len(tmpls.templates)} extracted templates, dropped {ndropped}.'
-    )
+    print( f'Pipepline: {len(tmpls.templates)} extracted templates, dropped {ndropped}.')
     print(f'Pipeline (templates) memory: {memory():.1f} GB')
 
     astro = AstroCorrect(config)
@@ -260,7 +261,7 @@ def run(
             if config.solve_method == 'ata':
                 fluxes, errs, info = fitter.solve()
             else:
-                fluxes, errs, info = fitter.solve_lo()
+                fluxes, errs, info = fitter.solve_linear_operator()
 
             res = fitter.residual()
             print(f'Pipeline (residual) memory: {memory():.1f} GB')
@@ -277,7 +278,7 @@ def run(
                 if config.solve_method == 'ata':
                     fluxes, errs, info = fitter.solve()
                 else:
-                    fluxes, errs, info = fitter.solve_lo()
+                    fluxes, errs, info = fitter.solve_linear_operator()
                 res = fitter.residual()
 
         # second pass: add extra templates for poor fits
@@ -297,7 +298,10 @@ def run(
                     # Placeholder for additional components (e.g. colour maps)
 
                 fitter = fitter_cls(templates, images[idx], weights_i, config)
-                fluxes, errs, info = fitter.solve()
+                if config.solve_method == 'ata':
+                    fluxes, errs, info = fitter.solve()
+                else:
+                    fluxes, errs, info = fitter.solve_linear_operator()
                 res = fitter.residual()
 
         err_pred = fitter.predicted_errors()

@@ -180,7 +180,8 @@ class AstroCorrect:
         model = self.cfg.astrom_model.lower()
         kwargs = dict(
             snr_threshold=self.cfg.snr_thresh_astrom,
-            **self.cfg.astrom_kwargs,  # Use astrom_kwargs directly
+            **self.cfg.astrom_kwargs.get(model, {}),  # This line!
+        #    **self.cfg.astrom_kwargs,  # Use astrom_kwargs directly
         )
 
         pos, dx, dy, w = measure_template_shifts(
@@ -228,7 +229,6 @@ class AstroCorrect:
         order: int = 2,
         shape: tuple[int, int],
     ) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]:
-        print('POLY ORDER:', order)
         phi = np.array(
             [astrometry.cheb_basis(x / (shape[1] - 1), y / (shape[0] - 1), order) for x, y in pos]
         )
@@ -254,7 +254,6 @@ class AstroCorrect:
         length_scale: float = 300.0,
     ) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]:
 
-        print('GP LENGTH SCALE:', length_scale)
         err = 1 / np.sqrt(w)
         base = ConstantKernel(1.0, (1e-3, 1e3)) * RBF(length_scale, (10.0, 5000.0))
         gpx = GaussianProcessRegressor(

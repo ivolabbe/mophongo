@@ -46,7 +46,7 @@ class GlobalAstroFitter(SparseFitter):
             return      # nothing more to do
 
         # ---------- astrometry part ----------
-        order = config.astrom_basis_order
+        order = self.config.astrom_kwargs.get('poly')['order']
         self.basis_order = order
         self.n_alpha = astrometry.n_terms(order)   # α_k  (β_k shares the same K)
 

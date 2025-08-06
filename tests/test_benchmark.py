@@ -9,6 +9,7 @@ from mophongo.psf import PSF
 from mophongo.templates import Templates
 from mophongo.fit import SparseFitter
 from utils import make_simple_data
+from mophongo.fft import fftconvolve as mophongo_fftconvolve
 
 
 def test_benchmark_pipeline_steps():
@@ -21,20 +22,21 @@ def test_benchmark_pipeline_steps():
     tmpls = Templates.from_image(images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel)
     extract_time = time.perf_counter() - start
 
-  
+
     start = time.perf_counter()
     fitter = SparseFitter(tmpls.templates, images[1])
     fitter.solve()
     fit_time = time.perf_counter() - start
 
     print(f"Extraction time: {extract_time:.4f} s")
-#    print(f"Extension time: {extend_time:.4f} s")
+    #    print(f"Extension time: {extend_time:.4f} s")
     print(f"Fitting time: {fit_time:.4f} s")
 
     assert extract_time > 0
-#    assert extend_time > 0
+    #    assert extend_time > 0
     assert fit_time > 0
 
+#%%
 #!/usr/bin/env python3
 import time
 import numpy as np
@@ -52,22 +54,32 @@ def _convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
 
 # scipy / astropy imports
 from scipy.ndimage       import convolve as nd_convolve
-from scipy.signal       import convolve2d, fftconvolve
+from scipy.signal       import convolve2d, fftconvolve, oaconvolve
 from astropy.convolution import convolve as astro_convolve, convolve_fft
+from scipy import fft as spfft
 
 def test_benchmark_convolution():
     def run_benchmark(image, kernel, niter=5):
+        # Precompute FFTs for caching test
+        from numpy.fft import rfftn
+        shape = [spfft.next_fast_len(s1 + s2 - 1) for s1, s2 in zip(image.shape, kernel.shape)]
+        fft1 = rfftn(image, shape)
+        fft2 = rfftn(kernel, shape)
+
         methods = {
             "direct (_convolve2d)"       : lambda: _convolve2d(image, kernel),
-            "scipy.ndimage.convolve"     : lambda: nd_convolve(image, kernel, mode="constant", cval=0.0),
+            "mophongo.fftconvolve (normal)" : lambda: mophongo_fftconvolve(image, kernel, mode="same"),
+            "mophongo.fftconvolve (cached fft1, fft2)" : lambda: mophongo_fftconvolve(None, None, fft1=fft1, fft2=fft2, mode="same", in1_shape=image.shape),
+        #    "scipy.ndimage.convolve"     : lambda: nd_convolve(image, kernel, mode="constant", cval=0.0),
             "scipy.signal.convolve2d"    : lambda: convolve2d(image, kernel, mode="same", boundary="fill", fillvalue=0.0),
             "scipy.signal.fftconvolve"   : lambda: fftconvolve(image, kernel, mode="same"),
-            "astropy.convolution.convolve": lambda: astro_convolve(image, kernel, boundary="fill", fill_value=0.0, normalize_kernel=False),
+            "scipy.signal.oaconvolve"    : lambda: oaconvolve(image, kernel, mode="same"),
+        #    "astropy.convolution.convolve": lambda: astro_convolve(image, kernel, boundary="fill", fill_value=0.0, normalize_kernel=False),
             "astropy.convolution.convolve_fft": lambda: convolve_fft(image, kernel, normalize_kernel=False, boundary="fill", fill_value=0.0),
         }
 
-        print(f"{'method':35s}  {'time [s]':>10s}")
-        print("-"*50)
+        print(f"{'method':40s}  {'time [s]':>10s} {'per second':>10s}")
+        print("-"*60)
         for name, func in methods.items():
             # warm up
             func()
@@ -75,26 +87,18 @@ def test_benchmark_convolution():
             for _ in range(niter):
                 out = func()
             dt = (time.perf_counter() - t0) / niter
-            print(f"{name:35s}  {dt:10.5f}")
+            print(f"{name:40s}  {dt:10.5f}  {1/dt:.0f}")
 
-#    if __name__ == "__main__":
-        # configure sizes here
-    # hands down scipy.signal.fftconvolve is the fastest 
- #       IMG_SIZE = 50
- #       KERNEL_SIZE = 201
+    IMG_SIZE = 11
+    KERNEL_SIZE = 31
+    np.random.seed(0)
+    image  = np.random.rand(IMG_SIZE, IMG_SIZE).astype(np.float32)
+    x = np.linspace(-1, 1, KERNEL_SIZE)
+    y = x[:,None]
+    gauss = np.exp(-(x[None,:]**2 + y**2)/(2*(0.2**2)))
+    kernel = (gauss/gauss.sum()).astype(np.float32)
 
-        IMG_SIZE = 50
-        KERNEL_SIZE = 201
+    print(f"Image size: {image.shape}, kernel size: {kernel.shape}")
+    run_benchmark(image, kernel, niter=50)
 
-
-        # random test data
-        np.random.seed(0)
-        image  = np.random.rand(IMG_SIZE, IMG_SIZE).astype(np.float32)
-        # e.g. Gaussian‐like kernel
-        x = np.linspace(-1, 1, KERNEL_SIZE)
-        y = x[:,None]
-        gauss = np.exp(-(x[None,:]**2 + y**2)/(2*(0.2**2)))
-        kernel = (gauss/gauss.sum()).astype(np.float32)
-
-        print(f"Image size: {image.shape}, kernel size: {kernel.shape}")
-        run_benchmark(image, kernel, niter=20)
+# %%

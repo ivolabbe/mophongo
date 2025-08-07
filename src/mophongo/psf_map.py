@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="Geometry is in a geographic CRS.*distance",
+    category=UserWarning,
+    module=r"mophongo\.psf_map"
+)
+
 from dataclasses import dataclass, field
 from typing import Mapping, Hashable
 import re
@@ -10,6 +18,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 import shapely
+from shapely import prepared 
 from shapely.geometry import Polygon, Point
 from shapely.strtree import STRtree
 from astropy.wcs import WCS
@@ -74,7 +83,40 @@ class PSFRegionMap:
     # ───────────── private derived constants ──────────────
     def __post_init__(self) -> None:
         self._area_min = self.area_factor * self.buffer_tol
-        self.tree = STRtree(self.regions.geometry.to_list())
+
+        # 1. build the STRtree from raw geometries
+        self._geoms     = list(self.regions.geometry)          # keep a plain list for STRtree
+        self.tree       = STRtree(self._geoms)
+
+        # 2. compile “prepared” versions for fast contains
+        self._prepared  = [prepared.prep(g) for g in self._geoms]
+
+        # 3. map idx → key once so we avoid pandas look-ups
+        self._keys      = self.regions["psf_key"].to_numpy()
+
+    # ----------------------------------------------------------------
+    #  Make deepcopy / pickle work
+    # ----------------------------------------------------------------
+    def __getstate__(self):
+        """
+        Return a picklable representation of the object.
+
+        We drop the STRtree (and anything else that can’t be pickled)
+        and rebuild it in __setstate__.
+        """
+        state = self.__dict__.copy()
+        state["tree"] = None        # Prepared geometries → not picklable
+        return state
+
+    def __setstate__(self, state):
+        """
+        Restore the object and rebuild the spatial index.
+        """
+        self.__dict__.update(state)
+        if self.tree is None and hasattr(self, "regions"):
+            # Rebuild STRtree on demand
+            self.tree = STRtree(self.regions.geometry.to_list())
+
 
     # =================================================================
     # public factory
@@ -460,7 +502,33 @@ class PSFRegionMap:
         ax.invert_xaxis()
         return fig, ax
 
+    # -------------------------------------------------------------------
+    # fast lookup
+    # -------------------------------------------------------------------
     def lookup_key(self, ra: float, dec: float, nearest: bool = True) -> int | None:
+        """
+        Return psf_key containing (ra, dec) in deg, or nearest one if `nearest` is True.
+        Runs in O(log N) for both hit & miss.
+        """
+        pt = Point(ra, dec)
+
+        # ---------- exact hit (typ. 1–3 candidates) --------------------
+        for idx in self.tree.query(pt):                     # fast candidate search
+            if self._prepared[idx].contains(pt):            # prepared geometry ⇒ µs
+                return int(self._keys[idx])
+
+        # ---------- fallback: nearest ----------------------------------
+        if nearest and len(self._geoms):
+            try:
+                idx = self.tree.nearest(pt)                 # shapely ≥2.0
+            except AttributeError:                          # older shapely / pygeos
+                # GeoPandas >=0.10 has the same via spatial index
+                idx = self.regions.sindex.nearest(pt)[1][0]
+            return int(self._keys[idx])
+
+        return None
+
+    def lookup_key_slow(self, ra: float, dec: float, nearest: bool = True) -> int | None:
         """Return the integer *psf_key* at (ra, dec) in deg.
         If not inside any region, optionally return the nearest region's psf_key by boundary.
         """

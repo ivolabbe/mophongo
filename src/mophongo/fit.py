@@ -41,6 +41,7 @@ class FitConfig:
     solve_method: str = "ata"  # 'ata' or 'lo' (linear operator)
     cg_kwargs: Dict[str, Any] = field(default_factory=lambda: {"M": None, "maxiter": 500, "atol": 1e-6})
     fit_covariances: bool = False  # Use simple fitting errors from diagonal of normal matrix
+    fft_fast: float | bool = False  # False for full kernel, float (0.1-1.0) for truncated FFT kernels
     # condense fit astrometry flags into one: fit_astrometry_niter = 0, means not fitting astrometry
     fit_astrometry_niter: int = 2     # Number of astrometry refinement passes (0 → disabled)
     fit_astrometry_joint: bool = False  # Use joint astrometry fitting, or separate step

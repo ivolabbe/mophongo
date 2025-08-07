@@ -56,6 +56,7 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
   - [x] Added LSQR-based matrix-free solver (`solve_lo`)
   - [ ] Deduplicate templates using weighted overlap cosine similarity
   - [x] Consolidated flux and RMS estimation into parent `SparseFitter`
+  - [x] Added STRtree-based normal matrix builder (`build_normal_tree`)
 - [x] **Pipeline orchestrator** (`src/mophongo/pipeline.py`)
   - [x] `run` to tie all pieces together
   - [x] don't implement source detection just yet: assume detection + segmentation image + catalog are available.

@@ -47,11 +47,13 @@ class FitConfig:
     reg_astrom: float = 1e-4
     snr_thresh_astrom: float = 10.0   # 0 → keep all sources (current behaviour)
     astrom_model: str = "gp"  # 'polynomial' or 'gp'
+    astrom_basis_order: int = 1
     astrom_kwargs: dict[str, dict] = field(default_factory=lambda: {'poly': {'order': 2}, 'gp': {'length_scale': 400}})
 #    astrom_kwargs={'poly': {'order': 2}, 'gp': {'length_scale': 400}}
     multi_tmpl_chi2_thresh: float = 5.0
     multi_tmpl_psf_core: bool = True
     multi_tmpl_colour: bool = False
+    normal: str = "loop"  # 'loop' or 'tree'
 
 
 def _diag_inv_hutch(A, k=32, rtol=1e-4, maxiter=None, seed=0):
@@ -162,6 +164,13 @@ class SparseFitter:
         w = self.weights[sl]
         return float(np.sum(data * w * data))
 
+    def build_normal(self) -> None:
+        """Dispatch to the configured normal-matrix builder."""
+        if getattr(self.config, "normal", "loop") == "tree":
+            self.build_normal_tree()
+        else:
+            self.build_normal_matrix()
+
     def build_normal_matrix(self) -> None:
         """Construct normal matrix using :class:`Template` objects."""
         # Compute weighted norms for all templates first
@@ -243,6 +252,79 @@ class SparseFitter:
         self._ata = ata.tocsr()
         self._atb = atb
 
+    def build_normal_tree(self) -> None:
+        """Construct normal matrix using an STRtree to find overlaps."""
+        from shapely.geometry import box
+        from shapely.strtree import STRtree
+
+        norms = [self._weighted_norm(t) for t in self.templates]
+        tol = 1e-8 * max(norms)
+        keep = [i for i, n in enumerate(norms) if n > tol]
+        dropped = len(self.templates) - len(keep)
+        if dropped:
+            logger.info("Dropped %d templates with low norm.", dropped)
+        self.templates = [self.templates[i] for i in keep]
+        norms = [norms[i] for i in keep]
+
+        n = len(self.templates)
+        ata = lil_matrix((n, n))
+        atb = np.zeros(n)
+
+        boxes = []
+        for i, tmpl in enumerate(tqdm(self.templates, total=n, desc="Building Normal matrix")):
+            sl_i = tmpl.slices_original
+            data_i = tmpl.data[tmpl.slices_cutout]
+            w_i = self.weights[sl_i]
+            img_i = self.image[sl_i]
+            atb[i] = np.sum(data_i * w_i * img_i)
+            ata[i, i] = norms[i]
+
+            y0, y1, x0, x1 = tmpl.bbox
+            geom = box(x0, y0, x1, y1)
+            boxes.append(geom)
+
+        tree = STRtree(boxes)
+
+        for i, geom in enumerate(boxes):
+            sl_i = self.templates[i].slices_original
+            for j in tree.query(geom):
+                j = int(j)
+                if j <= i:
+                    continue
+                inter = self._slice_intersection(sl_i, self.templates[j].slices_original)
+                if inter is None:
+                    continue
+                w = self.weights[inter]
+                sl_i_local = (
+                    slice(
+                        inter[0].start - sl_i[0].start + self.templates[i].slices_cutout[0].start,
+                        inter[0].stop - sl_i[0].start + self.templates[i].slices_cutout[0].start,
+                    ),
+                    slice(
+                        inter[1].start - sl_i[1].start + self.templates[i].slices_cutout[1].start,
+                        inter[1].stop - sl_i[1].start + self.templates[i].slices_cutout[1].start,
+                    ),
+                )
+                sl_j = self.templates[j].slices_original
+                sl_j_local = (
+                    slice(
+                        inter[0].start - sl_j[0].start + self.templates[j].slices_cutout[0].start,
+                        inter[0].stop - sl_j[0].start + self.templates[j].slices_cutout[0].start,
+                    ),
+                    slice(
+                        inter[1].start - sl_j[1].start + self.templates[j].slices_cutout[1].start,
+                        inter[1].stop - sl_j[1].start + self.templates[j].slices_cutout[1].start,
+                    ),
+                )
+                arr_i = self.templates[i].data[sl_i_local]
+                arr_j = self.templates[j].data[sl_j_local]
+                val = np.sum(arr_i * arr_j * w)
+                ata[i, j] = val
+                ata[j, i] = val
+
+        self._ata = ata.tocsr()
+        self._atb = atb
+
     def model_image(self) -> np.ndarray:
         if self.solution is None:
             raise ValueError("Solve system first")
@@ -256,13 +338,13 @@ class SparseFitter:
     @property
     def ata(self):
         if self._ata is None:
-            self.build_normal_matrix()
+            self.build_normal()
         return self._ata
 
     @property
     def atb(self):
         if self._atb is None:
-            self.build_normal_matrix()
+            self.build_normal()
         return self._atb
 
     def solve(
@@ -274,7 +356,7 @@ class SparseFitter:
         cfg = config or self.config
 
         # build big normal matrix once, this as a shift entry for every template
-        A, b = self.ata, self.atb  # triggers build_normal_matrix()
+        A, b = self.ata, self.atb  # triggers build_normal()
 
         # Guarantees strict positive definiteness after whitening
         # A symmetric matrix that is positive‐semi-definite but rank-deficient
@@ -412,6 +494,14 @@ class SparseFitter:
 
         info = dict(istop=istop, itn=itn, resid_norm=resid)
         return x_full, err_full, info
+
+    def solve_lo(
+        self,
+        config: FitConfig | None = None,
+        x0: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, dict]:
+        """Alias for :meth:`solve_linear_operator` (LSQR solver)."""
+        return self.solve_linear_operator(config=config, x0=x0)
 
     def residual(self) -> np.ndarray:
         return self.image - self.model_image()

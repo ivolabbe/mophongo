@@ -97,7 +97,7 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
 - [ ] End-to-end test with realistic mosaic data using `make_mosaic_dataset`
 - [ ] Profiling speed + memory usage
 - [ ] optimizations
-  - [ ] adaptive kernel size depending on SNR
+  - [x] adaptive kernel size depending on SNR
   - [ ] tracking is_dirty on templates
   - [ ] partial normal matrix rebuilding / deleting / refactoring
   - [ ] conditioning matrix   

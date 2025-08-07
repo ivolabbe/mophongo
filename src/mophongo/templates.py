@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from __future__ import annotations
+
 from typing import Any, Iterable, Iterator, List, Tuple
 from copy import deepcopy
 
@@ -9,6 +10,7 @@ from astropy.wcs import WCS
 from photutils.segmentation import SegmentationImage
 from tqdm import tqdm
 from scipy.signal import fftconvolve
+from scipy.interpolate import interp1d
 from skimage.measure import block_reduce
 
 from .utils import measure_shape, bin2d_mean
@@ -26,8 +28,6 @@ def _convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     from numpy.lib.stride_tricks import sliding_window_view
     windows = sliding_window_view(padded, kernel.shape)
     return np.einsum("ijkl,kl->ij", windows, kernel)
-
-
 class Template(Cutout2D):
     """Cutout-based template storing slice bookkeeping."""
 
@@ -57,6 +57,8 @@ class Template(Cutout2D):
         self.flux = 0.0
         self.err = 0.0
         self.shift = np.array([0.0, 0.0], dtype=float)
+        self.ee_rlim: float = 0.0
+        self.ee_fraction: float = 1.0
 
     @property
     def bbox(
@@ -290,6 +292,81 @@ class Templates:
         return obj
 
     @staticmethod
+    def _prepare_fft_fast(psf: np.ndarray) -> tuple[np.ndarray, np.ndarray, interp1d]:
+        """Return radial profile, EE curve and inverse profile interpolator."""
+        y, x = np.indices(psf.shape)
+        cy, cx = (np.array(psf.shape) - 1) / 2
+        r = np.hypot(y - cy, x - cx)
+        r_int = r.astype(int)
+        prof_num = np.bincount(r_int.ravel(), psf.ravel())
+        prof_den = np.bincount(r_int.ravel())
+        prof = prof_num / np.maximum(prof_den, 1)
+        rr = np.arange(len(prof))
+        ee = np.cumsum(prof * 2 * np.pi * rr)
+        if ee[-1] > 0:
+            ee /= ee[-1]
+        p2r = interp1d(
+            prof[::-1],
+            rr[::-1],
+            bounds_error=False,
+            fill_value=(rr.max(), rr.max()),
+        )
+        return prof, ee, p2r
+
+    @staticmethod
+    def _crop_kernel(kern: np.ndarray, rlim: float) -> tuple[np.ndarray, float]:
+        """Crop ``kern`` around its centre to ``rlim`` pixels."""
+        r = int(np.ceil(rlim))
+        cy, cx = (np.array(kern.shape) - 1) / 2
+        size_y = min(2 * r + (kern.shape[0] % 2), kern.shape[0])
+        size_x = min(2 * r + (kern.shape[1] % 2), kern.shape[1])
+        cut = Cutout2D(kern, (cx, cy), (size_y, size_x), mode="trim", copy=True)
+        kc = cut.data
+        return kc, float(kc.sum())
+
+    @staticmethod
+    def prepare_kernel_info(
+        templates: list["Template"],
+        psf_full: np.ndarray,
+        image_770: np.ndarray,
+        weight_770: np.ndarray | None,
+        *,
+        eta: float,
+        r_min_pix: float = 1.0,
+        r_max_pix: float | None = None,
+    ) -> None:
+        """Compute quick-flux based kernel crop radius and encircled energy."""
+        if not eta:
+            return
+
+        prof, ee, p2r = Templates._prepare_fft_fast(psf_full)
+        rr = np.arange(len(prof))
+
+        if weight_770 is not None:
+            sigma_pix = float(
+                np.median(np.sqrt(1 / weight_770[weight_770 > 0]))
+            )
+        else:
+            sigma_pix = float(np.std(image_770))
+
+        qflux = Templates.quick_flux(templates, image_770)
+
+        for tmpl, Fq in zip(templates, qflux):
+            if not np.isfinite(Fq) or Fq <= 0:
+                tmpl.ee_rlim = 0.0
+                tmpl.ee_fraction = 1.0
+                continue
+
+            thresh = float(eta) * sigma_pix / Fq
+            thresh = np.clip(thresh, prof.min(), prof.max())
+            r_pix = float(p2r(thresh))
+            r_pix = max(r_min_pix, r_pix)
+            if r_max_pix is not None:
+                r_pix = min(r_pix, r_max_pix)
+            tmpl.ee_rlim = r_pix
+            tmpl.ee_fraction = float(np.interp(r_pix, rr, ee))
+
+    @staticmethod
     def quick_flux(templates: List[Template], image: np.ndarray) -> np.ndarray:
         """Return quick flux estimates based on template data and image."""
         flux = np.zeros(len(templates), dtype=float)
@@ -404,6 +481,9 @@ class Templates:
         kernel : np.ndarray or PSFRegionMap or None
             Convolution kernel matching the template resolution. If ``None``,
             templates are returned unchanged (aside from optional padding).
+            If templates have ``ee_rlim`` set via :meth:`prepare_kernel_info`,
+            kernels are cropped to this radius and their ``ee_fraction`` is
+            stored on each template.
         inplace : bool, optional
             If ``True``, templates are modified in place and the internal list
             is returned. Otherwise a new list of convolved templates is
@@ -425,17 +505,14 @@ class Templates:
         if kernel is not None:
             if isinstance(kernel, PSFRegionMap):
                 ker = kernel
-                ky, kx = ker.psfs[0].shape
             else:
                 ker = kernel
-                ky, kx = ker.shape
-        else:
-            ky = kx = 0
 
         new_templates: list[Template] = []
         for tmpl in tqdm(tmpls, desc="Convolving templates"):
-            new_tmpl = tmpl.pad((ky, kx), original_shape, inplace=inplace)
 
+            # Obtain kernel for this template
+            kern = None
             if ker is not None:
                 if isinstance(ker, PSFRegionMap):
                     x, y = tmpl.position_original
@@ -447,8 +524,24 @@ class Templates:
                 else:
                     kern = ker
 
-                conv = fftconvolve(new_tmpl.data, kern, mode="same")
-                new_tmpl.data[:] = conv / conv.sum()
+            rlim = getattr(tmpl, "ee_rlim", 0.0)
+            if kern is not None and rlim > 0:
+                kern_use, ee = Templates._crop_kernel(kern, rlim)
+            else:
+                kern_use = kern
+                ee = float(kern_use.sum()) if kern_use is not None else 1.0
+
+            ky_pad, kx_pad = kern_use.shape if kern_use is not None else (0, 0)
+
+            new_tmpl = tmpl.pad((ky_pad, kx_pad), original_shape, inplace=inplace)
+
+            if kern_use is not None:
+                tmpl_flux = new_tmpl.data.sum()
+                conv = fftconvolve(new_tmpl.data, kern_use, mode="same")
+                new_tmpl.data[:] = conv / max(tmpl_flux, 1e-12)
+
+            new_tmpl.ee_rlim = rlim
+            new_tmpl.ee_fraction = ee
 
             if not inplace:
                 new_templates.append(new_tmpl)

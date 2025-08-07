@@ -209,7 +209,7 @@ def run(
 
         kernel = None
         if kernels is not None and kernels[idx] is not None:
-            kernel = deepcopy(kernels[idx])
+            kernel = kernels[idx]
             if isinstance(kernel, PSFRegionMap):
                 print(f"Using kernel lookup table {kernel.name}")
                 if k > 1:
@@ -228,8 +228,7 @@ def run(
             if wcs is not None:
                 tmpls_lo.wcs = wcs[idx]
             tmpls_lo._templates = [
-                t.downsample_wcs(images[idx],
-                                 wcs[idx] if wcs is not None else None, k)
+                t.downsample_wcs(images[idx], wcs[idx], k)
                 for t in tmpls._templates
             ]
         else:

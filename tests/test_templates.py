@@ -62,3 +62,27 @@ def test_template_extension_methods(tmp_path):
 
 def test_kernel_padding():
     return
+
+
+def test_convolve_templates_fft_fast():
+    images, segmap, catalog, psfs, truth_img, rms = make_simple_data(seed=3, nsrc=5, size=51, ndilate=2, peak_snr=3)
+    psf_hi = PSF.from_array(psfs[0])
+    psf_lo = PSF.from_array(psfs[1])
+    kernel = psf_hi.matching_kernel(psf_lo)
+
+    tmpl = Templates()
+    tmpl.extract_templates(images[0], segmap, list(zip(catalog["x"], catalog["y"])))
+    Templates.prepare_kernel_info(
+        tmpl._templates,
+        psfs[1],
+        images[1],
+        rms[1],
+        eta=0.5,
+        r_max_pix=psfs[1].shape[0] // 2 - 1,
+    )
+    templates = tmpl.convolve_templates(kernel, inplace=False)
+
+    # Ensure kernels were truncated: encircled energy < 1 and sums match
+    for t in templates:
+        assert 0.0 < t.ee_fraction <= 1.0
+        np.testing.assert_allclose(t.data.sum(), t.ee_fraction, rtol=1e-5)

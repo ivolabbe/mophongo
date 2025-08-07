@@ -235,6 +235,16 @@ def run(
         if weights_i is not None:
             tmpls_lo.prune_outside_weight(weights_i)
 
+        if config.fft_fast and psfs is not None:
+            Templates.prepare_kernel_info(
+                tmpls_lo._templates,
+                psfs[idx],
+                images[idx],
+                weights_i,
+                eta=config.fft_fast,
+                r_max_pix=psfs[idx].shape[0] // 2 - 1,
+            )
+
         templates = tmpls_lo.convolve_templates(kernel, inplace=False)
         #        templates = empls_lo._templates
 
@@ -304,7 +314,10 @@ def run(
                     fluxes, errs, info = fitter.solve_linear_operator()
                 res = fitter.residual()
 
-        err_pred = fitter.predicted_errors()
+        ee_arr = np.array([getattr(t, "ee_fraction", 1.0) for t in templates])
+        fluxes = fluxes / ee_arr
+        errs = errs / ee_arr
+        err_pred = fitter.predicted_errors() / ee_arr
 
         print("Done...")
 

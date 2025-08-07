@@ -39,18 +39,6 @@ def intersection(
         return None
     return y0, y1, x0, x1
 
-def bin2d_mean(arr: np.ndarray, k: int) -> np.ndarray:
-    """Block-average a 2-D array by an integer factor using ``block_reduce``.
-
-    Trailing rows/columns that do not fit an exact ``k``×``k`` block are
-    discarded, matching ``astropy.nddata.block_reduce`` semantics.
-    """
-    if k == 1:
-        return arr
-
-    return block_reduce(arr, k, func=np.mean)
-
-
 def downsample_psf(psf: np.ndarray, k: int) -> np.ndarray:
     """Downsample a PSF by an integer factor, preserving the centroid.
 
@@ -69,7 +57,8 @@ def downsample_psf(psf: np.ndarray, k: int) -> np.ndarray:
     if k == 1:
         return psf
 
-    # only downsample if k a multiple of 2 and  
+    # only downsample if k a multiple of 2 and 
+    # correct for drift of center from odd to even size
     if (k % 2 == 0) and (psf.shape[0] % 2 == 1):
         shift_hi = (k - 1) / 2.0
         psf = shift(
@@ -80,7 +69,7 @@ def downsample_psf(psf: np.ndarray, k: int) -> np.ndarray:
             cval=0.0,
             prefilter=False,
         )
-    return block_reduce(psf, k, func=np.mean)
+    return block_reduce(psf, k, func=np.sum)
 
 
 def bin_factor_from_wcs(w_det: WCS, w_img: WCS, tol: float = 0.02) -> int:

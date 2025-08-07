@@ -11,9 +11,9 @@ from photutils.segmentation import SegmentationImage
 from tqdm import tqdm
 from scipy.signal import fftconvolve
 from scipy.interpolate import interp1d
-from skimage.measure import block_reduce
+from astropy.nddata import block_reduce
 
-from .utils import measure_shape, bin2d_mean
+from .utils import measure_shape 
 from .psf_map import PSFRegionMap
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,7 @@ def _convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     from numpy.lib.stride_tricks import sliding_window_view
     windows = sliding_window_view(padded, kernel.shape)
     return np.einsum("ijkl,kl->ij", windows, kernel)
+
 class Template(Cutout2D):
     """Cutout-based template storing slice bookkeeping."""
 
@@ -37,6 +38,8 @@ class Template(Cutout2D):
         position: tuple[float, float],
         size: tuple[int, int],
         label: int | None = None,
+        copy: bool = True,
+        wcs: WCS | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -45,11 +48,14 @@ class Template(Cutout2D):
             size,
             mode="partial",
             fill_value=0.0,
-            copy=True,
+            copy=copy,
+            wcs=wcs,
             **kwargs,
         )
         # @@@ bug in Cutout2D: shape_input is not set correctly
         self.shape_input = data.shape
+        self.shape_original = data.shape 
+        self.wcs_original = wcs 
         # record shift from original position here
         self.id = label
         self.parent_id = label
@@ -71,21 +77,24 @@ class Template(Cutout2D):
             padding: Tuple[int, int],
             original_shape: Tuple[int, int],
             *,
+            image: np.ndarray | None = None,
             inplace=False) -> "Template":
         """Create a new Template with padding, maintaining correct original coordinates."""
 
         # force padding to be even, otherwise unpredictable behavior for cutout
         ony, onx = padding[0] // 2, padding[1] // 2
-        pady, padx = ony * 2, onx * 2
         ny, nx = self.data.shape
 
         # Create new Template directly from the original array reference
         # This ensures all coordinates remain consistent with the true original
+        if image is None:
+            image = np.zeros(self.shape_input, dtype=self.data.dtype)
+        
         new_template = Template(
-            data=np.zeros(self.shape_input, dtype=self.data.dtype),
+            data=image,
             position=self.input_position_original,
-            size=(ny + pady, nx + padx),
-            wcs=self.wcs,
+            size=(ny + ony * 2, nx + onx * 2),
+            wcs=self.wcs,  # wcs will be wrong, offset by padding
             label=self.id,
         )
 
@@ -98,6 +107,82 @@ class Template(Cutout2D):
             self.__dict__.update(new_template.__dict__)
 
         return new_template
+
+
+    # ------------------------------------------------------------------
+    # centred, even-padding convolution
+    # ------------------------------------------------------------------
+    def convolve_cutout(
+        self,
+        kernel: np.ndarray,
+        *,
+        parent_image: np.ndarray | None = None,
+        preserve_dtype: bool = True,
+    ) -> "Template":
+        """
+        Convolve *this* template with a centred ``kernel`` **and return a new
+        `Template` that already has the correct, larger geometry**.
+
+        The routine guarantees that the padding applied to the original
+        cut-out is **even** – i.e. an integer number of pixels *on both
+        sides* – which avoids the odd-size artefacts you saw earlier.
+
+        Parameters
+        ----------
+        kernel
+            2-D, centred convolution kernel.
+        parent_image
+            Reference to the *full* parent image.  If ``None`` a tiny dummy
+            array of zeros (same dtype) is created just to satisfy Cutout2D.
+            It is **never** copied, so the memory cost is negligible.
+        preserve_dtype
+            Cast the result back to ``self.data.dtype`` (default) instead of
+            keeping the float64 that `fftconvolve` returns.
+
+        Returns
+        -------
+        Template
+            A *new* template whose ``data`` attribute contains the full
+            convolution result and whose spatial metadata (WCS, slices, …)
+            is already consistent with the enlarged size.
+        """
+        # 1. --- full convolution -------------------------------------------------
+        full = fftconvolve(self.data, kernel, mode="full")
+        if preserve_dtype:
+            full = full.astype(self.data.dtype, copy=False)
+
+        ny, nx = full.shape
+
+        if parent_image is None:
+            # a 1-byte dummy is enough – Cutout2D only keeps a *view*
+            parent_image = np.zeros(self.shape_input, dtype=self.data.dtype)
+
+        # 2. make *sure* the new cut-out is large enough -----------------------
+        #     If ny or nx is odd, add 1 so it becomes even (keeps later padding
+        #     code happy) *and* ≥ full.shape.
+        ny_even = ny if ny % 2 == 0 else ny + 1
+        nx_even = nx if nx % 2 == 0 else nx + 1
+
+        # # --------- 3. build a fresh Cutout2D --------------------------------
+        new_cut = Template(
+            parent_image,          # original full image reference
+            position=self.input_position_original, # note (x, y)  
+            size=(ny_even, nx_even),     # (ny, nx)
+            wcs=self.wcs,     # note wcs origin is wrong
+            label=self.id,   
+            copy=False,       # do not copy the data, we are replacing later     
+        )
+
+        # copy the convolution result into the enlarged cut-out
+        # account for the extra pixel
+        # 4.  centre `full` inside the (possibly larger) even array -------------
+        y0 = (ny_even - ny) // 2     # shift is 0 or 1
+        x0 = (nx_even - nx) // 2
+        data = np.zeros(new_cut.data.shape, dtype=self.data.dtype)
+        data[y0:y0 + ny, x0:x0 + nx] = full
+        new_cut.data = data
+
+        return new_cut
 
     def downsample(self, k: int) -> "Template":
         """Return a new template averaged by ``k×k`` blocks.
@@ -119,7 +204,7 @@ class Template(Cutout2D):
         lo = deepcopy(hi)
 
         # pixel data and bounding box
-        lo.data = bin2d_mean(hi.data, k)
+        lo.data = block_reduce(hi.data, k, func=np.sum)
         ny_lo, nx_lo = lo.data.shape
         y0, _, x0, _ = hi.bbox
         bbox = (y0 // k, y0 // k + ny_lo, x0 // k, x0 // k + nx_lo)
@@ -192,7 +277,7 @@ class Template(Cutout2D):
                                label=self.id)
 
         # Fill the data with block-reduced (averaged) values from the high-res template
-        lowres_tmpl.data[:] = block_reduce(self.data, k, func=np.mean)
+        lowres_tmpl.data[:] = block_reduce(self.data, k, func=np.sum)
         return lowres_tmpl
 
 
@@ -271,7 +356,7 @@ class Templates:
         hires_image: np.ndarray,
         segmap: np.ndarray,
         positions: Iterable[Tuple[float, float]],
-        kernel: np.ndarray,
+        kernel: np.ndarray | None = None,
         extension: np.ndarray | str | None = None,  # 'psf', 'wings', 'both', None
         wcs: WCS | None = None,
     ) -> "Templates":
@@ -320,7 +405,7 @@ class Templates:
         cy, cx = (np.array(kern.shape) - 1) / 2
         size_y = min(2 * r + (kern.shape[0] % 2), kern.shape[0])
         size_x = min(2 * r + (kern.shape[1] % 2), kern.shape[1])
-        cut = Cutout2D(kern, (cx, cy), (size_y, size_x), mode="trim", copy=True)
+        cut = Cutout2D(kern, (cx, cy), (size_y, size_x), mode="trim", copy=False)
         kc = cut.data
         return kc, float(kc.sum())
 
@@ -464,10 +549,15 @@ class Templates:
             cut.data[cut.slices_cutout] *= (
                 segm.data[cut.slices_original] == label).astype(cut.data.dtype)
 
+            # sum data should never be zero. There should
+            # there should also never be NaNs.
+            cut.data /= np.sum(cut.data) 
+ 
             templates.append(cut)
 
         self._templates = templates
         return templates
+
 
     def convolve_templates(
         self,
@@ -500,48 +590,26 @@ class Templates:
 
         tmpls = self._templates
         original_shape = self.original_shape
-
-        ker = None
-        if kernel is not None:
-            if isinstance(kernel, PSFRegionMap):
-                ker = kernel
-            else:
-                ker = kernel
+        dummy_image = np.zeros(original_shape, dtype=np.byte)
 
         new_templates: list[Template] = []
-        for tmpl in tqdm(tmpls, desc="Convolving templates"):
+        for i,tmpl in enumerate(tqdm(tmpls, desc="Convolving templates")):
 
             # Obtain kernel for this template
-            kern = None
-            if ker is not None:
-                if isinstance(ker, PSFRegionMap):
-                    x, y = tmpl.position_original
-                    if tmpl.wcs is not None:
-                        ra, dec = tmpl.wcs.wcs_pix2world(x, y, 0)
-                    else:
-                        ra, dec = x, y
-                    kern = ker.get_psf(ra, dec)
+            if isinstance(kernel, PSFRegionMap):
+                x, y = tmpl.position_original
+                if tmpl.wcs is not None:
+                    ra, dec = tmpl.wcs.wcs_pix2world(x, y, 0)
                 else:
-                    kern = ker
-
-            rlim = getattr(tmpl, "ee_rlim", 0.0)
-            if kern is not None and rlim > 0:
-                kern_use, ee = Templates._crop_kernel(kern, rlim)
+                    ra, dec = x, y
+                kern = kernel.get_psf(ra, dec)
             else:
-                kern_use = kern
-                ee = float(kern_use.sum()) if kern_use is not None else 1.0
+                kern = kernel
 
-            ky_pad, kx_pad = kern_use.shape if kern_use is not None else (0, 0)
-
-            new_tmpl = tmpl.pad((ky_pad, kx_pad), original_shape, inplace=inplace)
-
-            if kern_use is not None:
-                tmpl_flux = new_tmpl.data.sum()
-                conv = fftconvolve(new_tmpl.data, kern_use, mode="same")
-                new_tmpl.data[:] = conv / max(tmpl_flux, 1e-12)
-
-            new_tmpl.ee_rlim = rlim
-            new_tmpl.ee_fraction = ee
+            if tmpl.ee_rlim > 0.0 and tmpl.ee_fraction < 1.0:
+                kern, tmpl.ee_fraction = Templates._crop_kernel(kern, tmpl.ee_rlim)
+ 
+            new_tmpl = tmpl.convolve_cutout(kern, parent_image=dummy_image)
 
             if not inplace:
                 new_templates.append(new_tmpl)

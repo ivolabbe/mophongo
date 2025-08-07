@@ -131,6 +131,32 @@ def test_flux_and_rms_estimation():
     assert np.all(flux2 == 42.0)
 
 
+def test_build_normal_tree_matches_loop():
+    images, segmap, catalog, psfs, _, rms = make_simple_data()
+
+    psf_hi = PSF.from_array(psfs[0])
+    psf_lo = PSF.from_array(psfs[1])
+    kernel = psf_hi.matching_kernel(psf_lo)
+
+    tmpls = Templates.from_image(
+        images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel
+    )
+    fitter_loop = SparseFitter(
+        tmpls.templates, images[1], 1.0 / rms[1] ** 2, FitConfig()
+    )
+    fitter_tree = SparseFitter(
+        tmpls.templates, images[1], 1.0 / rms[1] ** 2, FitConfig(normal="tree")
+    )
+
+    fitter_loop.build_normal_matrix()
+    fitter_tree.build_normal_tree()
+
+    np.testing.assert_allclose(
+        fitter_loop.ata.toarray(), fitter_tree._ata.toarray()
+    )
+    np.testing.assert_allclose(fitter_loop.atb, fitter_tree._atb)
+
+
 def test_build_normal_matrix_new_equivalence():
     return
     images, segmap, catalog, psfs, _, rms = make_simple_data()

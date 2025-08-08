@@ -90,20 +90,87 @@ def measure_background(sci: np.ndarray, nbin: int = 4) -> float:
     clipped = SigmaClip(sigma=3.0)(binned)
     return float(np.median(clipped))
 
+import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
+from scipy.ndimage import binary_dilation as _dilate
+from astropy.stats import mad_std
+
+def _mean_downsample(arr, fact):
+    """Fast block-reduce by *fact*×*fact* using strides, no Python loops."""
+    ny, nx = arr.shape
+    ny2, nx2 = ny // fact, nx // fact
+    trimmed = arr[:ny2*fact, :nx2*fact]                  # drop edge pixels
+    view = trimmed.reshape(ny2, fact, nx2, fact)
+    return view.mean(axis=(1, 3), dtype=arr.dtype)
+
+def _sigma_clip(arr, sigma=3.0):
+    """Vectorised σ-clip that returns a boolean mask."""
+    med = np.median(arr)
+    dev = sigma * mad_std(arr, ignore_nan=True)
+    return np.abs(arr - med) > dev
+
+# benchmarking shows not faster
+def measure_ivar_fast(
+    sci: np.ndarray,
+    *,
+    wht: np.ndarray | None = None,
+    background: float = 0.0,
+    nbin: int = 4,
+    ndilate: int = 2,
+) -> np.ndarray:
+    """
+    Faster drop-in replacement for `measure_ivar`.
+
+    • pure NumPy (no block_reduce / SigmaClip loop)
+    • avoids temporary allocations where possible
+    """
+    if wht is None:
+        wht = np.ones_like(sci, dtype=np.float32)
+
+    print('ivar fast')
+    # --- clean NaNs & negatives once ------------------------------------
+    sci = np.nan_to_num(sci, nan=0.0)
+    wht = np.where((wht > 0) & np.isfinite(wht), wht, 0.0)
+
+    # --- mean-downsample -------------------------------------------------
+    sci_sub = sci - background
+    sci_bin = _mean_downsample(sci_sub, nbin)
+    wht_bin = _mean_downsample(wht,     nbin)
+
+    # --- detection image -------------------------------------------------
+    det_bin = np.zeros_like(sci_bin, dtype=np.float32)
+    pos = wht_bin > 0
+    det_bin[pos] = sci_bin[pos] * np.sqrt(wht_bin[pos])
+
+    # --- σ-clip & optional dilation -------------------------------------
+    mask = _sigma_clip(det_bin, sigma=3.0)
+    if ndilate > 0:
+        mask = _dilate(mask, structure=np.ones((2*ndilate+1,)*2, bool))
+
+    mask |= (wht_bin <= 0)
+
+    # --- robust rms ------------------------------------------------------
+    rms = mad_std(det_bin[~mask], ignore_nan=True)
+    inv_var_bin = np.square(np.sqrt(wht_bin) / rms)      # (√w / σ)^2
+
+    # --- upsample back to full frame (nearest) --------------------------
+    ny, nx = sci.shape
+    out = np.repeat(np.repeat(inv_var_bin, nbin, axis=0), nbin, axis=1)
+    return out[:ny, :nx].astype(np.float32) / (nbin**2)
 
 def measure_ivar(
     sci: np.ndarray,
     *,
     wht: np.ndarray | None = None,
     background: float = 0.0,
-    nbin: int = 3,
-    ndilate: int = 3,
+    nbin: int = 4,
+    ndilate: int = 2,
 ) -> np.ndarray:
     """Calibrate weight map using noise estimates from the image."""
     print("Measuring inverse variance map...") 
     if wht is None:
         wht = np.ones_like(sci, dtype=np.float32)
-    
+
     # Handle NaNs in input arrays
     sci_clean = np.where(np.isfinite(sci), sci, 0.0)
     wht_clean = np.where(np.isfinite(wht) & (wht > 0), wht, 0.0)

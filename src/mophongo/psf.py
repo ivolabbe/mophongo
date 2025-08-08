@@ -25,6 +25,8 @@ from astropy.utils.data import download_file
 from photutils.psf.matching import TukeyWindow
 from photutils.centroids import centroid_quadratic
 
+from tqdm import tqdm
+
 from .utils import (
     measure_shape,
     get_wcs_pscale,
@@ -723,27 +725,6 @@ class EffectivePSF:
 
 
 
-# ---------------------------------------------------------------------
-# Basic WCS utilities
-# ---------------------------------------------------------------------
-def get_wcs_pscale(wcs, set_attribute=True):
-    """Pixel scale in arcsec from a ``WCS`` object."""
-    from numpy.linalg import det
-
-    if isinstance(wcs, fits.Header):
-        wcs = WCS(wcs, relax=True)
-
-    if hasattr(wcs.wcs, "cd") and wcs.wcs.cd is not None:
-        detv = det(wcs.wcs.cd)
-    else:
-        detv = det(wcs.wcs.pc)
-
-    pscale = np.sqrt(np.abs(detv)) * 3600.0
-    if set_attribute:
-        wcs.pscale = pscale
-    return pscale
-
-
 def to_header(wcs, add_naxis=True, relax=True, key=None):
     """Convert WCS to a FITS header with a few extra keywords."""
     hdr = wcs.to_header(relax=relax, key=key)
@@ -1096,7 +1077,7 @@ class DrizzlePSF:
         positions: list[tuple[float, float]],
         *,
         filter: str | None = None,
-        size: int,
+        size: float | int = 51,
         verbose: bool = False,
     ) -> np.ndarray:
         """Return a cube of drizzled PSFs evaluated at given coordinates.
@@ -1117,13 +1098,26 @@ class DrizzlePSF:
         np.ndarray
             Array of shape ``(Npos, size, size)`` containing the drizzled PSFs.
         """
+        # ------------------------------------------------------------
+        # 1.  Detect if *size* was passed in arc-seconds
+        #     – any real / floating-point value → arcsec
+        #     – an integer                      → pixels      (status-quo)
+        # ------------------------------------------------------------
+        if not isinstance(size, (int, np.integer)):
+            # user gave a physical size (arcsec) → convert to pixels
+            size_pix    = int(round(size / self.driz_pscale))
+        else:
+            # already an integer → treat as pixels
+            size_pix = int(size)
+
+        size_pix = np.maximum(9, size_pix)  # enforce minimum size
 
         psf_cube: list[np.ndarray] = []
-        for ra, dec in positions:
+        for ra, dec in tqdm(positions, desc="Drizzling PSFs"):
             cutout = self.get_driz_cutout(
                 ra,
                 dec,
-                size=size,
+                size=size_pix,
                 verbose=verbose,
                 recenter=False,
                 search_boxsize=11,                
@@ -1137,7 +1131,7 @@ class DrizzlePSF:
                 kernel=self.driz_header["KERNEL"],
                 pixfrac=self.driz_header["PIXFRAC"],
                 verbose=verbose,
-                npix=size // 2,
+#                npix=size // 2,
             )
             psf_cube.append(psf)
 

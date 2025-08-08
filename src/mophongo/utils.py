@@ -411,20 +411,26 @@ def matching_kernel(
         return np.zeros_like(kernel)
 
     if recenter:
-        cy = (kernel.shape[0] - 1) / 2
-        cx = (kernel.shape[1] - 1) / 2
-        ycen, xcen = centroid_quadratic(kernel,
-                                        xpeak=cx,
-                                        ypeak=cy,
-                                        fit_boxsize=5)
+        # first guess is center of mass, then fit quadratic centroid
+        xcom, ycom = centroid_com(kernel)
+        xcen, ycen = centroid_quadratic(kernel,
+                                        xpeak=xcom,
+                                        ypeak=ycom,
+                                        fit_boxsize=7)
         if np.isnan(ycen) or np.isnan(xcen):
             # fallback to centroid_com if quadratic fails
-            ycen, xcen = centroid_com(kernel)
+            xcen, ycen = xcom, ycom
 
         if not np.isnan(ycen) and not np.isnan(xcen):
+            # recenter kernel to the centroid of stamp
+            cx = (kernel.shape[1] - 1) / 2
+            cy = (kernel.shape[0] - 1) / 2
+#            print('Re-centering kernel by (%.2f, %.2f)' %  (cy - ycen, cx - xcen))
             kernel = shift(kernel, (cy - ycen, cx - xcen),
                            order=3,
                            mode="nearest")
+            # xcen, ycen = centroid_com(kernel)
+            # print('before centroid:', xcom, ycom,' after:', xcen, ycen, ' expected:', cx, cy)
         else:
             logger.warning("Centroiding failed, kernel not recentered.")
 
@@ -897,7 +903,7 @@ def starlet_basis(size: int, n_scales: int = 5) -> np.ndarray:
             kernel = h
         else:
             # Use scipy.ndimage.zoom with order=0 for dilation
-            from scipy.ndimage import zoom
+#            from scipy.ndimage import zoom
             step = 2 ** j
             # Create dilated kernel by upsampling with zeros
             kernel = np.kron(h, np.ones((step, step))) / (step * step)
@@ -956,12 +962,9 @@ def get_wcs_pscale(wcs, set_attribute=True):
     if isinstance(wcs, fits.Header):
         wcs = WCS(wcs, relax=True)
 
-    if hasattr(wcs.wcs, "cd") and wcs.wcs.cd is not None:
-        detv = det(wcs.wcs.cd)
-    else:
-        detv = det(wcs.wcs.pc)
+    # assumes wcs in degrees
+    pscale = wcs.proj_plane_pixel_scales()[0].value * 3600
 
-    pscale = np.sqrt(np.abs(detv)) * 3600.0
     if set_attribute:
         wcs.pscale = pscale
     return pscale

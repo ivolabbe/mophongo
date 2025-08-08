@@ -51,7 +51,7 @@ class FitConfig:
     astrom_model: str = "gp"  # 'polynomial' or 'gp'
     astrom_centroid: str = "centroid"    # "centroid" (=old) | "correlation"
  #    astrom_basis_order: int = 1
-    astrom_kwargs: dict[str, dict] = field(default_factory=lambda: {'poly': {'order': 2}, 'gp': {'length_scale': 300}})
+    astrom_kwargs: dict[str, dict] = field(default_factory=lambda: {'poly': {'order': 2}, 'gp': {'length_scale': 500}})
 #    astrom_kwargs={'poly': {'order': 2}, 'gp': {'length_scale': 400}}
     multi_tmpl_chi2_thresh: float = 5.0
     multi_tmpl_psf_core: bool = True

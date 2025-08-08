@@ -167,6 +167,7 @@ def run(
     from .templates import Templates
     from .fit import SparseFitter, FitConfig
     from .astro_fit import GlobalAstroFitter
+    from astropy.nddata import block_replicate, block_reduce
     from .local_astrometry import AstroCorrect
     from . import utils
     import warnings
@@ -202,6 +203,18 @@ def run(
     residuals = []
     for idx in range(1, len(images)):
 
+        # hack for now replace lower res by upsampled 
+        test_binning = True
+        if wcs is not None and test_binning:
+            k_test = bin_factor_from_wcs(wcs[0], wcs[idx])
+            print('binning factor:', k_test)
+            if k_test > 1:
+                print(f"upsampling image {idx} by factor {k_test}")
+                images[idx] = block_replicate(images[idx], k_test, conserve_sum=True)
+                weights[idx] = block_replicate(weights[idx], k_test) * k_test**2
+                wcs[idx] = wcs[0]
+
+
         if wcs is not None:
             k = bin_factor_from_wcs(wcs[0], wcs[idx])
         else:
@@ -213,6 +226,7 @@ def run(
             if isinstance(kernel, PSFRegionMap):
                 print(f"Using kernel lookup table {kernel.name}")
                 if k > 1:
+                    print(f"Downsampling kernel {kernel.name} by factor {k}")
                     kernel.psfs = np.array(
                         [downsample_psf(psf, k) for psf in kernel.psfs])
             else:
@@ -223,6 +237,7 @@ def run(
 
         # Downsample templates and kernel to match the image resolution
         if k > 1:
+            print(f"Downsampling templates by factor {k}")
             tmpls_lo = Templates()
             tmpls_lo.original_shape = images[idx].shape
             if wcs is not None:
@@ -270,10 +285,7 @@ def run(
             print(f"Running iteration {j+1} of {niter}")
 
             fitter = fitter_cls(templates, images[idx], weights_i, config)
-            if config.solve_method == 'ata':
-                fluxes, errs, info = fitter.solve()
-            else:
-                fluxes, errs, info = fitter.solve_linear_operator()
+            fluxes, errs, info = fitter.solve()
 
             res = fitter.residual()
             print(f'Pipeline (residual) memory: {memory():.1f} GB')
@@ -282,16 +294,14 @@ def run(
                 logger.info("fitting astrometry separately")
                 astro.fit(templates, res, fitter.solution)
 
-                # perform a final fit with just the fluxes. @@@ could do this as final pass also for joint fitter
-                # check if this call is ok, only makes sense if we rebuild the normal matrix
-                # TODO: track this from the templates is_dirty flag
-                # dont have to rebuild if we are adding templates for residuals
-                fitter._ata = None  # @@@ do this properly
-                if config.solve_method == 'ata':
-                    fluxes, errs, info = fitter.solve()
-                else:
-                    fluxes, errs, info = fitter.solve_linear_operator()
-                res = fitter.residual()
+        # perform a final fit with just the fluxes. @@@ could do this as final pass also for joint fitter
+        # check if this call is ok, only makes sense if we rebuild the normal matrix
+        # TODO: track this from the templates is_dirty flag
+        # dont have to rebuild if we are adding templates for residuals
+        fitter._ata = None  # @@@ do this properly
+        fluxes, errs, info = fitter.solve()
+
+        res = fitter.residual()
 
         # second pass: add extra templates for poor fits
         if (config.multi_tmpl_psf_core or config.multi_tmpl_colour
@@ -306,7 +316,9 @@ def run(
                     parent = templates[bi]
                     if config.multi_tmpl_psf_core and psfs is not None:
                         stamp = _extract_psf_at(parent, psfs[idx])
-                        tmpls.add_component(parent, stamp, "psf")
+                        # @@@ doesnt do anything.... need to add to templates
+                        add_tmpl = tmpls.add_component(parent, stamp, "psf")
+                        templates.append(add_tmpl)
                     # Placeholder for additional components (e.g. colour maps)
 
                 fitter = fitter_cls(templates, images[idx], weights_i, config)
@@ -351,6 +363,11 @@ def run(
             cat[f"flux_{idx}"][ci] = fl
             cat[f"err_{idx}"][ci] = err_sum[pid]
             cat[f"err_pred_{idx}"][ci] = err_pred_sum[pid]
+
+        if k_test>1 and test_binning:
+            print(f"Downsampling residuals by factor {k_test}")
+            # downsample residuals to match the original image size
+            res = block_reduce(res, k_test, func=np.sum)
 
         residuals.append(res)
 

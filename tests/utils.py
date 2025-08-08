@@ -717,6 +717,11 @@ def make_testdata():
     size_y_40mas = 3520
     postfix = 'large'
 
+    center_ra, center_dec = 34.361343, -5.1326021
+    size_x_40mas = 29_000
+    size_y_40mas = 7600
+    postfix = 'half'
+
     center_radec = SkyCoord(center_ra, center_dec, unit='deg')
     #  center = (center_x_40mas, center_y_40mas)
     size = (size_y_40mas, size_x_40mas)  # Cutout2D expects (ny, nx)
@@ -787,7 +792,11 @@ def make_testdata():
             hdu = fits.PrimaryHDU(cutout_80mas.data.astype(np.float32), header=hdr)
             hdu.writeto(outdir + outfile.replace(postfix,postfix+'-80mas'), overwrite=True)
 
-            cutout_40mas = block_replicate(cutout_80mas.data, 2,  conserve_sum=True)
+            if 'sci' in outfile:
+                cutout_40mas = block_replicate(cutout_80mas.data, 2,  conserve_sum=True)
+            else:
+                # weights go with inv variance, so we need to multiply by 4
+                cutout_40mas = block_replicate(cutout_80mas.data, 2)*4
 
             hdr.update(target_wcs.to_header())
             hdu = fits.PrimaryHDU(cutout_40mas.astype(np.float32), header=hdr)

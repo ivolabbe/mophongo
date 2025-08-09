@@ -1,0 +1,66 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2761
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww28940\viewh20380\viewkind0
+\pard\tx566\tx1133\tx1700\tx2267\tx2834\tx3401\tx3968\tx4535\tx5102\tx5669\tx6236\tx6803\pardirnatural\partightenfactor0
+
+\f0\fs32 \cf0 legacy ideas\
+\
+1) expand SEXTRACTOR style segmentation through dilation, until the average SNR in co-added pixels < XXX\
+\
+2) star finder:\
+* check profile k-nn fitter\
+* The sharpness statistic compares the central pixel to the mean of\
+;       the surrounding pixels.   If this difference is greater than the\
+;       originally estimated height of the Gaussian or less than 0.2 the height of the\
+;	Gaussian (for the default values of SHARPLIM) then the star will be\
+;	rejected.\
+\
+3) sanitize image\
+; smooth weightmap to fill holes\
+; normalize to median weight\
+; set image to zero where weight < minweight, and to maxweight if weight > maxweight\
+; scan for weird values, set weight and value to 0\
+\
+4) optimize detection for certain SED weights\
+pro autopilot_prep_detection, par, _extra=extra\
+\
+5) fit a model PSF to the slowest growth curve (eg moffat, gauss hermite)\
+get convolution kernel to that (deconvolve complications)\
+(broaden by adding 2 pixel fwhm in quadrature, or set minimium)\
+\
+6) auto find the best windowing\
+      win=pu.TukeyWindow(alpha=0.3)\
+revert to \
+         win=pu.SplitCosineBellWindow(alpha=0.7,beta=0.3)\
+\
+criterion badness = (min(kern)/stddev(kern))\
+\
+broaden target until stable \
+\
+\pard\tx566\tx1133\tx1700\tx2267\tx2834\tx3401\tx3968\tx4535\tx5102\tx5669\tx6236\tx6803\pardirnatural\partightenfactor0
+\cf0 does oversampling help?\
+\pard\tx566\tx1133\tx1700\tx2267\tx2834\tx3401\tx3968\tx4535\tx5102\tx5669\tx6236\tx6803\pardirnatural\partightenfactor0
+\cf0 \
+\
+7) account for the smoothing of oversampling\
+\
+        ; presmooth for binning and interpolation kernel (so effectively the derived kernel\
+        ; if deconvolved for them. If reconstructing at full resolution, the model need to be\
+        ; smoothed the same way\
+        if bin gt 1 then begin\
+            psfb = fltarr([(psf.dim)[0:1]/bin,gx.length])\
+\
+            ; deconvolve for cubic or linear interpolation\
+            if par.fit_interp eq 'cubic' then cubic=-0.5 else interp=1\
+\
+# so this bins the psf, then expands by interpolation\
+\
+            for i=0,gx.length-1 do begin\
+               psm = rbin( rbin(psf[*,*,i],bin) ,bin,/expand,interp=interp,cubic=cubic)  ; @@@  WOA this works! harcoded interp=1, so use that in mophongo\
+               psfb[0,0,i] = rbin(psm,bin)\
+\
+8) auto find the best detection threshold\
+\
+ }

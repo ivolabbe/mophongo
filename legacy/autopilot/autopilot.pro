@@ -1,16 +1,6 @@
 
 ; @@@ expand SEXTRACTOR style segmentation through dilation!!!!
 ; until the average SNR in co-added pixels < XXX
-;
-; @@@ reorganize: make into separate objects:
-;  - PSF maker (per band)
-;  - Object detector, deblender, detection kernel
-;  - Background substraction
-;  - shiftmapper + registration
-;  - Aper + fitting Photometry: filters, kernels, convolutions, book keeping, mophongo
-;
-;  check @@ http://www.astro.yale.edu/whitaker/contents/Reduction.html
-;
 
 compile_opt idl2, logical_predicate
 

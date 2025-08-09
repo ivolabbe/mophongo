@@ -1,4 +1,4 @@
-#from .templates import Template 
+from .templates import Templates, Template 
 from .fit import SparseFitter
 from .local_astrometry import AstroCorrect
 from .catalog import Catalog

@@ -1,31 +1,3 @@
-function auto_sample_background, img, tsz=tsz, len=len, frac=frac
-   if not keyword_set(tsz) then tsz = mean(round(sqrt(img.dim)))
-   if not keyword_set(len) then len = product(round(sqrt(img.dim)))
-   if keyword_set(frac) then flen = round(len*frac) else flen = round(len)
-
-   ; draw more as we reject locations within tsz/2 of border
-   if len lt 1000 then buf = 1.5 else buf = 1.1  ;   ratio((sqrt(imask.length)+[0,-2*tsz])^2)
-    dim = mask.dim
-   imask = where(mask)
-
-   bs,  where(mask), iloc, len=len*buf, seed=seed
-   ix = iloc mod dim[0]
-   iy = iloc / dim[0]
-   xmin = min(ix,max=xmax)  ; defines border
-   ymin = min(iy,max=ymax)
-
-   iok = where(ix gt xmin + tsz/2 and ix lt xmax - tsz/2 and iy gt ymin + tsz/2 and iy lt ymax - tsz/2)
-   iok = iok[0:len-1]
-
-   xc = ix[iok] + randomu(seed,iok.length) - 0.5   ; @@@ shouldnt the random phase be -0.5 - 0.5 ?
-   yc = iy[iok] + randomu(seed,iok.length) - 0.5   ; @@@ shouldnt the random phase be -0.5 - 0.5 ?
-
-;  getstamps ...
-
-  ; put in sq image here ....
-
-   return, [1#xc, 1#yc]
-end
 
 
 function autopilot_threshold, det, minarea=minarea, spurious=spurious, detneg=detneg, stopme=stopme, verbose=verbose, showme=showme

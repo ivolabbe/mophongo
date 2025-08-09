@@ -7,3 +7,6 @@ data/*
 !data/PSF/*OS4_GRID25*
 !data/PSF/*OS4_GRID9*
 examples/*fits
+examples/stars/
+legacy/autopilot/*png
+legacy/autopilot/*pdf

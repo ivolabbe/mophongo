@@ -91,19 +91,33 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
 - [ ] scan for bug fixes / robustness improvements
   - [x] align PSF components to fractional template centers
   - [ ] automated way of determining optimal convolution kernels for PSF  
+- [ ] storage
+  - [ ] best way to store intermediate results
+  - [ ] "drop" image
+- [ ] templates
+  - [ ] test and validate fitting in downsampled space
+  - [ ] profiles of low SNR objects -> asymptotically to psf
+- [ ] background options
+  - [ ] global background fit
+  - [ ] background per stamp
+- [ ] diagnostics
+  - [ ] standard diagnostic view of fit result for object
 - [ ] validate output catalogs on MIRI data
   - [ ] color color, color mag
   - [ ] SEDs of stars, photo-z
+  - [ ] add in residuals in core for improved flux measurements (shift / psf errors)
+- [ ] investigate blending in detection image
 - [ ] Investigate template extension methods (Moffat fit and PSF dilation)
 - [ ] End-to-end test with realistic mosaic data using `make_mosaic_dataset`
 - [ ] Profiling speed + memory usage
 - [ ] optimizations
   - [x] adaptive kernel size depending on SNR
-  - [ ] tracking is_dirty on templates
-  - [ ] partial normal matrix rebuilding / deleting / refactoring
-  - [ ] conditioning matrix   
-- [ ]  wavelength dependent morphonology: only where residuals are significant.
-  - [ ] Add point source (start with marginally sampled Gaussian?  
+  - [ ] preconditioning matrix   
+- [ ] strong residuals
+  - [ ] handle saturated stars in 444 -> catalog pre pass detection
+  - [ ] fit as PSF both 444, 770, fit for centroid, mask center
+- [ ]  wavelength dependent morphology: only where residuals are significant.
+  - [ ] Add point source, if PSF not given start with marginally sampled Gaussian?  
   - [ ] add second bluer band
 - [ ] refactoring for readibility and modularity
   - [ ] split off PSF map / drizzle PSF / PSFs module, make submodule

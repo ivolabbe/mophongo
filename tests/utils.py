@@ -689,7 +689,7 @@ def rebin_wcs(wcs: WCS, n: int) -> WCS:
 
 
 #%%
-def make_testdata():
+def make_testdata_old():
     from astropy.io import fits
     from astropy.wcs import WCS
     from astropy.coordinates import SkyCoord

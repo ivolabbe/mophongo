@@ -204,7 +204,7 @@ def run(
     for idx in range(1, len(images)):
 
         # hack for now replace lower res by upsampled 
-        test_binning = True
+        test_binning = False
         if wcs is not None and test_binning:
             k_test = bin_factor_from_wcs(wcs[0], wcs[idx])
             print('binning factor:', k_test)
@@ -243,7 +243,7 @@ def run(
             if wcs is not None:
                 tmpls_lo.wcs = wcs[idx]
             tmpls_lo._templates = [
-                t.downsample_wcs(images[idx], wcs[idx], k)
+                t.downsample_wcs(k)
                 for t in tmpls._templates
             ]
         else:
@@ -364,10 +364,11 @@ def run(
             cat[f"err_{idx}"][ci] = err_sum[pid]
             cat[f"err_pred_{idx}"][ci] = err_pred_sum[pid]
 
-        if k_test>1 and test_binning:
-            print(f"Downsampling residuals by factor {k_test}")
-            # downsample residuals to match the original image size
-            res = block_reduce(res, k_test, func=np.sum)
+        if test_binning:
+            if k_test>1:
+                print(f"Downsampling residuals by factor {k_test}")
+                # downsample residuals to match the original image size
+                res = block_reduce(res, k_test, func=np.sum)
 
         residuals.append(res)
 

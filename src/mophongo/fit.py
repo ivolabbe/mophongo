@@ -47,12 +47,12 @@ class FitConfig:
     fit_astrometry_joint: bool = False  # Use joint astrometry fitting, or separate step
     # --- astrometry options -------------------------------------------------
     reg_astrom: float = 1e-4
-    snr_thresh_astrom: float = 10.0   # 0 → keep all sources (current behaviour)
+    snr_thresh_astrom: float = 15.0   # 0 → keep all sources (current behaviour)
     astrom_model: str = "gp"  # 'polynomial' or 'gp'
     astrom_centroid: str = "centroid"    # "centroid" (=old) | "correlation"
- #    astrom_basis_order: int = 1
+    #    astrom_basis_order: int = 1
     astrom_kwargs: dict[str, dict] = field(default_factory=lambda: {'poly': {'order': 2}, 'gp': {'length_scale': 500}})
-#    astrom_kwargs={'poly': {'order': 2}, 'gp': {'length_scale': 400}}
+    #    astrom_kwargs={'poly': {'order': 2}, 'gp': {'length_scale': 400}}
     multi_tmpl_chi2_thresh: float = 5.0
     multi_tmpl_psf_core: bool = True
     multi_tmpl_colour: bool = False
@@ -134,7 +134,8 @@ class SparseFitter:
         y1 = min(a[1], b[1])
         x0 = max(a[2], b[2])
         x1 = min(a[3], b[3])
-        if y0 >= y1 or x0 >= x1:
+        # exclude only zero pixel intersection
+        if y0 > y1 or x0 > x1:
             return None
         return y0, y1, x0, x1
 
@@ -153,7 +154,7 @@ class SparseFitter:
         y1 = min(a[0].stop, b[0].stop)
         x0 = max(a[1].start, b[1].start)
         x1 = min(a[1].stop, b[1].stop)
-        if y0 >= y1 or x0 >= x1:
+        if y0 > y1 or x0 > x1:
             return None
         return slice(y0, y1), slice(x0, x1)
 
@@ -181,14 +182,6 @@ class SparseFitter:
         norms = [self._weighted_norm(t) for t in self.templates]
         tol = 1e-8 * max(norms)
 
-        # Prune templates with near-zero norm
-        # valid: list[Template] = []
-        # norms: list[float] = []
-        # for tmpl, norm in zip(self.templates, norms_all):
-        #     if norm < tol:
-        #         valid.append(tmpl)
-        #         norms.append(norm)
-
         keep = [i for i, n in enumerate(norms) if n > tol]
         print(
             f"Dropped {len(self.templates)-len(keep)} templates with low norm."
@@ -215,6 +208,7 @@ class SparseFitter:
                 inter = self._slice_intersection(sl_i, tmpl_j.slices_original)
                 if inter is None:
                     continue
+
                 w = self.weights[inter]
                 sl_i_local = (
                     slice(
@@ -247,10 +241,11 @@ class SparseFitter:
                 arr_i = tmpl_i.data[sl_i_local]
                 arr_j = tmpl_j.data[sl_j_local]
                 val = np.sum(arr_i * arr_j * w)
-#                if val == 0: # cant prune < tol, because messes up global astrometry fit
-#                    continue
+                #                if val == 0: # cant prune < tol, because messes up global astrometry fit
+                #                    continue
                 ata[i, j] = val
                 ata[j, i] = val
+#                print(i, j, val, arr_i.shape, arr_j.shape, w.shape)
 
         self._ata = ata.tocsr()
         self._atb = atb
@@ -274,7 +269,8 @@ class SparseFitter:
         atb = np.zeros(n)
 
         boxes = []
-        for i, tmpl in enumerate(tqdm(self.templates, total=n, desc="Building Normal matrix")):
+        for i, tmpl in enumerate(
+                tqdm(self.templates, total=n, desc="Building Normal matrix")):
             sl_i = tmpl.slices_original
             data_i = tmpl.data[tmpl.slices_cutout]
             w_i = self.weights[sl_i]
@@ -294,29 +290,38 @@ class SparseFitter:
                 j = int(j)
                 if j <= i:
                     continue
-                inter = self._slice_intersection(sl_i, self.templates[j].slices_original)
+                inter = self._slice_intersection(
+                    sl_i, self.templates[j].slices_original)
                 if inter is None:
                     continue
                 w = self.weights[inter]
                 sl_i_local = (
                     slice(
-                        inter[0].start - sl_i[0].start + self.templates[i].slices_cutout[0].start,
-                        inter[0].stop - sl_i[0].start + self.templates[i].slices_cutout[0].start,
+                        inter[0].start - sl_i[0].start +
+                        self.templates[i].slices_cutout[0].start,
+                        inter[0].stop - sl_i[0].start +
+                        self.templates[i].slices_cutout[0].start,
                     ),
                     slice(
-                        inter[1].start - sl_i[1].start + self.templates[i].slices_cutout[1].start,
-                        inter[1].stop - sl_i[1].start + self.templates[i].slices_cutout[1].start,
+                        inter[1].start - sl_i[1].start +
+                        self.templates[i].slices_cutout[1].start,
+                        inter[1].stop - sl_i[1].start +
+                        self.templates[i].slices_cutout[1].start,
                     ),
                 )
                 sl_j = self.templates[j].slices_original
                 sl_j_local = (
                     slice(
-                        inter[0].start - sl_j[0].start + self.templates[j].slices_cutout[0].start,
-                        inter[0].stop - sl_j[0].start + self.templates[j].slices_cutout[0].start,
+                        inter[0].start - sl_j[0].start +
+                        self.templates[j].slices_cutout[0].start,
+                        inter[0].stop - sl_j[0].start +
+                        self.templates[j].slices_cutout[0].start,
                     ),
                     slice(
-                        inter[1].start - sl_j[1].start + self.templates[j].slices_cutout[1].start,
-                        inter[1].stop - sl_j[1].start + self.templates[j].slices_cutout[1].start,
+                        inter[1].start - sl_j[1].start +
+                        self.templates[j].slices_cutout[1].start,
+                        inter[1].stop - sl_j[1].start +
+                        self.templates[j].slices_cutout[1].start,
                     ),
                 )
                 arr_i = self.templates[i].data[sl_i_local]
@@ -324,6 +329,7 @@ class SparseFitter:
                 val = np.sum(arr_i * arr_j * w)
                 ata[i, j] = val
                 ata[j, i] = val
+#                print(i, j, val)
 
         self._ata = ata.tocsr()
         self._atb = atb
@@ -375,11 +381,9 @@ class SparseFitter:
             A = A + eye(A.shape[0], format="csr") * reg
 
         # detecting bad rows.
-        bad = np.where(np.abs(A.diagonal()) < 1e-14 * np.max(A.diagonal()))[0]
-        if bad.size:
-            print(
-                f"Eliminating {bad.size} nearly-zero diagonal rows before ILU",
-                bad.size)
+        # bad = np.where(np.abs(A.diagonal()) < 1e-14 * np.max(A.diagonal()))[0]
+        # if bad.size:
+        #     print(f"Eliminating {bad.size} ~zero diagonal rows before ILU", bad.size)
 
         eps = reg or 1e-10
         d = np.sqrt(np.maximum(A.diagonal(), eps))
@@ -406,10 +410,9 @@ class SparseFitter:
         if cfg.positivity:
             x_full[:self.n_flux] = np.maximum(0, x_full[:self.n_flux])
 
-        self.solution = x_full[:self.
-                               n_flux]  # fluxes, corresponds to original templates
-        self.solution_err = e_full[:self.
-                                   n_flux]  # flux errors, corresponds to original templates
+        # fluxes, errors, corresponding to original templates
+        self.solution = x_full[:self.n_flux]
+        self.solution_err = e_full[:self.n_flux]  
 
         # update the templates with the fitted fluxes, errors
         for tmpl, flux, err in zip(self._orig_templates, self.solution,
@@ -452,7 +455,8 @@ class SparseFitter:
 
             img = np.zeros_like(self.image, dtype=float)
             for coeff, tmpl in zip(x, self.templates):
-                img[tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
+                img[tmpl.
+                    slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
             return (w_sqrt * img).ravel()
 
         def _ATv(y: np.ndarray) -> np.ndarray:
@@ -461,10 +465,8 @@ class SparseFitter:
             y_img = w_sqrt * y.reshape(img_shape)
             out = np.zeros(n_cols, dtype=float)
             for i, tmpl in enumerate(self.templates):
-                out[i] = np.sum(
-                    tmpl.data[tmpl.slices_cutout]
-                    * y_img[tmpl.slices_original]
-                )
+                out[i] = np.sum(tmpl.data[tmpl.slices_cutout] *
+                                y_img[tmpl.slices_original])
             return out
 
         Aop = LinearOperator(

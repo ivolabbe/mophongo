@@ -60,10 +60,6 @@ def test_template_extension_methods(tmp_path):
 
     return
 
-def test_kernel_padding():
-    return
-
-
 def test_convolve_templates_fft_fast():
     images, segmap, catalog, psfs, truth_img, rms = make_simple_data(seed=3, nsrc=5, size=51, ndilate=2, peak_snr=3)
     psf_hi = PSF.from_array(psfs[0])
@@ -86,3 +82,4 @@ def test_convolve_templates_fft_fast():
     for t in templates:
         assert 0.0 < t.ee_fraction <= 1.0
         np.testing.assert_allclose(t.data.sum(), t.ee_fraction, rtol=1e-5)
+

@@ -44,6 +44,45 @@ def test_downsample_centroids(k: int, h: int, w: int, y0: int, x0: int) -> None:
         atol=1e-10,
     )
 
+def test_downsample_stamp():
+    from matplotlib import pyplot as plt
+    import matplotlib.patches as mpatches
+    import numpy as np
+    from astropy.nddata import block_reduce,block_replicate
+    from mophongo.templates import Template
+
+    data_lo = np.arange(20).reshape(4, 5)
+    data_hi = block_replicate(data_lo, 2, conserve_sum=True)
+    data_lo4 = block_reduce(data_lo, 2, func=np.sum)
+
+    size = np.array([6,6])
+    pos = np.array([-0.1, -0.1])
+    k = 4
+    idx_min = np.ceil(pos - size[::-1] / 2)
+
+    new_size, idx_min_new = Template.block_aligned(pos,size,k)
+
+    print(new_size, idx_min_new)
+    print(idx_min_new, idx_min_new + new_size[::-1])
+    print(data_lo4)
+    print(data_lo)
+    print(data_hi)
+
+    t = Template(data_hi,pos,size,block_align=4)
+    tlo = t.downsample_wcs(2)
+    tlo22 = tlo.downsample_wcs(2)
+    tlo4 = t.downsample_wcs(4)
+    print(t.data)
+    print(tlo.data)
+    print(tlo22.data)
+    print(tlo4.data)
+
+# size or copy makes no difference 
+# %timeit t = Template(np.zeros((2,2)),(0.1,0.1),(1,1),block_align=1)
+# %timeit t = Template(np.zeros((300,200)),(0.1,0.1),(2,4),block_align=4 )
+# %timeit t = Template(np.zeros((30_000,20_000)),(0.1,0.1),(2,4),block_align=4 )
+# %timeit t = Template(np.zeros((300,200)),(0.1,0.1),(2,4),block_align=4,copy=False)
+# %timeit t = Template(np.zeros((30_000,20_000)),(0.1,0.1),(2,4),block_align=4, copy=False)
 
 @pytest.mark.parametrize("k", [2, 3])
 def test_bin2d_mean_vs_numpy(k: int) -> None:
@@ -71,3 +110,105 @@ def test_psf_downsample_center(k: int) -> None:
     cx = (psf_lo * x).sum() / psf_lo.sum()
     assert np.allclose([cy, cx], [(psf_lo.shape[0] - 1) / 2, (psf_lo.shape[1] - 1) / 2])
 
+
+def test_cutout2d():
+    """Test that cutout2d works as expected."""
+
+    from astropy.nddata import Cutout2D
+    from matplotlib import pyplot as plt
+    import matplotlib.patches as mpatches
+    import numpy as np
+
+    def plot_cutout(cut, data, ax):
+        print('Plotting cutout...')
+        x0, y0 = cut.input_position_original
+        cx, cy = cut.input_position_cutout
+        ax.imshow(data, origin='lower')
+        ax.scatter(x0, y0, marker='x', color='lightgray', s=100)
+        ax.text(x0, y0 - 0.4, f"({cx:.3f}, {cy:.3f})", ha='center', color='lightgray', fontsize=12)
+        ax.text(x0, y0 + 0.4, f"({x0:.3f}, {y0:.3f})", ha='center', color='lightgray', fontsize=12)
+        x, y = cut.bbox_original[1][0]-0.5, cut.bbox_original[0][0]-0.5
+        h, w = cut.bbox_original[0][1] - cut.bbox_original[0][0] + 1, cut.bbox_original[1][1] - cut.bbox_original[1][0] + 1 
+        patch = mpatches.Rectangle((x,y), w, h, angle=0.0, color='lightgray', fill=False, lw=1)
+        ax.add_patch(patch)
+        x, y = np.ceil( (cut.input_position_original - np.array(cut.shape)/2) ) - 0.5
+        h, w = cut.shape
+        patch = mpatches.Rectangle((x,y), w, h, angle=0.0, color='lightgray', fill=False, lw=2)
+        ax.add_patch(patch)
+        print(cut.data)
+        print(f'{cut.input_position_original=}')
+        print(f'{cut.input_position_cutout=}')
+        print(f'{cut.position_original=}')
+        print(f'{cut.position_cutout=}')
+        print(f'{cut.bbox_original=}')
+
+    data = np.arange(81).reshape(9, 9)
+    x0, y0 = 0.49, 2.01
+    size=2
+    cut49 = Cutout2D(data, (0.49, y0), size, mode='partial', fill_value=0, limit_rounding_method=np.ceil)
+    cut50 = Cutout2D(data, (0.50, y0), size, mode='partial', fill_value=0, limit_rounding_method=np.ceil)
+    cut51 = Cutout2D(data, (0.51, y0), size, mode='partial', fill_value=0, limit_rounding_method=np.ceil)
+
+    print(data)
+    fig, ax = plt.subplots(1,3,figsize=(9, 3))
+    plot_cutout(cut49, data, ax[0])
+    plot_cutout(cut50, data, ax[1])
+    plot_cutout(cut51, data, ax[2])
+    plt.tight_layout() 
+    plt.show()
+
+    data = np.arange(25).reshape(5, 5)
+    size=3
+    cut49 = Cutout2D(data, (0.49, y0), size, mode='partial', fill_value=0, limit_rounding_method=np.ceil)
+    cut50 = Cutout2D(data, (0.50, y0), size, mode='partial', fill_value=0, limit_rounding_method=np.ceil)
+    cut51 = Cutout2D(data, (0.51, y0), size, mode='partial', fill_value=0, limit_rounding_method=np.ceil)
+
+    fig, ax = plt.subplots(1,3,figsize=(9, 3))
+    plot_cutout(cut49, data, ax[0])
+    plot_cutout(cut50, data, ax[1])
+    plot_cutout(cut51, data, ax[2])
+    plt.tight_layout() 
+
+    size=3
+    cut49 = Cutout2D(data, (1.49, y0), size, mode='partial', fill_value=0, limit_rounding_method=np.ceil)
+    cut50 = Cutout2D(data, (1.50, y0), size, mode='partial', fill_value=0, limit_rounding_method=np.ceil)
+    cut51 = Cutout2D(data, (1.51, y0), size, mode='partial', fill_value=0, limit_rounding_method=np.ceil)
+
+    print(data)
+    fig, ax = plt.subplots(1,3,figsize=(9, 3))
+    plot_cutout(cut49, data, ax[0])
+    plot_cutout(cut50, data, ax[1])
+    plot_cutout(cut51, data, ax[2])
+    plt.tight_layout() 
+
+
+    data = np.arange(81).reshape(9, 9)
+    x0, y0 = 1.5, 2.01
+    size=6
+    cut49 = Cutout2D(data, (x0-0.01, y0), size, mode='partial', fill_value=0, limit_rounding_method=np.ceil)
+    cut50 = Cutout2D(data, (x0-0.00, y0), size, mode='partial', fill_value=0, limit_rounding_method=np.ceil)
+    cut51 = Cutout2D(data, (x0+0.01, y0), size, mode='partial', fill_value=0, limit_rounding_method=np.ceil)
+
+    print(data)
+    fig, ax = plt.subplots(1,3,figsize=(9, 3))
+    plot_cutout(cut49, data, ax[0])
+    plot_cutout(cut50, data, ax[1])
+    plot_cutout(cut51, data, ax[2])
+    plt.tight_layout() 
+
+
+    cut = cut50
+    print(data)
+    for k in cut.__dict__:
+        print(f"{k}: {cut.__dict__[k]}")
+
+
+    origin = np.ceil( (cut.input_position_original - np.array(cut.shape)/2) )
+
+    # fix (otherwise local and original coordinates are rounded differently due to bankers rounding )
+    cut.position_cutout = np.round(cut.input_position_original) - cut._origin_original_true
+
+    orig = np.ceil( (cut.input_position_original - np.array(cut.shape)/2) )
+
+    #   assert cutout.shape == (size, size)
+    #   assert np.all(cutout == data[y0 - size // 2 : y0 + size // 2 + 1, x0 - size // 2 : x0 + size // 2 + 1])

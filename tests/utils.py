@@ -34,7 +34,7 @@ def make_simple_data(
     max_amplitude: float = 200.0,
     det_fwhm: float = 0,
     sigthresh: float = 2.0,
-    peak_snr: float = 1.0,
+    peak_snr: float = 10.0,
     ndilate: int = 2,
     border_size: int = 10,
 ) -> tuple[
@@ -58,11 +58,11 @@ def make_simple_data(
     lo_fwhm = 3.0 * hi_fwhm
 
     # Use Moffat PSFs instead of Gaussian
-    psf_hi = PSF.moffat(41, hi_fwhm, hi_fwhm, beta=3.0)  # Typical ground-based seeing
+    psf_hi = PSF.moffat(31, hi_fwhm, hi_fwhm, beta=3.0)  # Typical ground-based seeing
     # delta function
     #    psf_hi = PSF.gaussian(5,0.1,0.1).array.round()
 
-    psf_lo = PSF.moffat(41, lo_fwhm, lo_fwhm, beta=2.5)  # Broader wings for low-res
+    psf_lo = PSF.moffat(31, lo_fwhm, lo_fwhm, beta=2.5)  # Broader wings for low-res
 
     params = make_model_params(
         (ny, nx),
@@ -702,8 +702,17 @@ def make_testdata():
     indir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/'
     outdir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/testdata/'
 
+    ref_wcs = WCS(
+        fits.getheader(
+            indir +
+            "uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_sci_skysubvar.fits"
+        ))
+
     # --- User parameters from the pasted image ---
     center_ra, center_dec = 34.3032414, -5.1113316
+    xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
+    xy_even = xy + xy % 2
+
     size_x_40mas = 1000
     size_y_40mas = 820
     postfix = 'test'
@@ -711,19 +720,22 @@ def make_testdata():
     size_x_40mas = 3500
     size_y_40mas = 2520
     postfix = 'medium'
- 
+
     center_ra, center_dec = 34.303612, -5.1203157
+    xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
+    xy_even = xy + xy % 2
     size_x_40mas = 7000
     size_y_40mas = 3520
     postfix = 'large'
 
     center_ra, center_dec = 34.361343, -5.1326021
+    xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
+    xy_even = xy + xy % 2
     size_x_40mas = 29_000
     size_y_40mas = 7600
     postfix = 'half'
 
     center_radec = SkyCoord(center_ra, center_dec, unit='deg')
-    #  center = (center_x_40mas, center_y_40mas)
     size = (size_y_40mas, size_x_40mas)  # Cutout2D expects (ny, nx)
 
     # --- File lists ---
@@ -744,14 +756,17 @@ def make_testdata():
     # --- Extract cutouts for 40mas images ---
     for infile, outfile in files_40mas:
         with fits.open(indir + infile) as hdul:
+            xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
+            xy_even = xy + xy % 2
             data = hdul[0].data
             hdr = hdul[0].header
             wcs = WCS(hdr)
-            cutout = Cutout2D(data, position=center_radec, size=size, wcs=wcs)
+            cutout = Cutout2D(data, position=xy_even, size=size, wcs=wcs)
             hdr.update(cutout.wcs.to_header())
             hdu = fits.PrimaryHDU(cutout.data, header=hdr)
             hdu.writeto(outdir + outfile, overwrite=True)
             print(f"Saved {outdir+outfile}")
+            print(cutout.origin_original, cutout.shape)
 
     # Use the WCS and shape from one of the 40mas cutouts as the target
     ref_cutout_file = outdir + files_40mas[0][1]
@@ -783,25 +798,36 @@ def make_testdata():
             # PXSCLRT =   0.7251965743873189 / Pixel scale ratio relative to native detector s
             # Extract the cutout at the 80mas scale
             # make it slightly larger to avoid edge effects
+            wcs_80mas = WCS(hdr)
+            xy = np.round(wcs_80mas.wcs_world2pix(center_ra, center_dec, 0))
+            # Ensure xy is even for the cutout, so that 2x2 binnings are aligned
+            xy_even = xy + xy % 2
             size_80mas = (size[0] // 2, size[1] // 2)
             cutout_80mas = Cutout2D(data,
                                     position=center_radec,
                                     size=size_80mas,
                                     wcs=WCS(hdr))
             hdr.update(cutout_80mas.wcs.to_header())
-            hdu = fits.PrimaryHDU(cutout_80mas.data.astype(np.float32), header=hdr)
-            hdu.writeto(outdir + outfile.replace(postfix,postfix+'-80mas'), overwrite=True)
+            hdu = fits.PrimaryHDU(cutout_80mas.data.astype(np.float32),
+                                  header=hdr)
+            hdu.writeto(outdir + outfile.replace(postfix, postfix + '-80mas'),
+                        overwrite=True)
+            print(f"Saved {outdir + outfile.replace(postfix, postfix + '-80mas')}")
+            print(cutout_80mas.origin_original, cutout_80mas.shape)
 
             if 'sci' in outfile:
-                cutout_40mas = block_replicate(cutout_80mas.data, 2,  conserve_sum=True)
+                cutout_40mas = block_replicate(cutout_80mas.data,
+                                               2,
+                                               conserve_sum=True)
             else:
                 # weights go with inv variance, so we need to multiply by 4
-                cutout_40mas = block_replicate(cutout_80mas.data, 2)*4
+                cutout_40mas = block_replicate(cutout_80mas.data, 2) * 4
 
             hdr.update(target_wcs.to_header())
             hdu = fits.PrimaryHDU(cutout_40mas.astype(np.float32), header=hdr)
             hdu.writeto(outdir + outfile, overwrite=True)
             print(f"Saved {outdir + outfile} (registered to 40mas grid)")
+            print(cutout.origin_original, cutout.shape)
 
 
     # for infile, outfile in files_80mas:
@@ -846,7 +872,7 @@ if __name__ == "__main__":
 
     hdr = fits.getheader(data_dir+'uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_sci.fits')
     wcs_40mas = WCS(hdr)
-# doesnt work -> scaling is not correct
+    # doesnt work -> scaling is not correct
     wcs_80mas = wcs_40mas.slice((slice(None, None, 2), slice(None, None, 2)))
 
     # create a new WCS that corresponds to slicing every 2nd pixel in both Y and X

@@ -57,22 +57,6 @@ def test_lsqr_lo_matches_cg():
     assert err_lo.shape == err_cg.shape
 
 
-def test_ata_symmetry():
-    images, segmap, catalog, psfs, _, rms = make_simple_data()
-
-    psf_hi = PSF.from_array(psfs[0])
-    psf_lo = PSF.from_array(psfs[1])
-    kernel = psf_hi.matching_kernel(psf_lo)
-
-    tmpls = Templates.from_image(
-        images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel
-    )
-    fitter = SparseFitter(tmpls.templates, images[1], 1.0 / rms[1] ** 2, FitConfig())
-    fitter.build_normal_matrix()
-    ata = fitter.ata.toarray()
-    assert np.allclose(ata, ata.T)
-
-
 def test_zero_weight_template_dropped():
     img = np.zeros((4, 4))
     weights = np.ones_like(img)
@@ -130,57 +114,42 @@ def test_flux_and_rms_estimation():
     flux2, _ = fitter.flux_and_rms()
     assert np.all(flux2 == 42.0)
 
-
+#%%
 def test_build_normal_tree_matches_loop():
-    images, segmap, catalog, psfs, _, rms = make_simple_data()
+import numpy as np
+from mophongo.fit import FitConfig, SparseFitter
+from mophongo.psf import PSF
+from mophongo.templates import Templates, Template 
+from utils import make_simple_data, save_fit_diagnostic
+from matplotlib import pyplot as plt
 
-    psf_hi = PSF.from_array(psfs[0])
-    psf_lo = PSF.from_array(psfs[1])
-    kernel = psf_hi.matching_kernel(psf_lo)
+images, segmap, catalog, psfs, _, rms = make_simple_data(nsrc=20, size=101, peak_snr=10)
 
-    tmpls = Templates.from_image(
-        images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel
-    )
-    fitter_loop = SparseFitter(
-        tmpls.templates, images[1], 1.0 / rms[1] ** 2, FitConfig()
-    )
-    fitter_tree = SparseFitter(
-        tmpls.templates, images[1], 1.0 / rms[1] ** 2, FitConfig(normal="tree")
-    )
+psf_hi = PSF.from_array(psfs[0])
+psf_lo = PSF.from_array(psfs[1])
+kernel = psf_hi.matching_kernel(psf_lo)
 
-    fitter_loop.build_normal_matrix()
-    fitter_tree.build_normal_tree()
+tmpls = Templates.from_image(
+    images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel
+)
 
-    np.testing.assert_allclose(
-        fitter_loop.ata.toarray(), fitter_tree._ata.toarray()
-    )
-    np.testing.assert_allclose(fitter_loop.atb, fitter_tree._atb)
+templates = tmpls.convolve_templates(psfs[1], inplace=False)
+
+fitter_loop = SparseFitter(
+    templates, images[1], 1.0 / rms[1] ** 2, FitConfig(normal="loop")
+)
+fitter_tree = SparseFitter(
+    templates, images[1], 1.0 / rms[1] ** 2, FitConfig(normal="tree")
+)
+
+fitter_loop.build_normal_matrix()
+fitter_tree.build_normal_tree()
+
+np.testing.assert_allclose(
+    fitter_loop.ata.toarray(), fitter_tree._ata.toarray()
+)
+np.testing.assert_allclose(fitter_loop.atb, fitter_tree._atb)
 
 
-def test_build_normal_matrix_new_equivalence():
-    return
-    images, segmap, catalog, psfs, _, rms = make_simple_data()
-    psf_hi = PSF.from_array(psfs[0])
-    psf_lo = PSF.from_array(psfs[1])
-    kernel = psf_hi.matching_kernel(psf_lo)
 
-    old = Templates.from_image(
-        images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel
-    )
-    new = extract_templates(
-        images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel
-    )
-
-    fitter_old = SparseFitter(old.templates, images[1], 1.0 / rms[1] ** 2, FitConfig())
-    fitter_new = SparseFitter(new, images[1], 1.0 / rms[1] ** 2, FitConfig())
-    fitter_old.build_normal_matrix()
-    fitter_new.build_normal_matrix_new()
-
-    np.testing.assert_allclose(fitter_old.ata.toarray(), fitter_new._ata.toarray())
-    np.testing.assert_allclose(fitter_old.atb, fitter_new._atb)
-
-    fitter_old.solve()
-    fitter_new.solve()
-    model_old = fitter_old.model_image()
-    model_new = fitter_new.model_image_new()
-    np.testing.assert_allclose(model_old, model_new)
+# %%

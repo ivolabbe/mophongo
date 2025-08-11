@@ -172,7 +172,7 @@ def run(
     from .fit import SparseFitter, FitConfig
     from .astro_fit import GlobalAstroFitter
     from astropy.nddata import block_replicate, block_reduce
-    from .local_astrometry import AstroCorrect
+    from .astrometry import AstroCorrect
     from . import utils
     import warnings
 

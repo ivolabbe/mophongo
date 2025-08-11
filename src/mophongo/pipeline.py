@@ -26,7 +26,9 @@ from .utils import bin_factor_from_wcs, downsample_psf
 logger = logging.getLogger(__name__)
 
 
-def _per_source_chi2(residual: np.ndarray, weights: np.ndarray, templates: Sequence[Template]) -> np.ndarray:
+def _per_source_chi2(
+    residual: np.ndarray, weights: np.ndarray, templates: Sequence[Template]
+) -> np.ndarray:
     """Compute template-weighted chi² for each template.
 
     For each template, computes the sum of squared, template-weighted residuals
@@ -41,13 +43,14 @@ def _per_source_chi2(residual: np.ndarray, weights: np.ndarray, templates: Seque
     for i, tmpl in enumerate(templates):
         res = residual[tmpl.slices_original]
         tmpl_data = tmpl.data[tmpl.slices_cutout]
-        ivar = weights[tmpl.slices_original]   # inverse variance
-        mask = (ivar > 0)
+        ivar = weights[tmpl.slices_original]  # inverse variance
+        mask = ivar > 0
         # Template-weighted chi²: sum((res * tmpl)^2 / var) / sum(tmpl^2)
-        num = np.sum(mask * (res * tmpl_data)**2 * ivar)
+        num = np.sum(mask * (res * tmpl_data) ** 2 * ivar)
         denom = np.sum(mask * tmpl_data**2)
         chi2[i] = num / denom if denom > 0 else 0.0
     return chi2
+
 
 # should support PSFRegionMap as well, like in template.convolve_templates
 #   ra, dec = tmpl.wcs.wcs_pix2world(x, y, 0)
@@ -55,16 +58,17 @@ def _per_source_chi2(residual: np.ndarray, weights: np.ndarray, templates: Seque
 #     ra, dec = x, y
 # kern = kernel.get_psf(ra, dec)
 
+
 def _extract_psf_at(tmpl: Template, psf: np.ndarray | PSFRegionMap) -> np.ndarray:
     """Return a PSF stamp matching the template size.
-    
+
     Parameters
     ----------
     tmpl : Template
         Template object providing position and size information
     psf : np.ndarray or PSFRegionMap
         Either a static PSF array or a PSFRegionMap for spatially varying PSFs
-        
+
     Returns
     -------
     np.ndarray
@@ -76,7 +80,7 @@ def _extract_psf_at(tmpl: Template, psf: np.ndarray | PSFRegionMap) -> np.ndarra
     if isinstance(psf, PSFRegionMap):
         # Look up PSF at template position
         x, y = tmpl.input_position_original
-        if hasattr(tmpl, 'wcs') and tmpl.wcs is not None:
+        if hasattr(tmpl, "wcs") and tmpl.wcs is not None:
             ra, dec = tmpl.wcs.wcs_pix2world(x, y, 0)
         else:
             ra, dec = x, y
@@ -135,7 +139,7 @@ def run(
         Segmentation map aligned with the images. If not catalog provided, all sources are fit.
     catalog
         Optional source catalog. Must provide ``y`` and ``x`` columns giving pixel
-        positions. Performs only fitting of these sources, not all sources in Segmentation image. 
+        positions. Performs only fitting of these sources, not all sources in Segmentation image.
     psfs
         Point-spread functions matching each image.
     weights
@@ -174,7 +178,7 @@ def run(
 
     memory = lambda: psutil.Process(os.getpid()).memory_info().rss / 1e9
 
-    print(f'Pipeline (start) memory: {memory():.1f} GB')
+    print(f"Pipeline (start) memory: {memory():.1f} GB")
 
     if config is None:
         config = FitConfig()
@@ -184,7 +188,7 @@ def run(
     positions = list(zip(catalog["x"], catalog["y"]))
 
     # Step 1: Extract templates from the first image (alternatively, use models)
-    tmpls = Templates()    
+    tmpls = Templates()
     tmpls.extract_templates(
         np.nan_to_num(images[0], copy=False, nan=0.0, posinf=0.0, neginf=0.0),
         segmap,
@@ -196,87 +200,82 @@ def run(
         assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
 
     ndropped = len(positions) - len(templates)
-    print(f'Pipepline: {len(templates)} extracted templates, dropped {ndropped}.')
-    print(f'Pipeline (templates) memory: {memory():.1f} GB')
+    print(f"Pipepline: {len(templates)} extracted templates, dropped {ndropped}.")
+    print(f"Pipeline (templates) memory: {memory():.1f} GB")
 
     astro = AstroCorrect(config)
     residuals = []
     for idx in range(1, len(images)):
 
-        # hack for now replace lower res by upsampled 
-        test_binning = True
-        if wcs is not None and test_binning:
-            k_test = bin_factor_from_wcs(wcs[0], wcs[idx])
-            print('binning factor:', k_test)
-            if k_test > 1:
-                print(f"upsampling image {idx} by factor {k_test}")
-                images[idx] = block_replicate(images[idx], k_test, conserve_sum=True)
-                weights[idx] = block_replicate(weights[idx], k_test) * k_test**2
-                wcs[idx] = wcs[0]
-
-
-        if wcs is not None:
-            k = bin_factor_from_wcs(wcs[0], wcs[idx])
-        else:
-            k = 1
+        # assume weights are dominated by photometry image (for proper weights see sparse fitter, needes iteration)
+        weights_i = weights[idx] if weights is not None else None
 
         kernel = None
         if kernels is not None and kernels[idx] is not None:
             kernel = kernels[idx]
             if isinstance(kernel, PSFRegionMap):
                 print(f"Using kernel lookup table {kernel.name}")
-                if k > 1:
-                    print(f"Downsampling kernel {kernel.name} by factor {k}")
-                    kernel.psfs = np.array(
-                        [downsample_psf(psf, k) for psf in kernel.psfs])
-            else:
-                kernel = downsample_psf(kernel, k)
-
-        # assume weights are dominated by photometry image (for proper weights see sparse fitter, needes iteration)
-        weights_i = weights[idx] if weights is not None else None
-
-        # Downsample templates and kernel to match the image resolution
-        if k > 1:
-            print(f"Downsampling templates by factor {k}")
-            tmpls_lo = Templates()
-            tmpls_lo.original_shape = images[idx].shape
-            if wcs is not None:
-                tmpls_lo.wcs = wcs[idx]
-            tmpls_lo._templates = [
-                t.downsample_wcs(images[idx], wcs[idx], k)
-                for t in tmpls._templates
-            ]
         else:
-            tmpls_lo = tmpls
+            kernel is None
+
+        if wcs is not None:
+            k = bin_factor_from_wcs(wcs[0], wcs[idx])
+        else:
+            k = 1
+
+        # handle multi-resolution by upsampling or downsampling
+        if k > 1:
+            if config.multi_resolution_method == "upsample":
+                print(f"upsampling image {idx} by factor {k}")
+                images[idx] = block_replicate(images[idx], k, conserve_sum=True)
+                if weights_i is not None:
+                    weights_i = block_replicate(weights[idx], k) * k**2
+                wcs[idx] = wcs[0]
+            else:
+                # downsampling templates and kernels
+                print(f"Downsampling templates and kernels by factor {k}")
+                tmpls_lo = Templates()
+                tmpls_lo.original_shape = images[idx].shape
+                tmpls_lo.wcs = wcs[idx]
+                tmpls_lo._templates = [t.downsample(k, wcs_lo=wcs[idx]) for t in tmpls._templates]
+
+                if isinstance(kernel, PSFRegionMap):
+                    kernel.psfs = np.array([downsample_psf(psf, k) for psf in kernel.psfs])
+                else:
+                    kernel = downsample_psf(kernel, k)
+
+        if k == 1 or config.multi_resolution_method == "upsample":
+            tmpls_lo = deepcopy(tmpls)
 
         if weights_i is not None:
             tmpls_lo.prune_outside_weight(weights_i)
 
-        if config.fft_fast and psfs is not None:
-            Templates.prepare_kernel_info(
-                tmpls_lo._templates,
-                psfs[idx],
-                images[idx],
-                weights_i,
-                eta=config.fft_fast,
-                r_max_pix=psfs[idx].shape[0] // 2 - 1,
-            )
+        # if config.fft_fast and psfs is not None:
+        #     Templates.prepare_kernel_info(
+        #         tmpls_lo._templates,
+        #         psfs[idx],
+        #         images[idx],
+        #         weights_i,
+        #         eta=config.fft_fast,
+        #         r_max_pix=psfs[idx].shape[0] // 2 - 1,
+        #     )
 
         templates = tmpls_lo.convolve_templates(kernel, inplace=False)
-        #        templates = empls_lo._templates
-
-        print(f'Pipeline (convolved) memory: {memory():.1f} GB')
+        print(f"Pipeline (convolved) memory: {memory():.1f} GB")
 
         # test if images, weights, and templates are all finite
+        # @@@ do this somewhere else: sanitize when reading in
         assert np.all(np.isfinite(images[idx])), "Image contains NaN values"
         if weights_i is not None:
             assert np.all(np.isfinite(weights_i)), "Weights contain NaN values"
         for t in templates:
             assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
 
-        fitter_cls = GlobalAstroFitter if (
-            config.fit_astrometry_niter > 0
-            and config.fit_astrometry_joint) else SparseFitter
+        fitter_cls = (
+            GlobalAstroFitter
+            if (config.fit_astrometry_niter > 0 and config.fit_astrometry_joint)
+            else SparseFitter
+        )
 
         # every iteration will scale and shift the tmpl images
         # accumulated the shifts and scale are recorded in template attributes
@@ -288,7 +287,7 @@ def run(
             fluxes, errs, info = fitter.solve()
 
             res = fitter.residual()
-            print(f'Pipeline (residual) memory: {memory():.1f} GB')
+            print(f"Pipeline (residual) memory: {memory():.1f} GB")
 
             if config.fit_astrometry_niter > 0 and not config.fit_astrometry_joint:
                 logger.info("fitting astrometry separately")
@@ -300,18 +299,23 @@ def run(
         # dont have to rebuild if we are adding templates for residuals
         fitter._ata = None  # @@@ do this properly
         fluxes, errs, info = fitter.solve()
-
         res = fitter.residual()
 
         # second pass: add extra templates for poor fits
-        if (config.multi_tmpl_psf_core or config.multi_tmpl_colour
-            ) and psfs is not None and weights_i is not None:
+        # @@@ put in separate method
+        if (
+            (config.multi_tmpl_psf_core or config.multi_tmpl_colour)
+            and psfs is not None
+            and weights_i is not None
+        ):
             chi_nu = _per_source_chi2(res, weights_i, templates)
             bad_idx = np.where(chi_nu > config.multi_tmpl_chi2_thresh)[0]
-            print('Distribution >99% chi2:', np.percentile(chi_nu, [99]))
+            print("Distribution >99% chi2:", np.percentile(chi_nu, [99]))
             if bad_idx.size > 0:
-                print(f"Adding {len(bad_idx)} new templates for poor fits "
-                      f"(chi^2/nu > {config.multi_tmpl_chi2_thresh})")
+                print(
+                    f"Adding {len(bad_idx)} new templates for poor fits "
+                    f"(chi^2/nu > {config.multi_tmpl_chi2_thresh})"
+                )
                 for bi in bad_idx:
                     parent = templates[bi]
                     if config.multi_tmpl_psf_core and psfs is not None:
@@ -322,23 +326,26 @@ def run(
                     # Placeholder for additional components (e.g. colour maps)
 
                 fitter = fitter_cls(templates, images[idx], weights_i, config)
-                if config.solve_method == 'ata':
+                if config.solve_method == "ata":
                     fluxes, errs, info = fitter.solve()
                 else:
                     fluxes, errs, info = fitter.solve_linear_operator()
                 res = fitter.residual()
 
-        ee_arr = np.array([getattr(t, "ee_fraction", 1.0) for t in templates])
-        fluxes = fluxes / ee_arr
-        errs = errs / ee_arr
-        err_pred = fitter.predicted_errors() / ee_arr
+        err_pred = fitter.predicted_errors()
+
+        # this is only necessary if we clip the PSF wings
+        # ee_arr = np.array([getattr(t, "ee_fraction", 1.0) for t in templates])
+        # fluxes = fluxes / ee_arr
+        # errs = errs / ee_arr
+        # err_pred = fitter.predicted_errors() / ee_arr
 
         print("Done...")
 
+        # put this in catalog object
         # put fluxes into catalog based on template IDs
         parent_ids = [
-            tmpl.parent_id
-            if getattr(tmpl, "parent_id", None) is not None else tmpl.id
+            tmpl.parent_id if getattr(tmpl, "parent_id", None) is not None else tmpl.id
             for tmpl in templates
         ]
         id_to_index = {id_: i for i, id_ in enumerate(cat["id"])}
@@ -353,8 +360,8 @@ def run(
             if pid is None:
                 continue
             flux_sum[pid] += fl
-            err_sum[pid] = np.sqrt(err_sum[pid]**2 + er**2)
-            err_pred_sum[pid] = np.sqrt(err_pred_sum[pid]**2 + ep**2)
+            err_sum[pid] = np.sqrt(err_sum[pid] ** 2 + er**2)
+            err_pred_sum[pid] = np.sqrt(err_pred_sum[pid] ** 2 + ep**2)
 
         for pid, fl in flux_sum.items():
             ci = id_to_index.get(pid)
@@ -364,18 +371,16 @@ def run(
             cat[f"err_{idx}"][ci] = err_sum[pid]
             cat[f"err_pred_{idx}"][ci] = err_pred_sum[pid]
 
-        if k_test>1 and test_binning:
-            print(f"Downsampling residuals by factor {k_test}")
+        if k > 1 and config.multi_resolution_method == "upsample":
+            print(f"Downsampling residuals by factor {k}")
             # downsample residuals to match the original image size
-            res = block_reduce(res, k_test, func=np.sum)
+            res = block_reduce(res, k, func=np.sum)
 
         residuals.append(res)
 
-    print(
-        f'Pipeline (end) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB'
-    )
+    print(f"Pipeline (end) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB")
 
-    if 'astro' in locals():
+    if "astro" in locals():
         fitter.astro = astro
 
     return cat, residuals, fitter

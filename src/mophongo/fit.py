@@ -15,7 +15,7 @@ from .templates import Template, Templates
 logger = logging.getLogger(__name__)
 
 # full weights need to be calcuate like
-#template_var = scipy.signal.fftconvolve(K**2, 1 / wht1, mode='same')  # same shape as template
+# template_var = scipy.signal.fftconvolve(K**2, 1 / wht1, mode='same')  # same shape as template
 # Iterate if needed (since A appears in w(x)):
 # First fit using weights = wht2
 # Compute A (amplitude)
@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 # If template noise is negligible, simplify to: weights = wht2 (as in your current default).
 # Flux-dependent variance (via A^2) introduces mild nonlinearity; it's safe to fix A from initial fit for a single iteration.
 
+
 @dataclass
 class FitConfig:
     """Configuration options for :class:`SparseFitter`."""
@@ -39,23 +40,31 @@ class FitConfig:
     reg: float = 0.0
     bad_value: float = np.nan
     solve_method: str = "ata"  # 'ata' or 'lo' (linear operator)
-    cg_kwargs: Dict[str, Any] = field(default_factory=lambda: {"M": None, "maxiter": 500, "atol": 1e-6})
+    cg_kwargs: Dict[str, Any] = field(
+        default_factory=lambda: {"M": None, "maxiter": 500, "atol": 1e-6}
+    )
     fit_covariances: bool = False  # Use simple fitting errors from diagonal of normal matrix
-    fft_fast: float | bool = False  # False for full kernel, float (0.1-1.0) for truncated FFT kernels
+    fft_fast: float | bool = (
+        False  # False for full kernel, float (0.1-1.0) for truncated FFT kernels
+    )
     # condense fit astrometry flags into one: fit_astrometry_niter = 0, means not fitting astrometry
-    fit_astrometry_niter: int = 2     # Number of astrometry refinement passes (0 → disabled)
+    fit_astrometry_niter: int = 2  # Number of astrometry refinement passes (0 → disabled)
     fit_astrometry_joint: bool = False  # Use joint astrometry fitting, or separate step
     # --- astrometry options -------------------------------------------------
     reg_astrom: float = 1e-4
-    snr_thresh_astrom: float = 10.0   # 0 → keep all sources (current behaviour)
+    snr_thresh_astrom: float = 10.0  # 0 → keep all sources (current behaviour)
     astrom_model: str = "gp"  # 'polynomial' or 'gp'
-    astrom_centroid: str = "centroid"    # "centroid" (=old) | "correlation"
- #    astrom_basis_order: int = 1
-    astrom_kwargs: dict[str, dict] = field(default_factory=lambda: {'poly': {'order': 2}, 'gp': {'length_scale': 500}})
-#    astrom_kwargs={'poly': {'order': 2}, 'gp': {'length_scale': 400}}
+    astrom_centroid: str = "centroid"  # "centroid" (=old) | "correlation"
+    #    astrom_basis_order: int = 1
+    astrom_kwargs: dict[str, dict] = field(
+        default_factory=lambda: {"poly": {"order": 2}, "gp": {"length_scale": 500}}
+    )
+    #    astrom_kwargs={'poly': {'order': 2}, 'gp': {'length_scale': 400}}
     multi_tmpl_chi2_thresh: float = 5.0
-    multi_tmpl_psf_core: bool = True
+    multi_tmpl_psf_core: bool = False
     multi_tmpl_colour: bool = False
+    #    multi_resolution_method: str = "upsample"  # 'upsample' or 'downsample'
+    multi_resolution_method: str = "downsample"  # 'upsample' or 'downsample'
     normal: str = "tree"  # 'loop' or 'tree'
 
 
@@ -69,8 +78,8 @@ def _diag_inv_hutch(A, k=32, rtol=1e-4, maxiter=None, seed=0):
          raising on non-convergence – we just take the last iterate.
     3.   If both stall, add a ×10 diagonal jitter and restart *once*.
     """
-    n   = A.shape[0]
-    maxiter = maxiter or 6*n
+    n = A.shape[0]
+    maxiter = maxiter or 6 * n
     rng = default_rng(seed)
     acc = np.zeros(n)
 
@@ -81,17 +90,16 @@ def _diag_inv_hutch(A, k=32, rtol=1e-4, maxiter=None, seed=0):
             return x
         # --- 2. MINRES rescue --------------------------------------------
         x, flag = minres(A, rhs, rtol=rtol, maxiter=maxiter)  # never raises
-        if flag in (0, 1):                                   # converged or hit maxiter
+        if flag in (0, 1):  # converged or hit maxiter
             return x
         # --- 3. add jitter & restart once --------------------------------
         diag_boost = 1e-4 * np.median(A.diagonal())
-        x, _ = cg(A + diag_boost*np.eye(n), rhs,
-                  rtol=rtol, atol=0, maxiter=maxiter)
-        return x                                              # accept whatever we get
+        x, _ = cg(A + diag_boost * np.eye(n), rhs, rtol=rtol, atol=0, maxiter=maxiter)
+        return x  # accept whatever we get
 
     for _ in range(k):
-        z  = rng.choice((-1.0, 1.0), size=n)
-        x  = _solve(z)
+        z = rng.choice((-1.0, 1.0), size=n)
+        x = _solve(z)
         acc += z * x
 
     return np.sqrt(np.abs(acc / k))
@@ -111,8 +119,7 @@ class SparseFitter:
             weights = np.ones_like(image)
 
         self._orig_templates = templates  # keep original templates List object
-        self.templates = templates.copy(
-        )  # work in copy for fitting, modifying
+        self.templates = templates.copy()  # work in copy for fitting, modifying
 
         self.n_flux = len(templates)
         for i, tmpl in enumerate(self.templates):
@@ -128,8 +135,8 @@ class SparseFitter:
 
     @staticmethod
     def _intersection(
-            a: Tuple[int, int, int, int],
-            b: Tuple[int, int, int, int]) -> Tuple[int, int, int, int] | None:
+        a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]
+    ) -> Tuple[int, int, int, int] | None:
         y0 = max(a[0], b[0])
         y1 = min(a[1], b[1])
         x0 = max(a[2], b[2])
@@ -139,16 +146,15 @@ class SparseFitter:
         return y0, y1, x0, x1
 
     @staticmethod
-    def _bbox_to_slices(
-            bbox: Tuple[int, int, int, int]) -> Tuple[slice, slice]:
+    def _bbox_to_slices(bbox: Tuple[int, int, int, int]) -> Tuple[slice, slice]:
         """Convert integer bounding box to slices for array indexing."""
         y0, y1, x0, x1 = bbox
         return slice(y0, y1), slice(x0, x1)
 
     @staticmethod
     def _slice_intersection(
-            a: tuple[slice, slice],
-            b: tuple[slice, slice]) -> tuple[slice, slice] | None:
+        a: tuple[slice, slice], b: tuple[slice, slice]
+    ) -> tuple[slice, slice] | None:
         y0 = max(a[0].start, b[0].start)
         y1 = min(a[0].stop, b[0].stop)
         x0 = max(a[1].start, b[1].start)
@@ -190,9 +196,7 @@ class SparseFitter:
         #         norms.append(norm)
 
         keep = [i for i, n in enumerate(norms) if n > tol]
-        print(
-            f"Dropped {len(self.templates)-len(keep)} templates with low norm."
-        )
+        print(f"Dropped {len(self.templates)-len(keep)} templates with low norm.")
 
         self.templates = [self.templates[i] for i in keep]
         norms = [norms[i] for i in keep]
@@ -200,8 +204,7 @@ class SparseFitter:
         n = len(self.templates)
         ata = lil_matrix((n, n))
         atb = np.zeros(n)
-        for i, tmpl_i in enumerate(
-                tqdm(self.templates, total=n, desc="Building Normal matrix")):
+        for i, tmpl_i in enumerate(tqdm(self.templates, total=n, desc="Building Normal matrix")):
 
             sl_i = tmpl_i.slices_original
             data_i = tmpl_i.data[tmpl_i.slices_cutout]
@@ -218,37 +221,37 @@ class SparseFitter:
                 w = self.weights[inter]
                 sl_i_local = (
                     slice(
-                        inter[0].start - sl_i[0].start +
-                        tmpl_i.slices_cutout[0].start,
-                        inter[0].stop - sl_i[0].start +
-                        tmpl_i.slices_cutout[0].start,
+                        inter[0].start - sl_i[0].start + tmpl_i.slices_cutout[0].start,
+                        inter[0].stop - sl_i[0].start + tmpl_i.slices_cutout[0].start,
                     ),
                     slice(
-                        inter[1].start - sl_i[1].start +
-                        tmpl_i.slices_cutout[1].start,
-                        inter[1].stop - sl_i[1].start +
-                        tmpl_i.slices_cutout[1].start,
+                        inter[1].start - sl_i[1].start + tmpl_i.slices_cutout[1].start,
+                        inter[1].stop - sl_i[1].start + tmpl_i.slices_cutout[1].start,
                     ),
                 )
                 sl_j_local = (
                     slice(
-                        inter[0].start - tmpl_j.slices_original[0].start +
-                        tmpl_j.slices_cutout[0].start,
-                        inter[0].stop - tmpl_j.slices_original[0].start +
-                        tmpl_j.slices_cutout[0].start,
+                        inter[0].start
+                        - tmpl_j.slices_original[0].start
+                        + tmpl_j.slices_cutout[0].start,
+                        inter[0].stop
+                        - tmpl_j.slices_original[0].start
+                        + tmpl_j.slices_cutout[0].start,
                     ),
                     slice(
-                        inter[1].start - tmpl_j.slices_original[1].start +
-                        tmpl_j.slices_cutout[1].start,
-                        inter[1].stop - tmpl_j.slices_original[1].start +
-                        tmpl_j.slices_cutout[1].start,
+                        inter[1].start
+                        - tmpl_j.slices_original[1].start
+                        + tmpl_j.slices_cutout[1].start,
+                        inter[1].stop
+                        - tmpl_j.slices_original[1].start
+                        + tmpl_j.slices_cutout[1].start,
                     ),
                 )
                 arr_i = tmpl_i.data[sl_i_local]
                 arr_j = tmpl_j.data[sl_j_local]
                 val = np.sum(arr_i * arr_j * w)
-#                if val == 0: # cant prune < tol, because messes up global astrometry fit
-#                    continue
+                #                if val == 0: # cant prune < tol, because messes up global astrometry fit
+                #                    continue
                 ata[i, j] = val
                 ata[j, i] = val
 
@@ -333,8 +336,7 @@ class SparseFitter:
             raise ValueError("Solve system first")
         model = np.zeros_like(self.image, dtype=float)
         for coeff, tmpl in zip(self.solution, self._orig_templates):
-            model[
-                tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
+            model[tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
         model[self.weights <= 0 | np.isnan(self.weights)] = 0.0
         return model
 
@@ -351,9 +353,7 @@ class SparseFitter:
         return self._atb
 
     def solve(
-        self,
-        config: FitConfig | None = None,
-        x_w0: float | None = None
+        self, config: FitConfig | None = None, x_w0: float | None = None
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Solve for template fluxes using conjugate gradient."""
         cfg = config or self.config
@@ -377,9 +377,7 @@ class SparseFitter:
         # detecting bad rows.
         bad = np.where(np.abs(A.diagonal()) < 1e-14 * np.max(A.diagonal()))[0]
         if bad.size:
-            print(
-                f"Eliminating {bad.size} nearly-zero diagonal rows before ILU",
-                bad.size)
+            print(f"Eliminating {bad.size} nearly-zero diagonal rows before ILU", bad.size)
 
         eps = reg or 1e-10
         d = np.sqrt(np.maximum(A.diagonal(), eps))
@@ -404,16 +402,13 @@ class SparseFitter:
         e_full[idx] = self._flux_errors(A_w) / d  # un-whiten errors
 
         if cfg.positivity:
-            x_full[:self.n_flux] = np.maximum(0, x_full[:self.n_flux])
+            x_full[: self.n_flux] = np.maximum(0, x_full[: self.n_flux])
 
-        self.solution = x_full[:self.
-                               n_flux]  # fluxes, corresponds to original templates
-        self.solution_err = e_full[:self.
-                                   n_flux]  # flux errors, corresponds to original templates
+        self.solution = x_full[: self.n_flux]  # fluxes, corresponds to original templates
+        self.solution_err = e_full[: self.n_flux]  # flux errors, corresponds to original templates
 
         # update the templates with the fitted fluxes, errors
-        for tmpl, flux, err in zip(self._orig_templates, self.solution,
-                                   self.solution_err):
+        for tmpl, flux, err in zip(self._orig_templates, self.solution, self.solution_err):
             tmpl.flux = flux
             tmpl.err = err
 
@@ -461,10 +456,7 @@ class SparseFitter:
             y_img = w_sqrt * y.reshape(img_shape)
             out = np.zeros(n_cols, dtype=float)
             for i, tmpl in enumerate(self.templates):
-                out[i] = np.sum(
-                    tmpl.data[tmpl.slices_cutout]
-                    * y_img[tmpl.slices_original]
-                )
+                out[i] = np.sum(tmpl.data[tmpl.slices_cutout] * y_img[tmpl.slices_original])
             return out
 
         Aop = LinearOperator(
@@ -509,24 +501,20 @@ class SparseFitter:
     def residual(self) -> np.ndarray:
         return self.image - self.model_image()
 
-    def quick_flux(self,
-                   templates: Optional[List[Template]] = None) -> np.ndarray:
+    def quick_flux(self, templates: Optional[List[Template]] = None) -> np.ndarray:
         """Return quick flux estimates based on template data and image."""
         if templates is None:
             templates = self._orig_templates
         return Templates.quick_flux(templates, self.image)
 
-    def predicted_errors(self,
-                         templates: Optional[List[Template]] = None
-                         ) -> np.ndarray:
+    def predicted_errors(self, templates: Optional[List[Template]] = None) -> np.ndarray:
         """Return per-source uncertainties ignoring template covariance."""
         if templates is None:
             templates = self._orig_templates
         return Templates.predicted_errors(templates, self.weights)
 
     def flux_and_rms(
-        self,
-        templates: Optional[List[Template]] = None
+        self, templates: Optional[List[Template]] = None
     ) -> tuple[np.ndarray, np.ndarray]:
         """Return flux estimates and RMS errors for templates.
 
@@ -545,11 +533,11 @@ class SparseFitter:
             templates = self._orig_templates
 
         if templates and templates[0].flux != 0:
-            flux = np.array([t.flux for t in templates[:self.n_flux]])
+            flux = np.array([t.flux for t in templates[: self.n_flux]])
         else:
-            flux = self.quick_flux(templates)[:self.n_flux]
+            flux = self.quick_flux(templates)[: self.n_flux]
 
-        rms = self.predicted_errors(templates)[:self.n_flux]
+        rms = self.predicted_errors(templates)[: self.n_flux]
         return flux, rms
 
     def flux_errors(self) -> np.ndarray:

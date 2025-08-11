@@ -4,6 +4,7 @@ __pycache__/
 data/*
 data/*large*
 data/*half*
+data/PSF/*
 !data/*test*
 !data/PSF/
 !data/PSF/*OS4_GRID25*

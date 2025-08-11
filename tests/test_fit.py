@@ -157,6 +157,50 @@ def test_build_normal_tree_matches_loop():
     np.testing.assert_allclose(fitter_loop.atb, fitter_tree._atb)
 
 
+def test_solve_components_matches_global():
+    img = np.zeros((6, 6))
+    weights = np.ones_like(img)
+
+    t1 = Template(img, (2, 2), (3, 3))
+    t1.data[:] = np.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]])
+    t2 = Template(img, (2, 3), (3, 3))
+    t2.data[:] = np.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]])
+    t3 = Template(img, (5, 5), (1, 1))
+    t3.data[:] = np.array([[1]])
+
+    tmpls = [t1, t2, t3]
+    fluxes = [1.0, 2.0, 3.0]
+    image = np.zeros_like(img)
+    for f, t in zip(fluxes, tmpls):
+        image[t.slices_original] += f * t.data[t.slices_cutout]
+
+    # Global solve
+    fitter_all = SparseFitter(
+        [Template(img, (2, 2), (3, 3)), Template(img, (2, 3), (3, 3)), Template(img, (5, 5), (1, 1))],
+        image,
+        weights,
+        FitConfig(),
+    )
+    fitter_all.templates[0].data[:] = t1.data
+    fitter_all.templates[1].data[:] = t2.data
+    fitter_all.templates[2].data[:] = t3.data
+    flux_all, _, _ = fitter_all.solve()
+
+    # Component solve
+    fitter_comp = SparseFitter(
+        [Template(img, (2, 2), (3, 3)), Template(img, (2, 3), (3, 3)), Template(img, (5, 5), (1, 1))],
+        image,
+        weights,
+        FitConfig(),
+    )
+    fitter_comp.templates[0].data[:] = t1.data
+    fitter_comp.templates[1].data[:] = t2.data
+    fitter_comp.templates[2].data[:] = t3.data
+    flux_comp, _, _ = fitter_comp.solve_components()
+
+    np.testing.assert_allclose(flux_comp, flux_all, rtol=1e-6, atol=1e-6)
+
+
 def test_build_normal_matrix_new_equivalence():
     return
     images, segmap, catalog, psfs, _, rms = make_simple_data()

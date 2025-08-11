@@ -8,6 +8,7 @@ from typing import Callable, Sequence, Tuple
 
 import numpy as np
 from astropy.nddata import Cutout2D
+from astropy.table import Table
 from numpy.polynomial.chebyshev import chebval
 from photutils.centroids import centroid_com, centroid_quadratic
 from scipy.ndimage import shift as nd_shift
@@ -59,22 +60,6 @@ def basis_matrix(templates, shape, order):
         x, y = tmpl.input_position_original
         mat[i] = cheb_basis(x / (w - 1), y / (h - 1), order)
     return mat
-
-
-# def collapse_gradients(gx, gy, phi, k, shape):
-#     """Collapse per-object gradients into global templates."""
-#     GX = [np.zeros(shape, dtype=float) for _ in range(k)]
-#     GY = [np.zeros(shape, dtype=float) for _ in range(k)]
-#     for i in range(len(gx)):
-#         for j in range(k):
-#             GX[j] += phi[i, j] * gx[i]
-#             GY[j] += phi[i, j] * gy[i]
-#     return GX, GY
-
-
-# ---------------------------------------------------------------------------
-# Helpers from local astrometry
-# ---------------------------------------------------------------------------
 
 
 def _safe_centroid_quadratic(img, x0, y0, box):
@@ -153,9 +138,7 @@ def measure_template_shifts(
         else:
             try:
                 cx_m, cy_m = centroid_quadratic(model, *centre, fit_boxsize=box_size)
-                cx_t, cy_t = centroid_quadratic(
-                    cut_tmpl.data, *centre, fit_boxsize=box_size
-                )
+                cx_t, cy_t = centroid_quadratic(cut_tmpl.data, *centre, fit_boxsize=box_size)
             except Exception:
                 cx_m = cy_m = cx_t = cy_t = np.nan
 
@@ -255,9 +238,7 @@ def fit_polynomial_field(
     coeff_y = np.linalg.solve(phi.T @ W @ phi, phi.T @ (w * dy))
 
     def predict(p):
-        phi_p = np.array(
-            [cheb_basis(x / (shape[1] - 1), y / (shape[0] - 1), order) for x, y in p]
-        )
+        phi_p = np.array([cheb_basis(x / (shape[1] - 1), y / (shape[0] - 1), order) for x, y in p])
         return phi_p @ coeff_x, phi_p @ coeff_y
 
     return predict
@@ -392,34 +373,30 @@ class AstroMap:
         dx, dy = self._predict(pts)
         return dx.reshape(shape), dy.reshape(shape)
 
-    def fit(self, img1: np.ndarray, img2: np.ndarray, segmap: np.ndarray) -> None:
-        pos, dx, dy, wt = self._measure(img1, img2, segmap)
+    def fit(self, img1: np.ndarray, img2: np.ndarray, catalog: Table, **kwargs) -> None:
+        pos, dx, dy, wt = self._measure(img1, img2, catalog, **kwargs)
+        self.pos = pos
+        self.dxy = np.column_stack((dx, dy))
         if pos.size == 0:
             self._predict = lambda p: (np.zeros(len(p)), np.zeros(len(p)))
             return
-        self._predict = fit_polynomial_field(
-            pos, dx, dy, wt, order=self.order, shape=img1.shape
-        )
+        self._predict = fit_polynomial_field(pos, dx, dy, wt, order=self.order, shape=img1.shape)
 
     def _measure(
-        self, img1: np.ndarray, img2: np.ndarray, segmap: np.ndarray
+        self,
+        img1: np.ndarray,
+        img2: np.ndarray,
+        catalog: Table,
+        snr_threshold: float = 5.0,
+        snr_key: str = "snr",
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Measure shifts between two images at catalog positions."""
+        if snr_key not in catalog.colnames:
+            catalog[snr_key] = min_snr
         positions, dx, dy, w = [], [], [], []
-        labels = np.unique(segmap[segmap > 0])
-        for lab in labels:
-            mask = segmap == lab
-            y_idx, x_idx = np.nonzero(mask)
-            if y_idx.size == 0:
-                continue
-            flux = img1[mask].sum()
-            err = np.sqrt(np.abs(img1[mask]).sum())
-            if err == 0:
-                continue
-            snr = flux / err
-            if snr < self.snr_threshold:
-                continue
-            x_c = x_idx.mean()
-            y_c = y_idx.mean()
+        for row in catalog[catalog[snr_key] > snr_threshold]:
+            x_c, y_c = row["x"], row["y"]
+            # Extract a small cutout around the source position
             cut1 = Cutout2D(img1, (x_c, y_c), 3 * self.box_size + 1, mode="partial")
             cut2 = Cutout2D(img2, (x_c, y_c), 3 * self.box_size + 1, mode="partial")
             centre = cut1.input_position_cutout
@@ -441,12 +418,10 @@ class AstroMap:
             positions.append((x_c, y_c))
             dx.append(float(shift[0]))
             dy.append(float(shift[1]))
-            w.append(snr**2)
+            w.append(row[snr_key] ** 2)
         return (
             np.asarray(positions),
             np.asarray(dx),
             np.asarray(dy),
             np.asarray(w),
         )
-
-

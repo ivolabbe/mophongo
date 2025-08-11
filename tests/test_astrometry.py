@@ -12,7 +12,7 @@ from utils import make_simple_data
 from mophongo.psf import PSF
 from mophongo.templates import Templates
 from mophongo.fit import SparseFitter, FitConfig
-from mophongo.local_astrometry import AstroCorrect
+from mophongo.astrometry import AstroCorrect, AstroMap
 from utils import save_diagnostic_image
 
 def test_polynomial_astrometry_reduces_residual(tmp_path):
@@ -93,3 +93,16 @@ def test_gp_astrometry_returns_models():
     dx, dy = ac(np.array([[50.0, 50.0]]))
     assert isinstance(float(dx[0]), float)
     assert isinstance(float(dy[0]), float)
+
+
+def test_astromap_recovers_shift():
+    images, segmap, catalog, psfs, truth, wht = make_simple_data(
+        nsrc=10, size=151, peak_snr=5, seed=7
+    )
+    shx, shy = 0.4, -0.3
+    shifted = nd_shift(images[0], (shy, shx))
+    amap = AstroMap(order=1, snr_threshold=3.0)
+    amap.fit(images[0], shifted, segmap)
+    dx, dy = amap(np.array([[75.0, 75.0]]))
+    assert abs(dx[0] - shx) < 0.3
+    assert abs(dy[0] - shy) < 0.3

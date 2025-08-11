@@ -1,6 +1,6 @@
-from .templates import Templates, Template 
+from .templates import Templates, Template
 from .fit import SparseFitter
-from .local_astrometry import AstroCorrect
+from .astrometry import AstroCorrect, AstroMap
 from .catalog import Catalog
 #from .deblender import deblend_sources_symmetry, deblend_sources_hybrid
 #from .jwst_psf import make_extended_grid
@@ -20,6 +20,7 @@ __all__ = [
 #    "FitConfig",
     "SparseFitter",
     "AstroCorrect",
+    "AstroMap",
     "Catalog",
 #    "deblend_sources_symmetry",
 #    "deblend_sources_hybrid",

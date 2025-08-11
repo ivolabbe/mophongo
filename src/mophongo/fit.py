@@ -105,6 +105,99 @@ def _diag_inv_hutch(A, k=32, rtol=1e-4, maxiter=None, seed=0):
     return np.sqrt(np.abs(acc / k))
 
 
+def build_components_strtree_labels(
+    templates: List[Template],
+) -> tuple[np.ndarray, int]:
+    """Label independent template groups using an ``STRtree``.
+
+    Parameters
+    ----------
+    templates
+        Templates whose bounding boxes define the connectivity graph.
+
+    Returns
+    -------
+    labels, ncomp
+        ``labels`` maps each template index to a component id and ``ncomp`` is
+        the total number of components.
+    """
+    from shapely.geometry import box
+    from shapely.strtree import STRtree
+    from scipy.sparse import coo_matrix, csgraph
+
+    def _bbox_to_box(t: Template):
+        (ymin, ymax), (xmin, xmax) = t.bbox_original  # closed intervals
+        return box(xmin, ymin, xmax + 1, ymax + 1)
+
+    n = len(templates)
+    boxes = [_bbox_to_box(t) for t in templates]
+    tree = STRtree(boxes)
+
+    ii: list[int] = []
+    jj: list[int] = []
+    for i, gi in enumerate(boxes):
+        for j in tree.query(gi):
+            j = int(j)
+            if j > i:
+                ii.append(i)
+                jj.append(j)
+
+    if not ii:
+        return np.arange(n, dtype=int), n
+
+    adj = coo_matrix((np.ones(len(ii), dtype=np.uint8), (ii, jj)), shape=(n, n))
+    adj = adj + adj.T
+    ncomp, labels = csgraph.connected_components(adj, directed=False)
+    return labels, int(ncomp)
+
+
+def summarize_components(labels: np.ndarray) -> np.ndarray:
+    """Log a brief summary of component sizes."""
+
+    counts = np.bincount(labels)
+    logger.info(
+        "%d components (min=%d, median=%d, max=%d)",
+        len(counts),
+        counts.min(),
+        int(np.median(counts)),
+        counts.max(),
+    )
+    topk = np.argsort(counts)[::-1][:10]
+    logger.debug(
+        "Top components by size: %s",
+        [(int(cid), int(counts[cid])) for cid in topk],
+    )
+    return counts
+
+
+def solve_components_cg_with_labels(
+    ATA_csr: csr_matrix,
+    ATb: np.ndarray,
+    labels: np.ndarray,
+    *,
+    rtol: float = 1e-6,
+    maxiter: int = 2000,
+) -> tuple[np.ndarray, list[int]]:
+    """Solve block-diagonal systems independently with conjugate gradient."""
+
+    x = np.zeros_like(ATb, dtype=float)
+    infos: list[int] = []
+    for cid in range(labels.max() + 1):
+        idx = np.where(labels == cid)[0]
+        if idx.size == 0:
+            infos.append(0)
+            continue
+        A = ATA_csr[idx][:, idx].tocsr()
+        b = ATb[idx]
+        D = A.diagonal().copy()
+        D[D == 0] = 1.0
+        M = LinearOperator(A.shape, matvec=lambda v, D=D: v / D)
+        sol, info = cg(A, b, M=M, atol=0.0, rtol=rtol, maxiter=maxiter)
+        x[idx] = sol
+        infos.append(int(info))
+    return x, infos
+
+
 class SparseFitter:
     """Build and solve sparse normal equations for photometry."""
 
@@ -413,6 +506,59 @@ class SparseFitter:
             tmpl.err = err
 
         return self.solution, self.solution_err, info
+
+    def solve_components(
+        self, config: FitConfig | None = None
+    ) -> tuple[np.ndarray, np.ndarray, dict]:
+        """Solve independent template groups separately using CG.
+
+        Templates are partitioned into connected components via their bounding
+        box overlaps. Each component is solved independently, allowing block
+        diagonal systems to be handled efficiently.
+        """
+
+        cfg = config or self.config
+        A, b = self.ata, self.atb
+
+        reg = cfg.reg
+        if reg <= 0:
+            reg = 1e-4 * np.median(A.diagonal())
+        if reg > 0:
+            A = A + eye(A.shape[0], format="csr") * reg
+
+        labels, ncomp = build_components_strtree_labels(self.templates)
+        summarize_components(labels)
+
+        rtol = cfg.cg_kwargs.get("rtol", 1e-6)
+        maxit = cfg.cg_kwargs.get("maxiter", 2000)
+        x, info = solve_components_cg_with_labels(
+            A, b, labels, rtol=rtol, maxiter=maxit
+        )
+
+        err = np.zeros_like(x)
+        for cid in range(ncomp):
+            idx = np.where(labels == cid)[0]
+            if idx.size == 0:
+                continue
+            A_sub = A[idx][:, idx].tocsr()
+            err[idx] = self._flux_errors(A_sub)
+
+        if cfg.positivity:
+            x = np.maximum(0.0, x)
+
+        x_full = np.zeros(self.n_flux, dtype=float)
+        e_full = np.zeros(self.n_flux, dtype=float)
+        idx = [t.col_idx for t in self.templates]
+        x_full[idx] = x
+        e_full[idx] = err
+
+        self.solution = x_full
+        self.solution_err = e_full
+        for tmpl, flux, err in zip(self._orig_templates, x_full, e_full):
+            tmpl.flux = flux
+            tmpl.err = err
+
+        return x_full, e_full, {"cg_info": info, "ncomp": ncomp}
 
     def solve_linear_operator(
         self,

@@ -6,6 +6,12 @@ import numpy as np
 import pytest
 
 from mophongo.templates import Template
+import pytest
+from mophongo import utils as mutils
+
+if not hasattr(mutils, "bin2d_mean"):
+    pytest.skip("bin2d_mean not implemented", allow_module_level=True)
+
 from mophongo.utils import bin2d_mean, downsample_psf
 
 

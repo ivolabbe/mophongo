@@ -113,6 +113,268 @@ def _extract_psf_at(tmpl: Template, psf: np.ndarray | PSFRegionMap) -> np.ndarra
     return stamp
 
 
+class Pipeline:
+    """Photometry pipeline orchestrator.
+
+    Parameters mirror :func:`run` for backwards compatibility. After
+    calling :meth:`run` the resulting catalog, residual images and fitter
+    instance are stored on the object and returned.
+    """
+
+    def __init__(
+        self,
+        images: Sequence[np.ndarray],
+        segmap: np.ndarray,
+        *,
+        catalog: Table | None = None,
+        psfs: Sequence[np.ndarray] | None = None,
+        weights: Sequence[np.ndarray] | None = None,
+        wht_images: Sequence[np.ndarray] | None = None,
+        kernels: Sequence[np.ndarray | PSFRegionMap] | None = None,
+        wcs: Sequence[WCS] | None = None,
+        window: Window | None = None,
+        extend_templates: str | None = None,
+        config: FitConfig | None = None,
+    ) -> None:
+        if psfs is not None and len(images) != len(psfs):
+            raise ValueError("Number of images and PSFs must match")
+        if weights is None and wht_images is not None:
+            weights = wht_images
+        if weights is not None and len(weights) != len(images):
+            raise ValueError("Number of weight images must match number of images")
+
+        if config is None:
+            from .fit import FitConfig as _FitConfig
+
+            config = _FitConfig()
+
+        self.images = images
+        self.segmap = segmap
+        self.catalog = catalog
+        self.psfs = psfs
+        self.weights = weights
+        self.wht_images = wht_images
+        self.kernels = kernels
+        self.wcs = wcs
+        self.window = window
+        self.extend_templates = extend_templates
+        self.config = config
+
+        self.residuals: list[np.ndarray] | None = None
+        self.fitter = None
+        self.astro = None
+        self.templates = None
+
+    def run(self) -> tuple[Table, list[np.ndarray], SparseFitter]:
+        """Run photometry on the configured images.
+
+        Returns
+        -------
+        Table
+            Catalog containing flux measurements for each image.
+        list of ndarray
+            Residual images corresponding to each fitted image.
+        SparseFitter
+            The fitter instance used for the final fit.
+        """
+
+        images = self.images
+        segmap = self.segmap
+        catalog = self.catalog
+        psfs = self.psfs
+        weights = self.weights
+        kernels = self.kernels
+        wcs = self.wcs
+        config = self.config
+
+        from .psf import PSF
+        from .templates import Templates
+        from .fit import SparseFitter
+        from .astro_fit import GlobalAstroFitter
+        from astropy.nddata import block_replicate, block_reduce
+        from .local_astrometry import AstroCorrect
+        from . import utils
+        import warnings
+
+        memory = lambda: psutil.Process(os.getpid()).memory_info().rss / 1e9
+
+        print(f"Pipeline (start) memory: {memory():.1f} GB")
+        print(f"Pipeline config: {config}")
+
+        cat = catalog.copy() if catalog is not None else None
+        positions = list(zip(catalog["x"], catalog["y"])) if catalog is not None else []
+
+        tmpls = Templates()
+        tmpls.extract_templates(
+            np.nan_to_num(images[0], copy=False, nan=0.0, posinf=0.0, neginf=0.0),
+            segmap,
+            positions,
+            wcs=wcs[0] if wcs is not None else None,
+        )
+        templates = tmpls.templates
+        for t in templates:
+            assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
+
+        ndropped = len(positions) - len(templates)
+        print(f"Pipepline: {len(templates)} extracted templates, dropped {ndropped}.")
+        print(f"Pipeline (templates) memory: {memory():.1f} GB")
+
+        astro = AstroCorrect(config)
+        residuals: list[np.ndarray] = []
+        for idx in range(1, len(images)):
+            weights_i = weights[idx] if weights is not None else None
+
+            kernel = None
+            if kernels is not None:
+                kernel = kernels[idx]
+                if kernel is None:
+                    kernel = np.array([[1.0]])
+                elif isinstance(kernel, PSFRegionMap):
+                    print(f"Using kernel lookup table {kernel.name}")
+
+            if wcs is not None:
+                k = bin_factor_from_wcs(wcs[0], wcs[idx])
+            else:
+                k = 1
+
+            if k > 1:
+                if config.multi_resolution_method == "upsample":
+                    print(f"upsampling image {idx} by factor {k}")
+                    images[idx] = block_replicate(images[idx], k, conserve_sum=True)
+                    if weights_i is not None:
+                        weights_i = block_replicate(weights[idx], k) * k**2
+                    if wcs is not None:
+                        wcs[idx] = wcs[0]
+                else:
+                    print(f"Downsampling templates and kernels by factor {k}")
+                    tmpls_lo = Templates()
+                    tmpls_lo.original_shape = images[idx].shape
+                    tmpls_lo.wcs = wcs[idx]
+                    tmpls_lo._templates = [t.downsample(k, wcs_lo=wcs[idx]) for t in tmpls._templates]
+
+                    if isinstance(kernel, PSFRegionMap):
+                        kernel.psfs = np.array([downsample_psf(psf, k) for psf in kernel.psfs])
+                    else:
+                        kernel = downsample_psf(kernel, k)
+
+            if k == 1 or config.multi_resolution_method == "upsample":
+                tmpls_lo = deepcopy(tmpls)
+
+            if weights_i is not None:
+                tmpls_lo.prune_outside_weight(weights_i)
+
+            templates = tmpls_lo.convolve_templates(kernel, inplace=False)
+            print(f"Pipeline (convolved) memory: {memory():.1f} GB")
+
+            assert np.all(np.isfinite(images[idx])), "Image contains NaN values"
+            if weights_i is not None:
+                assert np.all(np.isfinite(weights_i)), "Weights contain NaN values"
+            for t in templates:
+                assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
+
+            fitter_cls = (
+                GlobalAstroFitter
+                if (config.fit_astrometry_niter > 0 and config.fit_astrometry_joint)
+                else SparseFitter
+            )
+
+            niter = max(config.fit_astrometry_niter, 1)
+            for j in range(niter):
+                print(f"Running iteration {j+1} of {niter}")
+
+                fitter = fitter_cls(templates, images[idx], weights_i, config)
+                fluxes, errs, info = fitter.solve()
+
+                res = fitter.residual()
+                print(f"Pipeline (residual) memory: {memory():.1f} GB")
+
+                if config.fit_astrometry_niter > 0 and not config.fit_astrometry_joint:
+                    logger.info("fitting astrometry separately")
+                    astro.fit(templates, res, fitter.solution)
+
+            fitter._ata = None
+            fluxes, errs, info = fitter.solve()
+            res = fitter.residual()
+
+            if (
+                (config.multi_tmpl_psf_core or config.multi_tmpl_colour)
+                and psfs is not None
+                and weights_i is not None
+            ):
+                chi_nu = _per_source_chi2(res, weights_i, templates)
+                bad_idx = np.where(chi_nu > config.multi_tmpl_chi2_thresh)[0]
+                print("Distribution >99% chi2:", np.percentile(chi_nu, [99]))
+                if bad_idx.size > 0:
+                    print(
+                        f"Adding {len(bad_idx)} new templates for poor fits "
+                        f"(chi^2/nu > {config.multi_tmpl_chi2_thresh})"
+                    )
+                    for bi in bad_idx:
+                        parent = templates[bi]
+                        if config.multi_tmpl_psf_core and psfs is not None:
+                            stamp = _extract_psf_at(parent, psfs[idx])
+                            add_tmpl = tmpls.add_component(parent, stamp, "psf")
+                            templates.append(add_tmpl)
+
+                    fitter = fitter_cls(templates, images[idx], weights_i, config)
+                    if config.solve_method == "ata":
+                        fluxes, errs, info = fitter.solve()
+                    else:
+                        fluxes, errs, info = fitter.solve_linear_operator()
+                    res = fitter.residual()
+
+            err_pred = fitter.predicted_errors()
+
+            print("Done...")
+
+            parent_ids = [
+                tmpl.parent_id if getattr(tmpl, "parent_id", None) is not None else tmpl.id
+                for tmpl in templates
+            ]
+            id_to_index = {id_: i for i, id_ in enumerate(cat["id"])}
+            cat[f"flux_{idx}"] = config.bad_value
+            cat[f"err_{idx}"] = config.bad_value
+            cat[f"err_pred_{idx}"] = config.bad_value
+
+            flux_sum: defaultdict[int, float] = defaultdict(float)
+            err_sum: defaultdict[int, float] = defaultdict(float)
+            err_pred_sum: defaultdict[int, float] = defaultdict(float)
+            for pid, fl, er, ep in zip(parent_ids, fluxes, errs, err_pred):
+                if pid is None:
+                    continue
+                flux_sum[pid] += fl
+                err_sum[pid] = np.sqrt(err_sum[pid] ** 2 + er**2)
+                err_pred_sum[pid] = np.sqrt(err_pred_sum[pid] ** 2 + ep**2)
+
+            for pid, fl in flux_sum.items():
+                ci = id_to_index.get(pid)
+                if ci is None:
+                    continue
+                cat[f"flux_{idx}"][ci] = fl
+                cat[f"err_{idx}"][ci] = err_sum[pid]
+                cat[f"err_pred_{idx}"][ci] = err_pred_sum[pid]
+
+            if k > 1 and config.multi_resolution_method == "upsample":
+                print(f"Downsampling residuals by factor {k}")
+                res = block_reduce(res, k, func=np.sum)
+
+            residuals.append(res)
+
+        print(
+            f"Pipeline (end) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB"
+        )
+
+        self.residuals = residuals
+        self.fitter = fitter
+        self.templates = tmpls
+        self.catalog = cat
+        if "astro" in locals():
+            fitter.astro = astro
+            self.astro = astro
+
+        return cat, residuals, fitter
+
+
 def run(
     images: Sequence[np.ndarray],
     segmap: np.ndarray,
@@ -125,262 +387,21 @@ def run(
     wcs: Sequence[WCS] | None = None,
     window: Window | None = None,
     extend_templates: str | None = None,
-    #    astrom_order: int = 1,
     config: FitConfig | None = None,
-) -> tuple[Table, np.ndarray]:
-    """Run photometry on a set of images.
+) -> tuple[Table, list[np.ndarray], SparseFitter]:
+    """Backward compatible wrapper for :class:`Pipeline`"""
 
-    Parameters
-    ----------
-    images
-        Sequence of image arrays. The first image defines the high-resolution
-        detection plane used to build templates.
-    segmap
-        Segmentation map aligned with the images. If not catalog provided, all sources are fit.
-    catalog
-        Optional source catalog. Must provide ``y`` and ``x`` columns giving pixel
-        positions. Performs only fitting of these sources, not all sources in Segmentation image.
-    psfs
-        Point-spread functions matching each image.
-    weights
-        Optional sequence of weight arrays corresponding to ``images``.
-    kernels
-        Optional sequence of precomputed kernels or :class:`~mophongo.kernels.KernelLookup`
-        objects corresponding to ``images``. If ``None``, matching kernels are
-        computed from ``psfs``.
-
-    Returns
-    -------
-    Table
-        Table containing the input catalog columns plus measured fluxes for
-        each image.
-    ndarray
-        Stack of residual images after subtracting the model from each input
-        image. The array has shape ``(n_images, ny, nx)``.
-    """
-
-    if psfs is not None:
-        if len(images) != len(psfs):
-            raise ValueError("Number of images and PSFs must match")
-    if weights is None and wht_images is not None:
-        weights = wht_images
-    if weights is not None and len(weights) != len(images):
-        raise ValueError("Number of weight images must match number of images")
-
-    from .psf import PSF
-    from .templates import Templates
-    from .fit import SparseFitter, FitConfig
-    from .astro_fit import GlobalAstroFitter
-    from astropy.nddata import block_replicate, block_reduce
-    from .local_astrometry import AstroCorrect
-    from . import utils
-    import warnings
-
-    memory = lambda: psutil.Process(os.getpid()).memory_info().rss / 1e9
-
-    print(f"Pipeline (start) memory: {memory():.1f} GB")
-
-    if config is None:
-        config = FitConfig()
-    print(f"Pipeline config: {config}")
-
-    cat = catalog.copy()
-    positions = list(zip(catalog["x"], catalog["y"]))
-
-    # Step 1: Extract templates from the first image (alternatively, use models)
-    tmpls = Templates()
-    tmpls.extract_templates(
-        np.nan_to_num(images[0], copy=False, nan=0.0, posinf=0.0, neginf=0.0),
+    pipeline = Pipeline(
+        images,
         segmap,
-        positions,
-        wcs=wcs[0] if wcs is not None else None,
+        catalog=catalog,
+        psfs=psfs,
+        weights=weights,
+        wht_images=wht_images,
+        kernels=kernels,
+        wcs=wcs,
+        window=window,
+        extend_templates=extend_templates,
+        config=config,
     )
-    templates = tmpls.templates
-    for t in templates:
-        assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
-
-    ndropped = len(positions) - len(templates)
-    print(f"Pipepline: {len(templates)} extracted templates, dropped {ndropped}.")
-    print(f"Pipeline (templates) memory: {memory():.1f} GB")
-
-    astro = AstroCorrect(config)
-    residuals = []
-    for idx in range(1, len(images)):
-
-        # assume weights are dominated by photometry image (for proper weights see sparse fitter, needes iteration)
-        weights_i = weights[idx] if weights is not None else None
-
-        kernel = None
-        if kernels is not None and kernels[idx] is not None:
-            kernel = kernels[idx]
-            if isinstance(kernel, PSFRegionMap):
-                print(f"Using kernel lookup table {kernel.name}")
-        else:
-            kernel is None
-
-        if wcs is not None:
-            k = bin_factor_from_wcs(wcs[0], wcs[idx])
-        else:
-            k = 1
-
-        # handle multi-resolution by upsampling or downsampling
-        if k > 1:
-            if config.multi_resolution_method == "upsample":
-                print(f"upsampling image {idx} by factor {k}")
-                images[idx] = block_replicate(images[idx], k, conserve_sum=True)
-                if weights_i is not None:
-                    weights_i = block_replicate(weights[idx], k) * k**2
-                wcs[idx] = wcs[0]
-            else:
-                # downsampling templates and kernels
-                print(f"Downsampling templates and kernels by factor {k}")
-                tmpls_lo = Templates()
-                tmpls_lo.original_shape = images[idx].shape
-                tmpls_lo.wcs = wcs[idx]
-                tmpls_lo._templates = [t.downsample(k, wcs_lo=wcs[idx]) for t in tmpls._templates]
-
-                if isinstance(kernel, PSFRegionMap):
-                    kernel.psfs = np.array([downsample_psf(psf, k) for psf in kernel.psfs])
-                else:
-                    kernel = downsample_psf(kernel, k)
-
-        if k == 1 or config.multi_resolution_method == "upsample":
-            tmpls_lo = deepcopy(tmpls)
-
-        if weights_i is not None:
-            tmpls_lo.prune_outside_weight(weights_i)
-
-        # if config.fft_fast and psfs is not None:
-        #     Templates.prepare_kernel_info(
-        #         tmpls_lo._templates,
-        #         psfs[idx],
-        #         images[idx],
-        #         weights_i,
-        #         eta=config.fft_fast,
-        #         r_max_pix=psfs[idx].shape[0] // 2 - 1,
-        #     )
-
-        templates = tmpls_lo.convolve_templates(kernel, inplace=False)
-        print(f"Pipeline (convolved) memory: {memory():.1f} GB")
-
-        # test if images, weights, and templates are all finite
-        # @@@ do this somewhere else: sanitize when reading in
-        assert np.all(np.isfinite(images[idx])), "Image contains NaN values"
-        if weights_i is not None:
-            assert np.all(np.isfinite(weights_i)), "Weights contain NaN values"
-        for t in templates:
-            assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
-
-        fitter_cls = (
-            GlobalAstroFitter
-            if (config.fit_astrometry_niter > 0 and config.fit_astrometry_joint)
-            else SparseFitter
-        )
-
-        # every iteration will scale and shift the tmpl images
-        # accumulated the shifts and scale are recorded in template attributes
-        niter = max(config.fit_astrometry_niter, 1)
-        for j in range(niter):
-            print(f"Running iteration {j+1} of {niter}")
-
-            fitter = fitter_cls(templates, images[idx], weights_i, config)
-            fluxes, errs, info = fitter.solve()
-
-            res = fitter.residual()
-            print(f"Pipeline (residual) memory: {memory():.1f} GB")
-
-            if config.fit_astrometry_niter > 0 and not config.fit_astrometry_joint:
-                logger.info("fitting astrometry separately")
-                astro.fit(templates, res, fitter.solution)
-
-        # perform a final fit with just the fluxes. @@@ could do this as final pass also for joint fitter
-        # check if this call is ok, only makes sense if we rebuild the normal matrix
-        # TODO: track this from the templates is_dirty flag
-        # dont have to rebuild if we are adding templates for residuals
-        fitter._ata = None  # @@@ do this properly
-        fluxes, errs, info = fitter.solve()
-        res = fitter.residual()
-
-        # second pass: add extra templates for poor fits
-        # @@@ put in separate method
-        if (
-            (config.multi_tmpl_psf_core or config.multi_tmpl_colour)
-            and psfs is not None
-            and weights_i is not None
-        ):
-            chi_nu = _per_source_chi2(res, weights_i, templates)
-            bad_idx = np.where(chi_nu > config.multi_tmpl_chi2_thresh)[0]
-            print("Distribution >99% chi2:", np.percentile(chi_nu, [99]))
-            if bad_idx.size > 0:
-                print(
-                    f"Adding {len(bad_idx)} new templates for poor fits "
-                    f"(chi^2/nu > {config.multi_tmpl_chi2_thresh})"
-                )
-                for bi in bad_idx:
-                    parent = templates[bi]
-                    if config.multi_tmpl_psf_core and psfs is not None:
-                        stamp = _extract_psf_at(parent, psfs[idx])
-                        # @@@ doesnt do anything.... need to add to templates
-                        add_tmpl = tmpls.add_component(parent, stamp, "psf")
-                        templates.append(add_tmpl)
-                    # Placeholder for additional components (e.g. colour maps)
-
-                fitter = fitter_cls(templates, images[idx], weights_i, config)
-                if config.solve_method == "ata":
-                    fluxes, errs, info = fitter.solve()
-                else:
-                    fluxes, errs, info = fitter.solve_linear_operator()
-                res = fitter.residual()
-
-        err_pred = fitter.predicted_errors()
-
-        # this is only necessary if we clip the PSF wings
-        # ee_arr = np.array([getattr(t, "ee_fraction", 1.0) for t in templates])
-        # fluxes = fluxes / ee_arr
-        # errs = errs / ee_arr
-        # err_pred = fitter.predicted_errors() / ee_arr
-
-        print("Done...")
-
-        # put this in catalog object
-        # put fluxes into catalog based on template IDs
-        parent_ids = [
-            tmpl.parent_id if getattr(tmpl, "parent_id", None) is not None else tmpl.id
-            for tmpl in templates
-        ]
-        id_to_index = {id_: i for i, id_ in enumerate(cat["id"])}
-        cat[f"flux_{idx}"] = config.bad_value
-        cat[f"err_{idx}"] = config.bad_value
-        cat[f"err_pred_{idx}"] = config.bad_value
-
-        flux_sum: defaultdict[int, float] = defaultdict(float)
-        err_sum: defaultdict[int, float] = defaultdict(float)
-        err_pred_sum: defaultdict[int, float] = defaultdict(float)
-        for pid, fl, er, ep in zip(parent_ids, fluxes, errs, err_pred):
-            if pid is None:
-                continue
-            flux_sum[pid] += fl
-            err_sum[pid] = np.sqrt(err_sum[pid] ** 2 + er**2)
-            err_pred_sum[pid] = np.sqrt(err_pred_sum[pid] ** 2 + ep**2)
-
-        for pid, fl in flux_sum.items():
-            ci = id_to_index.get(pid)
-            if ci is None:
-                continue
-            cat[f"flux_{idx}"][ci] = fl
-            cat[f"err_{idx}"][ci] = err_sum[pid]
-            cat[f"err_pred_{idx}"][ci] = err_pred_sum[pid]
-
-        if k > 1 and config.multi_resolution_method == "upsample":
-            print(f"Downsampling residuals by factor {k}")
-            # downsample residuals to match the original image size
-            res = block_reduce(res, k, func=np.sum)
-
-        residuals.append(res)
-
-    print(f"Pipeline (end) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB")
-
-    if "astro" in locals():
-        fitter.astro = astro
-
-    return cat, residuals, fitter
+    return pipeline.run()

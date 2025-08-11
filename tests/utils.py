@@ -10,7 +10,8 @@ import matplotlib.pyplot as plt
 from astropy.modeling.models import Gaussian2D
 from photutils.segmentation import detect_sources
 from photutils.segmentation import deblend_sources
-#from mophongo.photutils_deblend import deblend_sources
+
+# from mophongo.photutils_deblend import deblend_sources
 from photutils.datasets import make_model_image, make_model_params
 from skimage.morphology import dilation, disk, max_tree
 
@@ -22,8 +23,8 @@ from astropy.coordinates import SkyCoord
 
 
 def lupton_norm(img):
-    p = np.percentile(img, [1,99])
-    vmin, vmax = -p[1]/20, p[1]
+    p = np.percentile(img, [1, 99])
+    vmin, vmax = -p[1] / 20, p[1]
     return ImageNormalize(vmin=vmin, vmax=vmax, stretch=AsinhStretch(0.01))
 
 
@@ -37,9 +38,7 @@ def make_simple_data(
     peak_snr: float = 1.0,
     ndilate: int = 2,
     border_size: int = 10,
-) -> tuple[
-    list[np.ndarray], np.ndarray, Table, list[np.ndarray], np.ndarray, list[np.ndarray]
-]:
+) -> tuple[list[np.ndarray], np.ndarray, Table, list[np.ndarray], np.ndarray, list[np.ndarray]]:
     """Create a synthetic dataset with ``nsrc`` sources.
 
     A truth image with randomly positioned Gaussian sources is generated
@@ -90,25 +89,19 @@ def make_simple_data(
     hires = _convolve2d(truth, psf_hi.array)
     lowres = _convolve2d(truth, psf_lo.array)
 
-    flux_true = (
-        params["amplitude"]
-        * 2
-        * np.pi
-        * params["x_stddev"]
-        * params["y_stddev"]
-    )
+    flux_true = params["amplitude"] * 2 * np.pi * params["x_stddev"] * params["y_stddev"]
     # Add noise
     amp_min = float(params["amplitude"].min())
     noise_std = amp_min / peak_snr
     hires += rng.normal(scale=noise_std, size=hires.shape)
     lowres += rng.normal(scale=noise_std, size=lowres.shape)
-    wht_hi = np.ones_like(hires) * 1.0/noise_std**2
-    wht_lo = np.ones_like(lowres) * 1.0/noise_std**2
+    wht_hi = np.ones_like(hires) * 1.0 / noise_std**2
+    wht_lo = np.ones_like(lowres) * 1.0 / noise_std**2
 
     # Segmentation map from hires image
     # Use Gaussian PSF for detection (keeping this as Gaussian for now)
-    if det_fwhm>0:
-        psf_det = PSF.gaussian(3,0.01,0.01)   # delta function = no smoothing
+    if det_fwhm > 0:
+        psf_det = PSF.gaussian(3, 0.01, 0.01)  # delta function = no smoothing
         detimg = _convolve2d(hires, psf_det.array)
     else:
         detimg = hires
@@ -124,12 +117,12 @@ def make_simple_data(
         nlevels=64,
         contrast=0.000001,
         progress_bar=False,
-    #        compactness=0.0,
+        #        compactness=0.0,
     )
     segdata = segm.data
     segmap = np.zeros_like(segdata, dtype=int)
     used = set()
-    for (idx, y, x) in zip(params["id"], params["y_mean"], params["x_mean"]):
+    for idx, y, x in zip(params["id"], params["y_mean"], params["x_mean"]):
         iy = int(round(y))
         ix = int(round(x))
         if iy < 0 or iy >= ny or ix < 0 or ix >= nx:
@@ -146,12 +139,14 @@ def make_simple_data(
             x_max = min(nx, ix + 2)
             segmap[y_min:y_max, x_min:x_max] = idx
 
-    catalog = Table({
-        "id": params["id"],
-        "y": params["y_mean"],
-        "x": params["x_mean"],
-        "flux_true": flux_true,
-    })
+    catalog = Table(
+        {
+            "id": params["id"],
+            "y": params["y_mean"],
+            "x": params["x_mean"],
+            "flux_true": flux_true,
+        }
+    )
 
     return (
         [hires, lowres],
@@ -180,6 +175,7 @@ def save_diagnostic_image(
         try:
             from scipy.sparse.linalg import spsolve
             from scipy.sparse import eye
+
             n = fitter.ata.shape[0]
             cov_matrix = spsolve(fitter.ata, eye(n).tocsc()).toarray()
         except:
@@ -199,12 +195,12 @@ def save_diagnostic_image(
         cov_img = np.eye(n_sources) * 0.1  # Identity matrix with small values
 
     panels = [
-        (0, 0, truth,   "truth",   "gray",   lupton_norm(truth)),
-        (0, 1, hires,   "hires",   "gray",   lupton_norm(hires)),
-        (0, 2, segmap,  "segmap",  "nipy_spectral", None),
-        (1, 0, lowres,  "lowres",  "gray",   lupton_norm(lowres)),
-        (1, 1, model,   "model",   "gray",   lupton_norm(model)),
-        (1, 2, residual,"residual","gray",   None),
+        (0, 0, truth, "truth", "gray", lupton_norm(truth)),
+        (0, 1, hires, "hires", "gray", lupton_norm(hires)),
+        (0, 2, segmap, "segmap", "nipy_spectral", None),
+        (1, 0, lowres, "lowres", "gray", lupton_norm(lowres)),
+        (1, 1, model, "model", "gray", lupton_norm(model)),
+        (1, 2, residual, "residual", "gray", None),
     ]
 
     fig, axes = plt.subplots(2, 4, figsize=(16, 8))
@@ -280,7 +276,13 @@ def save_psf_diagnostic(
     titles = ["psf_hi", "kernel", "hi*kernel", "psf_lo", "residual"]
     for ax, img, title in zip(axes.ravel()[:5], imgs, titles):
         if title == "residual":
-            ax.imshow(img, cmap="gray", origin="lower", vmin=-0.01*psf_lo.max(), vmax=0.01*psf_lo.max())
+            ax.imshow(
+                img,
+                cmap="gray",
+                origin="lower",
+                vmin=-0.01 * psf_lo.max(),
+                vmax=0.01 * psf_lo.max(),
+            )
         else:
             ax.imshow(img, cmap="gray", origin="lower", norm=lupton_norm(img))
 
@@ -336,13 +338,15 @@ def save_template_diagnostic(
     for i, tmpl in enumerate(templates):
         axes[0, i].imshow(tmpl.data, cmap="gray", origin="lower", norm=lupton_norm(tmpl.data))
         axes[0, i].set_title(f"tmpl {i+1}")
-        axes[0, i].set_xticks([]); axes[0, i].set_yticks([])
+        axes[0, i].set_xticks([])
+        axes[0, i].set_yticks([])
 
     # Row 2: Convolved templates
     for i, tmpl in enumerate(templates_conv):
         axes[1, i].imshow(tmpl.data, cmap="gray", origin="lower", norm=lupton_norm(tmpl.data))
         axes[1, i].set_title(f"conv {i+1}")
-        axes[1, i].set_xticks([]); axes[1, i].set_yticks([])
+        axes[1, i].set_xticks([])
+        axes[1, i].set_yticks([])
 
     # Row 3: Segmentation map with labels for each template's bbox
     for i, tmpl in enumerate(templates):
@@ -355,9 +359,19 @@ def save_template_diagnostic(
             # Find the center of the bbox for label placement
             cy = (y1 - y0) // 2
             cx = (x1 - x0) // 2
-            axes[2, i].text(cx, cy, str(idx), color="white", fontsize=12, ha="center", va="center", weight="bold")
+            axes[2, i].text(
+                cx,
+                cy,
+                str(idx),
+                color="white",
+                fontsize=12,
+                ha="center",
+                va="center",
+                weight="bold",
+            )
         axes[2, i].set_title(f"seg {i+1}")
-        axes[2, i].set_xticks([]); axes[2, i].set_yticks([])
+        axes[2, i].set_xticks([])
+        axes[2, i].set_yticks([])
 
     plt.tight_layout()
     fig.savefig(filename, dpi=150)
@@ -394,7 +408,7 @@ def save_flux_vs_truth_plot(
 
     # Panel 2 (top-right): Ratio vs True with fitted error envelope
     ratio = np.array(recovered) / np.array(truth)
-    axes[0, 1].scatter(truth, ratio, s=20, alpha=0.4, label='Data')
+    axes[0, 1].scatter(truth, ratio, s=20, alpha=0.4, label="Data")
     axes[0, 1].axhline(1.0, color="k", linestyle="--", label="ratio=1")
 
     # Fit flux vs error relationship if errors provided
@@ -408,9 +422,14 @@ def save_flux_vs_truth_plot(
         if np.sum(valid_mask) > 10:  # Need enough points for fitting
             try:
                 # Initial guess: linear relationship with small offset
-                p0 = [error[valid_mask].mean() / recovered[valid_mask].mean(), 1.0, error[valid_mask].min()]
-                popt, _ = curve_fit(error_model, recovered[valid_mask], error[valid_mask],
-                                  p0=p0, maxfev=1000)
+                p0 = [
+                    error[valid_mask].mean() / recovered[valid_mask].mean(),
+                    1.0,
+                    error[valid_mask].min(),
+                ]
+                popt, _ = curve_fit(
+                    error_model, recovered[valid_mask], error[valid_mask], p0=p0, maxfev=1000
+                )
                 a_fit, b_fit, c_fit = popt
 
                 # Calculate fitted errors for all flux values
@@ -428,22 +447,29 @@ def save_flux_vs_truth_plot(
                 upper_envelope = (1 + rel_error_fit)[flux_sorted_idx]
                 lower_envelope = (1 - rel_error_fit)[flux_sorted_idx]
 
-                axes[0, 1].plot(truth_sorted, upper_envelope, 'orange', linewidth=2,
-                               label=f'Fitted ±1σ envelope\nσ = {a_fit:.2e}×F^{b_fit:.2f}+{c_fit:.2e}')
-                axes[0, 1].plot(truth_sorted, lower_envelope, 'orange', linewidth=2)
+                axes[0, 1].plot(
+                    truth_sorted,
+                    upper_envelope,
+                    "orange",
+                    linewidth=2,
+                    label=f"Fitted ±1σ envelope\nσ = {a_fit:.2e}×F^{b_fit:.2f}+{c_fit:.2e}",
+                )
+                axes[0, 1].plot(truth_sorted, lower_envelope, "orange", linewidth=2)
 
             except Exception as e:
                 print(f"Error fitting flux-error relationship: {e}")
                 # Fallback to simple error envelope
                 e_tot = np.array(error) / np.array(recovered)
-                axes[0, 1].scatter(truth, 1 + e_tot, s=5, alpha=0.4, color='orange', label='+/- 1σ')
-                axes[0, 1].scatter(truth, 1 - e_tot, s=5, alpha=0.4, color='orange')
+                axes[0, 1].scatter(
+                    truth, 1 + e_tot, s=5, alpha=0.4, color="orange", label="+/- 1σ"
+                )
+                axes[0, 1].scatter(truth, 1 - e_tot, s=5, alpha=0.4, color="orange")
                 error_fit = error  # Use original errors for SNR calculation
         else:
             # Fallback to simple error envelope
             e_tot = np.array(error) / np.array(recovered)
-            axes[0, 1].scatter(truth, 1 + e_tot, s=5, alpha=0.4, color='orange', label='+/- 1σ')
-            axes[0, 1].scatter(truth, 1 - e_tot, s=5, alpha=0.4, color='orange')
+            axes[0, 1].scatter(truth, 1 + e_tot, s=5, alpha=0.4, color="orange", label="+/- 1σ")
+            axes[0, 1].scatter(truth, 1 - e_tot, s=5, alpha=0.4, color="orange")
             error_fit = error
 
     # Calculate binned statistics
@@ -457,7 +483,7 @@ def save_flux_vs_truth_plot(
     bin_counts = []
 
     for i in range(n_bins):
-        mask = (truth >= bin_edges[i]) & (truth < bin_edges[i+1])
+        mask = (truth >= bin_edges[i]) & (truth < bin_edges[i + 1])
         if np.sum(mask) > 2:
             bin_ratio = ratio[mask]
             bin_medians.append(np.median(bin_ratio))
@@ -471,17 +497,23 @@ def save_flux_vs_truth_plot(
     # Plot binned statistics
     valid_bins = ~np.isnan(bin_medians)
     if np.any(valid_bins):
-        axes[0, 1].errorbar(bin_centers[valid_bins],
-                           np.array(bin_medians)[valid_bins],
-                           yerr=np.array(bin_mad_stds)[valid_bins],
-                           fmt='ko', capsize=5, capthick=2, alpha=0.5,
-                           label=f'Binned median ± MAD', markersize=6)
+        axes[0, 1].errorbar(
+            bin_centers[valid_bins],
+            np.array(bin_medians)[valid_bins],
+            yerr=np.array(bin_mad_stds)[valid_bins],
+            fmt="ko",
+            capsize=5,
+            capthick=2,
+            alpha=0.5,
+            label=f"Binned median ± MAD",
+            markersize=6,
+        )
 
     axes[0, 1].set_xlabel(xlabel)
     axes[0, 1].set_ylabel("Recovered / True")
     axes[0, 1].set_title("Flux Ratio vs True")
     axes[0, 1].set_ylim(0.7, 1.3)
-    axes[0, 1].set_xscale('function', functions=(np.sqrt, lambda x: x**2))  # Square root scaling
+    axes[0, 1].set_xscale("function", functions=(np.sqrt, lambda x: x**2))  # Square root scaling
     axes[0, 1].set_xlim(truth.min(), truth.max())
     axes[0, 1].legend()
 
@@ -494,9 +526,11 @@ def save_flux_vs_truth_plot(
         flux_ticks = []
 
         for snr in snr_ticks:
-            if 'error_fit_true' in locals():
+            if "error_fit_true" in locals():
                 # For each SNR level, find the flux where SNR = flux/error = snr
-                test_fluxes = np.logspace(np.log10( max(truth.min(),1e-4) ), np.log10(truth.max()), 1000)
+                test_fluxes = np.logspace(
+                    np.log10(max(truth.min(), 1e-4)), np.log10(truth.max()), 1000
+                )
                 test_errors = error_model(test_fluxes, a_fit, b_fit, c_fit)
                 test_snr = test_fluxes / test_errors
 
@@ -511,8 +545,9 @@ def save_flux_vs_truth_plot(
 
         # Filter ticks within plot range and apply sqrt scaling
         xlim = axes[0, 1].get_xlim()
-        valid_ticks = [(flux, snr) for flux, snr in zip(flux_ticks, snr_ticks)
-                      if xlim[0] <= flux <= xlim[1]]
+        valid_ticks = [
+            (flux, snr) for flux, snr in zip(flux_ticks, snr_ticks) if xlim[0] <= flux <= xlim[1]
+        ]
 
         if valid_ticks:
             flux_tick_pos, snr_tick_labels = zip(*valid_ticks)
@@ -523,8 +558,8 @@ def save_flux_vs_truth_plot(
             # Set the SNR axis limits to match the transformed bottom axis
             ax2.set_xlim([np.sqrt(xlim[0]), np.sqrt(xlim[1])])
             ax2.set_xticks(flux_tick_pos_sqrt)
-            ax2.set_xticklabels([f'{snr:.0f}' for snr in snr_tick_labels])
-            ax2.set_xlabel('SNR (True Flux / Fitted Error)')
+            ax2.set_xticklabels([f"{snr:.0f}" for snr in snr_tick_labels])
+            ax2.set_xlabel("SNR (True Flux / Fitted Error)")
 
     # Panel 3 (bottom-left): Histogram of Residuals / Error with Gaussian fit
     if error is not None:
@@ -532,11 +567,20 @@ def save_flux_vs_truth_plot(
 
         # Create histogram
         bins = np.linspace(-5, 5, 31)
-        counts, bin_edges, _ = axes[1, 0].hist(residuals_over_error, bins=bins, alpha=0.5, density=True,
-                                              color='lightblue', edgecolor='black', linewidth=0.5)
+        counts, bin_edges, _ = axes[1, 0].hist(
+            residuals_over_error,
+            bins=bins,
+            alpha=0.5,
+            density=True,
+            color="lightblue",
+            edgecolor="black",
+            linewidth=0.5,
+        )
 
         # Add zero residual line
-        axes[1, 0].axvline(0, color='black', linestyle='-', linewidth=2, alpha=0.8, label='zero residual')
+        axes[1, 0].axvline(
+            0, color="black", linestyle="-", linewidth=2, alpha=0.8, label="zero residual"
+        )
 
         # Fit Gaussian to the data
         def gaussian(x, amp, mu, sigma):
@@ -553,15 +597,20 @@ def save_flux_vs_truth_plot(
             # Plot fitted Gaussian
             x_fit = np.linspace(-10, 10, 100)
             y_fit = gaussian(x_fit, amp_fit, mu_fit, sigma_fit)
-            axes[1, 0].plot(x_fit, y_fit, 'g-', linewidth=2,
-                           label=f'Fitted Gaussian\nμ={mu_fit:.3f}, σ={sigma_fit:.3f}')
+            axes[1, 0].plot(
+                x_fit,
+                y_fit,
+                "g-",
+                linewidth=2,
+                label=f"Fitted Gaussian\nμ={mu_fit:.3f}, σ={sigma_fit:.3f}",
+            )
         except:
             mu_fit, sigma_fit = np.mean(residuals_over_error), np.std(residuals_over_error)
 
         # Add vertical lines for ±1, ±3 sigma
         for sigma in [1, 3]:
-            axes[1, 0].axvline(sigma, color='gray', linestyle='--', alpha=0.5)
-            axes[1, 0].axvline(-sigma, color='gray', linestyle='--', alpha=0.5)
+            axes[1, 0].axvline(sigma, color="gray", linestyle="--", alpha=0.5)
+            axes[1, 0].axvline(-sigma, color="gray", linestyle="--", alpha=0.5)
 
         # Calculate statistics
         mean_resid = np.mean(residuals_over_error)
@@ -570,13 +619,18 @@ def save_flux_vs_truth_plot(
         mad_resid = mad_std(residuals_over_error)
 
         # Add statistics text
-        stats_text = f'Mean: {mean_resid:.3f}\nMedian: {median_resid:.3f}\nStd: {std_resid:.3f}\nMAD: {mad_resid:.3f}'
-        if 'mu_fit' in locals():
-            stats_text += f'\nFit μ: {mu_fit:.3f}\nFit σ: {sigma_fit:.3f}'
+        stats_text = f"Mean: {mean_resid:.3f}\nMedian: {median_resid:.3f}\nStd: {std_resid:.3f}\nMAD: {mad_resid:.3f}"
+        if "mu_fit" in locals():
+            stats_text += f"\nFit μ: {mu_fit:.3f}\nFit σ: {sigma_fit:.3f}"
 
-        axes[1, 0].text(0.05, 0.95, stats_text,
-                       transform=axes[1, 0].transAxes, verticalalignment='top',
-                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
+        axes[1, 0].text(
+            0.05,
+            0.95,
+            stats_text,
+            transform=axes[1, 0].transAxes,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.5),
+        )
 
         axes[1, 0].set_xlabel("(Recovered - True) / Error")
         axes[1, 0].set_ylabel("Density")
@@ -590,14 +644,16 @@ def save_flux_vs_truth_plot(
 
         # Add ±1, ±3 sigma lines
         for sigma in [1, 3]:
-            axes[1, 1].axhline(sigma, color='gray', linestyle='--', alpha=0.5)
-            axes[1, 1].axhline(-sigma, color='gray', linestyle='--', alpha=0.5, label=f'±{sigma}σ')
+            axes[1, 1].axhline(sigma, color="gray", linestyle="--", alpha=0.5)
+            axes[1, 1].axhline(-sigma, color="gray", linestyle="--", alpha=0.5, label=f"±{sigma}σ")
 
         axes[1, 1].set_xlabel("Recovered Flux")
         axes[1, 1].set_ylabel("(Recovered - True) / Error")
         axes[1, 1].set_title("Residuals vs Recovered Flux")
         axes[1, 1].set_ylim(-10, 10)
-        axes[1, 1].set_xscale('function', functions=(np.sqrt, lambda x: x**2))  # Square root scaling
+        axes[1, 1].set_xscale(
+            "function", functions=(np.sqrt, lambda x: x**2)
+        )  # Square root scaling
         axes[1, 1].set_xlim(truth.min(), truth.max())
         axes[1, 1].legend()
 
@@ -629,11 +685,23 @@ def save_psf_fit_diagnostic(filename: str, psf: np.ndarray, model: np.ndarray) -
 
 def label_segmap(ax, segmap, catalog, fontsize=10):
     for idx, (y, x) in enumerate(zip(catalog["y"], catalog["x"]), start=1):
-        ax.text(x, y, str(idx), color="white", fontsize=fontsize, ha="center", va="center", weight="medium", alpha=0.7)
+        ax.text(
+            x,
+            y,
+            str(idx),
+            color="white",
+            fontsize=fontsize,
+            ha="center",
+            va="center",
+            weight="medium",
+            alpha=0.7,
+        )
 
-#%%
+
+# %%
 import copy
 from astropy.wcs import WCS
+
 
 def rebin_wcs(wcs: WCS, n: int) -> WCS:
     """
@@ -654,11 +722,11 @@ def rebin_wcs(wcs: WCS, n: int) -> WCS:
     new_wcs : astropy.wcs.WCS
         The rebinned WCS.
     """
-    factor = 2 ** n
+    factor = 2**n
     new_wcs = copy.deepcopy(wcs)
 
     # — scale the CD or CDELT matrix
-    if getattr(new_wcs.wcs, 'cd', None) is not None:
+    if getattr(new_wcs.wcs, "cd", None) is not None:
         new_wcs.wcs.cd = new_wcs.wcs.cd / factor
     else:
         new_wcs.wcs.cdelt = new_wcs.wcs.cdelt / factor
@@ -670,15 +738,15 @@ def rebin_wcs(wcs: WCS, n: int) -> WCS:
 
     # — update the “NAXIS” so to_header() will emit the right shape
     #    (Astropy uses .pixel_shape if present, else _naxis1/_naxis2)
-    if hasattr(new_wcs, 'pixel_shape') and new_wcs.pixel_shape is not None:
+    if hasattr(new_wcs, "pixel_shape") and new_wcs.pixel_shape is not None:
         ny, nx = new_wcs.pixel_shape
         new_wcs.pixel_shape = (int(ny // factor), int(nx // factor))
     else:
         # fallback into the private attributes
-        if hasattr(new_wcs.wcs, '_naxis1'):
+        if hasattr(new_wcs.wcs, "_naxis1"):
             new_wcs.wcs._naxis1 = int(new_wcs.wcs._naxis1 // factor)
             new_wcs.wcs._naxis2 = int(new_wcs.wcs._naxis2 // factor)
-        if hasattr(new_wcs.wcs, '_naxis'):
+        if hasattr(new_wcs.wcs, "_naxis"):
             na = new_wcs.wcs._naxis
             new_wcs.wcs._naxis = [int(na[0] // factor), int(na[1] // factor)]
 
@@ -688,7 +756,6 @@ def rebin_wcs(wcs: WCS, n: int) -> WCS:
     return new_wcs
 
 
-#%%
 def make_testdata_old():
     from astropy.io import fits
     from astropy.wcs import WCS
@@ -698,44 +765,53 @@ def make_testdata_old():
     from reproject import reproject_interp
     from reproject import reproject_adaptive
     import numpy as np
+
     """Create cutouts for UDS images based on user-defined parameters."""
-    indir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/'
-    outdir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/testdata/'
+    indir = "/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/"
+    outdir = "/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/testdata/"
 
     # --- User parameters from the pasted image ---
     center_ra, center_dec = 34.3032414, -5.1113316
     size_x_40mas = 1000
     size_y_40mas = 820
-    postfix = 'test'
+    postfix = "test"
 
     size_x_40mas = 3500
     size_y_40mas = 2520
-    postfix = 'medium'
- 
+    postfix = "medium"
+
     center_ra, center_dec = 34.303612, -5.1203157
     size_x_40mas = 7000
     size_y_40mas = 3520
-    postfix = 'large'
+    postfix = "large"
 
     center_ra, center_dec = 34.361343, -5.1326021
     size_x_40mas = 29_000
     size_y_40mas = 7600
-    postfix = 'half'
+    postfix = "half"
 
-    center_radec = SkyCoord(center_ra, center_dec, unit='deg')
+    center_radec = SkyCoord(center_ra, center_dec, unit="deg")
     #  center = (center_x_40mas, center_y_40mas)
     size = (size_y_40mas, size_x_40mas)  # Cutout2D expects (ny, nx)
 
     # --- File lists ---
     files_40mas = [
-        ("uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_sci_skysubvar.fits",
-         f"uds-{postfix}-f444w_sci.fits"),
-        ("uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_wht.fits",
-         f"uds-{postfix}-f444w_wht.fits"),
-        ("uds-grizli-v8.0-minerva-v1.0-40mas-f115w-clear_drc_sci_skysubvar.fits",
-         f"uds-{postfix}-f115w_sci.fits"),
-        ("uds-grizli-v8.0-minerva-v1.0-40mas-f115w-clear_drc_wht.fits",
-         f"uds-{postfix}-f115w_wht.fits"),
+        (
+            "uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_sci_skysubvar.fits",
+            f"uds-{postfix}-f444w_sci.fits",
+        ),
+        (
+            "uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_wht.fits",
+            f"uds-{postfix}-f444w_wht.fits",
+        ),
+        (
+            "uds-grizli-v8.0-minerva-v1.0-40mas-f115w-clear_drc_sci_skysubvar.fits",
+            f"uds-{postfix}-f115w_sci.fits",
+        ),
+        (
+            "uds-grizli-v8.0-minerva-v1.0-40mas-f115w-clear_drc_wht.fits",
+            f"uds-{postfix}-f115w_wht.fits",
+        ),
         ("LW_f277w-f356w-f444w_SEGMAP.fits", f"uds-{postfix}-LW_seg.fits"),
         #       ("LW_f277w-f356w-f444w_opterr.fits", "uds-test-f444w_opterr.fits"),
         #       ("LW_f277w-f356w-f444w_optavg.fits", "uds-test-f444w_optavg.fits"),
@@ -761,12 +837,10 @@ def make_testdata_old():
         target_shape = ref_hdul[0].data.shape
 
     files_80mas = [
-        ('uds-sbkgsub-v1.0-80mas-f770w_drz_sci.fits',
-         f"uds-{postfix}-f770w_sci.fits"),
-        ('uds-sbkgsub-v1.0-80mas-f770w_drz_wht.fits',
-         f"uds-{postfix}-f770w_wht.fits"),
+        ("uds-sbkgsub-v1.0-80mas-f770w_drz_sci.fits", f"uds-{postfix}-f770w_sci.fits"),
+        ("uds-sbkgsub-v1.0-80mas-f770w_drz_wht.fits", f"uds-{postfix}-f770w_wht.fits"),
     ]
-    #target_80mas = rebin_wcs(target_wcs, n=1)  # Downsample by a factor of 2
+    # target_80mas = rebin_wcs(target_wcs, n=1)  # Downsample by a factor of 2
 
     from astropy.nddata import block_replicate
 
@@ -775,81 +849,310 @@ def make_testdata_old():
             data = hdul[0].data
             hdr = hdul[0].header
             # https://drizzlepac.readthedocs.io/en/deployment/adrizzle.html
-            hdr['KERNEL'] = ('square', 'Drizzle kernel'
-                             )  # also turbo -> speed up
-            hdr['PIXFRAC'] = (1.0, 'Drizzle pixfrac')
+            hdr["KERNEL"] = ("square", "Drizzle kernel")  # also turbo -> speed up
+            hdr["PIXFRAC"] = (1.0, "Drizzle pixfrac")
             # NOTE this is on the 80mas grid, so does not correspond to the 40mas pixel scale
             # PIXFRAC =                  1.0 / Drizzle parameter describing pixel shrinking
             # PXSCLRT =   0.7251965743873189 / Pixel scale ratio relative to native detector s
             # Extract the cutout at the 80mas scale
             # make it slightly larger to avoid edge effects
             size_80mas = (size[0] // 2, size[1] // 2)
-            cutout_80mas = Cutout2D(data,
-                                    position=center_radec,
-                                    size=size_80mas,
-                                    wcs=WCS(hdr))
+            cutout_80mas = Cutout2D(data, position=center_radec, size=size_80mas, wcs=WCS(hdr))
             hdr.update(cutout_80mas.wcs.to_header())
             hdu = fits.PrimaryHDU(cutout_80mas.data.astype(np.float32), header=hdr)
-            hdu.writeto(outdir + outfile.replace(postfix,postfix+'-80mas'), overwrite=True)
+            hdu.writeto(outdir + outfile.replace(postfix, postfix + "-80mas"), overwrite=True)
 
-            if 'sci' in outfile:
-                cutout_40mas = block_replicate(cutout_80mas.data, 2,  conserve_sum=True)
+            if "sci" in outfile:
+                cutout_40mas = block_replicate(cutout_80mas.data, 2, conserve_sum=True)
             else:
                 # weights go with inv variance, so we need to multiply by 4
-                cutout_40mas = block_replicate(cutout_80mas.data, 2)*4
+                cutout_40mas = block_replicate(cutout_80mas.data, 2) * 4
 
             hdr.update(target_wcs.to_header())
             hdu = fits.PrimaryHDU(cutout_40mas.astype(np.float32), header=hdr)
             hdu.writeto(outdir + outfile, overwrite=True)
             print(f"Saved {outdir + outfile} (registered to 40mas grid)")
 
+    for infile, outfile in files_80mas:
+        with fits.open(indir + infile) as hdul:
+            data = hdul[0].data
+            hdr = hdul[0].header
+            # https://drizzlepac.readthedocs.io/en/deployment/adrizzle.html
+            hdr["KERNEL"] = ("square", "Drizzle kernel")  # also turbo -> speed up
+            hdr["PIXFRAC"] = (1.0, "Drizzle pixfrac")
+            # NOTE this is on the 80mas grid, so does not correspond to the 40mas pixel scale
+            # PIXFRAC =                  1.0 / Drizzle parameter describing pixel shrinking
+            # PXSCLRT =   0.7251965743873189 / Pixel scale ratio relative to native detector s
+            # Extract the cutout at the 80mas scale
+            # make it slightly larger to avoid edge effects
+            size_80mas = (size[0] // 2 + 4, size[1] // 2 + 4)
+            cutout_80mas = Cutout2D(data, position=center_radec, size=size_80mas, wcs=WCS(hdr))
+            # Reproject to 40mas grid
+            reprojected_data, _ = reproject_interp(
+                (cutout_80mas.data, cutout_80mas.wcs),
+                output_projection=target_wcs,
+                shape_out=target_shape,
+                order="nearest-neighbor",
+                parallel=8,
+            )
+            # update hdr with new wcs
+            hdr.update(target_wcs.to_header())
+            hdu = fits.PrimaryHDU(reprojected_data.astype(np.float32), header=hdr)
+            hdu.writeto(outdir + outfile.replace(postfix, postfix + "reproject"), overwrite=True)
+            print(f"Saved {outdir + outfile} (registered to 40mas grid)")
 
-    # for infile, outfile in files_80mas:
-    #     with fits.open(indir + infile) as hdul:
-    #         data = hdul[0].data
-    #         hdr = hdul[0].header
-    #         # https://drizzlepac.readthedocs.io/en/deployment/adrizzle.html
-    #         hdr['KERNEL'] = ('square', 'Drizzle kernel'
-    #                          )  # also turbo -> speed up
-    #         hdr['PIXFRAC'] = (1.0, 'Drizzle pixfrac')
-    #         # NOTE this is on the 80mas grid, so does not correspond to the 40mas pixel scale
-    #         # PIXFRAC =                  1.0 / Drizzle parameter describing pixel shrinking
-    #         # PXSCLRT =   0.7251965743873189 / Pixel scale ratio relative to native detector s
-    #         # Extract the cutout at the 80mas scale
-    #         # make it slightly larger to avoid edge effects
-    #         size_80mas = (size[0] // 2 + 4, size[1] // 2 + 4)
-    #         cutout_80mas = Cutout2D(data,
-    #                                 position=center_radec,
-    #                                 size=size_80mas,
-    #                                 wcs=WCS(hdr))
-    #         # Reproject to 40mas grid
-    #         reprojected_data, _ = reproject_interp(
-    #             (cutout_80mas.data, cutout_80mas.wcs),
-    #             output_projection=target_wcs,
-    #             shape_out=target_shape,
-    #             order='bicubic')
-    #         # update hdr with new wcs
-    #         hdr.update(target_wcs.to_header())
-    #         hdu = fits.PrimaryHDU(reprojected_data.astype(np.float32),
-    #                               header=hdr)
-    #         hdu.writeto(outdir + outfile, overwrite=True)
-    #         print(f"Saved {outdir + outfile} (registered to 40mas grid)")
+
+# %%
+@staticmethod
+def bin_remap_xy(x_hi: float, y_hi: float, k: int) -> tuple[float, float]:
+    """Map center-of-pixel coords (origin at pixel centers, 0-based) from hi→lo."""
+    shift = (k - 1) / 2.0
+    return (x_hi - shift) / k, (y_hi - shift) / k
+
+
+@staticmethod
+def expand_remap_xy(x_hi: float, y_hi: float, k: int) -> tuple[float, float]:
+    """Map center-of-pixel coords (origin at pixel centers, 0-based) from hi→lo."""
+    shift = (k - 1) / 2.0
+    return (x_hi + shift) * k, (y_hi + shift) * k
+
+
+def make_testdata():
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    from astropy.coordinates import SkyCoord
+    from astropy.nddata import Cutout2D
+    from astropy.table import Table
+    from reproject import reproject_interp
+    from reproject import reproject_adaptive
+    import numpy as np
+
+    """Create cutouts for UDS images based on user-defined parameters."""
+    indir = "/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/"
+    outdir = "/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/testdata/"
+
+    ref_wcs = WCS(
+        fits.getheader(
+            indir + "uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_sci_skysubvar.fits"
+        )
+    )
+
+    # --- User parameters from the pasted image ---
+    center_ra, center_dec = 34.3032414, -5.1113316
+    xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
+    xy_even = xy + xy % 2
+
+    size_x_40mas = 1000
+    size_y_40mas = 820
+    postfix = "test"
+
+    center_ra, center_dec = 34.4232414, -5.1213316
+    xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
+    xy_even = xy + xy % 2
+    size_x_40mas = 1400
+    size_y_40mas = 1020
+    postfix = "test2"
+
+    # size_x_40mas = 3500
+    # size_y_40mas = 2520
+    # postfix = "medium"
+
+    # center_ra, center_dec = 34.303612, -5.1203157
+    # xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
+    # xy_even = xy + xy % 2
+    # size_x_40mas = 7000
+    # size_y_40mas = 3520
+    # postfix = 'large'
+
+    # center_ra, center_dec = 34.361343, -5.1326021
+    # xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
+    # xy_even = xy + xy % 2
+    # size_x_40mas = 29_000
+    # size_y_40mas = 7600
+    # postfix = 'half'
+
+    center_radec = SkyCoord(center_ra, center_dec, unit="deg")
+    size = (size_y_40mas, size_x_40mas)  # Cutout2D expects (ny, nx)
+
+    xy = np.array(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
+    ll = np.ceil(xy - np.array(size[::-1]) / 2)
+    xy_even = xy + ll % 2
+    ra_even, dec_even = ref_wcs.wcs_pix2world(xy_even[0], xy_even[1], 0)
+    center_radec_even = SkyCoord(ra_even, dec_even, unit="deg")
+
+    # --- File lists ---
+    files_40mas = [
+        (
+            "uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_sci_skysubvar.fits",
+            f"uds-{postfix}-f444w_sci.fits",
+        ),
+        (
+            "uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_wht.fits",
+            f"uds-{postfix}-f444w_wht.fits",
+        ),
+        (
+            "uds-grizli-v8.0-minerva-v1.0-40mas-f115w-clear_drc_sci_skysubvar.fits",
+            f"uds-{postfix}-f115w_sci.fits",
+        ),
+        (
+            "uds-grizli-v8.0-minerva-v1.0-40mas-f115w-clear_drc_wht.fits",
+            f"uds-{postfix}-f115w_wht.fits",
+        ),
+        ("LW_f277w-f356w-f444w_SEGMAP.fits", f"uds-{postfix}-LW_seg.fits"),
+        #       ("LW_f277w-f356w-f444w_opterr.fits", "uds-test-f444w_opterr.fits"),
+        #       ("LW_f277w-f356w-f444w_optavg.fits", "uds-test-f444w_optavg.fits"),
+    ]
+
+    # --- Extract cutouts for 40mas images ---
+    for infile, outfile in files_40mas:
+        with fits.open(indir + infile) as hdul:
+            data = hdul[0].data
+            hdr = hdul[0].header
+            wcs = WCS(hdr)
+            cutout = Cutout2D(data, position=xy_even, size=size, wcs=wcs)
+            hdr.update(cutout.wcs.to_header())
+            hdu = fits.PrimaryHDU(cutout.data, header=hdr)
+            hdu.writeto(outdir + outfile, overwrite=True)
+            print(f"Saved {outdir+outfile}")
+            print(cutout.origin_original, cutout.shape)
+
+    # Use the WCS and shape from one of the 40mas cutouts as the target
+    ref_cutout_file = outdir + files_40mas[0][1]
+    with fits.open(ref_cutout_file) as ref_hdul:
+        target_header = ref_hdul[0].header
+        target_wcs = WCS(target_header)
+        target_shape = ref_hdul[0].data.shape
+
+    files_80mas = [
+        ("uds-sbkgsub-v1.0-80mas-f770w_drz_sci.fits", f"uds-{postfix}-f770w_sci.fits"),
+        ("uds-sbkgsub-v1.0-80mas-f770w_drz_wht.fits", f"uds-{postfix}-f770w_wht.fits"),
+    ]
+    # target_80mas = rebin_wcs(target_wcs, n=1)  # Downsample by a factor of 2
+
+    from astropy.nddata import block_replicate
+
+    for infile, outfile in files_80mas:
+        with fits.open(indir + infile) as hdul:
+            data = hdul[0].data
+            hdr = hdul[0].header
+            # https://drizzlepac.readthedocs.io/en/deployment/adrizzle.html
+            hdr["KERNEL"] = ("square", "Drizzle kernel")  # also turbo -> speed up
+            hdr["PIXFRAC"] = (1.0, "Drizzle pixfrac")
+            # NOTE this is on the 80mas grid, so does not correspond to the 40mas pixel scale
+            # PIXFRAC =                  1.0 / Drizzle parameter describing pixel shrinking
+            # PXSCLRT =   0.7251965743873189 / Pixel scale ratio relative to native detector s
+            # Extract the cutout at the 80mas scale
+            # make it slightly larger to avoid edge effects
+            wcs_80mas = WCS(hdr)
+            xy_80mas = np.array(wcs_80mas.wcs_world2pix(ra_even, dec_even, 0))
+            # Ensure xy is even for the cutout, so that 2x2 binnings are aligned
+            size_80mas = np.array((size[0] // 2, size[1] // 2))
+            cutout_80mas = Cutout2D(data, position=xy_80mas, size=size_80mas, wcs=WCS(hdr))
+            hdr.update(cutout_80mas.wcs.to_header())
+            hdu = fits.PrimaryHDU(cutout_80mas.data.astype(np.float32), header=hdr)
+            hdu.writeto(outdir + outfile.replace(postfix, postfix + "-80mas"), overwrite=True)
+            print(f"Saved {outdir + outfile.replace(postfix, postfix + '-80mas')}")
+            print("check expected, wcs", bin_remap_xy(xy_even[0], xy_even[1], 2), xy_80mas)
+            print("origin, shape", cutout_80mas.origin_original, cutout_80mas.shape)
+
+            if "sci" in outfile:
+                cutout_40mas = block_replicate(cutout_80mas.data, 2, conserve_sum=True)
+            else:
+                # weights go with inv variance, so we need to multiply by 4
+                cutout_40mas = block_replicate(cutout_80mas.data, 2) * 4
+
+            hdr.update(target_wcs.to_header())
+            hdu = fits.PrimaryHDU(cutout_40mas.astype(np.float32), header=hdr)
+            hdu.writeto(outdir + outfile, overwrite=True)
+            print(f"Saved {outdir + outfile} (registered to 40mas grid)")
+            print(cutout.origin_original, cutout.shape)
+
+    for infile, outfile in files_80mas:
+        with fits.open(indir + infile) as hdul:
+            data = hdul[0].data
+            hdr = hdul[0].header
+            # https://drizzlepac.readthedocs.io/en/deployment/adrizzle.html
+            hdr["KERNEL"] = ("square", "Drizzle kernel")  # also turbo -> speed up
+            hdr["PIXFRAC"] = (1.0, "Drizzle pixfrac")
+            # NOTE this is on the 80mas grid, so does not correspond to the 40mas pixel scale
+            # PIXFRAC =                  1.0 / Drizzle parameter describing pixel shrinking
+            # PXSCLRT =   0.7251965743873189 / Pixel scale ratio relative to native detector s
+            # Extract the cutout at the 80mas scale
+            # make it slightly larger to avoid edge effects
+            size_80mas = (size[0] // 2, size[1] // 2)
+            cutout_80mas = Cutout2D(
+                data, position=center_radec_even, size=size_80mas, wcs=WCS(hdr)
+            )
+
+            # Reproject to 40mas grid
+            reprojected_data, _ = reproject_interp(
+                (cutout_80mas.data, cutout_80mas.wcs),
+                output_projection=target_wcs,
+                shape_out=target_shape,
+                order="nearest-neighbor",
+                parallel=8,
+            )
+            # update hdr with new wcs
+            hdr.update(target_wcs.to_header())
+            hdu = fits.PrimaryHDU(reprojected_data.astype(np.float32) / 4, header=hdr)
+            hdu.writeto(
+                outdir + outfile.replace(postfix, postfix + "reproject-nn"), overwrite=True
+            )
+
+            reprojected_data, _ = reproject_interp(
+                (cutout_80mas.data, cutout_80mas.wcs),
+                output_projection=target_wcs,
+                shape_out=target_shape,
+                order="bicubic",
+                parallel=8,
+            )
+            # update hdr with new wcs
+            hdr.update(target_wcs.to_header())
+            hdu = fits.PrimaryHDU(reprojected_data.astype(np.float32) / 4, header=hdr)
+            hdu.writeto(outdir + outfile.replace(postfix, postfix + "reproject"), overwrite=True)
+            print(f"Saved {outdir + outfile} (registered to 40mas grid)")
+
+
+def check_project():
+    from astropy.io import fits
+    from astropy.nddate import block_replicate
+
+    indir = "/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/testdata/"
+
+    im_blk = fits.getdata(indir + "uds-test-f770w_sci.fits")
+    wcs_blk = WCS(fits.getheader(indir + "uds-test-f770w_sci.fits"))
+    im_rep = fits.getdata(indir + "uds-testreproject-nn-f770w_sci.fits")
+    wcs_rep = WCS(fits.getheader(indir + "uds-testreproject-nn-f770w_sci.fits"))
+
+    im_rep[0:2, 0:2], im_blk[0:2, 0:2], im_rep[0:2, 0:2] - im_blk[0:2, 0:2]
+
+    ix, iy = np.round(wcs_blk.wcs_world2pix(34.303612, -5.1153157, 0)).astype(int)
+    ixr, iyr = np.round(wcs_rep.wcs_world2pix(34.303612, -5.1153157, 0)).astype(int)
+
+    print(ix, iy, im_blk[iy, ix], ixr, iyr, im_rep[iyr, ixr])
+
+    im_80 = fits.getdata(indir + "uds-test-80mas-f770w_sci.fits")
+    im_80_40 = block_replicate(im_80, 2, conserve_sum=True)
+    im_80_40[0:4, 0:4] - im_rep[0:4, 0:4]
+    print((im_80_40 - im_rep).max())
+    print((im_80_40 - im_blk).max())
+
 
 # %%
 
 
 if __name__ == "__main__":
-    data_dir = '/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/'
+    data_dir = "/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/"
 
     from astropy.wcs import WCS
     from astropy.io import fits
 
-    hdr = fits.getheader(data_dir+'uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_sci.fits')
+    hdr = fits.getheader(data_dir + "uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_sci.fits")
     wcs_40mas = WCS(hdr)
-# doesnt work -> scaling is not correct
+    # doesnt work -> scaling is not correct
     wcs_80mas = wcs_40mas.slice((slice(None, None, 2), slice(None, None, 2)))
 
     # create a new WCS that corresponds to slicing every 2nd pixel in both Y and X
-    #wcs2 = wcs.slice((slice(None, None, 2), slice(None, None, 2)))
+    # wcs2 = wcs.slice((slice(None, None, 2), slice(None, None, 2)))
 
 # %%

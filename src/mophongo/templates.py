@@ -13,10 +13,11 @@ from scipy.signal import fftconvolve
 from scipy.interpolate import interp1d
 from astropy.nddata import block_reduce
 
-from .utils import measure_shape 
+from .utils import measure_shape
 from .psf_map import PSFRegionMap
 
 logger = logging.getLogger(__name__)
+
 
 def _convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     """Convolve ``image`` with ``kernel`` using direct sliding windows."""
@@ -26,8 +27,10 @@ def _convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     pad_after = (ky - 1 - pad_y, kx - 1 - pad_x)
     padded = np.pad(image, (pad_before, pad_after), mode="constant")
     from numpy.lib.stride_tricks import sliding_window_view
+
     windows = sliding_window_view(padded, kernel.shape)
     return np.einsum("ijkl,kl->ij", windows, kernel)
+
 
 class Template(Cutout2D):
     """Cutout-based template storing slice bookkeeping."""
@@ -54,8 +57,8 @@ class Template(Cutout2D):
         )
         # @@@ bug in Cutout2D: shape_input is not set correctly
         self.shape_input = data.shape
-        self.shape_original = data.shape 
-        self.wcs_original = wcs 
+        self.shape_original = data.shape
+        self.wcs_original = wcs
         # record shift from original position here
         self.id = label
         self.parent_id = label
@@ -67,18 +70,18 @@ class Template(Cutout2D):
         self.ee_fraction: float = 1.0
 
     @property
-    def bbox(
-            self
-    ) -> tuple[int, int, int, int]:  # pragma: no cover - simple alias
+    def bbox(self) -> tuple[int, int, int, int]:  # pragma: no cover - simple alias
         (ymin, ymax), (xmin, xmax) = self.bbox_original
         return int(ymin), int(ymax) + 1, int(xmin), int(xmax) + 1
 
-    def pad(self,
-            padding: Tuple[int, int],
-            original_shape: Tuple[int, int],
-            *,
-            image: np.ndarray | None = None,
-            inplace=False) -> "Template":
+    def pad(
+        self,
+        padding: Tuple[int, int],
+        original_shape: Tuple[int, int],
+        *,
+        image: np.ndarray | None = None,
+        inplace=False,
+    ) -> "Template":
         """Create a new Template with padding, maintaining correct original coordinates."""
 
         # force padding to be even, otherwise unpredictable behavior for cutout
@@ -89,7 +92,7 @@ class Template(Cutout2D):
         # This ensures all coordinates remain consistent with the true original
         if image is None:
             image = np.zeros(self.shape_input, dtype=self.data.dtype)
-        
+
         new_template = Template(
             data=image,
             position=self.input_position_original,
@@ -99,7 +102,7 @@ class Template(Cutout2D):
         )
 
         # Now place the old data in our padded version
-        new_template.data[ony:ony + ny, onx:onx + nx] = self.data
+        new_template.data[ony : ony + ny, onx : onx + nx] = self.data
 
         # if inplace is True, update the current instance
         if inplace:
@@ -107,7 +110,6 @@ class Template(Cutout2D):
             self.__dict__.update(new_template.__dict__)
 
         return new_template
-
 
     # ------------------------------------------------------------------
     # centred, even-padding convolution
@@ -165,21 +167,21 @@ class Template(Cutout2D):
 
         # # --------- 3. build a fresh Cutout2D --------------------------------
         new_cut = Template(
-            parent_image,          # original full image reference
-            position=self.input_position_original, # note (x, y)  
-            size=(ny_even, nx_even),     # (ny, nx)
-            wcs=self.wcs,     # note wcs origin is wrong
-            label=self.id,   
-            copy=False,       # do not copy the data, we are replacing later     
+            parent_image,  # original full image reference
+            position=self.input_position_original,  # note (x, y)
+            size=(ny_even, nx_even),  # (ny, nx)
+            wcs=self.wcs,  # note wcs origin is wrong
+            label=self.id,
+            copy=False,  # do not copy the data, we are replacing later
         )
 
         # copy the convolution result into the enlarged cut-out
         # account for the extra pixel
         # 4.  centre `full` inside the (possibly larger) even array -------------
-        y0 = (ny_even - ny) // 2     # shift is 0 or 1
+        y0 = (ny_even - ny) // 2  # shift is 0 or 1
         x0 = (nx_even - nx) // 2
         data = np.zeros(new_cut.data.shape, dtype=self.data.dtype)
-        data[y0:y0 + ny, x0:x0 + nx] = full
+        data[y0 : y0 + ny, x0 : x0 + nx] = full
         new_cut.data = data
 
         return new_cut
@@ -224,12 +226,12 @@ class Template(Cutout2D):
             return (coord - shift) / k
 
         for attr in (
-                "input_position_cutout",
-                #            "input_position_original",
-                "center_cutout",
-                #            "center_original",
-                "y",
-                "x",
+            "input_position_cutout",
+            #            "input_position_original",
+            "center_cutout",
+            #            "center_original",
+            "y",
+            "x",
         ):
             if hasattr(lo, attr):
                 y, x = getattr(lo, attr)
@@ -237,8 +239,7 @@ class Template(Cutout2D):
 
         return lo
 
-    def downsample_wcs(self, image_lo: np.ndarray, wcs_lo,
-                       k: int) -> "Template":
+    def downsample_wcs_old(self, image_lo: np.ndarray, wcs_lo, k: int) -> "Template":
         """
         Downsample this template to a lower resolution using the target image and WCS.
 
@@ -271,18 +272,117 @@ class Template(Cutout2D):
         # print('original data shape:', self.shape_input, image_lo.shape)
         # print(self.wcs)
         # print(wcs_lo)
-#        Create the new template using the low-res image and WCS
-        lowres_tmpl = Template(image_lo, (x_lo, y_lo), (height, width),
-                               wcs=wcs_lo,
-                               label=self.id)
+        #        Create the new template using the low-res image and WCS
+        lowres_tmpl = Template(image_lo, (x_lo, y_lo), (height, width), wcs=wcs_lo, label=self.id)
 
         # Fill the data with block-reduced (averaged) values from the high-res template
         lowres_tmpl.data[:] = block_reduce(self.data, k, func=np.sum)
         return lowres_tmpl
 
+    # block alignment methods currently not used
+    @staticmethod
+    def block_aligned(
+        pos: np.ndarray,  # [x_c, y_c] (float)
+        orig_size: np.ndarray,  # [ny, nx] (int)  <-- note reversed vs pos
+        block_align: int,
+        rfunc: Callable[[np.ndarray], np.ndarray] = np.ceil,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Return (size_aligned, idx_min_aligned) so that
+            idx_min_aligned = rfunc(pos - size_aligned/2)
+        and idx_min_aligned % k == 0,
+        with the smallest even Δsize per axis.
+
+        Conventions:
+        - pos is [x, y]
+        - size is [ny, nx]
+        """
+
+        # first force size to be minimum block size
+        size = np.maximum(np.asarray(orig_size), block_align).astype(np.int64)
+
+        # initial starts (paired with size[::-1] to match x↔nx, y↔ny)
+        idx0 = rfunc(pos - size[::-1] / 2.0).astype(np.int64)  # [x0, y0]
+
+        # minimal steps t: idx0 - t ≡ 0 (mod k)  ->  t ≡ idx0 (mod k)
+        steps = idx0 % block_align  # [tx, ty]
+
+        # add 2*steps to the paired sizes (map back with [::-1])
+        dsize = 2 * steps[::-1]  # [dny, dnx]
+        size_new = (size + dsize).astype(np.int64)  # [ny', nx']
+
+        # recompute aligned starts
+        idxmin = rfunc(pos - size_new[::-1] / 2.0).astype(np.int64)
+        return size_new, idxmin
+
+    @staticmethod
+    def bin_remap(x: float | tuple[float, float], k: int) -> np.ndarray:
+        """Map center-of-pixel coords (origin at pixel centers, 0-based) from hi→lo."""
+        shift = (k - 1) / 2.0
+        return (np.array(x) - shift) / k
+
+    @staticmethod
+    def expand_remap(x: float | tuple[float, float], k: int) -> np.ndarray:
+        """Map center-of-pixel coords (origin at pixel centers, 0-based) from hi→lo."""
+        shift = (k - 1) / 2.0
+        return (np.array(x) + shift) * k
+
+    # verified for k=2,4 for sizes 4-16
+    def downsample(
+        self, k: int, image: np.ndarray | None = None, wcs_lo: WCS | None = None
+    ) -> "Template":
+        """
+        Flux-conserving k× downsample aligned to the global hi-res grid.
+        Handles negative origins, preserves center-of-pixel convention.
+        """
+        from copy import deepcopy
+
+        if k == 1:
+            return deepcopy(self)
+
+        H, W = self.data.shape
+
+        # Global lower-left of this cutout (integer pixel indices, can be negative)
+        # Cutout2D uses (x, y); ensure we keep that order consistent
+        x0_hi, y0_hi = map(int, self._origin_original_true)
+
+        # Phase to reach the next k-aligned boundary *inside* this cutout
+        dx = (-x0_hi) % k
+        dy = (-y0_hi) % k
+
+        # Low-res size from the remaining pixels after phase adjustment
+        hlo = H // k
+        wlo = W // k
+        if hlo <= 0 or wlo <= 0:
+            raise ValueError("Cutout too small to downsample with current k/phase.")
+
+        # Hi-res block aligned to k×k boundaries
+        hi_aligned = self.data[dy : dy + hlo * k, dx : dx + wlo * k]
+        # Flux-conserving reduction
+        lo_block = block_reduce(hi_aligned, k, func=np.sum)
+
+        # print(hlo, wlo, k, lo_block.shape, hi_aligned.shape)
+
+        # Map the *center* correctly
+        x_lo, y_lo = self.bin_remap(self.input_position_original, k)
+        shape_input = np.array(self.shape_input) // k
+
+        if image is None:
+            image = np.zeros(shape_input)
+        # Build the low-res Template at the correct fractional center
+        low = Template(image, (x_lo, y_lo), (hlo, wlo), wcs=wcs_lo, label=self.id)
+
+        ly, lx = lo_block.shape
+        # print(wlo, hlo, low.shape)
+        # print(dx, dy, ly, lx)
+        low.data[:ly, :lx] = lo_block
+
+        return low
+
 
 class Templates:
     """Container for source templates."""
+
     min_size = 8  # minimum size of a template in pixels
 
     def __init__(self) -> None:
@@ -366,9 +466,9 @@ class Templates:
         # Step 1: Extract raw cutouts
         obj.extract_templates(hires_image, segmap, positions, wcs=wcs)
 
-        #if type(extension) == np.ndarray:
+        # if type(extension) == np.ndarray:
         # Extend templates with PSF wings
-        #obj.extend_with_psf_wings(extension, inplace=True)
+        # obj.extend_with_psf_wings(extension, inplace=True)
 
         # Step 2: Convolve with kernel (includes padding)
         if kernel is not None:
@@ -428,9 +528,7 @@ class Templates:
         rr = np.arange(len(prof))
 
         if weight_770 is not None:
-            sigma_pix = float(
-                np.median(np.sqrt(1 / weight_770[weight_770 > 0]))
-            )
+            sigma_pix = float(np.median(np.sqrt(1 / weight_770[weight_770 > 0])))
         else:
             sigma_pix = float(np.std(image_770))
 
@@ -469,7 +567,7 @@ class Templates:
         pred = np.empty(len(templates), dtype=float)
         for i, tmpl in enumerate(templates):
             w = weights[tmpl.slices_original]
-            pred[i] = 1.0 / np.sqrt(np.sum(w * tmpl.data[tmpl.slices_cutout]**2))
+            pred[i] = 1.0 / np.sqrt(np.sum(w * tmpl.data[tmpl.slices_cutout] ** 2))
             tmpl.err = pred[i]  # Store RMS in the template for later use
         return pred
 
@@ -525,7 +623,8 @@ class Templates:
 
         for pos in tqdm(positions, desc="Extracting templates"):
             # silently skip invalid positions
-            if not np.isfinite(pos).all(): continue
+            if not np.isfinite(pos).all():
+                continue
             x, y = int(round(pos[0])), int(round(pos[1]))
             if y < 0 or y >= ny or x < 0 or x >= nx:
                 continue
@@ -539,25 +638,25 @@ class Templates:
 
             # Make bbox symmetric around the center to ensure proper centering
             # enfore minimum size
-            height = max(y - bbox.iymin, bbox.iymax - y, self.min_size//2) * 2 
-            width =  max(x - bbox.ixmin, bbox.ixmax - x, self.min_size//2) * 2 
+            height = max(y - bbox.iymin, bbox.iymax - y, self.min_size // 2) * 2
+            width = max(x - bbox.ixmin, bbox.ixmax - x, self.min_size // 2) * 2
 
             # Create template cutout
             cut = Template(hires_image, pos, (height, width), wcs=wcs, label=label)
 
             # zero out all non segment pixels
-            cut.data[cut.slices_cutout] *= (
-                segm.data[cut.slices_original] == label).astype(cut.data.dtype)
+            cut.data[cut.slices_cutout] *= (segm.data[cut.slices_original] == label).astype(
+                cut.data.dtype
+            )
 
             # sum data should never be zero. There should
             # there should also never be NaNs.
-            cut.data /= np.sum(cut.data) 
- 
+            cut.data /= np.sum(cut.data)
+
             templates.append(cut)
 
         self._templates = templates
         return templates
-
 
     def convolve_templates(
         self,
@@ -593,7 +692,7 @@ class Templates:
         dummy_image = np.zeros(original_shape, dtype=np.byte)
 
         new_templates: list[Template] = []
-        for i,tmpl in enumerate(tqdm(tmpls, desc="Convolving templates")):
+        for i, tmpl in enumerate(tqdm(tmpls, desc="Convolving templates")):
 
             # Obtain kernel for this template
             if isinstance(kernel, PSFRegionMap):
@@ -608,7 +707,7 @@ class Templates:
 
             if tmpl.ee_rlim > 0.0 and tmpl.ee_fraction < 1.0:
                 kern, tmpl.ee_fraction = Templates._crop_kernel(kern, tmpl.ee_rlim)
- 
+
             new_tmpl = tmpl.convolve_cutout(kern, parent_image=dummy_image)
 
             if not inplace:
@@ -616,12 +715,11 @@ class Templates:
 
         return new_templates if not inplace else self._templates
 
-
-
     # put this in PSF class?
     @staticmethod
-    def _sample_psf(psf: np.ndarray, position: Tuple[float, float],
-                    height: int, width: int) -> np.ndarray:
+    def _sample_psf(
+        psf: np.ndarray, position: Tuple[float, float], height: int, width: int
+    ) -> np.ndarray:
         """Sample PSF at all positions in a grid centered at (center_x, center_y)."""
 
         # Create coordinate grids
@@ -638,10 +736,7 @@ class Templates:
         ix = np.round(cx + dx).astype(int)
 
         # Check bounds
-        valid = ((iy >= 0)
-                 & (iy < psf.shape[0])
-                 & (ix >= 0)
-                 & (ix < psf.shape[1]))
+        valid = (iy >= 0) & (iy < psf.shape[0]) & (ix >= 0) & (ix < psf.shape[1])
 
         # Sample PSF values
         vals = np.zeros((height, width), dtype=float)
@@ -649,11 +744,9 @@ class Templates:
 
         return vals
 
-    def extend_with_psf_wings(self,
-                              psf: np.ndarray,
-                              *,
-                              radius_factor: float = 1.5,
-                              inplace: bool = False) -> List[Template]:
+    def extend_with_psf_wings(
+        self, psf: np.ndarray, *, radius_factor: float = 1.5, inplace: bool = False
+    ) -> List[Template]:
         """Extend templates using PSF scaled to segment flux, placed where template is zero."""
 
         psf = psf / psf.sum()
@@ -673,7 +766,7 @@ class Templates:
             pady, padx = int(ny * (radius_factor - 1)), int(nx * (radius_factor - 1))
 
             # Pad the template
-            new_tmpl = tmpl.pad((pady,padx), self.original_shape, inplace=inplace)
+            new_tmpl = tmpl.pad((pady, padx), self.original_shape, inplace=inplace)
 
             # Sample PSF at all template positions
             nh, nw = new_tmpl.data.shape
@@ -701,12 +794,12 @@ class Templates:
             # Store original flux for diagnostics
             flux_before = data.sum()
             flux_after = new_tmpl.data.sum()
-            flux_added =  flux_after - flux_before
+            flux_added = flux_after - flux_before
 
             # Print diagnostics
-#            print(f"Source flux: {flux_before:.2f}, PSF scale: {psf_scale:.3f}, "
-#                  f"Flux before: {flux_before:.2f}, after: {flux_after:.2f}, "
-#                  f"added: {flux_added:.2f} ({100*flux_added/flux_before:.1f}%)")
+        #            print(f"Source flux: {flux_before:.2f}, PSF scale: {psf_scale:.3f}, "
+        #                  f"Flux before: {flux_before:.2f}, after: {flux_after:.2f}, "
+        #                  f"added: {flux_added:.2f} ({100*flux_added/flux_before:.1f}%)")
 
         if not inplace:
             return new_templates

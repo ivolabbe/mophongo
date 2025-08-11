@@ -10,3 +10,5 @@ examples/*fits
 examples/stars/
 legacy/autopilot/*png
 legacy/autopilot/*pdf
+!data/*large*
+!data/*half*

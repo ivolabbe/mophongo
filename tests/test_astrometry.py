@@ -15,6 +15,7 @@ from mophongo.fit import SparseFitter, FitConfig
 from mophongo.astrometry import AstroCorrect, AstroMap
 from utils import save_diagnostic_image
 
+
 def test_polynomial_astrometry_reduces_residual(tmp_path):
     images, segmap, catalog, psfs, truth, wht = make_simple_data(
         nsrc=10, size=151, peak_snr=5, seed=42
@@ -36,7 +37,7 @@ def test_polynomial_astrometry_reduces_residual(tmp_path):
     err = fitter.flux_errors()
     perr = fitter.predicted_errors()
     res = fitter.residual()
-    
+
     res0 = fitter.residual()
 
     ac = AstroCorrect(FitConfig())
@@ -50,7 +51,7 @@ def test_polynomial_astrometry_reduces_residual(tmp_path):
     assert abs(rhx[0] - shx) < 0.3
     assert abs(rhy[0] - shy) < 0.3
 
-    tmp_path = Path('../tmp')
+    tmp_path = Path("../tmp")
     tmp_path.mkdir(exist_ok=True)
     fname = tmp_path / "diagnostic_poly_shift.png"
     model = images[1] - res0
@@ -65,6 +66,7 @@ def test_polynomial_astrometry_reduces_residual(tmp_path):
         catalog=catalog,
     )
 
+
 def test_gp_astrometry_returns_models():
     images, segmap, catalog, psfs, truth, wht = make_simple_data(
         nsrc=5, size=101, peak_snr=5, seed=1
@@ -76,9 +78,7 @@ def test_gp_astrometry_returns_models():
 
     images[1] = nd_shift(images[1], (-0.5, 0.6))
 
-    tmpls = Templates.from_image(
-        images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel
-    )
+    tmpls = Templates.from_image(images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel)
 
     fitter = SparseFitter(tmpls.templates, images[1], wht[1], FitConfig())
     fitter.build_normal_matrix()

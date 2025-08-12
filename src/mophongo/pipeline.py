@@ -160,10 +160,10 @@ class Pipeline:
         self.extend_templates = extend_templates
         self.config = config
 
-        self.residuals: list[np.ndarray] | None = None
-        self.fitter = None
-        self.astro = None
-        self.templates = None
+        self.residuals: list[np.ndarray] = []
+        self.fit: list[np.ndarray] = []
+        self.astro: list[np.ndarray] = []
+        self.templates: list[np.ndarray] = []
 
     def run(self) -> tuple[Table, list[np.ndarray], SparseFitter]:
         """Run photometry on the configured images.
@@ -362,19 +362,17 @@ class Pipeline:
                 print(f"Downsampling residuals by factor {k}")
                 res = block_reduce(res, k, func=np.sum)
 
-            residuals.append(res)
+            if "astro" in locals():
+                self.astro.append(astro)
+            self.residuals.append(res)
+            self.fit.append(fitter)
+            self.templates.append(templates)
 
         print(f"Pipeline (end) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB")
 
-        self.residuals = residuals
-        self.fitter = fitter
-        self.templates = tmpls
         self.catalog = cat
-        if "astro" in locals():
-            fitter.astro = astro
-            self.astro = astro
 
-        return cat, residuals, fitter
+        return cat, self.residuals, self.fit
 
 
 def run(

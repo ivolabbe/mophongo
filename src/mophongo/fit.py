@@ -48,14 +48,12 @@ class FitConfig:
     # of the normal matrix diagonal.
     reg: float = 0.0
     bad_value: float = np.nan
-    solve_method: str = "ata"  # 'ata' or 'lo' (linear operator)
+    solve_method: str = "ata"  # 'ata', 'components', 'lo' (linear operator)
     cg_kwargs: Dict[str, Any] = field(
         default_factory=lambda: {"M": None, "maxiter": 500, "atol": 1e-6}
     )
     fit_covariances: bool = False  # Use simple fitting errors from diagonal of normal matrix
-    fft_fast: float | bool = (
-        False  # False for full kernel, float (0.1-1.0) for truncated FFT kernels
-    )
+    fft_fast: float | bool = False  # False for full kernel, 0.1-1.0 for truncated FFT
     # condense fit astrometry flags into one: fit_astrometry_niter = 0, means not fitting astrometry
     fit_astrometry_niter: int = 2  # Number of astrometry refinement passes (0 → disabled)
     fit_astrometry_joint: bool = False  # Use joint astrometry fitting, or separate step
@@ -73,7 +71,7 @@ class FitConfig:
     multi_tmpl_psf_core: bool = False
     multi_tmpl_colour: bool = False
     #    multi_resolution_method: str = "upsample"  # 'upsample' or 'downsample'
-    multi_resolution_method: str = "downsample"  # 'upsample' or 'downsample'
+    multi_resolution_method: str = "upsample"  # 'upsample' or 'downsample'
     normal: str = "tree"  # 'loop' or 'tree'
 
 
@@ -114,7 +112,7 @@ def _diag_inv_hutch(A, k=32, rtol=1e-4, maxiter=None, seed=0):
     return np.sqrt(np.abs(acc / k))
 
 
-def sparse_cholesky_leftlooking(
+def sparse_cholesky(
     A: sp.spmatrix, *, use_rcm: bool = False, drop_tol: float = 0.0
 ) -> tuple[csc_matrix, np.ndarray]:
     """Sparse left-looking Cholesky factorization.
@@ -216,7 +214,7 @@ def make_sparse_chol_prec(
 ) -> LinearOperator:
     """Return ``LinearOperator`` applying ``(LLᵀ)⁻¹`` via sparse Cholesky."""
 
-    L, p = sparse_cholesky_leftlooking(A, use_rcm=use_rcm, drop_tol=drop_tol)
+    L, p = sparse_cholesky(A, use_rcm=use_rcm, drop_tol=drop_tol)
     n = A.shape[0]
     invp = np.empty_like(p)
     invp[p] = np.arange(n, dtype=p.dtype)
@@ -230,7 +228,7 @@ def make_sparse_chol_prec(
     return LinearOperator((n, n), matvec=_apply, rmatvec=_apply, dtype=A.dtype)
 
 
-def build_components_strtree_labels(
+def build_components_tree(
     templates: List[Template],
 ) -> tuple[np.ndarray, int]:
     """Label independent template groups using an ``STRtree``.
@@ -325,12 +323,14 @@ def solve_components_cg_with_labels(
         A_w = Dinv @ A @ Dinv
         b_w = b / d
 
-        M = make_sparse_chol_prec(A_w)
+        #        M = make_sparse_chol_prec(A_w)
+        M = None
         sol_w, info = cg(A_w, b_w, M=M, atol=0.0, rtol=rtol, maxiter=maxiter)
         x[idx] = sol_w / d
         infos.append(int(info))
 
     return x, infos
+
 
 def make_basis_per_component(
     templates: List[Template],
@@ -445,9 +445,7 @@ def assemble_component_system(
 
             if has_shift:
                 Sj = basis_vals[g_j]
-                if Sj is not None and (
-                    not ab_from_bright_only or basis_vals[g_i] is not None
-                ):
+                if Sj is not None and (not ab_from_bright_only or basis_vals[g_i] is not None):
                     Gxj, Gyj = grad_cache[g_j]
                     gx = float(np.sum(Ti * w * Gxj[sl_j_local]))
                     AB[iA, 0:p] += gx * Sj
@@ -463,9 +461,7 @@ def assemble_component_system(
                     Gxx = float(np.sum(Gxi[sl_i_local] * w * Gxj[sl_j_local]))
                     BB[0:p, 0:p] += Gxx * np.outer(Si, Sj)
                     if include_y:
-                        Gyy = float(
-                            np.sum(Gyi[sl_i_local] * w * Gyj[sl_j_local])
-                        )
+                        Gyy = float(np.sum(Gyi[sl_i_local] * w * Gyj[sl_j_local]))
                         BB[p : 2 * p, p : 2 * p] += Gyy * np.outer(Si, Sj)
 
     if has_shift:
@@ -480,11 +476,10 @@ def assemble_component_system(
             Gxj, Gyj = grad_cache[g_j]
             bB[0:p] += float(np.sum(Gxj[tj.slices_cutout] * w * img)) * Sj
             if include_y:
-                bB[p : 2 * p] += (
-                    float(np.sum(Gyj[tj.slices_cutout] * w * img)) * Sj
-                )
+                bB[p : 2 * p] += float(np.sum(Gyj[tj.slices_cutout] * w * img)) * Sj
 
     return AA.tocsr(), AB.tocsr(), csr_matrix(BB), bA, bB
+
 
 class SparseFitter:
     """Build and solve sparse normal equations for photometry."""
@@ -804,7 +799,7 @@ class SparseFitter:
             tmpl.flux = flux
             tmpl.err = err
 
-        return self.solution, self.solution_err, info
+        return x_full, e_full, {"cg_info": info}
 
     def solve_components(
         self, config: FitConfig | None = None
@@ -826,8 +821,12 @@ class SparseFitter:
         if reg > 0:
             A = A + eye(A.shape[0], format="csr") * reg
 
-        labels, ncomp = build_components_strtree_labels(self.templates)
-        summarize_components(labels)
+        if b.shape[0] > 100:
+            labels, ncomp = build_components_tree(self.templates)
+            summarize_components(labels)
+        else:
+            labels = np.ones(b.shape[0], dtype=int)
+            ncomp = 1
 
         rtol = cfg.cg_kwargs.get("rtol", 1e-6)
         maxit = cfg.cg_kwargs.get("maxiter", 2000)
@@ -882,7 +881,7 @@ class SparseFitter:
             Solver diagnostics including CG convergence flags.
         """
 
-        labels, ncomp = build_components_strtree_labels(self.templates)
+        labels, ncomp = build_components_tree(self.templates)
         summarize_components(labels)
         basis_vals = make_basis_per_component(
             self.templates, labels, self.bright_mask, order=order
@@ -924,15 +923,16 @@ class SparseFitter:
                 M = LinearOperator(K.shape, matvec=lambda v, D=D: v / D)
                 sol, info = cg(K, rhs, M=M, atol=0.0, rtol=rtol, maxiter=maxiter)
                 if info > 0:
-                    sol, info = minres(
-                        K, rhs, M=M, atol=0.0, rtol=rtol, maxiter=maxiter
-                    )
+                    sol, info = minres(K, rhs, M=M, atol=0.0, rtol=rtol, maxiter=maxiter)
                 na = len(comp)
                 alpha_comp = sol[:na]
                 beta_comp = sol[na:]
             alpha[np.array(comp)] = alpha_comp
             betas.append((cid, beta_comp))
             infos.append(int(info))
+
+        # calulate e_full
+        e_full = np.zeros_like(x_full, dtype=float)
 
         if self.config.positivity:
             alpha = np.maximum(0.0, alpha)
@@ -944,92 +944,8 @@ class SparseFitter:
         for tmpl, flux in zip(self._orig_templates, x_full):
             tmpl.flux = flux
 
-        info = {"ncomp": ncomp, "cg_info": infos}
-        return x_full, betas, info
-
-    def solve_linear_operator(
-        self,
-        config: FitConfig | None = None,
-        x0: np.ndarray | None = None,
-    ) -> tuple[np.ndarray, np.ndarray, dict]:
-        """Solve for template fluxes with LSQR on a matrix-free ``LinearOperator``.
-
-        Parameters
-        ----------
-        config
-            Optional :class:`FitConfig` overriding the fitter configuration.
-        x0
-            Optional starting vector for the iterative solver.
-
-        Returns
-        -------
-        flux, err, info
-            Best-fit coefficients, their 1-σ uncertainties (predicted-error
-            approximation) and a dictionary with solver diagnostics.
-        """
-
-        cfg = config or self.config
-
-        w_sqrt = np.sqrt(self.weights)
-        n_cols = len(self.templates)
-        img_shape = self.image.shape
-        flat_size = self.image.size
-
-        def _Av(x: np.ndarray) -> np.ndarray:
-            """Apply ``A`` scaled by ``W^{1/2}``."""
-
-            img = np.zeros_like(self.image, dtype=float)
-            for coeff, tmpl in zip(x, self.templates):
-                img[tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
-            return (w_sqrt * img).ravel()
-
-        def _ATv(y: np.ndarray) -> np.ndarray:
-            """Apply ``Aᵀ`` scaled by ``W^{1/2}``."""
-
-            y_img = w_sqrt * y.reshape(img_shape)
-            out = np.zeros(n_cols, dtype=float)
-            for i, tmpl in enumerate(self.templates):
-                out[i] = np.sum(tmpl.data[tmpl.slices_cutout] * y_img[tmpl.slices_original])
-            return out
-
-        Aop = LinearOperator(
-            shape=(flat_size, n_cols),
-            matvec=_Av,
-            rmatvec=_ATv,
-            dtype=float,
-        )
-
-        b = (w_sqrt * self.image).ravel()
-
-        atol = cfg.cg_kwargs.get("atol", 1e-6)
-        maxit = cfg.cg_kwargs.get("maxiter", 500)
-        result = lsqr(Aop, b, atol=atol, btol=atol, iter_lim=maxit, x0=x0)
-        x_hat, istop, itn, resid = result[0], result[1], result[2], result[3]
-
-        x_full = np.zeros(self.n_flux, dtype=float)
-        idx = [t.col_idx for t in self.templates]
-        x_full[idx] = x_hat
-
-        if cfg.positivity:
-            x_full = np.maximum(0.0, x_full)
-
-        err_full = self.predicted_errors()
-
-        self.solution = x_full
-        self.solution_err = err_full
-        for tmpl, f, e in zip(self._orig_templates, x_full, err_full):
-            tmpl.flux, tmpl.err = f, e
-
-        info = dict(istop=istop, itn=itn, resid_norm=resid)
-        return x_full, err_full, info
-
-    def solve_lo(
-        self,
-        config: FitConfig | None = None,
-        x0: np.ndarray | None = None,
-    ) -> tuple[np.ndarray, np.ndarray, dict]:
-        """Alias for :meth:`solve_linear_operator` (LSQR solver)."""
-        return self.solve_linear_operator(config=config, x0=x0)
+        info = {"ncomp": ncomp, "cg_info": infos, "betas": betas}
+        return x_full, e_full, info
 
     def residual(self) -> np.ndarray:
         return self.image - self.model_image()

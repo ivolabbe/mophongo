@@ -949,8 +949,8 @@ def make_testdata():
     center_ra, center_dec = 34.4232414, -5.1213316
     xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
     xy_even = xy + xy % 2
-    size_x_40mas = 1400
-    size_y_40mas = 1020
+    size_x_40mas = 1900
+    size_y_40mas = 1420
     postfix = "test2"
 
     # size_x_40mas = 3500

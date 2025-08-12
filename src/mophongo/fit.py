@@ -48,7 +48,7 @@ class FitConfig:
     # of the normal matrix diagonal.
     reg: float = 0.0
     bad_value: float = np.nan
-    solve_method: str = "ata"  # 'ata', 'components', 'lo' (linear operator)
+    solve_method: str = "ata"  # 'ata', 'scene', 'lo' (linear operator)
     cg_kwargs: Dict[str, Any] = field(
         default_factory=lambda: {"M": None, "maxiter": 500, "atol": 1e-6}
     )
@@ -228,7 +228,7 @@ def make_sparse_chol_prec(
     return LinearOperator((n, n), matvec=_apply, rmatvec=_apply, dtype=A.dtype)
 
 
-def build_components_tree(
+def build_scene_tree(
     templates: List[Template],
 ) -> tuple[np.ndarray, int]:
     """Label independent template groups using an ``STRtree``.
@@ -240,9 +240,9 @@ def build_components_tree(
 
     Returns
     -------
-    labels, ncomp
-        ``labels`` maps each template index to a component id and ``ncomp`` is
-        the total number of components.
+    labels, nscene
+        ``labels`` maps each template index to a scene id and ``nscene`` is
+        the total number of scenes.
     """
     from shapely.geometry import box
     from shapely.strtree import STRtree
@@ -270,19 +270,19 @@ def build_components_tree(
 
     adj = coo_matrix((np.ones(len(ii), dtype=np.uint8), (ii, jj)), shape=(n, n))
     adj = adj + adj.T
-    ncomp, labels = csgraph.connected_components(adj, directed=False)
+    nscene, labels = csgraph.connected_components(adj, directed=False)
     for i, t in enumerate(templates):
-        t.id_scene = int(labels[i])  # assign component id to each template
+        t.id_scene = int(labels[i])  # assign scene id to each template
 
-    return labels, int(ncomp)
+    return labels, int(nscene)
 
 
-def summarize_components(labels: np.ndarray) -> np.ndarray:
-    """Log a brief summary of component sizes."""
+def summarize_scene(labels: np.ndarray) -> np.ndarray:
+    """Log a brief summary of scene sizes."""
 
     counts = np.bincount(labels)
     logger.info(
-        "%d components (min=%d, median=%d, max=%d)",
+        "%d scenes (min=%d, median=%d, max=%d)",
         len(counts),
         counts.min(),
         int(np.median(counts)),
@@ -290,52 +290,43 @@ def summarize_components(labels: np.ndarray) -> np.ndarray:
     )
     topk = np.argsort(counts)[::-1][:10]
     logger.debug(
-        "Top components by size: %s",
+        "Top scenes by size: %s",
         [(int(cid), int(counts[cid])) for cid in topk],
     )
     return counts
-
-
-def solve_components_cg(
-    ATA_csr: csr_matrix,
-    ATb: np.ndarray,
+def solve_scene_cg(
+    ATA_w_csr: csr_matrix,
+    ATb_w: np.ndarray,
     labels: np.ndarray,
     *,
     rtol: float = 1e-6,
     maxiter: int = 2000,
 ) -> tuple[np.ndarray, list[int]]:
-    """Solve block-diagonal systems independently with CG and Cholesky PCG.
+    """Solve block-diagonal systems independently with CG.
 
-    Each component is whitened prior to solution and uses a sparse Cholesky
-    preconditioner built from the whitened normal matrix.
+    Assumes ``ATA_w_csr`` and ``ATb_w`` have been whitened beforehand.
     """
 
-    x = np.zeros_like(ATb, dtype=float)
+    x = np.zeros_like(ATb_w, dtype=float)
     infos: list[int] = []
-    for cid in range(labels.max() + 1):
-        idx = np.where(labels == cid)[0]
+    for sid in range(labels.max() + 1):
+        idx = np.where(labels == sid)[0]
         if idx.size == 0:
             infos.append(0)
             continue
 
-        A = ATA_csr[idx][:, idx].tocsr()
-        b = ATb[idx]
+        A = ATA_w_csr[idx][:, idx].tocsr()
+        b = ATb_w[idx]
 
-        d = np.sqrt(np.maximum(A.diagonal(), 1e-15))
-        Dinv = diags(1.0 / d, format="csc")
-        A_w = Dinv @ A @ Dinv
-        b_w = b / d
-
-        #        M = make_sparse_chol_prec(A_w)
         M = None
-        sol_w, info = cg(A_w, b_w, M=M, atol=0.0, rtol=rtol, maxiter=maxiter)
-        x[idx] = sol_w / d
+        sol, info = cg(A, b, M=M, atol=0.0, rtol=rtol, maxiter=maxiter)
+        x[idx] = sol
         infos.append(int(info))
 
     return x, infos
 
 
-def make_basis_per_component(
+def make_basis_per_scene(
     templates: List[Template],
     labels: np.ndarray,
     bright: np.ndarray,
@@ -344,8 +335,8 @@ def make_basis_per_component(
     """Return per-template basis vectors for bright sources."""
 
     basis: list[Optional[np.ndarray]] = [None] * len(templates)
-    for cid in range(labels.max() + 1):
-        idx = np.where(labels == cid)[0]
+    for sid in range(labels.max() + 1):
+        idx = np.where(labels == sid)[0]
         if idx.size == 0:
             continue
         xs = np.array([templates[i].position_original[0] for i in idx], float)
@@ -356,9 +347,7 @@ def make_basis_per_component(
                 x, y = templates[i].position_original
                 basis[i] = cheb_basis(x - x0, y - y0, order)
     return basis
-
-
-def assemble_component_system(
+def assemble_scene_system(
     comp: list[int],
     templates: List[Template],
     image: np.ndarray,
@@ -370,7 +359,7 @@ def assemble_component_system(
     ab_from_bright_only: bool = True,
     tol_zero: float = 0.0,
 ):
-    """Return block system for a single component including shifts."""
+    """Return block system for a single scene including shifts."""
 
     g2l = {g: i for i, g in enumerate(comp)}
     nA = len(comp)
@@ -804,15 +793,14 @@ class SparseFitter:
 
         return x_full, e_full, {"cg_info": info}
 
-    def solve_components(
+    def solve_scene(
         self, config: FitConfig | None = None
     ) -> tuple[np.ndarray, np.ndarray, dict]:
-        """Solve independent template groups separately using CG.
+        """Solve independent template scenes separately using CG.
 
-        Templates are partitioned into connected components via their bounding
-        box overlaps. Each component is whitened and solved with conjugate
-        gradient using a sparse Cholesky preconditioner, allowing block
-        diagonal systems to be handled efficiently.
+        Templates are partitioned into connected scenes via their bounding
+        box overlaps. The normal matrix is whitened once for the full system,
+        and each scene is solved on this whitened matrix independently.
         """
 
         cfg = config or self.config
@@ -824,27 +812,25 @@ class SparseFitter:
         if reg > 0:
             A = A + eye(A.shape[0], format="csr") * reg
 
+        eps = reg or 1e-10
+        d = np.sqrt(np.maximum(A.diagonal(), eps))
+        Dinv = diags(1.0 / d, 0, format="csr")
+        A_w = Dinv @ A @ Dinv
+        b_w = b / d
+
         if b.shape[0] > 100:
-            labels, ncomp = build_components_tree(self.templates)
-            summarize_components(labels)
+            labels, nscene = build_scene_tree(self.templates)
+            summarize_scene(labels)
         else:
             labels = np.ones(b.shape[0], dtype=int)
-            ncomp = 1
+            nscene = 1
 
         rtol = cfg.cg_kwargs.get("rtol", 1e-6)
         maxit = cfg.cg_kwargs.get("maxiter", 2000)
-        x, info = solve_components_cg(A, b, labels, rtol=rtol, maxiter=maxit)
+        x_w, info = solve_scene_cg(A_w, b_w, labels, rtol=rtol, maxiter=maxit)
+        x = x_w / d
 
-        err = np.zeros_like(x)
-        for cid in range(ncomp):
-            idx = np.where(labels == cid)[0]
-            if idx.size == 0:
-                continue
-            A_sub = A[idx][:, idx].tocsr()
-            d = np.sqrt(np.maximum(A_sub.diagonal(), 1e-15))
-            Dinv = diags(1.0 / d, format="csc")
-            A_w = Dinv @ A_sub @ Dinv
-            err[idx] = self._flux_errors(A_w) / d
+        err = self._flux_errors(A_w) / d
 
         if cfg.positivity:
             x = np.maximum(0.0, x)
@@ -861,9 +847,9 @@ class SparseFitter:
             tmpl.flux = flux
             tmpl.err = err
 
-        return x_full, e_full, {"cg_info": info, "ncomp": ncomp}
+        return x_full, e_full, {"cg_info": info, "nscene": nscene}
 
-    def solve_components_shifts(
+    def solve_scene_shifts(
         self,
         order: int = 1,
         *,
@@ -872,21 +858,21 @@ class SparseFitter:
         rtol: float = 1e-6,
         maxiter: int = 2000,
     ) -> tuple[np.ndarray, list[tuple[int, np.ndarray]], dict]:
-        """Solve components with additional polynomial shift terms.
+        """Solve scenes with additional polynomial shift terms.
 
         Returns
         -------
         flux : ndarray
             Best-fit fluxes for the original templates.
         betas : list[tuple[int, ndarray]]
-            Per-component shift coefficients.
+            Per-scene shift coefficients.
         info : dict
             Solver diagnostics including CG convergence flags.
         """
 
-        labels, ncomp = build_components_tree(self.templates)
-        summarize_components(labels)
-        basis_vals = make_basis_per_component(
+        labels, nscene = build_scene_tree(self.templates)
+        summarize_scene(labels)
+        basis_vals = make_basis_per_scene(
             self.templates, labels, self.bright_mask, order=order
         )
 
@@ -894,12 +880,12 @@ class SparseFitter:
         betas: list[tuple[int, np.ndarray]] = []
         infos: list[int] = []
 
-        for cid in range(labels.max() + 1):
-            comp = np.where(labels == cid)[0].tolist()
+        for sid in range(labels.max() + 1):
+            comp = np.where(labels == sid)[0].tolist()
             if not comp:
                 infos.append(0)
                 continue
-            AA, AB, BB, bA, bB = assemble_component_system(
+            AA, AB, BB, bA, bB = assemble_scene_system(
                 comp,
                 self.templates,
                 self.image,
@@ -931,11 +917,8 @@ class SparseFitter:
                 alpha_comp = sol[:na]
                 beta_comp = sol[na:]
             alpha[np.array(comp)] = alpha_comp
-            betas.append((cid, beta_comp))
+            betas.append((sid, beta_comp))
             infos.append(int(info))
-
-        # calulate e_full
-        e_full = np.zeros_like(x_full, dtype=float)
 
         if self.config.positivity:
             alpha = np.maximum(0.0, alpha)
@@ -943,11 +926,12 @@ class SparseFitter:
         x_full = np.zeros(self.n_flux, dtype=float)
         idx = [t.col_idx for t in self.templates]
         x_full[idx] = alpha
+        e_full = np.zeros_like(x_full, dtype=float)
         self.solution = x_full
         for tmpl, flux in zip(self._orig_templates, x_full):
             tmpl.flux = flux
 
-        info = {"ncomp": ncomp, "cg_info": infos, "betas": betas}
+        info = {"nscene": nscene, "cg_info": infos, "betas": betas}
         return x_full, e_full, info
 
     def residual(self) -> np.ndarray:

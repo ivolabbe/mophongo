@@ -6,10 +6,11 @@ from typing import Any, Dict, List, Tuple, Optional
 import logging
 import numpy as np
 from numpy.random import default_rng
-from scipy.sparse import csr_matrix, diags, eye, lil_matrix
+from scipy.sparse import csr_matrix, diags, eye, lil_matrix, bmat
 from scipy.sparse.linalg import LinearOperator, cg, lsqr, minres
 from tqdm import tqdm
 
+from .astrometry import cheb_basis
 from .templates import Template, Templates
 
 logger = logging.getLogger(__name__)
@@ -197,6 +198,159 @@ def solve_components_cg_with_labels(
         infos.append(int(info))
     return x, infos
 
+def make_basis_per_component(
+    templates: List[Template],
+    labels: np.ndarray,
+    bright: np.ndarray,
+    order: int = 1,
+) -> list[Optional[np.ndarray]]:
+    """Return per-template basis vectors for bright sources."""
+
+    basis: list[Optional[np.ndarray]] = [None] * len(templates)
+    for cid in range(labels.max() + 1):
+        idx = np.where(labels == cid)[0]
+        if idx.size == 0:
+            continue
+        xs = np.array([templates[i].position_original[0] for i in idx], float)
+        ys = np.array([templates[i].position_original[1] for i in idx], float)
+        x0, y0 = xs.mean(), ys.mean()
+        for i in idx:
+            if bright[i]:
+                x, y = templates[i].position_original
+                basis[i] = cheb_basis(x - x0, y - y0, order)
+    return basis
+
+
+def assemble_component_system(
+    comp: list[int],
+    templates: List[Template],
+    image: np.ndarray,
+    weights: np.ndarray,
+    basis_vals: list[Optional[np.ndarray]],
+    *,
+    order: int = 1,
+    include_y: bool = True,
+    ab_from_bright_only: bool = True,
+    tol_zero: float = 0.0,
+):
+    """Return block system for a single component including shifts."""
+
+    g2l = {g: i for i, g in enumerate(comp)}
+    nA = len(comp)
+    bright_in_comp = [g for g in comp if basis_vals[g] is not None]
+    has_shift = len(bright_in_comp) >= 2
+    p = len(cheb_basis(0.0, 0.0, order)) if has_shift else 0
+    nB = p * (2 if include_y else 1)
+
+    AA = lil_matrix((nA, nA))
+    AB = lil_matrix((nA, nB))
+    BB = np.zeros((nB, nB), dtype=float)
+    bA = np.zeros(nA, dtype=float)
+    bB = np.zeros(nB, dtype=float)
+
+    for g_i in comp:
+        iA = g2l[g_i]
+        sl_i = templates[g_i].slices_original
+        w = weights[sl_i]
+        tt = templates[g_i].data[templates[g_i].slices_cutout]
+        img = image[sl_i]
+        bA[iA] += float(np.sum(tt * w * img))
+        AA[iA, iA] = float(np.sum(tt * w * tt))
+
+    grad_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    if has_shift:
+        for g in bright_in_comp:
+            arr = templates[g].data.astype(float)
+            if arr.shape[0] < 2 or arr.shape[1] < 2:
+                gy = np.zeros_like(arr)
+                gx = np.zeros_like(arr)
+            else:
+                gy, gx = np.gradient(arr)
+            grad_cache[g] = (gx, gy)
+
+    for a, g_i in enumerate(comp):
+        iA = g2l[g_i]
+        ti = templates[g_i]
+        sli = ti.slices_original
+        for g_j in comp:
+            if g_j <= g_i:
+                continue
+            tj = templates[g_j]
+            inter = SparseFitter._slice_intersection(sli, tj.slices_original)
+            if inter is None:
+                continue
+            sl_i_local = (
+                slice(
+                    inter[0].start - sli[0].start + ti.slices_cutout[0].start,
+                    inter[0].stop - sli[0].start + ti.slices_cutout[0].start,
+                ),
+                slice(
+                    inter[1].start - sli[1].start + ti.slices_cutout[1].start,
+                    inter[1].stop - sli[1].start + ti.slices_cutout[1].start,
+                ),
+            )
+            sl_j = tj.slices_original
+            sl_j_local = (
+                slice(
+                    inter[0].start - sl_j[0].start + tj.slices_cutout[0].start,
+                    inter[0].stop - sl_j[0].start + tj.slices_cutout[0].start,
+                ),
+                slice(
+                    inter[1].start - sl_j[1].start + tj.slices_cutout[1].start,
+                    inter[1].stop - sl_j[1].start + tj.slices_cutout[1].start,
+                ),
+            )
+            w = weights[inter]
+            Ti = ti.data[sl_i_local]
+            Tj = tj.data[sl_j_local]
+            gij = float(np.sum(Ti * w * Tj))
+            if abs(gij) > tol_zero:
+                jA = g2l[g_j]
+                AA[iA, jA] = gij
+                AA[jA, iA] = gij
+
+            if has_shift:
+                Sj = basis_vals[g_j]
+                if Sj is not None and (
+                    not ab_from_bright_only or basis_vals[g_i] is not None
+                ):
+                    Gxj, Gyj = grad_cache[g_j]
+                    gx = float(np.sum(Ti * w * Gxj[sl_j_local]))
+                    AB[iA, 0:p] += gx * Sj
+                    if include_y:
+                        gy = float(np.sum(Ti * w * Gyj[sl_j_local]))
+                        AB[iA, p : 2 * p] += gy * Sj
+
+                Si = basis_vals[g_i]
+                Sj = basis_vals[g_j]
+                if (Si is not None) and (Sj is not None):
+                    Gxi, Gyi = grad_cache[g_i]
+                    Gxj, Gyj = grad_cache[g_j]
+                    Gxx = float(np.sum(Gxi[sl_i_local] * w * Gxj[sl_j_local]))
+                    BB[0:p, 0:p] += Gxx * np.outer(Si, Sj)
+                    if include_y:
+                        Gyy = float(
+                            np.sum(Gyi[sl_i_local] * w * Gyj[sl_j_local])
+                        )
+                        BB[p : 2 * p, p : 2 * p] += Gyy * np.outer(Si, Sj)
+
+    if has_shift:
+        for g_j in comp:
+            Sj = basis_vals[g_j]
+            if Sj is None:
+                continue
+            tj = templates[g_j]
+            slj = tj.slices_original
+            w = weights[slj]
+            img = image[slj]
+            Gxj, Gyj = grad_cache[g_j]
+            bB[0:p] += float(np.sum(Gxj[tj.slices_cutout] * w * img)) * Sj
+            if include_y:
+                bB[p : 2 * p] += (
+                    float(np.sum(Gyj[tj.slices_cutout] * w * img)) * Sj
+                )
+
+    return AA.tocsr(), AB.tocsr(), csr_matrix(BB), bA, bB
 
 class SparseFitter:
     """Build and solve sparse normal equations for photometry."""
@@ -225,6 +379,17 @@ class SparseFitter:
         self._ata = None
         self._atb = None
         self.solution: np.ndarray | None = None
+
+        # Identify high-S/N templates for astrometric shift fitting
+        flux_est = Templates.quick_flux(self.templates, self.image)
+        err_est = Templates.predicted_errors(self.templates, self.weights)
+        snr = np.divide(
+            flux_est,
+            err_est,
+            out=np.zeros_like(flux_est),
+            where=err_est > 0,
+        )
+        self.bright_mask = snr > self.config.snr_thresh_astrom
 
     @staticmethod
     def _intersection(
@@ -557,6 +722,92 @@ class SparseFitter:
             tmpl.err = err
 
         return x_full, e_full, {"cg_info": info, "ncomp": ncomp}
+
+    def solve_components_shifts(
+        self,
+        order: int = 1,
+        *,
+        include_y: bool = True,
+        ab_from_bright_only: bool = True,
+        rtol: float = 1e-6,
+        maxiter: int = 2000,
+    ) -> tuple[np.ndarray, list[tuple[int, np.ndarray]], dict]:
+        """Solve components with additional polynomial shift terms.
+
+        Returns
+        -------
+        flux : ndarray
+            Best-fit fluxes for the original templates.
+        betas : list[tuple[int, ndarray]]
+            Per-component shift coefficients.
+        info : dict
+            Solver diagnostics including CG convergence flags.
+        """
+
+        labels, ncomp = build_components_strtree_labels(self.templates)
+        summarize_components(labels)
+        basis_vals = make_basis_per_component(
+            self.templates, labels, self.bright_mask, order=order
+        )
+
+        alpha = np.zeros(len(self.templates), dtype=float)
+        betas: list[tuple[int, np.ndarray]] = []
+        infos: list[int] = []
+
+        for cid in range(labels.max() + 1):
+            comp = np.where(labels == cid)[0].tolist()
+            if not comp:
+                infos.append(0)
+                continue
+            AA, AB, BB, bA, bB = assemble_component_system(
+                comp,
+                self.templates,
+                self.image,
+                self.weights,
+                basis_vals,
+                order=order,
+                include_y=include_y,
+                ab_from_bright_only=ab_from_bright_only,
+            )
+            if AB.shape[1] == 0:
+                A = AA.tocsr()
+                b = bA
+                D = A.diagonal().copy()
+                D[D == 0] = 1.0
+                M = LinearOperator(A.shape, matvec=lambda v, D=D: v / D)
+                sol, info = cg(A, b, M=M, atol=0.0, rtol=rtol, maxiter=maxiter)
+                alpha_comp = sol
+                beta_comp = np.zeros(0, dtype=float)
+            else:
+                K = bmat([[AA, AB], [AB.T, BB]], format="csr")
+                rhs = np.concatenate([bA, bB])
+                D = K.diagonal().copy()
+                D[D == 0] = 1.0
+                M = LinearOperator(K.shape, matvec=lambda v, D=D: v / D)
+                sol, info = cg(K, rhs, M=M, atol=0.0, rtol=rtol, maxiter=maxiter)
+                if info > 0:
+                    sol, info = minres(
+                        K, rhs, M=M, atol=0.0, rtol=rtol, maxiter=maxiter
+                    )
+                na = len(comp)
+                alpha_comp = sol[:na]
+                beta_comp = sol[na:]
+            alpha[np.array(comp)] = alpha_comp
+            betas.append((cid, beta_comp))
+            infos.append(int(info))
+
+        if self.config.positivity:
+            alpha = np.maximum(0.0, alpha)
+
+        x_full = np.zeros(self.n_flux, dtype=float)
+        idx = [t.col_idx for t in self.templates]
+        x_full[idx] = alpha
+        self.solution = x_full
+        for tmpl, flux in zip(self._orig_templates, x_full):
+            tmpl.flux = flux
+
+        info = {"ncomp": ncomp, "cg_info": infos}
+        return x_full, betas, info
 
     def solve_linear_operator(
         self,

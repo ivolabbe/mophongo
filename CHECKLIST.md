@@ -66,6 +66,7 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
   - [x] Added STRtree-based normal matrix builder (`build_normal_tree`)
   - [x] Added component-wise CG solver using STRtree groups
   - [x] Added component-wise solver with shift blocks
+  - [x] Whitened component solver with sparse Cholesky preconditioner
 - [x] **Pipeline orchestrator** (`src/mophongo/pipeline.py`)
   - [x] `run` to tie all pieces together
   - [x] don't implement source detection just yet: assume detection + segmentation image + catalog are available.
@@ -122,7 +123,7 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
 - [ ] Profiling speed + memory usage
 - [ ] optimizations
   - [x] adaptive kernel size depending on SNR
-  - [ ] preconditioning matrix   
+  - [x] preconditioning matrix
 - [ ] strong residuals
   - [ ] handle saturated stars in 444 -> catalog pre pass detection
   - [ ] fit as PSF both 444, 770, fit for centroid, mask center

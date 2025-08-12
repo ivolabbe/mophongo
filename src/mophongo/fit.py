@@ -296,7 +296,7 @@ def summarize_components(labels: np.ndarray) -> np.ndarray:
     return counts
 
 
-def solve_components_cg_with_labels(
+def solve_components_cg(
     ATA_csr: csr_matrix,
     ATb: np.ndarray,
     labels: np.ndarray,
@@ -833,7 +833,7 @@ class SparseFitter:
 
         rtol = cfg.cg_kwargs.get("rtol", 1e-6)
         maxit = cfg.cg_kwargs.get("maxiter", 2000)
-        x, info = solve_components_cg_with_labels(A, b, labels, rtol=rtol, maxiter=maxit)
+        x, info = solve_components_cg(A, b, labels, rtol=rtol, maxiter=maxit)
 
         err = np.zeros_like(x)
         for cid in range(ncomp):

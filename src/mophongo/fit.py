@@ -342,6 +342,7 @@ def build_scene_tree(
     adj = coo_matrix((np.ones(len(ii), dtype=np.uint8), (ii, jj)), shape=(n, n))
     adj = adj + adj.T
     nscene, labels = csgraph.connected_components(adj, directed=False)
+    labels += 1  # make labels start from 1
     for i, t in enumerate(templates):
         t.id_scene = int(labels[i])  # assign scene id to each template
 
@@ -363,6 +364,12 @@ def merge_small_scenes(
     """
     if minimum_bright is None:
         minimum_bright = len(cheb_basis(0.0, 0.0, order))  # p terms
+
+    logger.info(
+        "Merging small scenes with minimum_bright=%d, max_merge_radius=%.1f pixels",
+        minimum_bright,
+        max_merge_radius,
+    )
 
     labs = labels.copy()
     while True:
@@ -415,7 +422,7 @@ def merge_small_scenes(
 
     # compact labels to 0..k-1
     unique_labels, new_labs = np.unique(labs, return_inverse=True)
-
+    new_labs += 1  # make labels start from 1
     for i, t in enumerate(templates):
         t.id_scene = int(new_labs[i])
 

@@ -113,7 +113,7 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
   - [ ] global background fit
   - [ ] background per stamp
 - [ ] diagnostics
-  - [ ] standard diagnostic view of fit result for object
+  - [x] standard diagnostic view of fit result for object
 - [ ] validate output catalogs on MIRI data
   - [ ] color color, color mag
   - [ ] SEDs of stars, photo-z

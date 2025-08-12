@@ -374,6 +374,134 @@ class Pipeline:
 
         return cat, self.residuals, self.fit
 
+    def plot_result(
+        self,
+        idx: int = 1,
+        scene_id: int | None = None,
+        source_id: int | None = None,
+    ) -> tuple["matplotlib.figure.Figure", np.ndarray]:
+        """Plot the fitted image, model, residual, and color composite.
+
+        The high-resolution template image (``images[0]``) is shown with scene
+        overlays alongside the segmentation map, the selected low-resolution
+        image, its model, and the residual. A Lupton RGB image combining the
+        template and low-resolution images is also displayed.
+
+        Args:
+            idx: Index of the low-resolution image to display. Defaults to ``1``.
+            scene_id: Optional scene identifier to zoom into. Defaults to ``None``.
+            source_id: Optional source identifier to zoom into. Defaults to
+                ``None``. Ignored if ``scene_id`` is provided.
+
+        Returns:
+            Tuple containing the created figure and the array of axes.
+        """
+
+        import math
+
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from astropy.nddata import block_replicate
+        from astropy.visualization import make_lupton_rgb
+
+        if idx <= 0 or idx >= len(self.images):
+            raise ValueError("idx must be between 1 and len(images)-1")
+
+        segmap = self.segmap
+        fitter = self.fit[idx - 1]
+
+        scenes = np.zeros_like(segmap, dtype=int)
+        for tmpl in fitter.templates:
+            scenes[segmap == tmpl.id] = tmpl.id_scene + 1
+
+        mask: np.ndarray | None = None
+        if scene_id is not None:
+            mask = scenes == (scene_id + 1)
+        elif source_id is not None:
+            mask = segmap == source_id
+
+        if mask is not None and np.any(mask):
+            ys, xs = np.where(mask)
+            y0, y1 = ys.min(), ys.max() + 1
+            x0, x1 = xs.min(), xs.max() + 1
+        else:
+            y0, x0 = 0, 0
+            y1, x1 = segmap.shape
+
+        sl_hi = (slice(y0, y1), slice(x0, x1))
+
+        img_hi = self.images[0]
+        img_lo = self.images[idx]
+
+        if img_hi.shape != img_lo.shape:
+            k = img_hi.shape[0] // img_lo.shape[0]
+            sl_lo = (
+                slice(y0 // k, math.ceil(y1 / k)),
+                slice(x0 // k, math.ceil(x1 / k)),
+            )
+            img_lo_cut = img_lo[sl_lo]
+            model = fitter.model_image()[sl_lo]
+            residual = self.residuals[idx - 1][sl_lo]
+            img_lo_hr = block_replicate(img_lo_cut, k)
+            model_hr = block_replicate(model, k)
+            residual_hr = block_replicate(residual, k)
+        else:
+            img_lo_cut = img_lo[sl_hi]
+            model_hr = fitter.model_image()[sl_hi]
+            residual_hr = self.residuals[idx - 1][sl_hi]
+            img_lo_hr = img_lo_cut
+
+        tmpl_cut = img_hi[sl_hi]
+        seg_cut = segmap[sl_hi]
+        scenes_cut = scenes[sl_hi]
+
+        # RGB composite using template as blue and low-res as red
+        b = tmpl_cut / np.nanmax(tmpl_cut) if np.nanmax(tmpl_cut) != 0 else tmpl_cut
+        r = img_lo_hr / np.nanmax(img_lo_hr) if np.nanmax(img_lo_hr) != 0 else img_lo_hr
+        g = (r + b) / 2.0
+        col_image = make_lupton_rgb(r, g, b, stretch=2 * np.nanstd(r))
+
+        v = float(np.nanmax(np.abs(img_lo_hr))) if np.any(np.isfinite(img_lo_hr)) else 1.0
+
+        fig, ax = plt.subplots(3, 2, figsize=(12, 15))
+        ax = ax.flatten()
+        images = [
+            tmpl_cut,
+            seg_cut,
+            img_lo_hr,
+            model_hr,
+            residual_hr,
+            col_image,
+        ]
+        titles = [
+            f"image0 + scenes",
+            "segmap",
+            f"image{idx}",
+            f"model image{idx}",
+            "residual",
+            "color",
+        ]
+
+        for i, (im, title) in enumerate(zip(images, titles)):
+            if title == "segmap":
+                ax[i].imshow(im, origin="lower", cmap="tab20", interpolation="nearest")
+            elif title == "color":
+                ax[i].imshow(im, origin="lower", interpolation="nearest")
+            else:
+                ax[i].imshow(im, origin="lower", cmap="gray", vmin=-v, vmax=v)
+                if i == 0:
+                    ax[i].imshow(
+                        scenes_cut,
+                        origin="lower",
+                        cmap="tab20",
+                        alpha=0.5,
+                        interpolation="nearest",
+                    )
+            ax[i].set_title(title)
+
+        plt.tight_layout()
+        return fig, ax
+
 
 def run(
     images: Sequence[np.ndarray],

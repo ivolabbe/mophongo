@@ -25,7 +25,7 @@ def test_flux_recovery(tmp_path):
     fitter.build_normal_matrix()
     x, err, info = fitter.solve()
 
-    assert info == 0
+    assert info["cg_info"] == 0
 #    assert np.allclose(x, np.array(catalog['flux_true']), rtol=1e-1)
     model = fitter.model_image()
     fname = tmp_path / "fit.png"
@@ -157,7 +157,7 @@ def test_build_normal_tree_matches_loop():
     np.testing.assert_allclose(fitter_loop.atb, fitter_tree._atb)
 
 
-def test_solve_components_matches_global():
+def test_solve_scene_matches_global():
     img = np.zeros((6, 6))
     weights = np.ones_like(img)
 
@@ -196,7 +196,7 @@ def test_solve_components_matches_global():
     fitter_comp.templates[0].data[:] = t1.data
     fitter_comp.templates[1].data[:] = t2.data
     fitter_comp.templates[2].data[:] = t3.data
-    flux_comp, _, _ = fitter_comp.solve_components()
+    flux_comp, _, _ = fitter_comp.solve_scene()
 
     np.testing.assert_allclose(flux_comp, flux_all, rtol=1e-6, atol=1e-6)
 
@@ -246,7 +246,7 @@ def test_bright_source_detection():
     assert np.array_equal(fitter.bright_mask, expected)
 
 
-def test_solve_components_shifts_matches_global():
+def test_solve_scene_shifts_matches_global():
     img = np.zeros((6, 6))
     weights = np.ones_like(img)
 
@@ -283,7 +283,8 @@ def test_solve_components_shifts_matches_global():
     fitter_shift.templates[0].data[:] = t1.data
     fitter_shift.templates[1].data[:] = t2.data
     fitter_shift.templates[2].data[:] = t3.data
-    flux_shift, betas, _ = fitter_shift.solve_components_shifts(order=1)
+    flux_shift, _, info = fitter_shift.solve_scene_shifts(order=1)
+    betas = info["betas"]
 
     np.testing.assert_allclose(flux_shift, flux_all, rtol=1e-4, atol=1e-4)
     for _, beta in betas:

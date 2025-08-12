@@ -67,6 +67,7 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
   - [x] Added component-wise CG solver using STRtree groups
   - [x] Added component-wise solver with shift blocks
   - [x] Whitened component solver with sparse Cholesky preconditioner
+  - [x] Renamed component terminology to scene and centralized whitening in scene solver
 - [x] **Pipeline orchestrator** (`src/mophongo/pipeline.py`)
   - [x] `run` to tie all pieces together
   - [x] don't implement source detection just yet: assume detection + segmentation image + catalog are available.

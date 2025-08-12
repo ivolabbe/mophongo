@@ -192,7 +192,7 @@ class Pipeline:
         from .fit import SparseFitter
         from .astro_fit import GlobalAstroFitter
         from astropy.nddata import block_replicate, block_reduce
-        from .local_astrometry import AstroCorrect
+        from .astrometry import AstroCorrect
         from . import utils
         import warnings
 
@@ -250,7 +250,9 @@ class Pipeline:
                     tmpls_lo = Templates()
                     tmpls_lo.original_shape = images[idx].shape
                     tmpls_lo.wcs = wcs[idx]
-                    tmpls_lo._templates = [t.downsample(k, wcs_lo=wcs[idx]) for t in tmpls._templates]
+                    tmpls_lo._templates = [
+                        t.downsample(k, wcs_lo=wcs[idx]) for t in tmpls._templates
+                    ]
 
                     if isinstance(kernel, PSFRegionMap):
                         kernel.psfs = np.array([downsample_psf(psf, k) for psf in kernel.psfs])
@@ -360,9 +362,7 @@ class Pipeline:
 
             residuals.append(res)
 
-        print(
-            f"Pipeline (end) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB"
-        )
+        print(f"Pipeline (end) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB")
 
         self.residuals = residuals
         self.fitter = fitter

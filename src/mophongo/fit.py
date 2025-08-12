@@ -5,9 +5,17 @@ from typing import Any, Dict, List, Tuple, Optional
 
 import logging
 import numpy as np
+import scipy.sparse as sp
 from numpy.random import default_rng
-from scipy.sparse import csr_matrix, diags, eye, lil_matrix, bmat
-from scipy.sparse.linalg import LinearOperator, cg, lsqr, minres
+from scipy.sparse import csc_matrix, csr_matrix, diags, eye, lil_matrix, bmat
+from scipy.sparse.csgraph import reverse_cuthill_mckee
+from scipy.sparse.linalg import (
+    LinearOperator,
+    cg,
+    lsqr,
+    minres,
+    spsolve_triangular,
+)
 from tqdm import tqdm
 
 from .astrometry import cheb_basis
@@ -106,6 +114,122 @@ def _diag_inv_hutch(A, k=32, rtol=1e-4, maxiter=None, seed=0):
     return np.sqrt(np.abs(acc / k))
 
 
+def sparse_cholesky_leftlooking(
+    A: sp.spmatrix, *, use_rcm: bool = False, drop_tol: float = 0.0
+) -> tuple[csc_matrix, np.ndarray]:
+    """Sparse left-looking Cholesky factorization.
+
+    Parameters
+    ----------
+    A
+        Symmetric positive-definite matrix in sparse format.
+    use_rcm
+        Apply Reverse Cuthill–McKee permutation before factorization.
+    drop_tol
+        Drop entries with absolute value below this threshold (IC(0) when 0).
+
+    Returns
+    -------
+    L, p
+        ``L`` is the lower-triangular Cholesky factor in CSC format and
+        ``p`` is the permutation applied such that ``A[p][:, p] = L @ L.T``.
+    """
+
+    if not sp.isspmatrix(A):
+        raise TypeError("A must be a SciPy sparse matrix")
+    if A.shape[0] != A.shape[1]:
+        raise ValueError("A must be square")
+
+    Acsc = sp.tril(A.tocsc(), format="csc")
+    n = Acsc.shape[0]
+
+    if use_rcm:
+        Apat = (Acsc + Acsc.T).tocsr()
+        Apat.data[:] = 1.0
+        p = reverse_cuthill_mckee(Apat, symmetric_mode=True)
+    else:
+        p = np.arange(n, dtype=np.int64)
+
+    Aperm = Acsc[p, :][:, p].tocsc()
+    indptr, indices, data = Aperm.indptr, Aperm.indices, Aperm.data
+
+    Lcols: list[dict[int, float]] = [dict() for _ in range(n)]
+    rowcols: list[list[int]] = [[] for _ in range(n)]
+
+    for k in range(n):
+        w: dict[int, float] = {}
+        for t in range(indptr[k], indptr[k + 1]):
+            i = indices[t]
+            if i >= k:
+                w[i] = float(data[t])
+
+        for j in rowcols[k]:
+            m = Lcols[j][k]
+            if m == 0.0:
+                continue
+            for i, Lij in Lcols[j].items():
+                if i <= j or i < k:
+                    continue
+                c = Lij * m
+                if c != 0.0:
+                    if i in w:
+                        w[i] -= c
+                    elif abs(c) > drop_tol:
+                        w[i] = -c
+
+        diag = w.get(k, 0.0)
+        if diag <= 0.0:
+            diag += 1e-15
+        Lkk = float(np.sqrt(diag))
+        if not np.isfinite(Lkk) or Lkk == 0.0:
+            raise np.linalg.LinAlgError(f"Non-finite/zero pivot at column {k}")
+        Lcols[k][k] = Lkk
+        invLkk = 1.0 / Lkk
+
+        for i in sorted(w.keys()):
+            if i == k:
+                continue
+            val = w[i] * invLkk
+            if drop_tol > 0.0 and abs(val) < drop_tol:
+                continue
+            Lcols[k][i] = val
+            rowcols[i].append(k)
+
+    nnz = sum(len(col) for col in Lcols)
+    indptr_L = np.zeros(n + 1, dtype=int)
+    indices_L = np.empty(nnz, dtype=int)
+    data_L = np.empty(nnz, dtype=float)
+    pos = 0
+    for k in range(n):
+        indptr_L[k] = pos
+        for i, v in sorted(Lcols[k].items(), key=lambda x: x[0]):
+            indices_L[pos] = i
+            data_L[pos] = v
+            pos += 1
+    indptr_L[n] = pos
+    L = csc_matrix((data_L, indices_L, indptr_L), shape=(n, n))
+    return L, p
+
+
+def make_sparse_chol_prec(
+    A: sp.spmatrix, *, use_rcm: bool = False, drop_tol: float = 0.0
+) -> LinearOperator:
+    """Return ``LinearOperator`` applying ``(LLᵀ)⁻¹`` via sparse Cholesky."""
+
+    L, p = sparse_cholesky_leftlooking(A, use_rcm=use_rcm, drop_tol=drop_tol)
+    n = A.shape[0]
+    invp = np.empty_like(p)
+    invp[p] = np.arange(n, dtype=p.dtype)
+
+    def _apply(v: np.ndarray) -> np.ndarray:
+        vp = v[p]
+        y = spsolve_triangular(L, vp, lower=True)
+        w = spsolve_triangular(L.T, y, lower=False)
+        return w[invp]
+
+    return LinearOperator((n, n), matvec=_apply, rmatvec=_apply, dtype=A.dtype)
+
+
 def build_components_strtree_labels(
     templates: List[Template],
 ) -> tuple[np.ndarray, int]:
@@ -179,7 +303,11 @@ def solve_components_cg_with_labels(
     rtol: float = 1e-6,
     maxiter: int = 2000,
 ) -> tuple[np.ndarray, list[int]]:
-    """Solve block-diagonal systems independently with conjugate gradient."""
+    """Solve block-diagonal systems independently with CG and Cholesky PCG.
+
+    Each component is whitened prior to solution and uses a sparse Cholesky
+    preconditioner built from the whitened normal matrix.
+    """
 
     x = np.zeros_like(ATb, dtype=float)
     infos: list[int] = []
@@ -188,14 +316,20 @@ def solve_components_cg_with_labels(
         if idx.size == 0:
             infos.append(0)
             continue
+
         A = ATA_csr[idx][:, idx].tocsr()
         b = ATb[idx]
-        D = A.diagonal().copy()
-        D[D == 0] = 1.0
-        M = LinearOperator(A.shape, matvec=lambda v, D=D: v / D)
-        sol, info = cg(A, b, M=M, atol=0.0, rtol=rtol, maxiter=maxiter)
-        x[idx] = sol
+
+        d = np.sqrt(np.maximum(A.diagonal(), 1e-15))
+        Dinv = diags(1.0 / d, format="csc")
+        A_w = Dinv @ A @ Dinv
+        b_w = b / d
+
+        M = make_sparse_chol_prec(A_w)
+        sol_w, info = cg(A_w, b_w, M=M, atol=0.0, rtol=rtol, maxiter=maxiter)
+        x[idx] = sol_w / d
         infos.append(int(info))
+
     return x, infos
 
 def make_basis_per_component(
@@ -678,7 +812,8 @@ class SparseFitter:
         """Solve independent template groups separately using CG.
 
         Templates are partitioned into connected components via their bounding
-        box overlaps. Each component is solved independently, allowing block
+        box overlaps. Each component is whitened and solved with conjugate
+        gradient using a sparse Cholesky preconditioner, allowing block
         diagonal systems to be handled efficiently.
         """
 
@@ -704,7 +839,10 @@ class SparseFitter:
             if idx.size == 0:
                 continue
             A_sub = A[idx][:, idx].tocsr()
-            err[idx] = self._flux_errors(A_sub)
+            d = np.sqrt(np.maximum(A_sub.diagonal(), 1e-15))
+            Dinv = diags(1.0 / d, format="csc")
+            A_w = Dinv @ A_sub @ Dinv
+            err[idx] = self._flux_errors(A_w) / d
 
         if cfg.positivity:
             x = np.maximum(0.0, x)

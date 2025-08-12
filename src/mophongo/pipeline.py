@@ -330,7 +330,7 @@ class Pipeline:
             print("Done...")
 
             parent_ids = [
-                tmpl.parent_id if getattr(tmpl, "parent_id", None) is not None else tmpl.id
+                tmpl.id_parent if getattr(tmpl, "parent_id", None) is not None else tmpl.id
                 for tmpl in templates
             ]
             id_to_index = {id_: i for i, id_ in enumerate(cat["id"])}
@@ -338,6 +338,8 @@ class Pipeline:
             cat[f"err_{idx}"] = config.bad_value
             cat[f"err_pred_{idx}"] = config.bad_value
 
+            # using dict to accumulate fluxes and errors
+            # should also save separate errors for each parent template
             flux_sum: defaultdict[int, float] = defaultdict(float)
             err_sum: defaultdict[int, float] = defaultdict(float)
             err_pred_sum: defaultdict[int, float] = defaultdict(float)

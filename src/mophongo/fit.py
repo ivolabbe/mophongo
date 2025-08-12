@@ -250,7 +250,7 @@ def build_components_tree(
 
     def _bbox_to_box(t: Template):
         (ymin, ymax), (xmin, xmax) = t.bbox_original  # closed intervals
-        return box(xmin, ymin, xmax + 1, ymax + 1)
+        return box(xmin, ymin, xmax, ymax)
 
     n = len(templates)
     boxes = [_bbox_to_box(t) for t in templates]
@@ -271,6 +271,9 @@ def build_components_tree(
     adj = coo_matrix((np.ones(len(ii), dtype=np.uint8), (ii, jj)), shape=(n, n))
     adj = adj + adj.T
     ncomp, labels = csgraph.connected_components(adj, directed=False)
+    for i, t in enumerate(templates):
+        t.id_scene = int(labels[i])  # assign component id to each template
+
     return labels, int(ncomp)
 
 

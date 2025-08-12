@@ -61,7 +61,8 @@ class Template(Cutout2D):
         self.wcs_original = wcs
         # record shift from original position here
         self.id = label
-        self.parent_id = label
+        self.id_parent = label
+        self.id_scene = 0
         self.component = "main"
         self.flux = 0.0
         self.err = 0.0

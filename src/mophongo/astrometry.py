@@ -16,8 +16,15 @@ from scipy.signal import correlate2d, fftconvolve
 from sklearn.base import clone
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import ConstantKernel, RBF, WhiteKernel
+from astropy.wcs import WCS
+from astropy.coordinates import SkyCoord
+from astropy.wcs.utils import skycoord_to_pixel
 
 from .templates import Template
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def cheb_basis(x: float, y: float, order: int) -> np.ndarray:
@@ -389,30 +396,55 @@ class AstroMap:
         catalog: Table,
         snr_threshold: float = 5.0,
         snr_key: str = "snr",
+        wcs1: WCS = None,
+        wcs2: WCS = None,
+        pixel_scale: float = 1.0,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Measure shifts between two images at catalog positions."""
+        """Measure shifts between two images at catalog positions.
+        If WCS objects are provided, cutouts are centered on the same sky position (RA, Dec).
+        """
+        logger.info(
+            f"Measuring shifts between images with {len(catalog)} sources and SNR > {snr_threshold}"
+        )
         if snr_key not in catalog.colnames:
-            catalog[snr_key] = min_snr
+            catalog[snr_key] = snr_threshold
         positions, dx, dy, w = [], [], [], []
         for row in catalog[catalog[snr_key] > snr_threshold]:
-            x_c, y_c = row["x"], row["y"]
-            # Extract a small cutout around the source position
-            cut1 = Cutout2D(img1, (x_c, y_c), 3 * self.box_size + 1, mode="partial")
-            cut2 = Cutout2D(img2, (x_c, y_c), 3 * self.box_size + 1, mode="partial")
-            centre = cut1.input_position_cutout
-            if self.method.lower() == "correlation":
-                shift = _xcorr_shift(cut2.data, cut1.data, centre, box=self.box_size)
+            if wcs1 is not None and wcs2 is not None:
+                ra, dec = row["ra"], row["dec"]
+                # Convert pixel to sky in img1, then to pixel in img2
+                x_c, y_c = wcs1.wcs_world2pix(ra, dec, 0)
+                x2, y2 = wcs2.wcs_world2pix(ra, dec, 0)
+                # Use same bounding box in pixels, but center on sky position
+                cut1 = Cutout2D(img1, (x_c, y_c), 3 * self.box_size + 1, mode="partial")
+                #             print(x_c, y_c, x2, y2)
+                cut2 = Cutout2D(img2, (x2, y2), 3 * self.box_size + 1, mode="partial")
+                centre1 = cut1.input_position_cutout
+                centre2 = cut2.input_position_cutout
+            else:
+                x_c, y_c = row["x"], row["y"]
+                cut1 = Cutout2D(img1, (x_c, y_c), 3 * self.box_size + 1, mode="partial")
+                cut2 = Cutout2D(img2, (x_c, y_c), 3 * self.box_size + 1, mode="partial")
+                centre1 = centre2 = cut1.input_position_cutout
+
+            if self.method.lower() == "correlation" and (wcs1 is None or wcs2 is None):
+                shift = _xcorr_shift(cut2.data, cut1.data, centre2, box=self.box_size)
             else:
                 try:
                     cx1, cy1 = _safe_centroid_quadratic(
-                        cut1.data, centre[0], centre[1], self.box_size
+                        cut1.data, centre1[0], centre1[1], self.box_size
                     )
                     cx2, cy2 = _safe_centroid_quadratic(
-                        cut2.data, centre[0], centre[1], self.box_size
+                        cut2.data, centre2[0], centre2[1], self.box_size
                     )
                 except Exception:
                     continue
-                shift = np.array([cx2 - cx1, cy2 - cy1])
+                if wcs1 is not None and wcs2 is not None:
+                    # Convert to pixel shifts
+                    r2, d2 = wcs2.wcs_pix2world(cx2, cy2, 0)
+                    cx2, cy2 = wcs2.wcs_world2pix(r2, d2, 0)
+
+                shift = np.array([cx2 - cx1, cy2 - cy1]) * pixel_scale
             if np.isnan(shift).any():
                 continue
             positions.append((x_c, y_c))

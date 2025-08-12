@@ -18,10 +18,11 @@ from collections import defaultdict
 
 from astropy.table import Table
 from astropy.wcs import WCS
-from astropy.nddata import Cutout2D
+from astropy.nddata import Cutout2D, block_replicate, block_reduce
 
 from .psf_map import PSFRegionMap
 from .utils import bin_factor_from_wcs, downsample_psf
+from .templates import Templates, Template
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +165,8 @@ class Pipeline:
         self.fit: list[np.ndarray] = []
         self.astro: list[np.ndarray] = []
         self.templates: list[np.ndarray] = []
+        self.infos: list[dict] = []
+        self.tmpls: Templates()
 
     def run(self) -> tuple[Table, list[np.ndarray], SparseFitter]:
         """Run photometry on the configured images.
@@ -177,6 +180,12 @@ class Pipeline:
         SparseFitter
             The fitter instance used for the final fit.
         """
+        from .psf import PSF
+        from .fit import SparseFitter
+        from .astro_fit import GlobalAstroFitter
+        from .astrometry import AstroCorrect
+        from . import utils
+        import warnings
 
         images = self.images
         segmap = self.segmap
@@ -187,15 +196,6 @@ class Pipeline:
         wcs = self.wcs
         config = self.config
 
-        from .psf import PSF
-        from .templates import Templates
-        from .fit import SparseFitter
-        from .astro_fit import GlobalAstroFitter
-        from astropy.nddata import block_replicate, block_reduce
-        from .astrometry import AstroCorrect
-        from . import utils
-        import warnings
-
         memory = lambda: psutil.Process(os.getpid()).memory_info().rss / 1e9
 
         print(f"Pipeline (start) memory: {memory():.1f} GB")
@@ -204,14 +204,14 @@ class Pipeline:
         cat = catalog.copy() if catalog is not None else None
         positions = list(zip(catalog["x"], catalog["y"])) if catalog is not None else []
 
-        tmpls = Templates()
-        tmpls.extract_templates(
+        self.tmpls = Templates()
+        self.tmpls.extract_templates(
             np.nan_to_num(images[0], copy=False, nan=0.0, posinf=0.0, neginf=0.0),
             segmap,
             positions,
             wcs=wcs[0] if wcs is not None else None,
         )
-        templates = tmpls.templates
+        templates = self.tmpls.templates
         for t in templates:
             assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
 
@@ -251,7 +251,7 @@ class Pipeline:
                     tmpls_lo.original_shape = images[idx].shape
                     tmpls_lo.wcs = wcs[idx]
                     tmpls_lo._templates = [
-                        t.downsample(k, wcs_lo=wcs[idx]) for t in tmpls._templates
+                        t.downsample(k, wcs_lo=wcs[idx]) for t in self.tmpls._templates
                     ]
 
                     if isinstance(kernel, PSFRegionMap):
@@ -260,7 +260,7 @@ class Pipeline:
                         kernel = downsample_psf(kernel, k)
 
             if k == 1 or config.multi_resolution_method == "upsample":
-                tmpls_lo = deepcopy(tmpls)
+                tmpls_lo = deepcopy(self.tmpls)
 
             if weights_i is not None:
                 tmpls_lo.prune_outside_weight(weights_i)
@@ -358,27 +358,29 @@ class Pipeline:
                 cat[f"err_{idx}"][ci] = err_sum[pid]
                 cat[f"err_pred_{idx}"][ci] = err_pred_sum[pid]
 
-            if k > 1 and config.multi_resolution_method == "upsample":
-                print(f"Downsampling residuals by factor {k}")
-                res = block_reduce(res, k, func=np.sum)
+            # if k > 1 and config.multi_resolution_method == "upsample":
+            #     print(f"Downsampling residuals by factor {k}")
+            #     res = block_reduce(res, k, func=np.sum)
 
             if "astro" in locals():
                 self.astro.append(astro)
             self.residuals.append(res)
             self.fit.append(fitter)
             self.templates.append(templates)
+            self.infos.append(info)
 
         print(f"Pipeline (end) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB")
 
-        self.catalog = cat
+        self.table = cat
 
-        return cat, self.residuals, self.fit
+        return self.table, self.residuals, self.fit
 
     def plot_result(
         self,
         idx: int = 1,
         scene_id: int | None = None,
         source_id: int | None = None,
+        display_sig: float = 3.0,
     ) -> tuple["matplotlib.figure.Figure", np.ndarray]:
         """Plot the fitted image, model, residual, and color composite.
 
@@ -401,80 +403,84 @@ class Pipeline:
 
         import matplotlib.pyplot as plt
         import numpy as np
-        from astropy.nddata import block_replicate
+        from copy import deepcopy
         from astropy.visualization import make_lupton_rgb
+        from photutils.segmentation import SegmentationImage
 
         if idx <= 0 or idx >= len(self.images):
             raise ValueError("idx must be between 1 and len(images)-1")
 
         segmap = self.segmap
+        segmap_cmap = SegmentationImage(self.segmap).cmap
+        scene_cmap = deepcopy(segmap_cmap)
+        scene_cmap.colors[0] = (1.0, 1.0, 1.0, 0.0)
+
         fitter = self.fit[idx - 1]
 
         scenes = np.zeros_like(segmap, dtype=int)
+        scene_ids = []
         for tmpl in fitter.templates:
-            scenes[segmap == tmpl.id] = tmpl.id_scene + 1
+            scene_ids.append(tmpl.id_scene)
+            scenes[segmap == tmpl.id] = tmpl.id_scene
+
+        logger.info(f"Plotting results for image {idx} with {len(np.unique(scene_ids))} scenes")
 
         mask: np.ndarray | None = None
         if scene_id is not None:
-            mask = scenes == (scene_id + 1)
+            mask = scenes == scene_id
         elif source_id is not None:
             mask = segmap == source_id
 
+        buf = 10
         if mask is not None and np.any(mask):
             ys, xs = np.where(mask)
-            y0, y1 = ys.min(), ys.max() + 1
-            x0, x1 = xs.min(), xs.max() + 1
+            y0, y1 = max(ys.min() - buf, 0), min(ys.max() + buf, segmap.shape[0]) + 1
+            x0, x1 = max(xs.min() - buf, 0), min(xs.max() + buf, segmap.shape[1]) + 1
         else:
             y0, x0 = 0, 0
             y1, x1 = segmap.shape
 
         sl_hi = (slice(y0, y1), slice(x0, x1))
+        kbin = bin_factor_from_wcs(self.wcs[0], self.wcs[idx])
+        y0_lo, y1_lo, x0_lo, x1_lo = np.round(Template.bin_remap([y0, y1, x0, x1], kbin)).astype(
+            int
+        )
+        sl_lo = (slice(y0_lo, y1_lo), slice(x0_lo, x1_lo))
 
         img_hi = self.images[0]
         img_lo = self.images[idx]
 
-        if img_hi.shape != img_lo.shape:
-            k = img_hi.shape[0] // img_lo.shape[0]
-            sl_lo = (
-                slice(y0 // k, math.ceil(y1 / k)),
-                slice(x0 // k, math.ceil(x1 / k)),
-            )
-            img_lo_cut = img_lo[sl_lo]
-            model = fitter.model_image()[sl_lo]
-            residual = self.residuals[idx - 1][sl_lo]
-            img_lo_hr = block_replicate(img_lo_cut, k)
-            model_hr = block_replicate(model, k)
-            residual_hr = block_replicate(residual, k)
-        else:
-            img_lo_cut = img_lo[sl_hi]
-            model_hr = fitter.model_image()[sl_hi]
-            residual_hr = self.residuals[idx - 1][sl_hi]
-            img_lo_hr = img_lo_cut
+        img_cut = img_lo[sl_lo]
+        model_cut = fitter.model_image()[sl_lo]
 
         tmpl_cut = img_hi[sl_hi]
         seg_cut = segmap[sl_hi]
         scenes_cut = scenes[sl_hi]
+        # @@@ for now assume upsampled residual image
+        res_cut = self.residuals[idx - 1][sl_hi]
 
         # RGB composite using template as blue and low-res as red
-        b = tmpl_cut / np.nanmax(tmpl_cut) if np.nanmax(tmpl_cut) != 0 else tmpl_cut
-        r = img_lo_hr / np.nanmax(img_lo_hr) if np.nanmax(img_lo_hr) != 0 else img_lo_hr
+        tmpl_cut_lo = block_reduce(tmpl_cut, kbin, func=np.mean)
+        b = tmpl_cut_lo / np.nanstd(tmpl_cut_lo) if np.nanstd(tmpl_cut_lo) != 0 else tmpl_cut_lo
+        r = img_cut / np.nanstd(img_cut) if np.nanstd(img_cut) != 0 else img_cut
         g = (r + b) / 2.0
-        col_image = make_lupton_rgb(r, g, b, stretch=2 * np.nanstd(r))
+        col_cut = make_lupton_rgb(r, g, b, stretch=display_sig / 1.5)
 
-        v = float(np.nanmax(np.abs(img_lo_hr))) if np.any(np.isfinite(img_lo_hr)) else 1.0
+        # aspect is w/h
+        aspect = img_cut.shape[1] / img_cut.shape[0]
 
-        fig, ax = plt.subplots(3, 2, figsize=(12, 15))
+        fig, ax = plt.subplots(3, 2, figsize=(10, 13 / aspect))
         ax = ax.flatten()
         images = [
             tmpl_cut,
             seg_cut,
-            img_lo_hr,
-            model_hr,
-            residual_hr,
-            col_image,
+            img_cut,
+            model_cut,
+            res_cut,
+            col_cut,
         ]
         titles = [
-            f"image0 + scenes",
+            f"template + scenes",
             "segmap",
             f"image{idx}",
             f"model image{idx}",
@@ -484,16 +490,37 @@ class Pipeline:
 
         for i, (im, title) in enumerate(zip(images, titles)):
             if title == "segmap":
-                ax[i].imshow(im, origin="lower", cmap="tab20", interpolation="nearest")
+                ax[i].imshow(im, origin="lower", cmap=segmap_cmap, interpolation="nearest")
+                # if plotting a scene, overplot template id as text
+                if scene_id is not None or source_id is not None:
+                    for tmpl in fitter.templates:
+                        if tmpl.id_scene == scene_id:
+                            x, y = tmpl.position_original - np.array([x0, y0])
+                            ax[i].text(
+                                x,
+                                y,
+                                str(tmpl.id),
+                                color="white",
+                                fontsize=6,
+                                ha="center",
+                                va="center",
+                            )
             elif title == "color":
                 ax[i].imshow(im, origin="lower", interpolation="nearest")
             else:
+                ivalid = img_cut != 0
+                v = (
+                    display_sig * np.nanstd(img_cut[ivalid])
+                    if np.any(np.isfinite(img_cut[ivalid]))
+                    else 1.0
+                )
                 ax[i].imshow(im, origin="lower", cmap="gray", vmin=-v, vmax=v)
                 if i == 0:
+                    # set background of segmap to transparent
                     ax[i].imshow(
                         scenes_cut,
                         origin="lower",
-                        cmap="tab20",
+                        cmap=scene_cmap,
                         alpha=0.5,
                         interpolation="nearest",
                     )

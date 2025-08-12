@@ -464,8 +464,8 @@ class SparseFitter:
         reg = cfg.reg
         if reg <= 0:
             reg = 1e-4 * np.median(A.diagonal())
-        if reg > 0:
-            A = A + eye(A.shape[0], format="csr") * reg
+
+        A = A + eye(A.shape[0], format="csr") * reg
 
         # detecting bad rows.
         bad = np.where(np.abs(A.diagonal()) < 1e-14 * np.max(A.diagonal()))[0]
@@ -531,9 +531,7 @@ class SparseFitter:
 
         rtol = cfg.cg_kwargs.get("rtol", 1e-6)
         maxit = cfg.cg_kwargs.get("maxiter", 2000)
-        x, info = solve_components_cg_with_labels(
-            A, b, labels, rtol=rtol, maxiter=maxit
-        )
+        x, info = solve_components_cg_with_labels(A, b, labels, rtol=rtol, maxiter=maxit)
 
         err = np.zeros_like(x)
         for cid in range(ncomp):

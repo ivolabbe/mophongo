@@ -228,3 +228,63 @@ def test_build_normal_matrix_new_equivalence():
     model_old = fitter_old.model_image()
     model_new = fitter_new.model_image_new()
     np.testing.assert_allclose(model_old, model_new)
+
+
+def test_bright_source_detection():
+    images, segmap, catalog, psfs, _, rms = make_simple_data()
+    tmpls = Templates.from_image(
+        images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel=None
+    )
+    cfg = FitConfig(snr_thresh_astrom=5.0)
+    fitter = SparseFitter(
+        tmpls.templates, images[1], 1.0 / rms[1] ** 2, cfg
+    )
+    flux = Templates.quick_flux(tmpls.templates, images[1])
+    err = Templates.predicted_errors(tmpls.templates, 1.0 / rms[1] ** 2)
+    snr = flux / err
+    expected = snr > cfg.snr_thresh_astrom
+    assert np.array_equal(fitter.bright_mask, expected)
+
+
+def test_solve_components_shifts_matches_global():
+    img = np.zeros((6, 6))
+    weights = np.ones_like(img)
+
+    t1 = Template(img, (2, 2), (3, 3))
+    t1.data[:] = np.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]])
+    t2 = Template(img, (2, 3), (3, 3))
+    t2.data[:] = np.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]])
+    t3 = Template(img, (5, 5), (1, 1))
+    t3.data[:] = np.array([[1]])
+
+    tmpls = [t1, t2, t3]
+    fluxes = [1.0, 2.0, 3.0]
+    image = np.zeros_like(img)
+    for f, t in zip(fluxes, tmpls):
+        image[t.slices_original] += f * t.data[t.slices_cutout]
+
+    fitter_all = SparseFitter(
+        [Template(img, (2, 2), (3, 3)), Template(img, (2, 3), (3, 3)), Template(img, (5, 5), (1, 1))],
+        image,
+        weights,
+        FitConfig(),
+    )
+    fitter_all.templates[0].data[:] = t1.data
+    fitter_all.templates[1].data[:] = t2.data
+    fitter_all.templates[2].data[:] = t3.data
+    flux_all, _, _ = fitter_all.solve()
+
+    fitter_shift = SparseFitter(
+        [Template(img, (2, 2), (3, 3)), Template(img, (2, 3), (3, 3)), Template(img, (5, 5), (1, 1))],
+        image,
+        weights,
+        FitConfig(snr_thresh_astrom=0.0),
+    )
+    fitter_shift.templates[0].data[:] = t1.data
+    fitter_shift.templates[1].data[:] = t2.data
+    fitter_shift.templates[2].data[:] = t3.data
+    flux_shift, betas, _ = fitter_shift.solve_components_shifts(order=1)
+
+    np.testing.assert_allclose(flux_shift, flux_all, rtol=1e-4, atol=1e-4)
+    for _, beta in betas:
+        assert np.all(np.abs(beta) < 1e-6)

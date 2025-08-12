@@ -228,6 +228,77 @@ def make_sparse_chol_prec(
     return LinearOperator((n, n), matvec=_apply, rmatvec=_apply, dtype=A.dtype)
 
 
+def merge_small_scenes(
+    labels: np.ndarray,
+    templates: list[Template],
+    bright_mask: np.ndarray,
+    *,
+    order: int = 1,
+    minimum_bright: int | None = None,
+    max_merge_radius: float = np.inf,  # pixels; keep ∞ for no distance limit
+) -> np.ndarray:
+    """
+    Merge scenes that have < minimum_bright bright sources into their nearest scene.
+    Nearest is by centroid of template positions. In-place relabel (returns new labels).
+    """
+    if minimum_bright is None:
+        minimum_bright = len(cheb_basis(0.0, 0.0, order))  # p terms
+
+    labs = labels.copy()
+    while True:
+        uniq = np.unique(labs)
+        if uniq.size <= 1:
+            break
+
+        # per-scene indices
+        idx_lists = [np.where(labs == s)[0] for s in uniq]
+        sizes = np.array([idx.size for idx in idx_lists])
+        if sizes.min() == 0:
+            # prune empty labels quickly
+            nonempty = sizes > 0
+            uniq = uniq[nonempty]
+            idx_lists = [idx_lists[i] for i in np.where(nonempty)[0]]
+            sizes = sizes[nonempty]
+            if uniq.size <= 1:
+                break
+
+        # bright counts and centroids
+        nbright = np.array([int(np.count_nonzero(bright_mask[idx])) for idx in idx_lists])
+        cx = np.array(
+            [np.mean([templates[i].position_original[0] for i in idx]) for idx in idx_lists]
+        )
+        cy = np.array(
+            [np.mean([templates[i].position_original[1] for i in idx]) for idx in idx_lists]
+        )
+
+        # which scenes are under threshold?
+        under = np.where(nbright < minimum_bright)[0]
+        if under.size == 0:
+            break
+
+        # pick the *most* deficient scene to merge first (fewest brights)
+        u = under[np.argmin(nbright[under])]
+
+        # distances from that scene to all others
+        dx = cx - cx[u]
+        dy = cy - cy[u]
+        d2 = dx * dx + dy * dy
+        d2[u] = np.inf  # ignore self
+        v = int(np.argmin(d2))
+
+        if not np.isfinite(d2[v]) or d2[v] > max_merge_radius * max_merge_radius:
+            # nothing reasonable to merge with; stop
+            break
+
+        # relabel: move all members of scene uniq[u] into scene uniq[v]
+        labs[labs == uniq[u]] = uniq[v]
+
+        # continue; loop recomputes stats on the fly
+    # compact labels to 0..k-1
+    _, new_labs = np.unique(labs, return_inverse=True)
+    return new_labs.astype(int)
+
+
 def build_scene_tree(
     templates: List[Template],
 ) -> tuple[np.ndarray, int]:
@@ -277,7 +348,81 @@ def build_scene_tree(
     return labels, int(nscene)
 
 
-def summarize_scene(labels: np.ndarray) -> np.ndarray:
+def merge_small_scenes(
+    labels: np.ndarray,
+    templates: list[Template],
+    bright_mask: np.ndarray,
+    *,
+    order: int = 1,
+    minimum_bright: int | None = None,
+    max_merge_radius: float = np.inf,  # pixels; keep ∞ for no distance limit
+) -> np.ndarray:
+    """
+    Merge scenes that have < minimum_bright bright sources into their nearest scene.
+    Nearest is by centroid of template positions. In-place relabel (returns new labels).
+    """
+    if minimum_bright is None:
+        minimum_bright = len(cheb_basis(0.0, 0.0, order))  # p terms
+
+    labs = labels.copy()
+    while True:
+        uniq = np.unique(labs)
+        if uniq.size <= 1:
+            break
+
+        # per-scene indices
+        idx_lists = [np.where(labs == s)[0] for s in uniq]
+        sizes = np.array([idx.size for idx in idx_lists])
+        if sizes.min() == 0:
+            # prune empty labels quickly
+            nonempty = sizes > 0
+            uniq = uniq[nonempty]
+            idx_lists = [idx_lists[i] for i in np.where(nonempty)[0]]
+            sizes = sizes[nonempty]
+            if uniq.size <= 1:
+                break
+
+        # bright counts and centroids
+        nbright = np.array([int(np.count_nonzero(bright_mask[idx])) for idx in idx_lists])
+        cx = np.array(
+            [np.mean([templates[i].position_original[0] for i in idx]) for idx in idx_lists]
+        )
+        cy = np.array(
+            [np.mean([templates[i].position_original[1] for i in idx]) for idx in idx_lists]
+        )
+
+        # which scenes are under threshold?
+        under = np.where(nbright < minimum_bright)[0]
+        if under.size == 0:
+            break
+
+        # pick the *most* deficient scene to merge first (fewest brights)
+        u = under[np.argmin(nbright[under])]
+
+        # distances from that scene to all others
+        dx = cx - cx[u]
+        dy = cy - cy[u]
+        d2 = dx * dx + dy * dy
+        d2[u] = np.inf  # ignore self
+        v = int(np.argmin(d2))
+
+        if not np.isfinite(d2[v]) or d2[v] > max_merge_radius * max_merge_radius:
+            # nothing reasonable to merge with; stop
+            break
+
+        # relabel: move all members of scene uniq[u] into scene uniq[v]
+        labs[labs == uniq[u]] = uniq[v]
+
+    # compact labels to 0..k-1
+    unique_labels, new_labs = np.unique(labs, return_inverse=True)
+
+    for i, t in enumerate(templates):
+        t.id_scene = int(new_labs[i])
+
+    return new_labs.astype(int), len(unique_labels)
+
+
+def summarize_scenes(labels: np.ndarray) -> np.ndarray:
     """Log a brief summary of scene sizes."""
 
     counts = np.bincount(labels)
@@ -294,6 +439,8 @@ def summarize_scene(labels: np.ndarray) -> np.ndarray:
         [(int(cid), int(counts[cid])) for cid in topk],
     )
     return counts
+
+
 def solve_scene_cg(
     ATA_w_csr: csr_matrix,
     ATb_w: np.ndarray,
@@ -347,6 +494,8 @@ def make_basis_per_scene(
                 x, y = templates[i].position_original
                 basis[i] = cheb_basis(x - x0, y - y0, order)
     return basis
+
+
 def assemble_scene_system(
     comp: list[int],
     templates: List[Template],
@@ -793,9 +942,7 @@ class SparseFitter:
 
         return x_full, e_full, {"cg_info": info}
 
-    def solve_scene(
-        self, config: FitConfig | None = None
-    ) -> tuple[np.ndarray, np.ndarray, dict]:
+    def solve_scene(self, config: FitConfig | None = None) -> tuple[np.ndarray, np.ndarray, dict]:
         """Solve independent template scenes separately using CG.
 
         Templates are partitioned into connected scenes via their bounding
@@ -820,10 +967,21 @@ class SparseFitter:
 
         if b.shape[0] > 100:
             labels, nscene = build_scene_tree(self.templates)
-            summarize_scene(labels)
+            summarize_scenes(labels)
+
+            # NEW: merge tiny scenes before building bases / blocks
+            labels, nscene = merge_small_scenes(
+                labels,
+                self.templates,
+                self.bright_mask,
+                order=cfg.astrom_kwargs.get("order", 1),
+            )
+            summarize_scenes(labels)
         else:
             labels = np.ones(b.shape[0], dtype=int)
             nscene = 1
+
+        self.labels = labels
 
         rtol = cfg.cg_kwargs.get("rtol", 1e-6)
         maxit = cfg.cg_kwargs.get("maxiter", 2000)
@@ -871,10 +1029,8 @@ class SparseFitter:
         """
 
         labels, nscene = build_scene_tree(self.templates)
-        summarize_scene(labels)
-        basis_vals = make_basis_per_scene(
-            self.templates, labels, self.bright_mask, order=order
-        )
+        summarize_scenes(labels)
+        basis_vals = make_basis_per_scene(self.templates, labels, self.bright_mask, order=order)
 
         alpha = np.zeros(len(self.templates), dtype=float)
         betas: list[tuple[int, np.ndarray]] = []

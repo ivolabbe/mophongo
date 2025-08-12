@@ -946,23 +946,23 @@ def make_testdata():
     size_y_40mas = 820
     postfix = "test"
 
-    center_ra, center_dec = 34.4232414, -5.1213316
-    xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
-    xy_even = xy + xy % 2
-    size_x_40mas = 1900
-    size_y_40mas = 1420
-    postfix = "test2"
+    size_x_40mas = 3500
+    size_y_40mas = 2520
+    postfix = "medium"
 
-    # size_x_40mas = 3500
-    # size_y_40mas = 2520
-    # postfix = "medium"
-
-    # center_ra, center_dec = 34.303612, -5.1203157
+    # center_ra, center_dec = 34.4232414, -5.1213316
     # xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
     # xy_even = xy + xy % 2
-    # size_x_40mas = 7000
-    # size_y_40mas = 3520
-    # postfix = 'large'
+    # size_x_40mas = 1900
+    # size_y_40mas = 1420
+    # postfix = "test2"
+
+    center_ra, center_dec = 34.303612, -5.1203157
+    xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
+    xy_even = xy + xy % 2
+    size_x_40mas = 7000
+    size_y_40mas = 3520
+    postfix = "large"
 
     # center_ra, center_dec = 34.361343, -5.1326021
     # xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
@@ -999,6 +999,8 @@ def make_testdata():
             f"uds-{postfix}-f115w_wht.fits",
         ),
         ("LW_f277w-f356w-f444w_SEGMAP.fits", f"uds-{postfix}-LW_seg.fits"),
+        ("test-40mas_f770w_sci.fits", f"uds-{postfix}-40mas-f770w_sci.fits"),
+        ("test-40mas_f770w_wht.fits", f"uds-{postfix}-40mas-f770w_wht.fits"),
         #       ("LW_f277w-f356w-f444w_opterr.fits", "uds-test-f444w_opterr.fits"),
         #       ("LW_f277w-f356w-f444w_optavg.fits", "uds-test-f444w_optavg.fits"),
     ]

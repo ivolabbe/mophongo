@@ -48,7 +48,7 @@ class FitConfig:
     # of the normal matrix diagonal.
     reg: float = 0.0
     bad_value: float = np.nan
-    solve_method: str = "ata"  # 'ata', 'scene', 'lo' (linear operator)
+    solve_method: str = "scene"  # 'all', 'scene', 'lo' (linear operator)
     cg_kwargs: Dict[str, Any] = field(
         default_factory=lambda: {"M": None, "maxiter": 500, "atol": 1e-6}
     )
@@ -73,6 +73,8 @@ class FitConfig:
     #    multi_resolution_method: str = "upsample"  # 'upsample' or 'downsample'
     multi_resolution_method: str = "upsample"  # 'upsample' or 'downsample'
     normal: str = "tree"  # 'loop' or 'tree'
+    scene_merge_small: bool = False  # Merge small scenes before building bases
+    scene_minimum_bright: int = 10  # Minimum bright sources per scene (default: 10)
 
 
 def _diag_inv_hutch(A, k=32, rtol=1e-4, maxiter=None, seed=0):
@@ -228,125 +230,106 @@ def make_sparse_chol_prec(
     return LinearOperator((n, n), matvec=_apply, rmatvec=_apply, dtype=A.dtype)
 
 
-def merge_small_scenes(
-    labels: np.ndarray,
-    templates: list[Template],
-    bright_mask: np.ndarray,
+import numpy as np
+import scipy.sparse as sp
+from scipy.sparse.csgraph import connected_components
+
+
+def build_scene_tree_from_normal(
+    ATA: sp.spmatrix,
+    ATb: np.ndarray,
     *,
-    order: int = 1,
-    minimum_bright: int | None = None,
-    max_merge_radius: float = np.inf,  # pixels; keep ∞ for no distance limit
-) -> np.ndarray:
-    """
-    Merge scenes that have < minimum_bright bright sources into their nearest scene.
-    Nearest is by centroid of template positions. In-place relabel (returns new labels).
-    """
-    if minimum_bright is None:
-        minimum_bright = len(cheb_basis(0.0, 0.0, order))  # p terms
-
-    labs = labels.copy()
-    while True:
-        uniq = np.unique(labs)
-        if uniq.size <= 1:
-            break
-
-        # per-scene indices
-        idx_lists = [np.where(labs == s)[0] for s in uniq]
-        sizes = np.array([idx.size for idx in idx_lists])
-        if sizes.min() == 0:
-            # prune empty labels quickly
-            nonempty = sizes > 0
-            uniq = uniq[nonempty]
-            idx_lists = [idx_lists[i] for i in np.where(nonempty)[0]]
-            sizes = sizes[nonempty]
-            if uniq.size <= 1:
-                break
-
-        # bright counts and centroids
-        nbright = np.array([int(np.count_nonzero(bright_mask[idx])) for idx in idx_lists])
-        cx = np.array(
-            [np.mean([templates[i].position_original[0] for i in idx]) for idx in idx_lists]
-        )
-        cy = np.array(
-            [np.mean([templates[i].position_original[1] for i in idx]) for idx in idx_lists]
-        )
-
-        # which scenes are under threshold?
-        under = np.where(nbright < minimum_bright)[0]
-        if under.size == 0:
-            break
-
-        # pick the *most* deficient scene to merge first (fewest brights)
-        u = under[np.argmin(nbright[under])]
-
-        # distances from that scene to all others
-        dx = cx - cx[u]
-        dy = cy - cy[u]
-        d2 = dx * dx + dy * dy
-        d2[u] = np.inf  # ignore self
-        v = int(np.argmin(d2))
-
-        if not np.isfinite(d2[v]) or d2[v] > max_merge_radius * max_merge_radius:
-            # nothing reasonable to merge with; stop
-            break
-
-        # relabel: move all members of scene uniq[u] into scene uniq[v]
-        labs[labs == uniq[u]] = uniq[v]
-
-        # continue; loop recomputes stats on the fly
-    # compact labels to 0..k-1
-    _, new_labs = np.unique(labs, return_inverse=True)
-    return new_labs.astype(int)
-
-
-def build_scene_tree(
-    templates: List[Template],
+    coupling_thresh: float = 0.03,  # 3% leakage threshold
+    return_0_based: bool = False,
 ) -> tuple[np.ndarray, int]:
-    """Label independent template groups using an ``STRtree``.
+    """
+    Scene partition from normal-equation couplings.
+    Connect i–j if the predicted cross-leakage between their diagonal-only
+    fits exceeds `coupling_thresh`, then take connected components.
 
     Parameters
     ----------
-    templates
-        Templates whose bounding boxes define the connectivity graph.
+    ATA : (n,n) sparse
+        Un-whitened normal matrix (your `_ata`).
+    ATb : (n,) array
+        RHS (your `_atb`).
+    coupling_thresh : float
+        Edge if max(|A_ij α_j|/(A_ii|α_i|), |A_ij α_i|/(A_jj|α_j|)) >= threshold.
+        0.02–0.05 works well; higher → more aggressive splitting.
+    return_0_based : bool
+        If True, labels are 0..K-1; else 1..K (default).
 
     Returns
     -------
-    labels, nscene
-        ``labels`` maps each template index to a scene id and ``nscene`` is
-        the total number of scenes.
+    labels : (n,) int array
+        Scene id per template.
+    nscene : int
+        Number of scenes.
     """
-    from shapely.geometry import box
-    from shapely.strtree import STRtree
-    from scipy.sparse import coo_matrix, csgraph
+    if not sp.isspmatrix(ATA):
+        raise TypeError("ATA must be a SciPy sparse matrix")
+    n = ATA.shape[0]
+    if n == 0:
+        return np.zeros(0, dtype=int), 0
 
-    def _bbox_to_box(t: Template):
-        (ymin, ymax), (xmin, xmax) = t.bbox_original  # closed intervals
-        return box(xmin, ymin, xmax, ymax)
+    A = ATA.tocsr()
+    d = A.diagonal().astype(float)
+    # Numerical floor: if a diagonal is ~0 it should already have been pruned,
+    # but keep it safe.
+    eps_d = max(1e-30, 1e-12 * np.median(d[d > 0])) if np.any(d > 0) else 1e-30
 
-    n = len(templates)
-    boxes = [_bbox_to_box(t) for t in templates]
-    tree = STRtree(boxes)
+    # Diagonal-only amplitudes
+    alpha = np.divide(ATb, d, out=np.zeros_like(ATb, dtype=float), where=d > eps_d)
+    abs_alpha = np.abs(alpha)
 
-    ii: list[int] = []
-    jj: list[int] = []
-    for i, gi in enumerate(boxes):
-        for j in tree.query(gi):
-            j = int(j)
-            if j > i:
-                ii.append(i)
-                jj.append(j)
+    # Work on strict upper triangle only
+    # (coo is convenient to vectorize)
+    Au = sp.triu(A, k=1).tocoo()
+    if Au.nnz == 0:
+        labs = np.arange(n, dtype=int)
+        return (labs if return_0_based else labs + 1), n
 
-    if not ii:
-        return np.arange(n, dtype=int), n
+    i = Au.row
+    j = Au.col
+    aij = np.abs(Au.data)
 
-    adj = coo_matrix((np.ones(len(ii), dtype=np.uint8), (ii, jj)), shape=(n, n))
-    adj = adj + adj.T
-    nscene, labels = csgraph.connected_components(adj, directed=False)
-    labels += 1  # make labels start from 1
-    for i, t in enumerate(templates):
-        t.id_scene = int(labels[i])  # assign scene id to each template
+    di = d[i]
+    dj = d[j]
+    ai = abs_alpha[i]
+    aj = abs_alpha[j]
 
-    return labels, int(nscene)
+    # r_ij = |A_ij α_j| / (A_ii |α_i| + eps),   r_ji similar
+    denom_i = di * ai
+    denom_j = dj * aj
+
+    # add small stabilization only where denom ~ 0
+    eps_i = np.where(denom_i > 0, 0.0, eps_d)
+    eps_j = np.where(denom_j > 0, 0.0, eps_d)
+
+    r_ij = aij * aj / (denom_i + eps_i)
+    r_ji = aij * ai / (denom_j + eps_j)
+    score = np.maximum(r_ij, r_ji)
+
+    mask = score >= float(coupling_thresh)
+    if not np.any(mask):
+        labs = np.arange(n, dtype=int)
+        return (labs if return_0_based else labs + 1), n
+
+    ii = i[mask]
+    jj = j[mask]
+    # Build symmetric adjacency for the kept edges
+    m = mask.sum()
+    data = np.ones(m * 2, dtype=np.uint8)
+    rows = np.concatenate([ii, jj])
+    cols = np.concatenate([jj, ii])
+    adj = sp.coo_matrix((data, (rows, cols)), shape=(n, n)).tocsr()
+
+    nscene, labels0 = connected_components(adj, directed=False)
+    return (labels0 if return_0_based else labels0 + 1), int(nscene)
+
+
+from shapely.geometry import Point
+from shapely.strtree import STRtree
 
 
 def merge_small_scenes(
@@ -356,77 +339,226 @@ def merge_small_scenes(
     *,
     order: int = 1,
     minimum_bright: int | None = None,
-    max_merge_radius: float = np.inf,  # pixels; keep ∞ for no distance limit
-) -> np.ndarray:
+    max_merge_radius: float = np.inf,  # pixels
+    max_iter: int = 64,
+) -> tuple[np.ndarray, int]:
     """
-    Merge scenes that have < minimum_bright bright sources into their nearest scene.
-    Nearest is by centroid of template positions. In-place relabel (returns new labels).
+    Merge scenes below the bright threshold into their nearest scene.
+    Uses Shapely 2.x STRtree.query_nearest (bulk) and unions all pairs per round.
+    Returns (1-based labels, n_scenes).
     """
     if minimum_bright is None:
-        minimum_bright = len(cheb_basis(0.0, 0.0, order))  # p terms
+        minimum_bright = len(cheb_basis(0.0, 0.0, order))
 
-    logger.info(
-        "Merging small scenes with minimum_bright=%d, max_merge_radius=%.1f pixels",
-        minimum_bright,
-        max_merge_radius,
-    )
+    # Work with compact 0..K-1 labels for bincounts
+    labs = np.unique(labels, return_inverse=True)[1]
 
-    labs = labels.copy()
-    while True:
-        uniq = np.unique(labs)
-        if uniq.size <= 1:
+    # Per-template positions & bright flags
+    x = np.array([t.position_original[0] for t in templates], dtype=float)
+    y = np.array([t.position_original[1] for t in templates], dtype=float)
+    b = bright_mask.astype(np.int64)
+
+    for _ in range(max_iter):
+        counts = np.bincount(labs)
+        K = counts.size
+        if K <= 1:
             break
 
-        # per-scene indices
-        idx_lists = [np.where(labs == s)[0] for s in uniq]
-        sizes = np.array([idx.size for idx in idx_lists])
-        if sizes.min() == 0:
-            # prune empty labels quickly
-            nonempty = sizes > 0
-            uniq = uniq[nonempty]
-            idx_lists = [idx_lists[i] for i in np.where(nonempty)[0]]
-            sizes = sizes[nonempty]
-            if uniq.size <= 1:
-                break
+        valid = counts > 0
+        ids = np.nonzero(valid)[0]
+        if ids.size <= 1:
+            break
 
-        # bright counts and centroids
-        nbright = np.array([int(np.count_nonzero(bright_mask[idx])) for idx in idx_lists])
-        cx = np.array(
-            [np.mean([templates[i].position_original[0] for i in idx]) for idx in idx_lists]
-        )
-        cy = np.array(
-            [np.mean([templates[i].position_original[1] for i in idx]) for idx in idx_lists]
-        )
+        # Per-scene aggregates
+        sumx = np.bincount(labs, weights=x, minlength=K)
+        sumy = np.bincount(labs, weights=y, minlength=K)
+        nbright = np.bincount(labs, weights=b, minlength=K).astype(int)
 
-        # which scenes are under threshold?
-        under = np.where(nbright < minimum_bright)[0]
+        cx = np.full(K, np.nan, dtype=float)
+        cy = np.full(K, np.nan, dtype=float)
+        cx[valid] = sumx[valid] / counts[valid]
+        cy[valid] = sumy[valid] / counts[valid]
+
+        under = np.where((nbright < minimum_bright) & valid)[0]
         if under.size == 0:
             break
 
-        # pick the *most* deficient scene to merge first (fewest brights)
-        u = under[np.argmin(nbright[under])]
+        # Build STRtree over centroids of valid scenes (targets)
+        pts = [Point(float(cx[i]), float(cy[i])) for i in ids]
+        tree = STRtree(pts)
 
-        # distances from that scene to all others
-        dx = cx - cx[u]
-        dy = cy - cy[u]
-        d2 = dx * dx + dy * dy
-        d2[u] = np.inf  # ignore self
-        v = int(np.argmin(d2))
+        # Query nearest for each underfilled scene (sources)
+        q_pts = [Point(float(cx[i]), float(cy[i])) for i in under]
 
-        if not np.isfinite(d2[v]) or d2[v] > max_merge_radius * max_merge_radius:
-            # nothing reasonable to merge with; stop
+        if np.isfinite(max_merge_radius):
+            pair_idx, _ = tree.query_nearest(
+                q_pts,
+                exclusive=True,
+                return_distance=True,
+                max_distance=float(max_merge_radius),
+            )
+            if pair_idx.size == 0:
+                break
+        else:
+            pair_idx, _ = tree.query_nearest(q_pts, exclusive=True, return_distance=True)
+
+        # Map query indices back to scene ids in [0..K-1]
+        src = under[pair_idx[0].astype(int)]
+        dst = ids[pair_idx[1].astype(int)]
+
+        # Remove any accidental self-pairs (shouldn’t happen with exclusive=True)
+        m = src != dst
+        if not np.any(m):
             break
+        src = src[m]
+        dst = dst[m]
 
-        # relabel: move all members of scene uniq[u] into scene uniq[v]
-        labs[labs == uniq[u]] = uniq[v]
+        # -------- union all pairs in one go (prevents A↔B label swaps) -------
+        parent = np.arange(K, dtype=int)
 
-    # compact labels to 0..k-1
-    unique_labels, new_labs = np.unique(labs, return_inverse=True)
-    new_labs += 1  # make labels start from 1
-    for i, t in enumerate(templates):
-        t.id_scene = int(new_labs[i])
+        def find(a: int) -> int:
+            # path compression
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
 
-    return new_labs.astype(int), len(unique_labels)
+        for u, v in zip(src, dst):
+            ru, rv = find(u), find(v)
+            if ru != rv:
+                # union by simple heuristic: attach smaller index to larger
+                if ru < rv:
+                    parent[ru] = rv
+                else:
+                    parent[rv] = ru
+
+        # Relabel all members by representative
+        labs = np.fromiter((find(int(li)) for li in labs), dtype=int, count=labs.size)
+
+        # loop: recompute aggregates on merged labels
+
+    # Final compact relabel to 1..K (1-based)
+    uniq, inv = np.unique(labs, return_inverse=True)
+    new_labs = (inv + 1).astype(int)
+    return new_labs, int(uniq.size)
+
+
+def make_basis_per_scene(
+    templates: List[Template],
+    labels: np.ndarray,
+    bright: np.ndarray,
+    order: int = 1,
+) -> list[Optional[np.ndarray]]:
+    """Return per-template basis vectors for bright sources."""
+
+    basis: list[Optional[np.ndarray]] = [None] * len(templates)
+    for sid in range(labels.max() + 1):
+        idx = np.where(labels == sid)[0]
+        if idx.size == 0:
+            continue
+        xs = np.array([templates[i].position_original[0] for i in idx], float)
+        ys = np.array([templates[i].position_original[1] for i in idx], float)
+        x0, y0 = xs.mean(), ys.mean()
+        for i in idx:
+            if bright[i]:
+                x, y = templates[i].position_original
+                basis[i] = cheb_basis(x - x0, y - y0, order)
+    return basis
+
+
+def assemble_scene_system_self_AB(
+    idx: list[int],
+    templates: List[Template],
+    image: np.ndarray,
+    weights: np.ndarray,
+    basis_vals: list[Optional[np.ndarray]],
+    *,
+    order: int = 1,
+    include_y: bool = True,
+    ab_from_bright_only: bool = True,
+) -> tuple[sp.csr_matrix, sp.csr_matrix, np.ndarray]:
+    """
+    Build ONLY the self couplings for a single scene:
+      - AB: flux(row i) ↔ shift(betas) using *template i* gradients
+      - BB: shift(betas) ↔ shift(betas) using *template i* gradients
+      - bB: RHS for shifts using image vs gradients of *template i*
+
+    No A (flux–flux) terms are constructed here — reuse the prebuilt A, b.
+
+    Returns
+    -------
+    AB : (nA, nB) csr
+    BB : (nB, nB) csr
+    bB : (nB,) ndarray
+    """
+    # Which members have a shift basis in this scene?
+    bright_in_idx = [g for g in idx if basis_vals[g] is not None]
+    has_shift = len(bright_in_idx) >= 2
+    if not has_shift:
+        # No shift block → return empty shapes that play nicely downstream.
+        nA = len(idx)
+        return sp.csr_matrix((nA, 0)), sp.csr_matrix((0, 0)), np.zeros(0, dtype=float)
+
+    # p = # of polynomial terms per axis
+    p = len(cheb_basis(0.0, 0.0, order))
+    nA = len(idx)
+    nB = p * (2 if include_y else 1)
+
+    AB = sp.lil_matrix((nA, nB))
+    BB = np.zeros((nB, nB), dtype=float)
+    bB = np.zeros(nB, dtype=float)
+
+    # Cache gradients where needed
+    grad_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+
+    def _gx_gy_for(g: int) -> tuple[np.ndarray, np.ndarray]:
+        if g not in grad_cache:
+            arr = templates[g].data.astype(float)
+            if arr.shape[0] < 2 or arr.shape[1] < 2:
+                gy = np.zeros_like(arr)
+                gx = np.zeros_like(arr)
+            else:
+                gy, gx = np.gradient(arr)  # gy = d/dy, gx = d/dx
+            grad_cache[g] = (gx, gy)
+        return grad_cache[g]
+
+    for row, g in enumerate(idx):
+        ti = templates[g]
+        sl = ti.slices_original
+        tcut = ti.data[ti.slices_cutout]
+        w = weights[sl]
+        img = image[sl]
+
+        Si = basis_vals[g]
+        if (Si is None) and ab_from_bright_only:
+            continue  # leave AB row zeros for faint sources
+
+        # Need gradients for *this* source only
+        Gx, Gy = _gx_gy_for(g)
+
+        # ----- AB (self) ---------------------------------------------------
+        # <T_i, w, dT_i/dx> and <T_i, w, dT_i/dy>
+        gx = float(np.sum(tcut * w * Gx[ti.slices_cutout]))
+        AB[row, 0:p] += gx * (Si if Si is not None else 0.0)
+        if include_y:
+            gy = float(np.sum(tcut * w * Gy[ti.slices_cutout]))
+            AB[row, p : 2 * p] += gy * (Si if Si is not None else 0.0)
+
+        # ----- BB (self) ---------------------------------------------------
+        # <dT_i/dx, w, dT_i/dx> and <dT_i/dy, w, dT_i/dy>
+        if Si is not None:
+            Gxx = float(np.sum(Gx[ti.slices_cutout] * w * Gx[ti.slices_cutout]))
+            BB[0:p, 0:p] += Gxx * np.outer(Si, Si)
+            if include_y:
+                Gyy = float(np.sum(Gy[ti.slices_cutout] * w * Gy[ti.slices_cutout]))
+                BB[p : 2 * p, p : 2 * p] += Gyy * np.outer(Si, Si)
+
+            # ----- bB (self) -----------------------------------------------
+            bB[0:p] += float(np.sum(Gx[ti.slices_cutout] * w * img)) * Si
+            if include_y:
+                bB[p : 2 * p] += float(np.sum(Gy[ti.slices_cutout] * w * img)) * Si
+
+    return AB.tocsr(), sp.csr_matrix(BB), bB
 
 
 def summarize_scenes(labels: np.ndarray) -> np.ndarray:
@@ -441,7 +573,7 @@ def summarize_scenes(labels: np.ndarray) -> np.ndarray:
         counts.max(),
     )
     topk = np.argsort(counts)[::-1][:10]
-    logger.debug(
+    logger.info(
         "Top scenes by size: %s",
         [(int(cid), int(counts[cid])) for cid in topk],
     )
@@ -480,30 +612,496 @@ def solve_scene_cg(
     return x, infos
 
 
-def make_basis_per_scene(
-    templates: List[Template],
-    labels: np.ndarray,
-    bright: np.ndarray,
-    order: int = 1,
-) -> list[Optional[np.ndarray]]:
-    """Return per-template basis vectors for bright sources."""
+class SparseFitter:
+    """Build and solve sparse normal equations for photometry."""
 
-    basis: list[Optional[np.ndarray]] = [None] * len(templates)
-    for sid in range(labels.max() + 1):
-        idx = np.where(labels == sid)[0]
-        if idx.size == 0:
-            continue
-        xs = np.array([templates[i].position_original[0] for i in idx], float)
-        ys = np.array([templates[i].position_original[1] for i in idx], float)
-        x0, y0 = xs.mean(), ys.mean()
-        for i in idx:
-            if bright[i]:
-                x, y = templates[i].position_original
-                basis[i] = cheb_basis(x - x0, y - y0, order)
-    return basis
+    def __init__(
+        self,
+        templates: List[Template],
+        image: np.ndarray,
+        weights: np.ndarray | None = None,
+        config: FitConfig | None = None,
+    ) -> None:
+        if weights is None:
+            weights = np.ones_like(image)
+
+        self._orig_templates = templates  # keep original templates List object
+        self.templates = templates.copy()  # work in list copy for fitting, modifying
+
+        self.n_flux = len(templates)
+        for i, tmpl in enumerate(self.templates):
+            tmpl.is_flux = True
+            tmpl.col_idx = i
+
+        self.image = image
+        self.weights = weights
+        self.config = config or FitConfig()
+        self._ata = None
+        self._atb = None
+        self.solution: np.ndarray | None = None
+
+        # Identify high-S/N templates for astrometric shift fitting
+        flux_est = Templates.quick_flux(self.templates, self.image)
+        err_est = Templates.predicted_errors(self.templates, self.weights)
+        snr = np.divide(
+            flux_est,
+            err_est,
+            out=np.zeros_like(flux_est),
+            where=err_est > 0,
+        )
+        self.bright_mask = snr > self.config.snr_thresh_astrom
+
+    @staticmethod
+    def _intersection(
+        a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]
+    ) -> Tuple[int, int, int, int] | None:
+        y0 = max(a[0], b[0])
+        y1 = min(a[1], b[1])
+        x0 = max(a[2], b[2])
+        x1 = min(a[3], b[3])
+        if y0 >= y1 or x0 >= x1:
+            return None
+        return y0, y1, x0, x1
+
+    @staticmethod
+    def _bbox_to_slices(bbox: Tuple[int, int, int, int]) -> Tuple[slice, slice]:
+        """Convert integer bounding box to slices for array indexing."""
+        y0, y1, x0, x1 = bbox
+        return slice(y0, y1), slice(x0, x1)
+
+    @staticmethod
+    def _slice_intersection(
+        a: tuple[slice, slice], b: tuple[slice, slice]
+    ) -> tuple[slice, slice] | None:
+        y0 = max(a[0].start, b[0].start)
+        y1 = min(a[0].stop, b[0].stop)
+        x0 = max(a[1].start, b[1].start)
+        x1 = min(a[1].stop, b[1].stop)
+        if y0 >= y1 or x0 >= x1:
+            return None
+        return slice(y0, y1), slice(x0, x1)
+
+    def _weighted_norm(self, tmpl: Template) -> float:
+        """Return the weighted L2 norm of ``tmpl``.
+        The norm is computed by summing ``data * weight * data`` over the
+        template support in the image space.
+        """
+        sl = tmpl.slices_original
+        data = tmpl.data[tmpl.slices_cutout]
+        w = self.weights[sl]
+        return float(np.sum(data * w * data))
+
+    def build_normal(self) -> None:
+        """Dispatch to the configured normal-matrix builder."""
+        if getattr(self.config, "normal", "loop") == "tree":
+            self.build_normal_tree()
+        else:
+            self.build_normal_matrix()
+
+    def build_normal_tree(self) -> None:
+        """Construct normal matrix using an STRtree to find overlaps."""
+        from shapely.geometry import box
+        from shapely.strtree import STRtree
+
+        norms = [self._weighted_norm(t) for t in self.templates]
+        tol = 1e-8 * max(norms)
+        keep = [i for i, n in enumerate(norms) if n > tol]
+        dropped = len(self.templates) - len(keep)
+        if dropped:
+            logger.info("Dropped %d templates with low norm.", dropped)
+        self.templates = [self.templates[i] for i in keep]
+        norms = [norms[i] for i in keep]
+
+        n = len(self.templates)
+        ata = lil_matrix((n, n))
+        atb = np.zeros(n)
+
+        boxes = []
+        for i, tmpl in enumerate(tqdm(self.templates, total=n, desc="Building Normal matrix")):
+            sl_i = tmpl.slices_original
+            data_i = tmpl.data[tmpl.slices_cutout]
+            w_i = self.weights[sl_i]
+            img_i = self.image[sl_i]
+            atb[i] = np.sum(data_i * w_i * img_i)
+            ata[i, i] = norms[i]
+
+            y0, y1, x0, x1 = tmpl.bbox
+            geom = box(x0, y0, x1, y1)
+            boxes.append(geom)
+
+        tree = STRtree(boxes)
+
+        for i, geom in enumerate(boxes):
+            sl_i = self.templates[i].slices_original
+            for j in tree.query(geom):
+                j = int(j)
+                if j <= i:
+                    continue
+                inter = self._slice_intersection(sl_i, self.templates[j].slices_original)
+                if inter is None:
+                    continue
+                w = self.weights[inter]
+                sl_i_local = (
+                    slice(
+                        inter[0].start - sl_i[0].start + self.templates[i].slices_cutout[0].start,
+                        inter[0].stop - sl_i[0].start + self.templates[i].slices_cutout[0].start,
+                    ),
+                    slice(
+                        inter[1].start - sl_i[1].start + self.templates[i].slices_cutout[1].start,
+                        inter[1].stop - sl_i[1].start + self.templates[i].slices_cutout[1].start,
+                    ),
+                )
+                sl_j = self.templates[j].slices_original
+                sl_j_local = (
+                    slice(
+                        inter[0].start - sl_j[0].start + self.templates[j].slices_cutout[0].start,
+                        inter[0].stop - sl_j[0].start + self.templates[j].slices_cutout[0].start,
+                    ),
+                    slice(
+                        inter[1].start - sl_j[1].start + self.templates[j].slices_cutout[1].start,
+                        inter[1].stop - sl_j[1].start + self.templates[j].slices_cutout[1].start,
+                    ),
+                )
+                arr_i = self.templates[i].data[sl_i_local]
+                arr_j = self.templates[j].data[sl_j_local]
+                val = np.sum(arr_i * arr_j * w)
+                ata[i, j] = val
+                ata[j, i] = val
+
+        self._ata = ata.tocsr()
+        self._atb = atb
+        self.rtree = tree
+
+    def model_image(self) -> np.ndarray:
+        if self.solution is None:
+            raise ValueError("Solve system first")
+        model = np.zeros_like(self.image, dtype=float)
+        for coeff, tmpl in zip(self.solution, self._orig_templates):
+            model[tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
+        model[self.weights <= 0 | np.isnan(self.weights)] = 0.0
+        return model
+
+    @property
+    def ata(self):
+        if self._ata is None:
+            self.build_normal()
+        return self._ata
+
+    @property
+    def atb(self):
+        if self._atb is None:
+            self.build_normal()
+        return self._atb
+
+    def solve(self, config: FitConfig | None = None) -> Tuple[np.ndarray, np.ndarray, dict]:
+        """Solve for template fluxes using conjugate gradient."""
+        if config is None:
+            config = self.config
+        if config.solve_method == "scene":
+            return self.solve_scene(config=config)
+        else:
+            return self.solve_all(config=config)
+
+    def _solve_scenes_with_shifts(
+        self,
+        A_w: csr_matrix,  # prewhitened flux normal (D^-1 A D^-1)
+        b_w: np.ndarray,  # prewhitened RHS (b / d)
+        d: np.ndarray,  # whitening scales: sqrt(diag(A_reg))
+        scene_ids: np.ndarray,
+        templates: List[Template],  # precomputed/pruned list (self.templates)
+        bright_mask: np.ndarray,  # precomputed mask aligned to `templates`
+        *,
+        order: int = 1,
+        include_y: bool = True,
+        ab_from_bright_only: bool = True,
+        rtol: float = 1e-6,
+        maxiter: int = 2000,
+    ) -> tuple[np.ndarray, np.ndarray, list[tuple[int, np.ndarray]], list[int]]:
+        """
+        Per-scene solve of joint block system in WHITENED flux space:
+
+            [ A_w(scene)   AB_w ] [ x_w(scene) ] = [ b_w(scene) ]
+            [  AB_wᵀ        BB  ] [   beta     ]   [     bB      ]
+
+        Returns
+        -------
+        alpha : (n,)  unwhitened fluxes (x_w / d)
+        err   : (n,)  unwhitened 1σ flux errors (from whitened Schur complement)
+        betas : list[(scene_id, beta_vec)]
+        infos : list[int]  CG/MINRES flags per scene
+        """
+        from scipy.sparse import diags, bmat
+
+        cfg = self.config
+
+        # Per-template polynomial bases (uses provided bright_mask)
+        basis_vals = make_basis_per_scene(templates, scene_ids, bright_mask, order=order)
+
+        n = A_w.shape[0]
+        alpha = np.zeros(n, dtype=float)  # unwhitened fluxes
+        err = np.zeros(n, dtype=float)
+        betas: list[tuple[int, np.ndarray]] = []
+        infos: list[int] = []
+
+        logger.debug("Solving %d scenes with shifts", len(np.unique(scene_ids)))
+
+        for sid in np.unique(scene_ids):
+            idx = np.where(scene_ids == sid)[0]
+            if idx.size == 0:
+                betas.append((int(sid), np.zeros(0, dtype=float)))
+                infos.append(0)
+                continue
+
+            # Assemble self-only AB/BB/bB (in UNwhitened units)
+            AB, BB, bB = assemble_scene_system_self_AB(
+                idx,
+                templates,
+                self.image,
+                self.weights,
+                basis_vals,
+                order=order,
+                include_y=include_y,
+                ab_from_bright_only=ab_from_bright_only,
+            )
+
+            A_w_blk = A_w[idx][:, idx].tocsr()
+            b_w_blk = b_w[idx]
+
+            if AB.shape[1] == 0:
+                logger.debug("Scene %d: no shifts, solving flux-only", sid)
+                # flux-only in this scene
+                xw, info = cg(A_w_blk, b_w_blk, atol=0.0, rtol=rtol, maxiter=maxiter)
+                alpha[idx] = xw / d[idx]
+                err[idx] = self._flux_errors(A_w_blk) / d[idx]
+                betas.append((int(sid), np.zeros(0, dtype=float)))
+                infos.append(int(info))
+                continue
+
+            # Left-whiten AB rows to match whitened flux variables
+            Dinv_scene = diags(1.0 / d[idx], 0, format="csr")
+            AB_w = Dinv_scene @ AB  # (nA, nB); BB, bB stay in natural units
+
+            # Solve joint whitened system
+            K = bmat([[A_w_blk, AB_w], [AB_w.T, BB]], format="csr")
+            rhs = np.concatenate([b_w_blk, bB])
+
+            sol, info = cg(K, rhs, atol=0.0, rtol=rtol, maxiter=maxiter)
+            if info > 0:
+                sol, info = minres(K, rhs, atol=0.0, rtol=rtol, maxiter=maxiter)
+
+            na = idx.size
+            xw_scene = sol[:na]
+            beta_scene = sol[na:]
+            alpha[idx] = xw_scene / d[idx]
+            betas.append((int(sid), beta_scene))
+            infos.append(int(info))
+
+            # Flux errors via whitened Schur complement
+            # BB_dense = BB.toarray()
+            # BB_dense.flat[:: BB_dense.shape[0] + 1] += cfg.reg_astrom  # tiny ridge for stability
+            # BB_inv = np.linalg.pinv(BB_dense)
+            # S_w = (A_w_blk - (AB_w @ BB_inv @ AB_w.T)).tocsr()
+            # err[idx] = self._flux_errors(S_w) / d[idx]
+
+            # --- Flux errors via whitened Schur complement (stay in whitened flux space)
+            BB_dense = BB.toarray()
+            BB_dense.flat[:: BB_dense.shape[0] + 1] += cfg.reg_astrom  # tiny ridge for stability
+            # Prefer solve over pinv when well-conditioned
+            try:
+                # X solves: BB * X = AB_w.T   → X: (nB, nA)
+                X = np.linalg.solve(BB_dense, AB_w.T.toarray())
+            except np.linalg.LinAlgError:
+                # fallback to pinv if BB is ill-conditioned
+                X = np.linalg.pinv(BB_dense) @ AB_w.T.toarray()
+
+            # Y = AB_w @ X  (nA × nA) — this is dense ndarray by design
+            Y = AB_w @ X
+            # Schur complement in whitened space; cast dense Y back to sparse before subtract
+            S_w = (A_w_blk - sp.csr_matrix(Y)).tocsr()
+            # Convert whitened errors to unwhitened: σ(x) = σ(x_w) / d
+            err[idx] = self._flux_errors(S_w) / d[idx]
+
+            logger.debug("betas for scene %d: %s", sid, betas[-1][1])
+            logger.debug("Scene %d: solved with %d templates, info=%d", sid, len(idx), info)
+
+        return alpha, err, betas, infos
+
+    def solve_scene(self, config: FitConfig | None = None) -> tuple[np.ndarray, np.ndarray, dict]:
+        """Solve independent template scenes separately using CG.
+
+        Templates are partitioned into connected scenes via their bounding
+        box overlaps. The normal matrix is whitened once for the full system,
+        and each scene is solved on this whitened matrix independently.
+        """
+
+        cfg = config or self.config
+
+        # note templates are pruned here
+        A, b = self.ata, self.atb
+
+        reg = cfg.reg
+        if reg <= 0:
+            reg = 1e-4 * np.median(A.diagonal())
+        if reg > 0:
+            A = A + eye(A.shape[0], format="csr") * reg
+
+        d = np.sqrt(np.maximum(A.diagonal(), reg))
+        Dinv = diags(1.0 / d, 0, format="csr")
+        A_w = Dinv @ A @ Dinv
+        b_w = b / d
+
+        templates = self.templates
+        idx = [t.col_idx for t in templates]
+        bright_mask = self.bright_mask[idx]
+
+        # get scene ids from the normal equations
+        #  merge small scenes so enough bright sources are present
+        scene_ids, nscene = build_scene_tree_from_normal(A, b, coupling_thresh=1e-4)
+        summarize_scenes(scene_ids)
+        if cfg.scene_merge_small:
+            from mophongo.astrometry import n_terms
+
+            npoly = n_terms(cfg.astrom_kwargs.get("order", 1))
+            minimum_bright = max(cfg.scene_minimum_bright, npoly * 2)
+
+            scene_ids, nscene = merge_small_scenes(
+                scene_ids,
+                templates,
+                bright_mask,
+                minimum_bright=minimum_bright,
+            )
+            summarize_scenes(scene_ids)
+
+        self.scene_ids = scene_ids  # store for diagnostics
+        for i, t in enumerate(templates):
+            t.id_scene = int(scene_ids[i])  # assign scene id to each template
+
+        # after you computed `scene_ids` (and before the flux-only branch)
+        rtol = cfg.cg_kwargs.get("rtol", 1e-6)
+        maxit = cfg.cg_kwargs.get("maxiter", 2000)
+        if cfg.fit_astrometry_niter > 0 and cfg.fit_astrometry_joint:
+            # x, err are unwhitened fluxes, betas are astrometric shifts
+            x, err, betas, infos = self._solve_scenes_with_shifts(
+                A_w,
+                b_w,
+                d,
+                scene_ids,
+                templates,
+                bright_mask,
+                order=cfg.astrom_kwargs.get("poly", {}).get("order", 1),
+                include_y=True,
+                ab_from_bright_only=True,
+                rtol=rtol,
+                maxiter=maxit,
+            )
+            info = {"cg_info": infos, "nscene": nscene, "betas": betas}
+        else:
+            x_w, info = solve_scene_cg(A_w, b_w, scene_ids, rtol=rtol, maxiter=maxit)
+            x = x_w / d
+            err = self._flux_errors(A_w) / d
+
+        if cfg.positivity:
+            x = np.maximum(0.0, x)
+
+        x_full = np.zeros(self.n_flux, dtype=float)
+        e_full = np.zeros(self.n_flux, dtype=float)
+        x_full[idx] = x
+        e_full[idx] = err
+
+        self.solution = x_full
+        self.solution_err = e_full
+        for tmpl, flux, err in zip(self._orig_templates, x_full, e_full):
+            tmpl.flux = flux
+            tmpl.err = err
+
+        return x_full, e_full, {"cg_info": info, "nscene": nscene}
+
+    def residual(self) -> np.ndarray:
+        return self.image - self.model_image()
+
+    def quick_flux(self, templates: Optional[List[Template]] = None) -> np.ndarray:
+        """Return quick flux estimates based on template data and image."""
+        if templates is None:
+            templates = self._orig_templates
+        return Templates.quick_flux(templates, self.image)
+
+    def predicted_errors(self, templates: Optional[List[Template]] = None) -> np.ndarray:
+        """Return per-source uncertainties ignoring template covariance."""
+        if templates is None:
+            templates = self._orig_templates
+        return Templates.predicted_errors(templates, self.weights)
+
+    def flux_and_rms(
+        self, templates: Optional[List[Template]] = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return flux estimates and RMS errors for templates.
+
+        Uses existing template fluxes when available; otherwise computes
+        quick fluxes and predicted errors for the first ``n_flux`` templates.
+
+        Args:
+            templates: Optional list of templates to evaluate. Defaults to
+                the original templates supplied to the fitter.
+
+        Returns:
+            Tuple ``(flux, rms)`` containing the flux estimates and
+            corresponding RMS errors for each template.
+        """
+        if templates is None:
+            templates = self._orig_templates
+
+        if templates and templates[0].flux != 0:
+            flux = np.array([t.flux for t in templates[: self.n_flux]])
+        else:
+            flux = self.quick_flux(templates)[: self.n_flux]
+
+        rms = self.predicted_errors(templates)[: self.n_flux]
+        return flux, rms
+
+    def flux_errors(self) -> np.ndarray:
+        """Return the 1-sigma flux uncertainties from the last solution."""
+        if self.solution_err is None:
+            raise ValueError("Solve system first")
+        return self.solution_err
+
+    def _flux_errors(self, A: csr_matrix) -> np.ndarray:
+        """Return 1-sigma uncertainties for the fitted fluxes.
+        This computes the diagonal of ``A`` :sup:`-1` using a SuperLU
+        factorization when possible and falls back to a Hutchinson
+        trace estimator otherwise.
+        """
+        eps_pd = 1e-4 * np.median(A.diagonal())
+        A = A + eps_pd * eye(A.shape[0], format="csr")  # ensure PD
+
+        # 0. cheap independent-pixel approximation?
+        off = A.copy()
+        off.setdiag(0)
+        covar_power = np.sqrt((off.data**2).sum()) / A.diagonal().sum()
+        if covar_power < 1e-3 or not self.config.fit_covariances:
+            return 1 / np.sqrt(A.diagonal())
+        else:
+            return _diag_inv_hutch(A, k=16, rtol=1e-4)
+
+    @classmethod
+    def fit(
+        cls,
+        templates: List[Template],
+        image: np.ndarray,
+        weights: np.ndarray | None = None,
+        config: FitConfig | None = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Convenience method to solve for fluxes and return residuals."""
+        fitter = cls(templates, image, weights, config)
+        fluxes, _, _ = fitter.solve()
+        resid = fitter.residual()
+        return fluxes, resid
 
 
-def assemble_scene_system(
+# ------------------------------------- OBSOLETE BELOW -------------------------------------
+# ------------------------------------- OBSOLETE BELOW -------------------------------------
+
+
+def assemble_scene_system_old(
     comp: list[int],
     templates: List[Template],
     image: np.ndarray,
@@ -629,390 +1227,609 @@ def assemble_scene_system(
     return AA.tocsr(), AB.tocsr(), csr_matrix(BB), bA, bB
 
 
-class SparseFitter:
-    """Build and solve sparse normal equations for photometry."""
+def build_scene_tree_old(
+    templates: List[Template],
+) -> tuple[np.ndarray, int]:
+    """Label independent template groups using Shapely 2.x STRtree.query."""
+    from shapely.geometry import box
+    from shapely.strtree import STRtree
+    from scipy.sparse import coo_matrix, csgraph
+    import numpy as np
 
-    def __init__(
-        self,
-        templates: List[Template],
-        image: np.ndarray,
-        weights: np.ndarray | None = None,
-        config: FitConfig | None = None,
-    ) -> None:
-        if weights is None:
-            weights = np.ones_like(image)
+    def _bbox_to_box(t: Template):
+        (ymin, ymax), (xmin, xmax) = t.bbox_original  # closed intervals
+        return box(xmin, ymin, xmax, ymax)
 
-        self._orig_templates = templates  # keep original templates List object
-        self.templates = templates.copy()  # work in copy for fitting, modifying
+    n = len(templates)
+    if n == 0:
+        return np.zeros(0, dtype=int), 0
 
-        self.n_flux = len(templates)
-        for i, tmpl in enumerate(self.templates):
-            tmpl.is_flux = True
-            tmpl.col_idx = i
+    boxes = [_bbox_to_box(t) for t in templates]
+    tree = STRtree(boxes)
 
-        self.image = image
-        self.weights = weights
-        self.config = config or FitConfig()
-        self._ata = None
-        self._atb = None
-        self.solution: np.ndarray | None = None
+    # Collect undirected edges (i<j) where boxes intersect
+    ii: list[int] = []
+    jj: list[int] = []
+    for i, gi in enumerate(boxes):
+        j_idx = tree.query(gi, predicate="intersects")  # ndarray[int]
+        if j_idx.size == 0:
+            continue
+        sel = j_idx > i
+        if np.any(sel):
+            js = j_idx[sel].tolist()
+            ii.extend([i] * len(js))
+            jj.extend(js)
 
-        # Identify high-S/N templates for astrometric shift fitting
-        flux_est = Templates.quick_flux(self.templates, self.image)
-        err_est = Templates.predicted_errors(self.templates, self.weights)
-        snr = np.divide(
-            flux_est,
-            err_est,
-            out=np.zeros_like(flux_est),
-            where=err_est > 0,
-        )
-        self.bright_mask = snr > self.config.snr_thresh_astrom
+    if not ii:
+        # no overlaps → each template is its own scene
+        return (np.arange(n, dtype=int) + 1, n)
 
-    @staticmethod
-    def _intersection(
-        a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]
-    ) -> Tuple[int, int, int, int] | None:
-        y0 = max(a[0], b[0])
-        y1 = min(a[1], b[1])
-        x0 = max(a[2], b[2])
-        x1 = min(a[3], b[3])
-        if y0 >= y1 or x0 >= x1:
-            return None
-        return y0, y1, x0, x1
+    adj = coo_matrix((np.ones(len(ii), dtype=np.uint8), (ii, jj)), shape=(n, n))
+    adj = adj + adj.T
+    nscene, labels = csgraph.connected_components(adj.tocsr(), directed=False)
 
-    @staticmethod
-    def _bbox_to_slices(bbox: Tuple[int, int, int, int]) -> Tuple[slice, slice]:
-        """Convert integer bounding box to slices for array indexing."""
-        y0, y1, x0, x1 = bbox
-        return slice(y0, y1), slice(x0, x1)
+    return labels.astype(int) + 1, int(nscene)
 
-    @staticmethod
-    def _slice_intersection(
-        a: tuple[slice, slice], b: tuple[slice, slice]
-    ) -> tuple[slice, slice] | None:
-        y0 = max(a[0].start, b[0].start)
-        y1 = min(a[0].stop, b[0].stop)
-        x0 = max(a[1].start, b[1].start)
-        x1 = min(a[1].stop, b[1].stop)
-        if y0 >= y1 or x0 >= x1:
-            return None
-        return slice(y0, y1), slice(x0, x1)
 
-    def _weighted_norm(self, tmpl: Template) -> float:
-        """Return the weighted L2 norm of ``tmpl``.
-        The norm is computed by summing ``data * weight * data`` over the
-        template support in the image space.
-        """
-        sl = tmpl.slices_original
-        data = tmpl.data[tmpl.slices_cutout]
-        w = self.weights[sl]
-        return float(np.sum(data * w * data))
+def build_scene_tree(
+    templates: List[Template],
+    bright_mask: np.ndarray,
+    minimum_bright: int = 5,
+) -> tuple[np.ndarray, int]:
+    """
+    Bright-seeded scene builder (Shapely 2.x).
+    1) Components among BRIGHT via bbox intersects.
+    2) Merge underfilled bright components (nearest component centroid) until
+       each has >= p bright sources, where p = len(cheb_basis(0,0,order)).
+    3) Attach FAINT: overlap→component with max area; else nearest component centroid.
+    Returns (labels_1based, nscene).
+    """
+    import numpy as np
+    from shapely.geometry import box, Point
+    from shapely.strtree import STRtree
+    from scipy.sparse import coo_matrix, csgraph
 
-    def build_normal(self) -> None:
-        """Dispatch to the configured normal-matrix builder."""
-        if getattr(self.config, "normal", "loop") == "tree":
-            self.build_normal_tree()
+    n = len(templates)
+    if n == 0:
+        return np.zeros(0, dtype=int), 0
+
+    bright_mask = np.asarray(bright_mask, dtype=bool)
+    B = np.flatnonzero(bright_mask)
+    F = np.flatnonzero(~bright_mask)
+
+    # Geometries + centroids (robust to degenerate boxes)
+    geoms = []
+    cx = np.empty(n, float)
+    cy = np.empty(n, float)
+    for i, t in enumerate(templates):
+        (ymin, ymax), (xmin, xmax) = t.bbox_original
+        g = box(xmin, ymin, xmax, ymax)
+        if g.is_empty or g.area <= 0:
+            x0, y0 = t.position_original
+            e = 0.5
+            g = box(x0 - e, y0 - e, x0 + e, y0 + e)
+        geoms.append(g)
+        c = g.centroid
+        cx[i], cy[i] = float(c.x), float(c.y)
+
+    labels = -np.ones(n, dtype=int)
+
+    # If no brights → each template is its own scene (aggressive split)
+    if B.size == 0:
+        labs = np.arange(n, dtype=int)
+        return labs + 1, n
+
+    # --- 1) BRIGHT graph by bbox intersections
+    geoms_B = [geoms[i] for i in B]
+    tree_B = STRtree(geoms_B)
+
+    ii_b: list[int] = []
+    jj_b: list[int] = []
+    for k, gi in enumerate(geoms_B):
+        js = tree_B.query(gi, predicate="intersects")
+        if js.size:
+            js = js[js > k]  # undirected edges (j>i)
+            if js.size:
+                ii_b.extend([k] * js.size)
+                jj_b.extend(js.tolist())
+
+    if ii_b:
+        adj_b = coo_matrix((np.ones(len(ii_b), np.uint8), (ii_b, jj_b)), shape=(B.size, B.size))
+        adj_b = adj_b + adj_b.T
+        ncomp_b, labs_B_local = csgraph.connected_components(adj_b.tocsr(), directed=False)
+    else:
+        ncomp_b = B.size
+        labs_B_local = np.arange(B.size, dtype=int)
+
+    # --- 2) Merge underfilled BRIGHT components by nearest component centroid
+    # Compact to 0..K-1
+    uniqB, invB = np.unique(labs_B_local, return_inverse=True)
+    labs_B_local = invB
+    K = uniqB.size
+
+    # component centroids from bright centroids
+    bx = cx[B]
+    by = cy[B]
+
+    # Loop until every bright component has >= p brights or only one remains
+    max_iter = 256
+    for _ in range(max_iter):
+        counts = np.bincount(labs_B_local, minlength=K)
+        valid = counts > 0
+        ids = np.nonzero(valid)[0]
+        if ids.size <= 1:
+            break
+
+        # Underfilled comps
+        under = ids[counts[ids] < minimum_bright]
+        if under.size == 0:
+            break
+
+        # Component centroids (mean of member bright centroids)
+        sumx = np.bincount(labs_B_local, weights=bx, minlength=K)
+        sumy = np.bincount(labs_B_local, weights=by, minlength=K)
+        cxC = np.empty(K, float)
+        cxC.fill(np.nan)
+        cyC = np.empty(K, float)
+        cyC.fill(np.nan)
+        cxC[valid] = sumx[valid] / counts[valid]
+        cyC[valid] = sumy[valid] / counts[valid]
+
+        # STRtree over all current component centroids
+        pts = [Point(cxC[i], cyC[i]) for i in ids]
+        treeC = STRtree(pts)
+        q_pts = [Point(cxC[i], cyC[i]) for i in under]
+
+        # Bulk nearest; may return multiple ties per query → reduce to min distance
+        (q_idx, t_idx), dists = treeC.query_nearest(q_pts, return_distance=True)
+        q_idx = np.asarray(q_idx, int)  # indices into q_pts
+        t_idx = np.asarray(t_idx, int)  # indices into pts
+        dists = np.asarray(dists, float)
+
+        best_to = np.full(under.size, -1, int)
+        best_d = np.full(under.size, np.inf, float)
+        for qi, ti, d in zip(q_idx, t_idx, dists):
+            # Map local indices back to component ids
+            src_comp = under[qi]
+            dst_comp = ids[ti]
+            if src_comp == dst_comp:
+                continue
+            if d < best_d[qi]:
+                best_d[qi] = d
+                best_to[qi] = dst_comp
+
+        # Apply merges (dedup)
+        pairs = [(u, v) for u, v in zip(under, best_to) if v >= 0 and u != v]
+        if not pairs:
+            break
+        pairs = list(dict.fromkeys(pairs))
+        u = np.array([a for a, _ in pairs], int)
+        v = np.array([b for _, b in pairs], int)
+
+        remap = np.arange(K, dtype=int)
+        remap[u] = v
+        new_labs = remap[labs_B_local]
+        if np.array_equal(new_labs, labs_B_local):
+            break
+        labs_B_local = new_labs
+
+        # Repack component ids 0..K'-1
+        uniqB, invB = np.unique(labs_B_local, return_inverse=True)
+        labs_B_local = invB
+        K = uniqB.size
+
+    # Assign bright template labels
+    labels[B] = labs_B_local
+
+    # --- 3) Attach FAINT templates
+    # Prefer overlap with any bright template; choose the bright component with max area
+    if F.size:
+        # Tree on BRIGHT template bboxes for overlap checks
+        tree_overlap_B = STRtree(geoms_B)
+
+        for i in F:
+            gi = geoms[i]
+            js = tree_overlap_B.query(gi, predicate="intersects")
+            if js.size:
+                # choose component with maximum intersection area
+                areas = [gi.intersection(geoms_B[int(j)]).area for j in js]
+                if areas and np.max(areas) > 0.0:
+                    jbest = int(js[int(np.argmax(areas))])
+                    labels[i] = labs_B_local[jbest]
+
+        # Remaining faint → nearest component centroid
+        rem = np.where(labels[F] < 0)[0]
+        if rem.size:
+            # Component centroid points (after merges)
+            counts = np.bincount(labs_B_local)
+            sumx = np.bincount(labs_B_local, weights=bx)
+            sumy = np.bincount(labs_B_local, weights=by)
+            cxC = sumx / counts
+            cyC = sumy / counts
+            ptsC = [Point(float(xc), float(yc)) for xc, yc in zip(cxC, cyC)]
+            treeC = STRtree(ptsC)
+
+            q_pts = [Point(cx[F[k]], cy[F[k]]) for k in rem]
+            (qa, qb), dists = treeC.query_nearest(q_pts, return_distance=True)
+            qa = np.asarray(qa, int)
+            qb = np.asarray(qb, int)
+            dists = np.asarray(dists, float)
+
+            # Reduce ties per query
+            m = rem.size
+            best_d = np.full(m, np.inf, float)
+            best_qb = np.full(m, -1, int)
+            for q, bidx, d in zip(qa, qb, dists):
+                if d < best_d[q]:
+                    best_d[q] = d
+                    best_qb[q] = bidx
+
+            good = best_qb >= 0
+            if np.any(good):
+                labels[F[rem[good]]] = best_qb[good]
+
+    # Any still -1 (shouldn’t happen) → give own component
+    if np.any(labels < 0):
+        miss = np.where(labels < 0)[0]
+        start = labels.max() + 1
+        labels[miss] = np.arange(start, start + miss.size, dtype=int)
+
+    # Pack to 1..K
+    uniq, inv = np.unique(labels, return_inverse=True)
+    return (inv + 1).astype(int), int(uniq.size)
+
+
+def build_scene_tree(
+    templates: List[Template],
+    bright_mask: np.ndarray,
+    minimum_bright: int = 3,
+) -> tuple[np.ndarray, int]:
+    """
+    Bright-seeded scene builder (Shapely 2.x), minimal knobs.
+
+    1) Make components among BRIGHT via bbox intersects.
+    2) Greedily merge underfilled bright components by nearest component centroid
+       (exclusive=True) until each has >= minimum_bright, or only one remains.
+    3) Attach FAINT: if overlaps any BRIGHT template → join the bright component
+       with max overlap area; else join nearest component centroid.
+    4) Final guarantee: if any scene still has < minimum_bright brights, merge
+       those scenes into their nearest scene with >= minimum_bright (or chain
+       until one scene if necessary).
+
+    Returns (labels_1based, nscene).
+    """
+    import numpy as np
+    from shapely.geometry import box, Point
+    from shapely.strtree import STRtree
+    from scipy.sparse import coo_matrix, csgraph
+
+    n = len(templates)
+    if n == 0:
+        return np.zeros(0, dtype=int), 0
+
+    bright_mask = np.asarray(bright_mask, bool)
+    B = np.flatnonzero(bright_mask)
+    F = np.flatnonzero(~bright_mask)
+
+    # ---- geometry + centroids (robust to degenerate boxes)
+    geoms = []
+    cx = np.empty(n, float)
+    cy = np.empty(n, float)
+    for i, t in enumerate(templates):
+        (ymin, ymax), (xmin, xmax) = t.bbox_original
+        g = box(xmin, ymin, xmax, ymax)
+        if g.is_empty or g.area <= 0:
+            x0, y0 = t.position_original
+            e = 0.5
+            g = box(x0 - e, y0 - e, x0 + e, y0 + e)
+        geoms.append(g)
+        c = g.centroid
+        cx[i], cy[i] = float(c.x), float(c.y)
+
+    labels = -np.ones(n, dtype=int)
+
+    # No brights → aggressive split (each its own)
+    if B.size == 0:
+        labs = np.arange(n, dtype=int)
+        return labs + 1, n
+
+    # If total brights less than threshold, put all into one seed scene
+    if B.size < minimum_bright:
+        labels[B] = 0
+        # attach all faint later to that single component
+        single_seed = True
+    else:
+        single_seed = False
+
+    # ---- 1) bright components via bbox intersects
+    if not single_seed:
+        geoms_B = [geoms[i] for i in B]
+        tree_B = STRtree(geoms_B)
+        ii: list[int] = []
+        jj: list[int] = []
+        for k, gi in enumerate(geoms_B):
+            js = tree_B.query(gi, predicate="intersects")
+            if js.size:
+                js = js[js > k]  # undirected edges
+                if js.size:
+                    ii.extend([k] * js.size)
+                    jj.extend(js.tolist())
+        if ii:
+            adj = coo_matrix((np.ones(len(ii), np.uint8), (ii, jj)), shape=(B.size, B.size))
+            adj = adj + adj.T
+            _, labs_B = csgraph.connected_components(adj.tocsr(), directed=False)
         else:
-            self.build_normal_matrix()
+            labs_B = np.arange(B.size, dtype=int)
 
-    def build_normal_matrix(self) -> None:
-        """Construct normal matrix using :class:`Template` objects."""
-        # Compute weighted norms for all templates first
+        # compact 0..K-1
+        _, labs_B = np.unique(labs_B, return_inverse=True)
+        K = int(labs_B.max() + 1)
 
-        norms = [self._weighted_norm(t) for t in self.templates]
-        tol = 1e-8 * max(norms)
+        # ---- 2) merge underfilled bright components by nearest centroid (exclusive)
+        bx = cx[B]
+        by = cy[B]
 
-        # Prune templates with near-zero norm
-        # valid: list[Template] = []
-        # norms: list[float] = []
-        # for tmpl, norm in zip(self.templates, norms_all):
-        #     if norm < tol:
-        #         valid.append(tmpl)
-        #         norms.append(norm)
+        def merge_underfilled(labs_B, K):
+            # union-find helpers
+            parent = np.arange(K, dtype=int)
 
-        keep = [i for i, n in enumerate(norms) if n > tol]
-        print(f"Dropped {len(self.templates)-len(keep)} templates with low norm.")
+            def find(a):
+                while parent[a] != a:
+                    parent[a] = parent[parent[a]]
+                    a = parent[a]
+                return a
 
-        self.templates = [self.templates[i] for i in keep]
-        norms = [norms[i] for i in keep]
+            def union(a, b):
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    if ra < rb:
+                        parent[rb] = ra
+                    else:
+                        parent[ra] = rb
 
-        n = len(self.templates)
-        ata = lil_matrix((n, n))
-        atb = np.zeros(n)
-        for i, tmpl_i in enumerate(tqdm(self.templates, total=n, desc="Building Normal matrix")):
+            counts = np.bincount(labs_B, minlength=K)
+            valid = counts > 0
+            ids = np.nonzero(valid)[0]
+            if ids.size <= 1:
+                return labs_B, K, False
 
-            sl_i = tmpl_i.slices_original
-            data_i = tmpl_i.data[tmpl_i.slices_cutout]
-            w_i = self.weights[sl_i]
-            img_i = self.image[sl_i]
-            atb[i] = np.sum(data_i * w_i * img_i)
-            ata[i, i] = norms[i]
+            under = ids[counts[ids] < minimum_bright]
+            if under.size == 0:
+                return labs_B, K, False
 
-            for j in range(i + 1, n):
-                tmpl_j = self.templates[j]
-                inter = self._slice_intersection(sl_i, tmpl_j.slices_original)
-                if inter is None:
-                    continue
-                w = self.weights[inter]
-                sl_i_local = (
-                    slice(
-                        inter[0].start - sl_i[0].start + tmpl_i.slices_cutout[0].start,
-                        inter[0].stop - sl_i[0].start + tmpl_i.slices_cutout[0].start,
-                    ),
-                    slice(
-                        inter[1].start - sl_i[1].start + tmpl_i.slices_cutout[1].start,
-                        inter[1].stop - sl_i[1].start + tmpl_i.slices_cutout[1].start,
-                    ),
-                )
-                sl_j_local = (
-                    slice(
-                        inter[0].start
-                        - tmpl_j.slices_original[0].start
-                        + tmpl_j.slices_cutout[0].start,
-                        inter[0].stop
-                        - tmpl_j.slices_original[0].start
-                        + tmpl_j.slices_cutout[0].start,
-                    ),
-                    slice(
-                        inter[1].start
-                        - tmpl_j.slices_original[1].start
-                        + tmpl_j.slices_cutout[1].start,
-                        inter[1].stop
-                        - tmpl_j.slices_original[1].start
-                        + tmpl_j.slices_cutout[1].start,
-                    ),
-                )
-                arr_i = tmpl_i.data[sl_i_local]
-                arr_j = tmpl_j.data[sl_j_local]
-                val = np.sum(arr_i * arr_j * w)
-                #                if val == 0: # cant prune < tol, because messes up global astrometry fit
-                #                    continue
-                ata[i, j] = val
-                ata[j, i] = val
+            sumx = np.bincount(labs_B, weights=bx, minlength=K)
+            sumy = np.bincount(labs_B, weights=by, minlength=K)
+            cxC = np.full(K, np.nan)
+            cyC = np.full(K, np.nan)
+            cxC[valid] = sumx[valid] / counts[valid]
+            cyC[valid] = sumy[valid] / counts[valid]
 
-        self._ata = ata.tocsr()
-        self._atb = atb
+            pts_all = [Point(cxC[i], cyC[i]) for i in ids]
+            treeC = STRtree(pts_all)
+            q_pts = [Point(cxC[i], cyC[i]) for i in under]
 
-    def build_normal_tree(self) -> None:
-        """Construct normal matrix using an STRtree to find overlaps."""
-        from shapely.geometry import box
+            # critical: exclusive=True avoids self-pairing (distance 0).
+            (qa, qb), dists = treeC.query_nearest(q_pts, return_distance=True, exclusive=True)
+            qa = np.asarray(qa, int)
+            qb = np.asarray(qb, int)
+            dists = np.asarray(dists, float)
+
+            # pick the closest target per query (handles ties)
+            best_to = np.full(under.size, -1, int)
+            best_d = np.full(under.size, np.inf, float)
+            for q, b, d in zip(qa, qb, dists):
+                src_comp = under[q]
+                dst_comp = ids[b]
+                if d < best_d[q]:
+                    best_d[q] = d
+                    best_to[q] = dst_comp
+
+            pairs = [(u, v) for u, v in zip(under, best_to) if v >= 0 and u != v]
+            if not pairs:
+                return labs_B, K, False
+
+            # union merges
+            for u, v in dict.fromkeys(pairs):
+                union(u, v)
+
+            reps = np.array([find(i) for i in range(K)], int)
+            new_labs = reps[labs_B]
+            if np.array_equal(new_labs, labs_B):
+                return labs_B, K, False
+
+            # re-pack to 0..K'-1
+            _, new_labs = np.unique(new_labs, return_inverse=True)
+            return new_labs, int(new_labs.max() + 1), True
+
+        changed = True
+        it = 0
+        while changed and it < 256:
+            labs_B, K, changed = merge_underfilled(labs_B, K)
+            it += 1
+
+        labels[B] = labs_B
+    # else: single_seed already set labels[B]=0
+
+    # ---- 3) attach FAINT
+    if F.size:
+        geoms_B = [geoms[i] for i in B]
+        tree_overlap_B = STRtree(geoms_B)
+
+        # overlap preference
+        for i in F:
+            gi = geoms[i]
+            js = tree_overlap_B.query(gi, predicate="intersects")
+            if js.size:
+                areas = [gi.intersection(geoms_B[int(j)]).area for j in js]
+                if areas and np.max(areas) > 0.0:
+                    jbest = int(js[int(np.argmax(areas))])
+                    labels[i] = labels[B[jbest]]
+
+        # nearest centroid fallback
+        rem = np.where(labels[F] < 0)[0]
+        if rem.size:
+            # current scene ids among brights
+            sc_ids = np.unique(labels[B])
+            sc_ids = sc_ids[sc_ids >= 0]
+            # centroids per scene from *bright* members
+            bx = cx[B]
+            by = cy[B]
+            labsB = labels[B]
+            counts = np.bincount(labsB)
+            sumx = np.bincount(labsB, weights=bx)
+            sumy = np.bincount(labsB, weights=by)
+            cxC = sumx / np.maximum(counts, 1)
+            cyC = sumy / np.maximum(counts, 1)
+            ptsC = [Point(float(cxC[s]), float(cyC[s])) for s in range(cxC.size)]
+            treeC = STRtree(ptsC)
+
+            q_pts = [Point(cx[F[k]], cy[F[k]]) for k in rem]
+            (qa, qb), dists = treeC.query_nearest(q_pts, return_distance=True)
+            qa = np.asarray(qa, int)
+            qb = np.asarray(qb, int)
+
+            m = rem.size
+            best_d = np.full(m, np.inf, float)
+            best_qb = np.full(m, -1, int)
+            for q, b, d in zip(qa, qb, dists):
+                if d < best_d[q]:
+                    best_d[q] = d
+                    best_qb[q] = b
+
+            good = best_qb >= 0
+            if np.any(good):
+                labels[F[rem[good]]] = best_qb[good]
+
+    # ---- 4) final guarantee on bright counts
+    labs = labels.copy()
+    # pack to 0..K-1 first
+    _, labs = np.unique(labs, return_inverse=True)
+    # bright counts per scene
+    bcounts = np.bincount(labs[B], minlength=labs.max() + 1)
+    under = np.flatnonzero(bcounts < minimum_bright)
+    if under.size and (labs.max() + 1) > 1:
+        # scene centroids from *bright* members when present, else all members
+        K = labs.max() + 1
+        cxS = np.zeros(K)
+        cyS = np.zeros(K)
+        cntS = np.zeros(K)
+        # try bright-only
+        for s in range(K):
+            idx = B[labs[B] == s]
+            if idx.size:
+                cxS[s] = cx[idx].mean()
+                cyS[s] = cy[idx].mean()
+                cntS[s] = idx.size
+        # fill scenes without brights using all members
+        for s in range(K):
+            if cntS[s] == 0:
+                idx = np.flatnonzero(labs == s)
+                cxS[s] = cx[idx].mean()
+                cyS[s] = cy[idx].mean()
+
         from shapely.strtree import STRtree
 
-        norms = [self._weighted_norm(t) for t in self.templates]
-        tol = 1e-8 * max(norms)
-        keep = [i for i, n in enumerate(norms) if n > tol]
-        dropped = len(self.templates) - len(keep)
-        if dropped:
-            logger.info("Dropped %d templates with low norm.", dropped)
-        self.templates = [self.templates[i] for i in keep]
-        norms = [norms[i] for i in keep]
+        pts_all = [Point(cxS[s], cyS[s]) for s in range(K)]
+        treeS = STRtree(pts_all)
 
-        n = len(self.templates)
-        ata = lil_matrix((n, n))
-        atb = np.zeros(n)
-
-        boxes = []
-        for i, tmpl in enumerate(tqdm(self.templates, total=n, desc="Building Normal matrix")):
-            sl_i = tmpl.slices_original
-            data_i = tmpl.data[tmpl.slices_cutout]
-            w_i = self.weights[sl_i]
-            img_i = self.image[sl_i]
-            atb[i] = np.sum(data_i * w_i * img_i)
-            ata[i, i] = norms[i]
-
-            y0, y1, x0, x1 = tmpl.bbox
-            geom = box(x0, y0, x1, y1)
-            boxes.append(geom)
-
-        tree = STRtree(boxes)
-
-        for i, geom in enumerate(boxes):
-            sl_i = self.templates[i].slices_original
-            for j in tree.query(geom):
-                j = int(j)
-                if j <= i:
-                    continue
-                inter = self._slice_intersection(sl_i, self.templates[j].slices_original)
-                if inter is None:
-                    continue
-                w = self.weights[inter]
-                sl_i_local = (
-                    slice(
-                        inter[0].start - sl_i[0].start + self.templates[i].slices_cutout[0].start,
-                        inter[0].stop - sl_i[0].start + self.templates[i].slices_cutout[0].start,
-                    ),
-                    slice(
-                        inter[1].start - sl_i[1].start + self.templates[i].slices_cutout[1].start,
-                        inter[1].stop - sl_i[1].start + self.templates[i].slices_cutout[1].start,
-                    ),
-                )
-                sl_j = self.templates[j].slices_original
-                sl_j_local = (
-                    slice(
-                        inter[0].start - sl_j[0].start + self.templates[j].slices_cutout[0].start,
-                        inter[0].stop - sl_j[0].start + self.templates[j].slices_cutout[0].start,
-                    ),
-                    slice(
-                        inter[1].start - sl_j[1].start + self.templates[j].slices_cutout[1].start,
-                        inter[1].stop - sl_j[1].start + self.templates[j].slices_cutout[1].start,
-                    ),
-                )
-                arr_i = self.templates[i].data[sl_i_local]
-                arr_j = self.templates[j].data[sl_j_local]
-                val = np.sum(arr_i * arr_j * w)
-                ata[i, j] = val
-                ata[j, i] = val
-
-        self._ata = ata.tocsr()
-        self._atb = atb
-
-    def model_image(self) -> np.ndarray:
-        if self.solution is None:
-            raise ValueError("Solve system first")
-        model = np.zeros_like(self.image, dtype=float)
-        for coeff, tmpl in zip(self.solution, self._orig_templates):
-            model[tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
-        model[self.weights <= 0 | np.isnan(self.weights)] = 0.0
-        return model
-
-    @property
-    def ata(self):
-        if self._ata is None:
-            self.build_normal()
-        return self._ata
-
-    @property
-    def atb(self):
-        if self._atb is None:
-            self.build_normal()
-        return self._atb
-
-    def solve(
-        self, config: FitConfig | None = None, x_w0: float | None = None
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Solve for template fluxes using conjugate gradient."""
-        cfg = config or self.config
-
-        # build big normal matrix once, this as a shift entry for every template
-        A, b = self.ata, self.atb  # triggers build_normal()
-
-        # Guarantees strict positive definiteness after whitening
-        # A symmetric matrix that is positive‐semi-definite but rank-deficient
-        # can have eigenvalues down to 10⁻¹⁴–10⁻¹⁶ (numerical zero). Adding 10⁻⁸
-        # shifts every eigenvalue by that amount, lifting them well above rounding
-        # error yet staying ≪ typical diagonal (10⁰–10⁴ for sky+source units). The
-        # induced bias in fluxes is therefore ≤ 10⁻⁸ negligible compared to
-        # Poisson errors (∼10⁻²–10⁻³).
-        reg = cfg.reg
-        if reg <= 0:
-            reg = 1e-4 * np.median(A.diagonal())
-
-        A = A + eye(A.shape[0], format="csr") * reg
-
-        # detecting bad rows.
-        bad = np.where(np.abs(A.diagonal()) < 1e-14 * np.max(A.diagonal()))[0]
-        if bad.size:
-            print(f"Eliminating {bad.size} nearly-zero diagonal rows before ILU", bad.size)
-
-        eps = reg or 1e-10
-        d = np.sqrt(np.maximum(A.diagonal(), eps))
-        Dinv = diags(1.0 / d, 0, format="csr")
-
-        A_w = Dinv @ A @ Dinv
-        b_w = Dinv @ b
-
-        # expand to full solution vector corresponding to _orig_templates
-        idx = [t.col_idx for t in self.templates]
-
-        # reuse prevous solution if available
-        x_w0 = getattr(self, "x_w0", None)
-        x_w, info = cg(A_w, b_w, x0=x_w0, **cfg.cg_kwargs)
-        self.x_w = x_w
-
-        # n_flux is always the full input length of the templates
-        x_full = np.zeros(self.n_flux, dtype=float)
-        e_full = np.zeros(self.n_flux, dtype=float)
-
-        x_full[idx] = x_w / d  # un-whiten + scatter
-        e_full[idx] = self._flux_errors(A_w) / d  # un-whiten errors
-
-        if cfg.positivity:
-            x_full[: self.n_flux] = np.maximum(0, x_full[: self.n_flux])
-
-        self.solution = x_full[: self.n_flux]  # fluxes, corresponds to original templates
-        self.solution_err = e_full[: self.n_flux]  # flux errors, corresponds to original templates
-
-        # update the templates with the fitted fluxes, errors
-        for tmpl, flux, err in zip(self._orig_templates, self.solution, self.solution_err):
-            tmpl.flux = flux
-            tmpl.err = err
-
-        return x_full, e_full, {"cg_info": info}
-
-    def solve_scene(self, config: FitConfig | None = None) -> tuple[np.ndarray, np.ndarray, dict]:
-        """Solve independent template scenes separately using CG.
-
-        Templates are partitioned into connected scenes via their bounding
-        box overlaps. The normal matrix is whitened once for the full system,
-        and each scene is solved on this whitened matrix independently.
-        """
-
-        cfg = config or self.config
-        A, b = self.ata, self.atb
-
-        reg = cfg.reg
-        if reg <= 0:
-            reg = 1e-4 * np.median(A.diagonal())
-        if reg > 0:
-            A = A + eye(A.shape[0], format="csr") * reg
-
-        eps = reg or 1e-10
-        d = np.sqrt(np.maximum(A.diagonal(), eps))
-        Dinv = diags(1.0 / d, 0, format="csr")
-        A_w = Dinv @ A @ Dinv
-        b_w = b / d
-
-        if b.shape[0] > 100:
-            labels, nscene = build_scene_tree(self.templates)
-            summarize_scenes(labels)
-
-            # NEW: merge tiny scenes before building bases / blocks
-            labels, nscene = merge_small_scenes(
-                labels,
-                self.templates,
-                self.bright_mask,
-                order=cfg.astrom_kwargs.get("order", 1),
-            )
-            summarize_scenes(labels)
+        strong = np.flatnonzero(bcounts >= minimum_bright)
+        if strong.size == 0:
+            # collapse everything into one
+            labs[:] = 0
         else:
-            labels = np.ones(b.shape[0], dtype=int)
-            nscene = 1
+            q_pts = [pts_all[s] for s in under]
+            tgt_pts = [pts_all[s] for s in strong]
+            # map under → nearest strong (build tree only on strong)
+            treeStrong = STRtree(tgt_pts)
+            (qa, qb), _ = treeStrong.query_nearest(q_pts, return_distance=True)
+            qa = np.asarray(qa, int)
+            qb = np.asarray(qb, int)
+            # apply merges
+            remap = np.arange(K, dtype=int)
+            for src, ti in zip(under[qa], strong[qb]):
+                remap[src] = ti
+            labs = remap[labs]
 
-        self.labels = labels
+    # final pack 1..K
+    uniq, inv = np.unique(labs, return_inverse=True)
+    return (inv + 1).astype(int), int(uniq.size)
 
-        rtol = cfg.cg_kwargs.get("rtol", 1e-6)
-        maxit = cfg.cg_kwargs.get("maxiter", 2000)
-        x_w, info = solve_scene_cg(A_w, b_w, labels, rtol=rtol, maxiter=maxit)
-        x = x_w / d
 
-        err = self._flux_errors(A_w) / d
+def merge_small_scenes_old(
+    labels: np.ndarray,
+    templates: list[Template],
+    bright_mask: np.ndarray,
+    *,
+    order: int = 1,
+    minimum_bright: int | None = None,
+    max_merge_radius: float = np.inf,  # pixels; keep ∞ for no distance limit
+) -> np.ndarray:
+    """
+    Merge scenes that have < minimum_bright bright sources into their nearest scene.
+    Nearest is by centroid of template positions. In-place relabel (returns new labels).
+    """
+    if minimum_bright is None:
+        minimum_bright = len(cheb_basis(0.0, 0.0, order))  # p terms
 
-        if cfg.positivity:
-            x = np.maximum(0.0, x)
+    logger.info(
+        "Merging small scenes with minimum_bright=%d, max_merge_radius=%.1f pixels",
+        minimum_bright,
+        max_merge_radius,
+    )
 
-        x_full = np.zeros(self.n_flux, dtype=float)
-        e_full = np.zeros(self.n_flux, dtype=float)
-        idx = [t.col_idx for t in self.templates]
-        x_full[idx] = x
-        e_full[idx] = err
+    labs = labels.copy()
+    while True:
+        uniq = np.unique(labs)
+        if uniq.size <= 1:
+            break
 
-        self.solution = x_full
-        self.solution_err = e_full
-        for tmpl, flux, err in zip(self._orig_templates, x_full, e_full):
-            tmpl.flux = flux
-            tmpl.err = err
+        # per-scene indices
+        idx_lists = [np.where(labs == s)[0] for s in uniq]
+        sizes = np.array([idx.size for idx in idx_lists])
+        if sizes.min() == 0:
+            # prune empty labels quickly
+            nonempty = sizes > 0
+            uniq = uniq[nonempty]
+            idx_lists = [idx_lists[i] for i in np.where(nonempty)[0]]
+            sizes = sizes[nonempty]
+            if uniq.size <= 1:
+                break
 
-        return x_full, e_full, {"cg_info": info, "nscene": nscene}
+        # bright counts and centroids
+        nbright = np.array([int(np.count_nonzero(bright_mask[idx])) for idx in idx_lists])
+        cx = np.array(
+            [np.mean([templates[i].position_original[0] for i in idx]) for idx in idx_lists]
+        )
+        cy = np.array(
+            [np.mean([templates[i].position_original[1] for i in idx]) for idx in idx_lists]
+        )
+
+        # which scenes are under threshold?
+        under = np.where(nbright < minimum_bright)[0]
+        if under.size == 0:
+            break
+
+        # pick the *most* deficient scene to merge first (fewest brights)
+        u = under[np.argmin(nbright[under])]
+
+        # distances from that scene to all others
+        dx = cx - cx[u]
+        dy = cy - cy[u]
+        d2 = dx * dx + dy * dy
+        d2[u] = np.inf  # ignore self
+        v = int(np.argmin(d2))
+
+        if not np.isfinite(d2[v]) or d2[v] > max_merge_radius * max_merge_radius:
+            # nothing reasonable to merge with; stop
+            break
+
+        # relabel: move all members of scene uniq[u] into scene uniq[v]
+        labs[labs == uniq[u]] = uniq[v]
+
+    # compact labels to 0..k-1
+    unique_labels, new_labs = np.unique(labs, return_inverse=True)
+
+    return new
 
     def solve_scene_shifts(
         self,
@@ -1097,82 +1914,73 @@ class SparseFitter:
         info = {"nscene": nscene, "cg_info": infos, "betas": betas}
         return x_full, e_full, info
 
-    def residual(self) -> np.ndarray:
-        return self.image - self.model_image()
 
-    def quick_flux(self, templates: Optional[List[Template]] = None) -> np.ndarray:
-        """Return quick flux estimates based on template data and image."""
-        if templates is None:
-            templates = self._orig_templates
-        return Templates.quick_flux(templates, self.image)
+def build_normal_matrix(self) -> None:
+    """Construct normal matrix using :class:`Template` objects."""
+    # Compute weighted norms for all templates first
 
-    def predicted_errors(self, templates: Optional[List[Template]] = None) -> np.ndarray:
-        """Return per-source uncertainties ignoring template covariance."""
-        if templates is None:
-            templates = self._orig_templates
-        return Templates.predicted_errors(templates, self.weights)
+    norms = [self._weighted_norm(t) for t in self.templates]
+    tol = 1e-8 * max(norms)
 
-    def flux_and_rms(
-        self, templates: Optional[List[Template]] = None
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Return flux estimates and RMS errors for templates.
+    keep = [i for i, n in enumerate(norms) if n > tol]
+    print(f"Dropped {len(self.templates)-len(keep)} templates with low norm.")
 
-        Uses existing template fluxes when available; otherwise computes
-        quick fluxes and predicted errors for the first ``n_flux`` templates.
+    self.templates = [self.templates[i] for i in keep]
+    norms = [norms[i] for i in keep]
 
-        Args:
-            templates: Optional list of templates to evaluate. Defaults to
-                the original templates supplied to the fitter.
+    n = len(self.templates)
+    ata = lil_matrix((n, n))
+    atb = np.zeros(n)
+    for i, tmpl_i in enumerate(tqdm(self.templates, total=n, desc="Building Normal matrix")):
 
-        Returns:
-            Tuple ``(flux, rms)`` containing the flux estimates and
-            corresponding RMS errors for each template.
-        """
-        if templates is None:
-            templates = self._orig_templates
+        sl_i = tmpl_i.slices_original
+        data_i = tmpl_i.data[tmpl_i.slices_cutout]
+        w_i = self.weights[sl_i]
+        img_i = self.image[sl_i]
+        atb[i] = np.sum(data_i * w_i * img_i)
+        ata[i, i] = norms[i]
 
-        if templates and templates[0].flux != 0:
-            flux = np.array([t.flux for t in templates[: self.n_flux]])
-        else:
-            flux = self.quick_flux(templates)[: self.n_flux]
+        for j in range(i + 1, n):
+            tmpl_j = self.templates[j]
+            inter = self._slice_intersection(sl_i, tmpl_j.slices_original)
+            if inter is None:
+                continue
+            w = self.weights[inter]
+            sl_i_local = (
+                slice(
+                    inter[0].start - sl_i[0].start + tmpl_i.slices_cutout[0].start,
+                    inter[0].stop - sl_i[0].start + tmpl_i.slices_cutout[0].start,
+                ),
+                slice(
+                    inter[1].start - sl_i[1].start + tmpl_i.slices_cutout[1].start,
+                    inter[1].stop - sl_i[1].start + tmpl_i.slices_cutout[1].start,
+                ),
+            )
+            sl_j_local = (
+                slice(
+                    inter[0].start
+                    - tmpl_j.slices_original[0].start
+                    + tmpl_j.slices_cutout[0].start,
+                    inter[0].stop
+                    - tmpl_j.slices_original[0].start
+                    + tmpl_j.slices_cutout[0].start,
+                ),
+                slice(
+                    inter[1].start
+                    - tmpl_j.slices_original[1].start
+                    + tmpl_j.slices_cutout[1].start,
+                    inter[1].stop
+                    - tmpl_j.slices_original[1].start
+                    + tmpl_j.slices_cutout[1].start,
+                ),
+            )
+            arr_i = tmpl_i.data[sl_i_local]
+            arr_j = tmpl_j.data[sl_j_local]
+            val = np.sum(arr_i * arr_j * w)
+            #                if val == 0: # cant prune < tol, because messes up global astrometry fit
+            #                    continue
+            ata[i, j] = val
+            ata[j, i] = val
 
-        rms = self.predicted_errors(templates)[: self.n_flux]
-        return flux, rms
-
-    def flux_errors(self) -> np.ndarray:
-        """Return the 1-sigma flux uncertainties from the last solution."""
-        if self.solution_err is None:
-            raise ValueError("Solve system first")
-        return self.solution_err
-
-    def _flux_errors(self, A: csr_matrix) -> np.ndarray:
-        """Return 1-sigma uncertainties for the fitted fluxes.
-        This computes the diagonal of ``A`` :sup:`-1` using a SuperLU
-        factorization when possible and falls back to a Hutchinson
-        trace estimator otherwise.
-        """
-        eps_pd = 1e-6 * np.median(A.diagonal())
-        A = A + eps_pd * eye(A.shape[0], format="csr")  # ensure PD
-
-        # 0. cheap independent-pixel approximation?
-        off = A.copy()
-        off.setdiag(0)
-        covar_power = np.sqrt((off.data**2).sum()) / A.diagonal().sum()
-        if covar_power < 1e-3 or not self.config.fit_covariances:
-            return 1 / np.sqrt(A.diagonal())
-        else:
-            return _diag_inv_hutch(A, k=16, rtol=1e-4)
-
-    @classmethod
-    def fit(
-        cls,
-        templates: List[Template],
-        image: np.ndarray,
-        weights: np.ndarray | None = None,
-        config: FitConfig | None = None,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Convenience method to solve for fluxes and return residuals."""
-        fitter = cls(templates, image, weights, config)
-        fluxes, _, _ = fitter.solve()
-        resid = fitter.residual()
-        return fluxes, resid
+    self._ata = ata.tocsr()
+    self._atb = atb

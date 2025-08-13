@@ -18,7 +18,7 @@ from scipy.sparse.linalg import (
 )
 from tqdm import tqdm
 
-from .astrometry import cheb_basis
+from .astrometry import cheb_basis, AstroCorrect
 from .templates import Template, Templates
 
 logger = logging.getLogger(__name__)
@@ -64,11 +64,11 @@ class FitConfig:
     astrom_centroid: str = "centroid"  # "centroid" (=old) | "correlation"
     #    astrom_basis_order: int = 1
     astrom_kwargs: dict[str, dict] = field(
-        default_factory=lambda: {"poly": {"order": 2}, "gp": {"length_scale": 500}}
+        default_factory=lambda: {"poly": {"order": 1}, "gp": {"length_scale": 500}}
     )
     #    astrom_kwargs={'poly': {'order': 2}, 'gp': {'length_scale': 400}}
     multi_tmpl_chi2_thresh: float = 5.0
-    multi_tmpl_psf_core: bool = False
+    multi_tmpl_psf_core: bool = True
     multi_tmpl_colour: bool = False
     #    multi_resolution_method: str = "upsample"  # 'upsample' or 'downsample'
     multi_resolution_method: str = "upsample"  # 'upsample' or 'downsample'
@@ -444,71 +444,80 @@ def merge_small_scenes(
 
 
 def make_basis_per_scene(
-    templates: List[Template],
+    templates: list[Template],
     labels: np.ndarray,
     bright: np.ndarray,
     order: int = 1,
-) -> list[Optional[np.ndarray]]:
-    """Return per-template basis vectors for bright sources."""
-
+) -> tuple[
+    list[Optional[np.ndarray]], dict[int, tuple[float, float]], dict[int, tuple[float, float]]
+]:
+    """Return per-template basis vectors for BRIGHT sources and per-scene center/scale."""
     basis: list[Optional[np.ndarray]] = [None] * len(templates)
-    for sid in range(labels.max() + 1):
+    centers: dict[int, tuple[float, float]] = {}
+    scales: dict[int, tuple[float, float]] = {}
+
+    for sid in np.unique(labels):
         idx = np.where(labels == sid)[0]
         if idx.size == 0:
             continue
-        xs = np.array([templates[i].position_original[0] for i in idx], float)
-        ys = np.array([templates[i].position_original[1] for i in idx], float)
-        x0, y0 = xs.mean(), ys.mean()
+
+        # Prefer bright members to define center/scale; fall back to all in scene
+        idx_b = [i for i in idx if bright[i]]
+        use = idx_b if idx_b else idx
+
+        xs = np.array([templates[i].position_original[0] for i in use], float)
+        ys = np.array([templates[i].position_original[1] for i in use], float)
+
+        x0 = float(xs.mean())
+        y0 = float(ys.mean())
+        # Half-range scaling → map roughly to [-1,1]
+        Sx = 0.5 * float(xs.max() - xs.min()) if xs.size else 1.0
+        Sy = 0.5 * float(ys.max() - ys.min()) if ys.size else 1.0
+        # Pad a bit and guard against degenerate scenes
+        Sx = max(1.0, 1.05 * Sx)
+        Sy = max(1.0, 1.05 * Sy)
+
+        centers[int(sid)] = (x0, y0)
+        scales[int(sid)] = (Sx, Sy)
+
         for i in idx:
-            if bright[i]:
-                x, y = templates[i].position_original
-                basis[i] = cheb_basis(x - x0, y - y0, order)
-    return basis
+            if not bright[i]:
+                continue
+            x, y = templates[i].position_original
+            u = (x - x0) / Sx
+            v = (y - y0) / Sy
+            basis[i] = cheb_basis(u, v, order)
+
+    return basis, centers, scales
 
 
 def assemble_scene_system_self_AB(
     idx: list[int],
-    templates: List[Template],
+    templates: list[Template],
     image: np.ndarray,
     weights: np.ndarray,
     basis_vals: list[Optional[np.ndarray]],
     *,
+    alpha0: np.ndarray,  # <— NEW: per-template flux (unwhitened)
     order: int = 1,
     include_y: bool = True,
     ab_from_bright_only: bool = True,
 ) -> tuple[sp.csr_matrix, sp.csr_matrix, np.ndarray]:
-    """
-    Build ONLY the self couplings for a single scene:
-      - AB: flux(row i) ↔ shift(betas) using *template i* gradients
-      - BB: shift(betas) ↔ shift(betas) using *template i* gradients
-      - bB: RHS for shifts using image vs gradients of *template i*
-
-    No A (flux–flux) terms are constructed here — reuse the prebuilt A, b.
-
-    Returns
-    -------
-    AB : (nA, nB) csr
-    BB : (nB, nB) csr
-    bB : (nB,) ndarray
-    """
     # Which members have a shift basis in this scene?
     bright_in_idx = [g for g in idx if basis_vals[g] is not None]
     has_shift = len(bright_in_idx) >= 2
     if not has_shift:
-        # No shift block → return empty shapes that play nicely downstream.
         nA = len(idx)
-        return sp.csr_matrix((nA, 0)), sp.csr_matrix((0, 0)), np.zeros(0, dtype=float)
+        return sp.csr_matrix((nA, 0)), sp.csr_matrix((0, 0)), np.zeros(0, float)
 
-    # p = # of polynomial terms per axis
     p = len(cheb_basis(0.0, 0.0, order))
     nA = len(idx)
     nB = p * (2 if include_y else 1)
 
     AB = sp.lil_matrix((nA, nB))
-    BB = np.zeros((nB, nB), dtype=float)
-    bB = np.zeros(nB, dtype=float)
+    BB = np.zeros((nB, nB), float)
+    bB = np.zeros(nB, float)
 
-    # Cache gradients where needed
     grad_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
     def _gx_gy_for(g: int) -> tuple[np.ndarray, np.ndarray]:
@@ -518,7 +527,7 @@ def assemble_scene_system_self_AB(
                 gy = np.zeros_like(arr)
                 gx = np.zeros_like(arr)
             else:
-                gy, gx = np.gradient(arr)  # gy = d/dy, gx = d/dx
+                gy, gx = np.gradient(arr)  # gy=d/dy, gx=d/dx
             grad_cache[g] = (gx, gy)
         return grad_cache[g]
 
@@ -531,32 +540,30 @@ def assemble_scene_system_self_AB(
 
         Si = basis_vals[g]
         if (Si is None) and ab_from_bright_only:
-            continue  # leave AB row zeros for faint sources
+            continue
 
-        # Need gradients for *this* source only
+        ai = float(alpha0[g])  # <-- flux scaling (pixels stay in dx/dy)
+
         Gx, Gy = _gx_gy_for(g)
 
-        # ----- AB (self) ---------------------------------------------------
-        # <T_i, w, dT_i/dx> and <T_i, w, dT_i/dy>
-        gx = float(np.sum(tcut * w * Gx[ti.slices_cutout]))
-        AB[row, 0:p] += gx * (Si if Si is not None else 0.0)
+        # Inner products
+        gx_ip = float(np.sum(tcut * w * Gx[ti.slices_cutout]))
+        AB[row, 0:p] += (-ai) * gx_ip * (Si if Si is not None else 0.0)
         if include_y:
-            gy = float(np.sum(tcut * w * Gy[ti.slices_cutout]))
-            AB[row, p : 2 * p] += gy * (Si if Si is not None else 0.0)
+            gy_ip = float(np.sum(tcut * w * Gy[ti.slices_cutout]))
+            AB[row, p : 2 * p] += (-ai) * gy_ip * (Si if Si is not None else 0.0)
 
-        # ----- BB (self) ---------------------------------------------------
-        # <dT_i/dx, w, dT_i/dx> and <dT_i/dy, w, dT_i/dy>
         if Si is not None:
             Gxx = float(np.sum(Gx[ti.slices_cutout] * w * Gx[ti.slices_cutout]))
-            BB[0:p, 0:p] += Gxx * np.outer(Si, Si)
+            BB[0:p, 0:p] += (ai * ai) * Gxx * np.outer(Si, Si)
             if include_y:
                 Gyy = float(np.sum(Gy[ti.slices_cutout] * w * Gy[ti.slices_cutout]))
-                BB[p : 2 * p, p : 2 * p] += Gyy * np.outer(Si, Si)
+                BB[p : 2 * p, p : 2 * p] += (ai * ai) * Gyy * np.outer(Si, Si)
 
-            # ----- bB (self) -----------------------------------------------
-            bB[0:p] += float(np.sum(Gx[ti.slices_cutout] * w * img)) * Si
+            # RHS for beta (Gauss–Newton: J_beta^T W y; sign matches AB above)
+            bB[0:p] += (-ai) * float(np.sum(Gx[ti.slices_cutout] * w * img)) * Si
             if include_y:
-                bB[p : 2 * p] += float(np.sum(Gy[ti.slices_cutout] * w * img)) * Si
+                bB[p : 2 * p] += (-ai) * float(np.sum(Gy[ti.slices_cutout] * w * img)) * Si
 
     return AB.tocsr(), sp.csr_matrix(BB), bB
 
@@ -649,7 +656,8 @@ class SparseFitter:
             out=np.zeros_like(flux_est),
             where=err_est > 0,
         )
-        self.bright_mask = snr > self.config.snr_thresh_astrom
+
+    #        self.orig_bright = snr > self.config.snr_thresh_astrom
 
     @staticmethod
     def _intersection(
@@ -689,7 +697,9 @@ class SparseFitter:
         sl = tmpl.slices_original
         data = tmpl.data[tmpl.slices_cutout]
         w = self.weights[sl]
-        return float(np.sum(data * w * data))
+        wnorm = float(np.sum(data * w * data))
+        tmpl.wnorm = wnorm
+        return wnorm
 
     def build_normal(self) -> None:
         """Dispatch to the configured normal-matrix builder."""
@@ -816,7 +826,7 @@ class SparseFitter:
         ab_from_bright_only: bool = True,
         rtol: float = 1e-6,
         maxiter: int = 2000,
-    ) -> tuple[np.ndarray, np.ndarray, list[tuple[int, np.ndarray]], list[int]]:
+    ) -> tuple[np.ndarray, np.ndarray, list[tuple[int, np.ndarray, dict]], list[int]]:
         """
         Per-scene solve of joint block system in WHITENED flux space:
 
@@ -835,12 +845,14 @@ class SparseFitter:
         cfg = self.config
 
         # Per-template polynomial bases (uses provided bright_mask)
-        basis_vals = make_basis_per_scene(templates, scene_ids, bright_mask, order=order)
+        basis_vals, centers, scales = make_basis_per_scene(
+            templates, scene_ids, bright_mask, order=order
+        )
 
         n = A_w.shape[0]
         alpha = np.zeros(n, dtype=float)  # unwhitened fluxes
         err = np.zeros(n, dtype=float)
-        betas: list[tuple[int, np.ndarray]] = []
+        betas: list[tuple[int, np.ndarray, dict]] = []
         infos: list[int] = []
 
         logger.debug("Solving %d scenes with shifts", len(np.unique(scene_ids)))
@@ -852,7 +864,13 @@ class SparseFitter:
                 infos.append(0)
                 continue
 
-            # Assemble self-only AB/BB/bB (in UNwhitened units)
+            A_w_blk = A_w[idx][:, idx].tocsr()
+            b_w_blk = b_w[idx]
+
+            # α⁰ in **unwhitened** units: b_w/d  (since A_ii = d^2 and b = b_w*d)
+            alpha0_scene = np.zeros(len(templates), float)
+            alpha0_scene[idx] = b_w_blk / d[idx]
+
             AB, BB, bB = assemble_scene_system_self_AB(
                 idx,
                 templates,
@@ -862,10 +880,8 @@ class SparseFitter:
                 order=order,
                 include_y=include_y,
                 ab_from_bright_only=ab_from_bright_only,
+                alpha0=alpha0_scene,
             )
-
-            A_w_blk = A_w[idx][:, idx].tocsr()
-            b_w_blk = b_w[idx]
 
             if AB.shape[1] == 0:
                 logger.debug("Scene %d: no shifts, solving flux-only", sid)
@@ -881,6 +897,18 @@ class SparseFitter:
             Dinv_scene = diags(1.0 / d[idx], 0, format="csr")
             AB_w = Dinv_scene @ AB  # (nA, nB); BB, bB stay in natural units
 
+            # --- compute ridge once
+            tau = float(getattr(self.config, "reg_astrom", 1e-4))
+            diagB = BB.diagonal() if sp.issparse(BB) else np.diag(BB)  # safe both ways
+            scaleB = np.median(diagB) if diagB.size and np.all(np.isfinite(diagB)) else 1.0
+            lam = tau * scaleB
+
+            # --- use the regularized sparse BB in K
+            if lam != 0.0:
+                BB_reg = BB + sp.eye(BB.shape[0], format="csr") * lam
+            else:
+                BB_reg = BB
+
             # Solve joint whitened system
             K = bmat([[A_w_blk, AB_w], [AB_w.T, BB]], format="csr")
             rhs = np.concatenate([b_w_blk, bB])
@@ -893,20 +921,10 @@ class SparseFitter:
             xw_scene = sol[:na]
             beta_scene = sol[na:]
             alpha[idx] = xw_scene / d[idx]
-            betas.append((int(sid), beta_scene))
             infos.append(int(info))
-
-            # Flux errors via whitened Schur complement
-            # BB_dense = BB.toarray()
-            # BB_dense.flat[:: BB_dense.shape[0] + 1] += cfg.reg_astrom  # tiny ridge for stability
-            # BB_inv = np.linalg.pinv(BB_dense)
-            # S_w = (A_w_blk - (AB_w @ BB_inv @ AB_w.T)).tocsr()
-            # err[idx] = self._flux_errors(S_w) / d[idx]
 
             # --- Flux errors via whitened Schur complement (stay in whitened flux space)
             BB_dense = BB.toarray()
-            BB_dense.flat[:: BB_dense.shape[0] + 1] += cfg.reg_astrom  # tiny ridge for stability
-            # Prefer solve over pinv when well-conditioned
             try:
                 # X solves: BB * X = AB_w.T   → X: (nB, nA)
                 X = np.linalg.solve(BB_dense, AB_w.T.toarray())
@@ -920,6 +938,41 @@ class SparseFitter:
             S_w = (A_w_blk - sp.csr_matrix(Y)).tocsr()
             # Convert whitened errors to unwhitened: σ(x) = σ(x_w) / d
             err[idx] = self._flux_errors(S_w) / d[idx]
+
+            # ----- save astrometry dx, dy shifts for this scene  < HERE > -----
+            x_cen, y_cen = centers[int(sid)]
+            Sx, Sy = scales[int(sid)]
+            poly_shift_at = AstroCorrect.build_poly_predictor(
+                beta_scene, x_cen, y_cen, order, Sx, Sy
+            )
+
+            # Evaluate at *input* positions (what you originally convolved/placed)
+            pts = np.array([templates[i].position_original for i in idx], float)  # (na, 2)
+            dx, dy = poly_shift_at(pts)  # -> (na,), (na,)
+
+            # Record (lazy) shifts; apply later with AstroCorrect.apply_template_shifts(...) if desired
+            # sign convention: shift is positive from image to template
+            for k, i in enumerate(idx):
+                templates[i].to_shift = np.array([dx[k], dy[k]])
+            #                templates[i].is_dirty = True
+
+            p = len(cheb_basis(0.0, 0.0, order))
+            bx = beta_scene[:p]
+            by = beta_scene[p : 2 * p]
+            phi0 = cheb_basis(0.0, 0.0, order)
+            mean_dx = float(phi0 @ bx)
+            mean_dy = float(phi0 @ by)
+            logger.debug(
+                "Scene %s mean-shift near center ≈ (%.3f, %.3f) px", sid, mean_dx, mean_dy
+            )
+
+            betas.append(
+                (
+                    int(sid),
+                    beta_scene,
+                    {"center": (x_cen, y_cen), "scale": (Sx, Sy), "order": order},
+                )
+            )
 
             logger.debug("betas for scene %d: %s", sid, betas[-1][1])
             logger.debug("Scene %d: solved with %d templates, info=%d", sid, len(idx), info)
@@ -952,7 +1005,9 @@ class SparseFitter:
 
         templates = self.templates
         idx = [t.col_idx for t in templates]
-        bright_mask = self.bright_mask[idx]
+        is_bright = np.array(
+            [(t.flux / t.err > cfg.snr_thresh_astrom) if t.err > 0 else False for t in templates]
+        )  # bright_mask = self._orig_bright_mask[idx]
 
         # get scene ids from the normal equations
         #  merge small scenes so enough bright sources are present
@@ -967,7 +1022,7 @@ class SparseFitter:
             scene_ids, nscene = merge_small_scenes(
                 scene_ids,
                 templates,
-                bright_mask,
+                is_bright,
                 minimum_bright=minimum_bright,
             )
             summarize_scenes(scene_ids)
@@ -987,7 +1042,7 @@ class SparseFitter:
                 d,
                 scene_ids,
                 templates,
-                bright_mask,
+                is_bright,
                 order=cfg.astrom_kwargs.get("poly", {}).get("order", 1),
                 include_y=True,
                 ab_from_bright_only=True,
@@ -1013,6 +1068,7 @@ class SparseFitter:
         for tmpl, flux, err in zip(self._orig_templates, x_full, e_full):
             tmpl.flux = flux
             tmpl.err = err
+            tmpl.is_bright = bool(err > 0 and flux / err > cfg.snr_thresh_astrom)
 
         return x_full, e_full, {"cg_info": info, "nscene": nscene}
 

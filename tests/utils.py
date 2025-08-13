@@ -964,12 +964,12 @@ def make_testdata():
     size_y_40mas = 3520
     postfix = "large"
 
-    # center_ra, center_dec = 34.361343, -5.1326021
-    # xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
-    # xy_even = xy + xy % 2
-    # size_x_40mas = 29_000
-    # size_y_40mas = 7600
-    # postfix = 'half'
+    center_ra, center_dec = 34.361343, -5.1326021
+    xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
+    xy_even = xy + xy % 2
+    size_x_40mas = 29_0000
+    size_y_40mas = 7600
+    postfix = "half"
 
     center_radec = SkyCoord(center_ra, center_dec, unit="deg")
     size = (size_y_40mas, size_x_40mas)  # Cutout2D expects (ny, nx)
@@ -1013,7 +1013,7 @@ def make_testdata():
             wcs = WCS(hdr)
             cutout = Cutout2D(data, position=xy_even, size=size, wcs=wcs)
             hdr.update(cutout.wcs.to_header())
-            hdu = fits.PrimaryHDU(cutout.data, header=hdr)
+            hdu = fits.PrimaryHDU(cutout.data.astype(np.float32), header=hdr)
             hdu.writeto(outdir + outfile, overwrite=True)
             print(f"Saved {outdir+outfile}")
             print(cutout.origin_original, cutout.shape)

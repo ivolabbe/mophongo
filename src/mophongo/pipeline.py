@@ -279,6 +279,7 @@ class Pipeline:
                 if (config.fit_astrometry_niter > 0 and config.fit_astrometry_joint)
                 else SparseFitter
             )
+            fitter_cls = SparseFitter
 
             niter = max(config.fit_astrometry_niter, 1)
             for j in range(niter):
@@ -286,7 +287,6 @@ class Pipeline:
 
                 fitter = fitter_cls(templates, images[idx], weights_i, config)
                 fluxes, errs, info = fitter.solve()
-
                 res = fitter.residual()
                 print(f"Pipeline (residual) memory: {memory():.1f} GB")
 
@@ -294,9 +294,9 @@ class Pipeline:
                     logger.info("fitting astrometry separately")
                     astro.fit(templates, res, fitter.solution)
 
-            fitter._ata = None
-            fluxes, errs, info = fitter.solve()
-            res = fitter.residual()
+                    fitter._ata = None
+                    fluxes, errs, info = fitter.solve()
+                    res = fitter.residual()
 
             if (
                 (config.multi_tmpl_psf_core or config.multi_tmpl_colour)
@@ -410,20 +410,27 @@ class Pipeline:
         if idx <= 0 or idx >= len(self.images):
             raise ValueError("idx must be between 1 and len(images)-1")
 
+        nscenes = len(np.unique(self.fit[idx - 1].scene_ids))
+
         segmap = self.segmap
-        segmap_cmap = SegmentationImage(self.segmap).cmap
+        segm = SegmentationImage(segmap)
+        segmap_cmap = segm.cmap
         scene_cmap = deepcopy(segmap_cmap)
         scene_cmap.colors[0] = (1.0, 1.0, 1.0, 0.0)
 
         fitter = self.fit[idx - 1]
 
-        scenes = np.zeros_like(segmap, dtype=int)
-        scene_ids = []
-        for tmpl in fitter.templates:
-            scene_ids.append(tmpl.id_scene)
-            scenes[segmap == tmpl.id] = tmpl.id_scene
+        if not hasattr(self, "scenes"):
+            logger.info("Building scene map for diagnostics")
+            scenes = np.zeros_like(segmap, dtype=int)
+            # fitter.scene_ids
+            for tmpl in fitter.templates:
+                iseg = segm.get_index(tmpl.id)
+                sl = segm.segments[iseg].slices
+                scenes_slice = scenes[sl]
+                scenes_slice[segm.data[sl] == tmpl.id] = tmpl.id_scene
 
-        logger.info(f"Plotting results for image {idx} with {len(np.unique(scene_ids))} scenes")
+        logger.info(f"Plotting image {idx} with {nscenes} scenes")
 
         mask: np.ndarray | None = None
         if scene_id is not None:

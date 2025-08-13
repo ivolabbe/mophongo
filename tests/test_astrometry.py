@@ -10,9 +10,9 @@ from scipy.ndimage import shift as nd_shift
 from pathlib import Path
 from utils import make_simple_data
 from mophongo.psf import PSF
-from mophongo.templates import Templates
+from mophongo.templates import Templates, Template
 from mophongo.fit import SparseFitter, FitConfig
-from mophongo.astrometry import AstroCorrect, AstroMap
+from mophongo.astrometry import AstroCorrect, AstroMap, cheb_basis
 from utils import save_diagnostic_image
 
 
@@ -106,3 +106,39 @@ def test_astromap_recovers_shift():
     dx, dy = amap(np.array([[75.0, 75.0]]))
     assert abs(dx[0] - shx) < 0.3
     assert abs(dy[0] - shy) < 0.3
+
+
+def test_apply_template_shifts_uses_shift_field():
+    data = np.zeros((7, 7))
+    data[3, 3] = 1.0
+    tmpl = Template(data, (3.0, 3.0), (7, 7), label=1)
+    tmpl.shift = np.array([0.5, -0.25])
+
+    AstroCorrect.apply_template_shifts([tmpl])
+
+    expected = nd_shift(
+        data,
+        (-0.25, 0.5),
+        order=3,
+        mode="constant",
+        cval=0.0,
+        prefilter=True,
+    )
+    assert np.allclose(tmpl.data, expected)
+    assert np.allclose(tmpl.input_position_original, (2.5, 3.25))
+    assert np.allclose(tmpl.shift, 0.0)
+
+
+def test_build_poly_predictor_returns_expected_shift():
+    order = 1
+    betax = np.array([1.0, 0.2, -0.3])
+    betay = np.array([-0.5, 0.1, 0.05])
+    coeffs = np.concatenate([betax, betay])
+    x0, y0 = 10.0, 20.0
+    predict = AstroCorrect.build_poly_predictor(coeffs, x0, y0, order)
+
+    x, y = 11.0, 19.0
+    dx, dy = predict(x, y)
+    phi = cheb_basis(x - x0, y - y0, order)
+    assert np.allclose(dx, phi @ betax)
+    assert np.allclose(dy, phi @ betay)

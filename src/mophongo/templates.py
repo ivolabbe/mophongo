@@ -43,22 +43,38 @@ class Template(Cutout2D):
             **kwargs,
         )
         # do not allow writing into a view
-        if not copy:
-            self.data.flags.writeable = False
+        #        if not copy:
+        #            self.data.flags.writeable = False
+
+        # basic metadata
+        # Store the original data reference
+        #        self.base_data = data.copy()
+
+        self.is_dirty = False  # flag to track if data needs to be updated
         # @@@ bug in Cutout2D: shape_input is not set correctly
         self.shape_input = data.shape
         self.shape_original = data.shape
         self.wcs_original = wcs
-        # record shift from original position here
+
+        # logical
         self.id = label
-        self.id_parent = label
+        self.id_parent = label  # @@@ this is redundant -> remove
         self.id_scene = 1
-        self.component = "main"
+        self.name = "main"  # component name
+
+        # flux
         self.flux = 0.0
         self.err = 0.0
-        self.shift = np.array([0.0, 0.0], dtype=float)
+        self.err_pred = 0.0  # predicted error from weight map and profile
+        self.wnorm = 0.0  # weighted norm of the template d * w * d
         self.ee_rlim: float = 0.0
         self.ee_fraction: float = 1.0
+
+        # astrometry
+        # record shift from original position here
+        # this is the intended shift from base_data to data
+        self.to_shift = np.array([0.0, 0.0], dtype=float)  # impending shift
+        self.shifted = np.array([0.0, 0.0], dtype=float)  # accumulated shift
 
     @property
     def bbox(self) -> tuple[int, int, int, int]:  # pragma: no cover - simple alias
@@ -174,6 +190,7 @@ class Template(Cutout2D):
         data = np.zeros(new_cut.data.shape, dtype=self.data.dtype)
         data[y0 : y0 + ny, x0 : x0 + nx] = full
         new_cut.data = data
+        #        new_cut.base_data = data  # also store it in base data
 
         return new_cut
 
@@ -434,7 +451,7 @@ class Templates:
         tmpl = deepcopy(parent)
         tmpl.data = data
         tmpl.component = component
-        tmpl.parent_id = parent.parent_id or parent.id
+        tmpl.id_parent = parent.id_parent or parent.id
         for key, val in kwargs.items():
             setattr(tmpl, key, val)
 
@@ -466,6 +483,51 @@ class Templates:
             obj.convolve_templates(kernel, inplace=True)
 
         return obj
+
+    # ------------------------------------------------------------
+    # static helpers
+    # ------------------------------------------------------------
+    @staticmethod
+    def apply_template_shifts(templates: Sequence[Template]) -> None:
+        """Apply stored ``shift`` values to templates in-place.
+
+        Parameters
+        ----------
+        templates:
+            Sequence of :class:`~mophongo.templates.Template` objects whose
+            ``shift`` attribute encodes the ``(dx, dy)`` offset to apply.
+        Sign convention:
+        Let (dx, dy) be the image→template correction predicted by astrometry,
+        i.e. “shift the image by (dx,dy) to match the template.”
+        When applied to template, we must shift the template by (-dx,-dy).
+        And scipy.ndimage.shift takes shifts in (axis0, axis1) = (y, x) order.
+        """
+        from scipy.ndimage import shift as nd_shift
+
+        for tmpl in templates:
+            #            if not tmpl.is_dirty:  # skip if shift was already applied
+            #                continue
+
+            dx, dy = map(float, tmpl.to_shift)
+            if abs(dx) < 1e-2 and abs(dy) < 1e-2:
+                continue
+
+            # sign convention: image is shifted, so we reverse shift the template
+            # positive shift is from image to template, but here we shift the template
+            #            x0, y0 = tmpl.input_position_original
+            # @@@ isnt it better to shift the data, because that only affects the Atb vector
+            tmpl.data = nd_shift(
+                tmpl.data,
+                (dy, dx),
+                order=3,
+                mode="constant",
+                cval=0.0,
+                prefilter=True,
+            )
+            tmpl.shifted += [dx, dy]  # accumulate in case of iterating
+            tmpl.to_shift[:] = 0.0
+
+    #            tmpl.is_dirty = False
 
     @staticmethod
     def _prepare_fft_fast(psf: np.ndarray) -> tuple[np.ndarray, np.ndarray, interp1d]:

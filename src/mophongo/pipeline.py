@@ -23,6 +23,7 @@ from astropy.nddata import Cutout2D, block_replicate, block_reduce
 from .psf_map import PSFRegionMap
 from .utils import bin_factor_from_wcs, downsample_psf
 from .templates import Templates, Template
+from .fit import FitConfig as _FitConfig
 
 logger = logging.getLogger(__name__)
 
@@ -145,8 +146,6 @@ class Pipeline:
             raise ValueError("Number of weight images must match number of images")
 
         if config is None:
-            from .fit import FitConfig as _FitConfig
-
             config = _FitConfig()
 
         self.images = images
@@ -216,6 +215,7 @@ class Pipeline:
             assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
 
         ndropped = len(positions) - len(templates)
+        # @@@ this is because of reliance of x,y in catalog -> use segmap?
         print(f"Pipepline: {len(templates)} extracted templates, dropped {ndropped}.")
         print(f"Pipeline (templates) memory: {memory():.1f} GB")
 
@@ -287,22 +287,31 @@ class Pipeline:
 
                 fitter = fitter_cls(templates, images[idx], weights_i, config)
                 fluxes, errs, info = fitter.solve()
-                res = fitter.residual()
                 print(f"Pipeline (residual) memory: {memory():.1f} GB")
 
                 if config.fit_astrometry_niter > 0 and not config.fit_astrometry_joint:
+                    # @@@ this is very expensive. We dont need to form the whole residual image
+                    # can do it on the stamps only
+                    res = fitter.residual()
                     logger.info("fitting astrometry separately")
                     astro.fit(templates, res, fitter.solution)
 
-                    fitter._ata = None
-                    fluxes, errs, info = fitter.solve()
-                    res = fitter.residual()
+                if config.fit_astrometry_niter > 0 and config.fit_astrometry_joint:
+                    Templates.apply_template_shifts(templates)
 
+            # one final flux only solve after astrometry
+            cfg2 = _FitConfig(**config.__dict__)
+            cfg2.fit_astrometry_niter = 0
+
+            # either with or without extra templates
             if (
                 (config.multi_tmpl_psf_core or config.multi_tmpl_colour)
                 and psfs is not None
                 and weights_i is not None
             ):
+                # @@@ this is very expensive. We dont need to form the whole residual image
+                # can do it on the stamps only
+                res = fitter.residual()
                 chi_nu = _per_source_chi2(res, weights_i, templates)
                 bad_idx = np.where(chi_nu > config.multi_tmpl_chi2_thresh)[0]
                 print("Distribution >99% chi2:", np.percentile(chi_nu, [99]))
@@ -315,16 +324,16 @@ class Pipeline:
                         parent = templates[bi]
                         if config.multi_tmpl_psf_core and psfs is not None:
                             stamp = _extract_psf_at(parent, psfs[idx])
-                            add_tmpl = tmpls.add_component(parent, stamp, "psf")
+                            add_tmpl = tmpls_lo.add_component(parent, stamp, "psf")
                             templates.append(add_tmpl)
 
                     fitter = fitter_cls(templates, images[idx], weights_i, config)
-                    if config.solve_method == "ata":
-                        fluxes, errs, info = fitter.solve()
-                    else:
-                        fluxes, errs, info = fitter.solve_linear_operator()
-                    res = fitter.residual()
+            else:
+                fitter._ata = None
 
+            fluxes, errs, info = fitter.solve(config=cfg2)
+            res = fitter.residual()
+            fluxes, errs, info = fitter.solve()
             err_pred = fitter.predicted_errors()
 
             print("Done...")

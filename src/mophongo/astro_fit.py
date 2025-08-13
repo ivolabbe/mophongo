@@ -39,6 +39,7 @@ class GlobalAstroFitter(SparseFitter):
 
         # ---------- flux part ----------
         super().__init__(list(templates), image, weights, config)
+        self.scene_ids = [0]
 
         print("GlobalAstroFitter: templates in", len(templates))
         if not self.config.fit_astrometry_niter > 0:

@@ -51,6 +51,7 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
   - [x] Added safeguards against singular normal matrices
 - [x] Added Gaussian-process-based local astrometric correction
 - [x] Introduced `AstroCorrect` for pluggable local astrometry models
+- [x] Added static utilities in `AstroCorrect` for applying stored template shifts and building polynomial predictors
 - [x] Merged astrometry modules and added `AstroMap` for image-to-image shift mapping
 - [x] Removed deprecated `fit_astrometry` flag in `FitConfig`; use `fit_astrometry_niter` only
 - [x] Added ILU preconditioner and SuperLU-based flux error estimation with Hutchinson fallback

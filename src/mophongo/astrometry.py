@@ -266,6 +266,80 @@ class AstroCorrect:
         init=False, repr=False, default=lambda p: (np.zeros(len(p)), np.zeros(len(p)))
     )
 
+    # ------------------------------------------------------------
+    # static helpers
+    # ------------------------------------------------------------
+    @staticmethod
+    def apply_template_shifts(templates: Sequence[Template]) -> None:
+        """Apply stored ``shift`` values to templates in-place.
+
+        Parameters
+        ----------
+        templates:
+            Sequence of :class:`~mophongo.templates.Template` objects whose
+            ``shift`` attribute encodes the ``(dx, dy)`` offset to apply.
+        """
+
+        for tmpl in templates:
+            dx, dy = map(float, tmpl.shift)
+            if abs(dx) < 1e-2 and abs(dy) < 1e-2:
+                continue
+
+            x0, y0 = tmpl.input_position_original
+            tmpl.data = nd_shift(
+                tmpl.data,
+                (dy, dx),
+                order=3,
+                mode="constant",
+                cval=0.0,
+                prefilter=True,
+            )
+            tmpl.input_position_original = (x0 - dx, y0 - dy)
+            tmpl.shift[:] = 0.0
+
+    @staticmethod
+    def build_poly_predictor(
+        coeffs: np.ndarray,
+        x_cen: float,
+        y_cen: float,
+        order: int,
+    ) -> Callable[[float | np.ndarray, float | None], tuple[np.ndarray, np.ndarray]]:
+        """Return a callable predicting shifts from polynomial coefficients.
+
+        Parameters
+        ----------
+        coeffs:
+            Concatenated polynomial coefficients ``[β_x, β_y]``.  The first
+            ``n_terms(order)`` entries correspond to the ``x`` shift and the
+            remaining entries (if present) to the ``y`` shift.
+        x_cen, y_cen:
+            Central coordinates used when the polynomial field was fitted.
+        order:
+            Chebyshev polynomial order of the solution.
+        """
+
+        p = n_terms(order)
+        bx = np.array(coeffs[:p], dtype=float)
+        by = np.array(coeffs[p:], dtype=float) if coeffs.size >= 2 * p else np.zeros(p)
+
+        def predict(
+            x: float | np.ndarray, y: float | None = None
+        ) -> tuple[np.ndarray, np.ndarray]:
+            if y is None:
+                pts = np.asarray(x, float).reshape(-1, 2)
+                shape = pts.shape[:-1]
+            else:
+                pts = np.c_[np.asarray(x, float).ravel(), np.asarray(y, float).ravel()]
+                shape = np.broadcast(x, y).shape
+            phi = np.array(
+                [cheb_basis(px - x_cen, py - y_cen, order) for px, py in pts]
+            )
+            dx = phi @ bx
+            dy = phi @ by
+            return dx.reshape(shape), dy.reshape(shape)
+
+        return predict
+
     def __call__(
         self, x: float | np.ndarray, y: float | None = None
     ) -> tuple[np.ndarray, np.ndarray]:

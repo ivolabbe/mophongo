@@ -167,6 +167,201 @@ class Pipeline:
         self.infos: list[dict] = []
         self.tmpls: Templates()
 
+    # ------------------------------------------------------------------
+    # Helper methods
+    # ------------------------------------------------------------------
+
+    def _add_templates_for_bad_fits(
+        self,
+        templates: list[Template],
+        tmpls_lo: Templates,
+        psf: np.ndarray | PSFRegionMap | None,
+        weights: np.ndarray | None,
+        fitter: "SparseFitter",
+        image: np.ndarray,
+        fitter_cls,
+        config: _FitConfig,
+    ) -> tuple[list[Template], "SparseFitter"]:
+        """Add secondary templates for poorly fitted sources.
+
+        Parameters
+        ----------
+        templates
+            Current list of templates used in the fit.
+        tmpls_lo
+            Base templates prior to convolution. Used when adding new
+            components.
+        psf
+            PSF image for the current low-resolution frame.
+        weights
+            Weight map corresponding to ``image``.
+        fitter
+            Fitter instance from the initial solve.
+        image
+            Image data being modelled.
+        fitter_cls
+            Fitter class used to instantiate a new fitter if additional
+            templates are required.
+        config
+            Fit configuration options.
+
+        Returns
+        -------
+        list[Template], SparseFitter
+            Possibly extended template list and a corresponding fitter
+            instance.
+        """
+
+        if not (
+            (config.multi_tmpl_psf_core or config.multi_tmpl_colour)
+            and psf is not None
+            and weights is not None
+        ):
+            fitter._ata = None
+            return templates, fitter
+
+        res = fitter.residual()
+        chi_nu = _per_source_chi2(res, weights, templates)
+        bad_idx = np.where(chi_nu > config.multi_tmpl_chi2_thresh)[0]
+        if bad_idx.size > 0:
+            logger.info(
+                "Adding %d new templates for poor fits", bad_idx.size
+            )
+            for bi in bad_idx:
+                parent = templates[bi]
+                if config.multi_tmpl_psf_core:
+                    stamp = _extract_psf_at(parent, psf)
+                    add_tmpl = tmpls_lo.add_component(parent, stamp, "psf")
+                    templates.append(add_tmpl)
+            fitter = fitter_cls(templates, image, weights, config)
+        else:
+            fitter._ata = None
+        return templates, fitter
+
+    def _update_catalog_with_fluxes(
+        self,
+        cat: Table,
+        templates: list[Template],
+        fluxes: np.ndarray,
+        errs: np.ndarray,
+        err_pred: np.ndarray,
+        idx: int,
+    ) -> None:
+        """Insert measured fluxes into the output catalog.
+
+        Parameters
+        ----------
+        cat
+            Catalog to update.
+        templates
+            Templates associated with the fitted sources.
+        fluxes, errs, err_pred
+            Flux measurements and their uncertainties.
+        idx
+            Index of the current image (used for column naming).
+        """
+
+        parent_ids = [
+            tmpl.id_parent if getattr(tmpl, "parent_id", None) is not None else tmpl.id
+            for tmpl in templates
+        ]
+        id_to_index = {id_: i for i, id_ in enumerate(cat["id"])}
+        cat[f"flux_{idx}"] = self.config.bad_value
+        cat[f"err_{idx}"] = self.config.bad_value
+        cat[f"err_pred_{idx}"] = self.config.bad_value
+
+        flux_sum: defaultdict[int, float] = defaultdict(float)
+        err_sum: defaultdict[int, float] = defaultdict(float)
+        err_pred_sum: defaultdict[int, float] = defaultdict(float)
+        for pid, fl, er, ep in zip(parent_ids, fluxes, errs, err_pred):
+            if pid is None:
+                continue
+            flux_sum[pid] += fl
+            err_sum[pid] = float(np.sqrt(err_sum[pid] ** 2 + er**2))
+            err_pred_sum[pid] = float(
+                np.sqrt(err_pred_sum[pid] ** 2 + ep**2)
+            )
+
+        for pid, fl in flux_sum.items():
+            ci = id_to_index.get(pid)
+            if ci is None:
+                continue
+            cat[f"flux_{idx}"][ci] = fl
+            cat[f"err_{idx}"][ci] = err_sum[pid]
+            cat[f"err_pred_{idx}"][ci] = err_pred_sum[pid]
+
+    def _add_aperture_photometry(
+        self,
+        cat: Table,
+        templates: list[Template],
+        fluxes: np.ndarray,
+        residual: np.ndarray,
+        psf: np.ndarray | PSFRegionMap | None,
+        idx: int,
+    ) -> None:
+        """Add aperture photometry measurements to the catalog.
+
+        The aperture flux is measured on the best-fit model for each source
+        with the residuals added back in. A simple PSF correction factor is
+        derived from the ratio of fluxes measured on the pre- and
+        post-convolution PSF images.
+        """
+
+        from photutils.aperture import CircularAperture, aperture_photometry
+        from .utils import measure_shape
+
+        id_to_index = {id_: i for i, id_ in enumerate(cat["id"])}
+        cat[f"ap_flux_{idx}"] = self.config.bad_value
+        cat[f"ap_corr_{idx}"] = self.config.bad_value
+
+        for tmpl, fl in zip(templates, fluxes):
+            pid = tmpl.id_parent if getattr(tmpl, "parent_id", None) is not None else tmpl.id
+            ci = id_to_index.get(pid)
+            if ci is None:
+                continue
+
+            res_patch = residual[tmpl.slices_original]
+            model_patch = fl * tmpl.data[tmpl.slices_cutout]
+            patch = res_patch + model_patch
+
+            try:
+                psf_stamp = _extract_psf_at(tmpl, psf) if psf is not None else tmpl.data
+                _, _, sx, sy, _ = measure_shape(psf_stamp, psf_stamp > 0)
+                fwhm = 2.355 * float(np.mean([sx, sy]))
+            except Exception:
+                fwhm = 1.0
+            radius = 1.5 * fwhm
+
+            x0 = tmpl.input_position_cutout[0] - tmpl.slices_cutout[1].start
+            y0 = tmpl.input_position_cutout[1] - tmpl.slices_cutout[0].start
+            aper = CircularAperture((x0, y0), r=radius)
+            phot = aperture_photometry(patch, aper, method="exact")
+            ap_flux = float(phot["aperture_sum"][0])
+
+            corr = 1.0
+            if self.psfs is not None and self.psfs[0] is not None and psf is not None:
+                psf_hi = _extract_psf_at(tmpl, self.psfs[0])
+                psf_lo = _extract_psf_at(tmpl, psf)
+                aper_psf_hi = aperture_photometry(
+                    psf_hi,
+                    CircularAperture(
+                        (psf_hi.shape[1] / 2, psf_hi.shape[0] / 2), r=radius
+                    ),
+                    method="exact",
+                )["aperture_sum"][0]
+                aper_psf_lo = aperture_photometry(
+                    psf_lo,
+                    CircularAperture(
+                        (psf_lo.shape[1] / 2, psf_lo.shape[0] / 2), r=radius
+                    ),
+                    method="exact",
+                )["aperture_sum"][0]
+                if aper_psf_lo != 0:
+                    corr = float(aper_psf_hi / aper_psf_lo)
+
+            cat[f"ap_flux_{idx}"][ci] = ap_flux
+            cat[f"ap_corr_{idx}"][ci] = corr
+
     def run(self) -> tuple[Table, list[np.ndarray], SparseFitter]:
         """Run photometry on the configured images.
 
@@ -303,74 +498,34 @@ class Pipeline:
             # one final flux only solve after astrometry
             cfg2 = _FitConfig(**config.__dict__)
             cfg2.fit_astrometry_niter = 0
-
-            # either with or without extra templates
-            if (
-                (config.multi_tmpl_psf_core or config.multi_tmpl_colour)
-                and psfs is not None
-                and weights_i is not None
-            ):
-                # @@@ this is very expensive. We dont need to form the whole residual image
-                # can do it on the stamps only
-                res = fitter.residual()
-                chi_nu = _per_source_chi2(res, weights_i, templates)
-                bad_idx = np.where(chi_nu > config.multi_tmpl_chi2_thresh)[0]
-                print("Distribution >99% chi2:", np.percentile(chi_nu, [99]))
-                if bad_idx.size > 0:
-                    print(
-                        f"Adding {len(bad_idx)} new templates for poor fits "
-                        f"(chi^2/nu > {config.multi_tmpl_chi2_thresh})"
-                    )
-                    for bi in bad_idx:
-                        parent = templates[bi]
-                        if config.multi_tmpl_psf_core and psfs is not None:
-                            stamp = _extract_psf_at(parent, psfs[idx])
-                            add_tmpl = tmpls_lo.add_component(parent, stamp, "psf")
-                            templates.append(add_tmpl)
-
-                    fitter = fitter_cls(templates, images[idx], weights_i, config)
-            else:
-                fitter._ata = None
+            templates, fitter = self._add_templates_for_bad_fits(
+                templates,
+                tmpls_lo,
+                psfs[idx] if psfs is not None else None,
+                weights_i,
+                fitter,
+                images[idx],
+                fitter_cls,
+                config,
+            )
 
             fluxes, errs, info = fitter.solve(config=cfg2)
             res = fitter.residual()
             fluxes, errs, info = fitter.solve()
             err_pred = fitter.predicted_errors()
+            res = fitter.residual()
 
             print("Done...")
 
-            parent_ids = [
-                tmpl.id_parent if getattr(tmpl, "parent_id", None) is not None else tmpl.id
-                for tmpl in templates
-            ]
-            id_to_index = {id_: i for i, id_ in enumerate(cat["id"])}
-            cat[f"flux_{idx}"] = config.bad_value
-            cat[f"err_{idx}"] = config.bad_value
-            cat[f"err_pred_{idx}"] = config.bad_value
-
-            # using dict to accumulate fluxes and errors
-            # should also save separate errors for each parent template
-            flux_sum: defaultdict[int, float] = defaultdict(float)
-            err_sum: defaultdict[int, float] = defaultdict(float)
-            err_pred_sum: defaultdict[int, float] = defaultdict(float)
-            for pid, fl, er, ep in zip(parent_ids, fluxes, errs, err_pred):
-                if pid is None:
-                    continue
-                flux_sum[pid] += fl
-                err_sum[pid] = np.sqrt(err_sum[pid] ** 2 + er**2)
-                err_pred_sum[pid] = np.sqrt(err_pred_sum[pid] ** 2 + ep**2)
-
-            for pid, fl in flux_sum.items():
-                ci = id_to_index.get(pid)
-                if ci is None:
-                    continue
-                cat[f"flux_{idx}"][ci] = fl
-                cat[f"err_{idx}"][ci] = err_sum[pid]
-                cat[f"err_pred_{idx}"][ci] = err_pred_sum[pid]
-
-            # if k > 1 and config.multi_resolution_method == "upsample":
-            #     print(f"Downsampling residuals by factor {k}")
-            #     res = block_reduce(res, k, func=np.sum)
+            self._update_catalog_with_fluxes(cat, templates, fluxes, errs, err_pred, idx)
+            self._add_aperture_photometry(
+                cat,
+                templates,
+                fluxes,
+                res,
+                psfs[idx] if psfs is not None else None,
+                idx,
+            )
 
             if "astro" in locals():
                 self.astro.append(astro)

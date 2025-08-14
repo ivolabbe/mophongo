@@ -77,11 +77,13 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
   - [x] Propagate RMS images as weights to compute flux uncertainties
   - [x] Prune templates lacking weight overlap before convolution
   - [x] Enabled template deduplication after extraction
-  - [x] Added multi-template second pass for poor-fit sources
-  - [x] Added integer-factor multi-resolution support with template and kernel downsampling
-  - [x] Block templates and PSFs before convolution with `block_reduce` and centroid-preserving PSF shifts
-  - [x] Downsample templates and kernels in the pipeline prior to convolution to avoid per-source PSF rebinning
-  - [x] Introduced `Pipeline` class to persist images and fit results
+- [x] Added multi-template second pass for poor-fit sources
+- [x] Added integer-factor multi-resolution support with template and kernel downsampling
+- [x] Block templates and PSFs before convolution with `block_reduce` and centroid-preserving PSF shifts
+- [x] Downsample templates and kernels in the pipeline prior to convolution to avoid per-source PSF rebinning
+- [x] Introduced `Pipeline` class to persist images and fit results
+- [x] Consolidated catalog matching and flux extraction into helper methods
+- [x] Added aperture photometry on model+residual with PSF correction
 - [x] **Simulation utilities for tests** (`tests/utils.py`)
   - [x] Create fake catalogs and images with Moffat sources of varying size and ellipticity. positions are ra,dec
   - [x] Produce matching high‑res and low‑res PSFs, with low res PSF at least 5x high res PSF.

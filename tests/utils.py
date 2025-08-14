@@ -756,152 +756,6 @@ def rebin_wcs(wcs: WCS, n: int) -> WCS:
     return new_wcs
 
 
-def make_testdata_old():
-    from astropy.io import fits
-    from astropy.wcs import WCS
-    from astropy.coordinates import SkyCoord
-    from astropy.nddata import Cutout2D
-    from astropy.table import Table
-    from reproject import reproject_interp
-    from reproject import reproject_adaptive
-    import numpy as np
-
-    """Create cutouts for UDS images based on user-defined parameters."""
-    indir = "/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/"
-    outdir = "/Users/ivo/Astro/PROJECTS/MINERVA/data/v1.0/testdata/"
-
-    # --- User parameters from the pasted image ---
-    center_ra, center_dec = 34.3032414, -5.1113316
-    size_x_40mas = 1000
-    size_y_40mas = 820
-    postfix = "test"
-
-    size_x_40mas = 3500
-    size_y_40mas = 2520
-    postfix = "medium"
-
-    center_ra, center_dec = 34.303612, -5.1203157
-    size_x_40mas = 7000
-    size_y_40mas = 3520
-    postfix = "large"
-
-    center_ra, center_dec = 34.361343, -5.1326021
-    size_x_40mas = 29_000
-    size_y_40mas = 7600
-    postfix = "half"
-
-    center_radec = SkyCoord(center_ra, center_dec, unit="deg")
-    #  center = (center_x_40mas, center_y_40mas)
-    size = (size_y_40mas, size_x_40mas)  # Cutout2D expects (ny, nx)
-
-    # --- File lists ---
-    files_40mas = [
-        (
-            "uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_sci_skysubvar.fits",
-            f"uds-{postfix}-f444w_sci.fits",
-        ),
-        (
-            "uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_wht.fits",
-            f"uds-{postfix}-f444w_wht.fits",
-        ),
-        (
-            "uds-grizli-v8.0-minerva-v1.0-40mas-f115w-clear_drc_sci_skysubvar.fits",
-            f"uds-{postfix}-f115w_sci.fits",
-        ),
-        (
-            "uds-grizli-v8.0-minerva-v1.0-40mas-f115w-clear_drc_wht.fits",
-            f"uds-{postfix}-f115w_wht.fits",
-        ),
-        ("LW_f277w-f356w-f444w_SEGMAP.fits", f"uds-{postfix}-LW_seg.fits"),
-        #       ("LW_f277w-f356w-f444w_opterr.fits", "uds-test-f444w_opterr.fits"),
-        #       ("LW_f277w-f356w-f444w_optavg.fits", "uds-test-f444w_optavg.fits"),
-    ]
-
-    # --- Extract cutouts for 40mas images ---
-    for infile, outfile in files_40mas:
-        with fits.open(indir + infile) as hdul:
-            data = hdul[0].data
-            hdr = hdul[0].header
-            wcs = WCS(hdr)
-            cutout = Cutout2D(data, position=center_radec, size=size, wcs=wcs)
-            hdr.update(cutout.wcs.to_header())
-            hdu = fits.PrimaryHDU(cutout.data, header=hdr)
-            hdu.writeto(outdir + outfile, overwrite=True)
-            print(f"Saved {outdir+outfile}")
-
-    # Use the WCS and shape from one of the 40mas cutouts as the target
-    ref_cutout_file = outdir + files_40mas[0][1]
-    with fits.open(ref_cutout_file) as ref_hdul:
-        target_header = ref_hdul[0].header
-        target_wcs = WCS(target_header)
-        target_shape = ref_hdul[0].data.shape
-
-    files_80mas = [
-        ("uds-sbkgsub-v1.0-80mas-f770w_drz_sci.fits", f"uds-{postfix}-f770w_sci.fits"),
-        ("uds-sbkgsub-v1.0-80mas-f770w_drz_wht.fits", f"uds-{postfix}-f770w_wht.fits"),
-    ]
-    # target_80mas = rebin_wcs(target_wcs, n=1)  # Downsample by a factor of 2
-
-    from astropy.nddata import block_replicate
-
-    for infile, outfile in files_80mas:
-        with fits.open(indir + infile) as hdul:
-            data = hdul[0].data
-            hdr = hdul[0].header
-            # https://drizzlepac.readthedocs.io/en/deployment/adrizzle.html
-            hdr["KERNEL"] = ("square", "Drizzle kernel")  # also turbo -> speed up
-            hdr["PIXFRAC"] = (1.0, "Drizzle pixfrac")
-            # NOTE this is on the 80mas grid, so does not correspond to the 40mas pixel scale
-            # PIXFRAC =                  1.0 / Drizzle parameter describing pixel shrinking
-            # PXSCLRT =   0.7251965743873189 / Pixel scale ratio relative to native detector s
-            # Extract the cutout at the 80mas scale
-            # make it slightly larger to avoid edge effects
-            size_80mas = (size[0] // 2, size[1] // 2)
-            cutout_80mas = Cutout2D(data, position=center_radec, size=size_80mas, wcs=WCS(hdr))
-            hdr.update(cutout_80mas.wcs.to_header())
-            hdu = fits.PrimaryHDU(cutout_80mas.data.astype(np.float32), header=hdr)
-            hdu.writeto(outdir + outfile.replace(postfix, postfix + "-80mas"), overwrite=True)
-
-            if "sci" in outfile:
-                cutout_40mas = block_replicate(cutout_80mas.data, 2, conserve_sum=True)
-            else:
-                # weights go with inv variance, so we need to multiply by 4
-                cutout_40mas = block_replicate(cutout_80mas.data, 2) * 4
-
-            hdr.update(target_wcs.to_header())
-            hdu = fits.PrimaryHDU(cutout_40mas.astype(np.float32), header=hdr)
-            hdu.writeto(outdir + outfile, overwrite=True)
-            print(f"Saved {outdir + outfile} (registered to 40mas grid)")
-
-    for infile, outfile in files_80mas:
-        with fits.open(indir + infile) as hdul:
-            data = hdul[0].data
-            hdr = hdul[0].header
-            # https://drizzlepac.readthedocs.io/en/deployment/adrizzle.html
-            hdr["KERNEL"] = ("square", "Drizzle kernel")  # also turbo -> speed up
-            hdr["PIXFRAC"] = (1.0, "Drizzle pixfrac")
-            # NOTE this is on the 80mas grid, so does not correspond to the 40mas pixel scale
-            # PIXFRAC =                  1.0 / Drizzle parameter describing pixel shrinking
-            # PXSCLRT =   0.7251965743873189 / Pixel scale ratio relative to native detector s
-            # Extract the cutout at the 80mas scale
-            # make it slightly larger to avoid edge effects
-            size_80mas = (size[0] // 2 + 4, size[1] // 2 + 4)
-            cutout_80mas = Cutout2D(data, position=center_radec, size=size_80mas, wcs=WCS(hdr))
-            # Reproject to 40mas grid
-            reprojected_data, _ = reproject_interp(
-                (cutout_80mas.data, cutout_80mas.wcs),
-                output_projection=target_wcs,
-                shape_out=target_shape,
-                order="nearest-neighbor",
-                parallel=8,
-            )
-            # update hdr with new wcs
-            hdr.update(target_wcs.to_header())
-            hdu = fits.PrimaryHDU(reprojected_data.astype(np.float32), header=hdr)
-            hdu.writeto(outdir + outfile.replace(postfix, postfix + "reproject"), overwrite=True)
-            print(f"Saved {outdir + outfile} (registered to 40mas grid)")
-
-
 # %%
 @staticmethod
 def bin_remap_xy(x_hi: float, y_hi: float, k: int) -> tuple[float, float]:
@@ -950,26 +804,26 @@ def make_testdata():
     size_y_40mas = 2520
     postfix = "medium"
 
-    # center_ra, center_dec = 34.4232414, -5.1213316
+    center_ra, center_dec = 34.4232414, -5.1213316
+    xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
+    xy_even = xy + xy % 2
+    size_x_40mas = 1900
+    size_y_40mas = 1420
+    postfix = "test2"
+
+    # center_ra, center_dec = 34.303612, -5.1203157
     # xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
     # xy_even = xy + xy % 2
-    # size_x_40mas = 1900
-    # size_y_40mas = 1420
-    # postfix = "test2"
+    # size_x_40mas = 7000
+    # size_y_40mas = 3520
+    # postfix = "large"
 
-    center_ra, center_dec = 34.303612, -5.1203157
-    xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
-    xy_even = xy + xy % 2
-    size_x_40mas = 7000
-    size_y_40mas = 3520
-    postfix = "large"
-
-    center_ra, center_dec = 34.361343, -5.1326021
-    xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
-    xy_even = xy + xy % 2
-    size_x_40mas = 29_0000
-    size_y_40mas = 7600
-    postfix = "half"
+    # center_ra, center_dec = 34.361343, -5.1326021
+    # xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
+    # xy_even = xy + xy % 2
+    # size_x_40mas = 29_0000
+    # size_y_40mas = 7600
+    # postfix = "half"
 
     center_radec = SkyCoord(center_ra, center_dec, unit="deg")
     size = (size_y_40mas, size_x_40mas)  # Cutout2D expects (ny, nx)
@@ -999,10 +853,10 @@ def make_testdata():
             f"uds-{postfix}-f115w_wht.fits",
         ),
         ("LW_f277w-f356w-f444w_SEGMAP.fits", f"uds-{postfix}-LW_seg.fits"),
-        ("test-40mas_f770w_sci.fits", f"uds-{postfix}-40mas-f770w_sci.fits"),
-        ("test-40mas_f770w_wht.fits", f"uds-{postfix}-40mas-f770w_wht.fits"),
         #       ("LW_f277w-f356w-f444w_opterr.fits", "uds-test-f444w_opterr.fits"),
-        #       ("LW_f277w-f356w-f444w_optavg.fits", "uds-test-f444w_optavg.fits"),
+        ("LW_f277w-f356w-f444w_optavg.fits", "uds-test-f444w_optavg.fits"),
+        #        ("test-40mas_f770w_sci.fits", f"uds-{postfix}-40mas-f770w_sci.fits"),
+        #        ("test-40mas_f770w_wht.fits", f"uds-{postfix}-40mas-f770w_wht.fits"),
     ]
 
     # --- Extract cutouts for 40mas images ---
@@ -1013,7 +867,7 @@ def make_testdata():
             wcs = WCS(hdr)
             cutout = Cutout2D(data, position=xy_even, size=size, wcs=wcs)
             hdr.update(cutout.wcs.to_header())
-            hdu = fits.PrimaryHDU(cutout.data.astype(np.float32), header=hdr)
+            hdu = fits.PrimaryHDU(cutout.data, header=hdr)
             hdu.writeto(outdir + outfile, overwrite=True)
             print(f"Saved {outdir+outfile}")
             print(cutout.origin_original, cutout.shape)
@@ -1151,8 +1005,6 @@ if __name__ == "__main__":
 
     hdr = fits.getheader(data_dir + "uds-grizli-v8.0-minerva-v1.0-40mas-f444w-clear_drc_sci.fits")
     wcs_40mas = WCS(hdr)
-    # doesnt work -> scaling is not correct
-    wcs_80mas = wcs_40mas.slice((slice(None, None, 2), slice(None, None, 2)))
 
     # create a new WCS that corresponds to slicing every 2nd pixel in both Y and X
     # wcs2 = wcs.slice((slice(None, None, 2), slice(None, None, 2)))

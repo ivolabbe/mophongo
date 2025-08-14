@@ -179,7 +179,6 @@ class Pipeline:
         SparseFitter
             The fitter instance used for the final fit.
         """
-        from .psf import PSF
         from .fit import SparseFitter
         from .astro_fit import GlobalAstroFitter
         from .astrometry import AstroCorrect
@@ -240,9 +239,11 @@ class Pipeline:
             if k > 1:
                 if config.multi_resolution_method == "upsample":
                     print(f"upsampling image {idx} by factor {k}")
-                    images[idx] = block_replicate(images[idx], k, conserve_sum=True)
+                    images[idx] = block_replicate(images[idx], k, conserve_sum=True).astype(
+                        np.float32
+                    )
                     if weights_i is not None:
-                        weights_i = block_replicate(weights[idx], k) * k**2
+                        weights_i = block_replicate(weights[idx], k).astype(np.float32) * k**2
                     if wcs is not None:
                         wcs[idx] = wcs[0]
                 else:

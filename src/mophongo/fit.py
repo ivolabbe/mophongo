@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple, Optional
 
-import logging
 import numpy as np
 import scipy.sparse as sp
 from numpy.random import default_rng
@@ -18,10 +17,18 @@ from scipy.sparse.linalg import (
 )
 from tqdm import tqdm
 
-from .astrometry import cheb_basis, AstroCorrect
+from .astrometry import cheb_basis, AstroCorrect, n_terms
 from .templates import Template, Templates
 
+import logging
+
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)  # show info for *this* logger only
+if not logger.handlers:  # avoid duplicate handlers on reloads
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("[%(module)s.%(funcName)s: %(message)s"))
+    logger.addHandler(handler)
 
 # full weights need to be calcuate like
 # template_var = scipy.signal.fftconvolve(K**2, 1 / wht1, mode='same')  # same shape as template
@@ -64,7 +71,7 @@ class FitConfig:
     astrom_centroid: str = "centroid"  # "centroid" (=old) | "correlation"
     #    astrom_basis_order: int = 1
     astrom_kwargs: dict[str, dict] = field(
-        default_factory=lambda: {"poly": {"order": 1}, "gp": {"length_scale": 500}}
+        default_factory=lambda: {"poly": {"order": 1}, "gp": {"length_scale": 400}}
     )
     #    astrom_kwargs={'poly': {'order': 2}, 'gp': {'length_scale': 400}}
     multi_tmpl_chi2_thresh: float = 5.0
@@ -73,7 +80,7 @@ class FitConfig:
     #    multi_resolution_method: str = "upsample"  # 'upsample' or 'downsample'
     multi_resolution_method: str = "upsample"  # 'upsample' or 'downsample'
     normal: str = "tree"  # 'loop' or 'tree'
-    scene_merge_small: bool = False  # Merge small scenes before building bases
+    scene_merge_small: bool = True  # Merge small scenes before building bases
     scene_minimum_bright: int = 10  # Minimum bright sources per scene (default: 10)
 
 
@@ -571,15 +578,15 @@ def assemble_scene_system_self_AB(
 def summarize_scenes(labels: np.ndarray) -> np.ndarray:
     """Log a brief summary of scene sizes."""
 
-    counts = np.bincount(labels)
+    counts = np.bincount(labels)[1:]  # skip 0 bin
     logger.info(
-        "%d scenes (min=%d, median=%d, max=%d)",
+        "%d scenes (max=%d, median=%d, min=%d)",
         len(counts),
-        counts.min(),
-        int(np.median(counts)),
         counts.max(),
+        int(np.median(counts)),
+        counts.min(),
     )
-    topk = np.argsort(counts)[::-1][:10]
+    topk = np.argsort(counts)[::-1][:5]
     logger.info(
         "Top scenes by size: %s",
         [(int(cid), int(counts[cid])) for cid in topk],
@@ -645,6 +652,7 @@ class SparseFitter:
         self.config = config or FitConfig()
         self._ata = None
         self._atb = None
+        self.scene_ids = None  # scene ids for each template
         self.solution: np.ndarray | None = None
 
         # Identify high-S/N templates for astrometric shift fitting
@@ -713,14 +721,13 @@ class SparseFitter:
         from shapely.geometry import box
         from shapely.strtree import STRtree
 
-        norms = [self._weighted_norm(t) for t in self.templates]
-        tol = 1e-8 * max(norms)
-        keep = [i for i, n in enumerate(norms) if n > tol]
-        dropped = len(self.templates) - len(keep)
-        if dropped:
-            logger.info("Dropped %d templates with low norm.", dropped)
-        self.templates = [self.templates[i] for i in keep]
-        norms = [norms[i] for i in keep]
+        # scan for low norm templates but keep them for now
+        norms = np.array([self._weighted_norm(t) for t in self.templates])
+        tol = 1e-6 * np.median(norms)
+        if np.sum(norms < tol) > 0:
+            logger.info("Found %d templates with low norm.", np.sum(norms < tol))
+        # self.templates = [self.templates[i] for i in keep]
+        # norms = [norms[i] for i in keep]
 
         n = len(self.templates)
         ata = lil_matrix((n, n))
@@ -992,44 +999,48 @@ class SparseFitter:
         # note templates are pruned here
         A, b = self.ata, self.atb
 
+        # regularization: add a small ridge to the diagonal
         reg = cfg.reg
         if reg <= 0:
-            reg = 1e-4 * np.median(A.diagonal())
+            reg = 1e-6 * np.median(A.diagonal())
         if reg > 0:
             A = A + eye(A.shape[0], format="csr") * reg
 
+        # clamp diagonal to avoid numerical issues
         d = np.sqrt(np.maximum(A.diagonal(), reg))
+        # whiten the normal equations
+        # A_w = D^-1 A D^-1, b_w = b / d
         Dinv = diags(1.0 / d, 0, format="csr")
         A_w = Dinv @ A @ Dinv
         b_w = b / d
 
+        # these are the templates we will use for the solve
         templates = self.templates
         idx = [t.col_idx for t in templates]
         is_bright = np.array(
             [(t.flux / t.err > cfg.snr_thresh_astrom) if t.err > 0 else False for t in templates]
-        )  # bright_mask = self._orig_bright_mask[idx]
+        )
 
         # get scene ids from the normal equations
-        #  merge small scenes so enough bright sources are present
-        scene_ids, nscene = build_scene_tree_from_normal(A, b, coupling_thresh=1e-4)
-        summarize_scenes(scene_ids)
-        if cfg.scene_merge_small:
-            from mophongo.astrometry import n_terms
+        # merge small scenes so enough bright sources are present
+        if hasattr(self, "scene_ids"):
+            scene_ids = self.scene_ids  # reuse if present (e.g repeated solves)
+        else:
+            scene_ids, nscene = build_scene_tree_from_normal(A, b, coupling_thresh=1e-4)
+            if cfg.scene_merge_small:
+                npoly = n_terms(cfg.astrom_kwargs.get("order", 1))
+                minimum_bright = max(cfg.scene_minimum_bright, npoly * 2)
+                scene_ids, nscene = merge_small_scenes(
+                    scene_ids,
+                    templates,
+                    is_bright,
+                    minimum_bright=minimum_bright,
+                )
+                summarize_scenes(scene_ids)
+                self.scene_ids = scene_ids  # cache for later use
 
-            npoly = n_terms(cfg.astrom_kwargs.get("order", 1))
-            minimum_bright = max(cfg.scene_minimum_bright, npoly * 2)
-
-            scene_ids, nscene = merge_small_scenes(
-                scene_ids,
-                templates,
-                is_bright,
-                minimum_bright=minimum_bright,
-            )
-            summarize_scenes(scene_ids)
-
-        self.scene_ids = scene_ids  # store for diagnostics
-        for i, t in enumerate(templates):
-            t.id_scene = int(scene_ids[i])  # assign scene id to each template
+            for i, t in enumerate(templates):
+                t.id_scene = int(scene_ids[i])  # assign scene id to each template
 
         # after you computed `scene_ids` (and before the flux-only branch)
         rtol = cfg.cg_kwargs.get("rtol", 1e-6)

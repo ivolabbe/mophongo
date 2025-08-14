@@ -10,7 +10,7 @@ requires-python = ">=3.11,<3.13"
 dependencies = [
     "numpy (>=2.2.1,<2.3.0)",
     "scipy (>=1.16.0,<2.0.0)",
-    "astropy (>=6.0,<7.0)",
+    "astropy (==7.1)",
     "scikit-image (>=0.25.2,<0.26.0)",
     "reproject (>=0.14.1,<0.15.0)",
     "sep (>=1.4.1,<2.0.0)",

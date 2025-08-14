@@ -22,9 +22,12 @@ from astropy.wcs.utils import skycoord_to_pixel
 
 from .templates import Template
 
+import warnings
 import logging
 
 logger = logging.getLogger(__name__)
+
+warnings.filterwarnings("ignore", module="photutils.centroids.core")
 
 
 def cheb_basis(x: float, y: float, order: int) -> np.ndarray:
@@ -352,8 +355,7 @@ class AstroCorrect:
                 cval=0.0,
                 prefilter=True,
             )
-            tmpl.input_position_original = (x0 - dxi, y0 - dyi)
-            tmpl.shift += [dxi, dyi]
+            tmpl.shifted += [dxi, dyi]
 
     def _fit_gp(
         self,

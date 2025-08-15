@@ -27,6 +27,8 @@ from .fit import FitConfig as _FitConfig
 
 logger = logging.getLogger(__name__)
 
+memory = lambda: psutil.Process(os.getpid()).memory_info().rss / 1e9
+
 
 def _per_source_chi2(
     residual: np.ndarray, weights: np.ndarray, templates: Sequence[Template]
@@ -224,9 +226,7 @@ class Pipeline:
         chi_nu = _per_source_chi2(res, weights, templates)
         bad_idx = np.where(chi_nu > config.multi_tmpl_chi2_thresh)[0]
         if bad_idx.size > 0:
-            logger.info(
-                "Adding %d new templates for poor fits", bad_idx.size
-            )
+            logger.info("Adding %d new templates for poor fits", bad_idx.size)
             for bi in bad_idx:
                 parent = templates[bi]
                 if config.multi_tmpl_psf_core:
@@ -278,9 +278,7 @@ class Pipeline:
                 continue
             flux_sum[pid] += fl
             err_sum[pid] = float(np.sqrt(err_sum[pid] ** 2 + er**2))
-            err_pred_sum[pid] = float(
-                np.sqrt(err_pred_sum[pid] ** 2 + ep**2)
-            )
+            err_pred_sum[pid] = float(np.sqrt(err_pred_sum[pid] ** 2 + ep**2))
 
         for pid, fl in flux_sum.items():
             ci = id_to_index.get(pid)
@@ -344,16 +342,12 @@ class Pipeline:
                 psf_lo = _extract_psf_at(tmpl, psf)
                 aper_psf_hi = aperture_photometry(
                     psf_hi,
-                    CircularAperture(
-                        (psf_hi.shape[1] / 2, psf_hi.shape[0] / 2), r=radius
-                    ),
+                    CircularAperture((psf_hi.shape[1] / 2, psf_hi.shape[0] / 2), r=radius),
                     method="exact",
                 )["aperture_sum"][0]
                 aper_psf_lo = aperture_photometry(
                     psf_lo,
-                    CircularAperture(
-                        (psf_lo.shape[1] / 2, psf_lo.shape[0] / 2), r=radius
-                    ),
+                    CircularAperture((psf_lo.shape[1] / 2, psf_lo.shape[0] / 2), r=radius),
                     method="exact",
                 )["aperture_sum"][0]
                 if aper_psf_lo != 0:
@@ -388,8 +382,6 @@ class Pipeline:
         kernels = self.kernels
         wcs = self.wcs
         config = self.config
-
-        memory = lambda: psutil.Process(os.getpid()).memory_info().rss / 1e9
 
         print(f"Pipeline (start) memory: {memory():.1f} GB")
         print(f"Pipeline config: {config}")
@@ -496,8 +488,8 @@ class Pipeline:
                     Templates.apply_template_shifts(templates)
 
             # one final flux only solve after astrometry
-            cfg2 = _FitConfig(**config.__dict__)
-            cfg2.fit_astrometry_niter = 0
+            cfg_noshift = _FitConfig(**config.__dict__)
+            cfg_noshift.fit_astrometry_niter = 0
             templates, fitter = self._add_templates_for_bad_fits(
                 templates,
                 tmpls_lo,
@@ -509,9 +501,17 @@ class Pipeline:
                 config,
             )
 
-            fluxes, errs, info = fitter.solve(config=cfg2)
-            res = fitter.residual()
-            fluxes, errs, info = fitter.solve()
+            # add soft non-negative priors if fluxes are < 0.0 and resolve.
+            snr = np.divide(fluxes, errs, out=np.zeros_like(errs), where=errs > 0)
+            if np.any(snr < config.negative_snr_thresh):
+                warnings.warn(
+                    "Some fluxes are negative, applying non-negative prior and resolving."
+                )
+                idx = snr < config.negative_snr_thresh
+                # this updates ata and atb, so we can resolve again
+                fitter.add_flux_priors(idx, np.zeros_like(idx), errs)
+
+            fluxes, errs, info = fitter.solve(config=cfg_noshift)
             err_pred = fitter.predicted_errors()
             res = fitter.residual()
 

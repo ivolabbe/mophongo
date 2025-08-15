@@ -82,6 +82,7 @@ class FitConfig:
     normal: str = "tree"  # 'loop' or 'tree'
     scene_merge_small: bool = True  # Merge small scenes before building bases
     scene_minimum_bright: int = 10  # Minimum bright sources per scene (default: 10)
+    negative_snr_thresh: float = -3.0  # Threshold for negative SNR fluxes to apply soft priors
 
 
 def _diag_inv_hutch(A, k=32, rtol=1e-4, maxiter=None, seed=0):
@@ -268,7 +269,7 @@ def build_scene_tree_from_normal(
 
     Returns
     -------
-    labels : (n,) int array
+    labels : (n) int array
         Scene id per template.
     nscene : int
         Number of scenes.
@@ -305,7 +306,7 @@ def build_scene_tree_from_normal(
     ai = abs_alpha[i]
     aj = abs_alpha[j]
 
-    # r_ij = |A_ij α_j| / (A_ii |α_i| + eps),   r_ji similar
+    # r_ij = |A_ij α_j| / (A_ii |α_i| + eps),   r_ji = aij * ai / (denom_j + eps_j)
     denom_i = di * ai
     denom_j = dj * aj
 
@@ -810,6 +811,65 @@ class SparseFitter:
             self.build_normal()
         return self._atb
 
+    def add_flux_priors(self, idx, fprior, eprior):
+        """
+        Add Gaussian priors on selected flux parameters directly to the internal
+        normal equations (ata, atb).
+
+        Prior form: (x_i - mu_i)^2 / sigma_i^2, where mu=fprior, sigma=eprior.
+
+        This works in both unwhitened and whitened coordinate systems:
+        - If solver is unwhitened: ata += Λ, atb += Λ * mu
+        - If solver is whitened with diag scale d: ata += Λ_w, atb += r_w
+              Λ_w = diag(1 / (d^2 * sigma^2)),  r_w = Λ_w * (d * mu)
+
+        Args:
+            idx    : 1D int array of parameter indices to which priors apply.
+            fprior : 1D float array (mu) of prior means, same length as idx.
+            eprior : 1D or scalar float prior stddev(s) (sigma), broadcastable to fprior.
+
+        Notes:
+            - Only modifies the diagonal of ata and the corresponding entries of atb.
+            - Safe to call multiple times; contributions accumulate.
+            - Assumes `self.ata` is square and `self.atb` length matches its dimension.
+            - Whitened detection uses a 1D scale vector attribute if present:
+              tries one of: ('whiten_d','_whiten_d','d','_d','scale_d','_scale_d')
+        """
+        if len(idx) == 0:
+            return
+
+        n = self.atb.shape[0]
+        idx = np.asarray(idx, dtype=np.int64)
+        mu = np.asarray(fprior, dtype=np.float64)
+        if np.isscalar(eprior):
+            sigma = np.full_like(mu, float(eprior), dtype=np.float64)
+        else:
+            sigma = np.asarray(eprior, dtype=np.float64)
+
+        if mu.shape != sigma.shape or mu.shape != idx.shape:
+            raise ValueError(
+                "idx, fprior, eprior must have the same shape (after broadcasting for sigma)."
+            )
+
+        # Numerically safe inverse variances
+        eps = 1e-30
+        sigma = np.maximum(sigma, eps)
+
+        # Build diagonal increment vector (size n), default zeros
+        diag_inc = np.zeros(n, dtype=np.float64)
+
+        # Unwhitened system: Λ = 1/sigma^2, rhs += Λ * mu
+        lam = 1.0 / (sigma * sigma)
+        diag_inc[idx] = lam
+        # Apply to atb
+        self.atb = np.asarray(self.atb, dtype=np.float64)
+        self.atb[idx] += lam * mu
+
+        # Apply diagonal increment to ata
+        # Keep ata format CSR for efficient algebra
+        ata = self.ata.tocsr() if not isinstance(self.ata, sp.csr_matrix) else self.ata
+        self.ata = ata + sp.diags(diag_inc, 0, shape=ata.shape, format="csr")
+
     def solve(self, config: FitConfig | None = None) -> Tuple[np.ndarray, np.ndarray, dict]:
         """Solve for template fluxes using conjugate gradient."""
         if config is None:
@@ -842,8 +902,8 @@ class SparseFitter:
 
         Returns
         -------
-        alpha : (n,)  unwhitened fluxes (x_w / d)
-        err   : (n,)  unwhitened 1σ flux errors (from whitened Schur complement)
+        alpha : (n)  unwhitened fluxes (x_w / d)
+        err   : (n)  unwhitened 1σ flux errors (from whitened Schur complement)
         betas : list[(scene_id, beta_vec)]
         infos : list[int]  CG/MINRES flags per scene
         """
@@ -1023,7 +1083,7 @@ class SparseFitter:
 
         # get scene ids from the normal equations
         # merge small scenes so enough bright sources are present
-        if hasattr(self, "scene_ids"):
+        if self.scene_ids is not None:
             scene_ids = self.scene_ids  # reuse if present (e.g repeated solves)
         else:
             scene_ids, nscene = build_scene_tree_from_normal(A, b, coupling_thresh=1e-4)
@@ -1386,220 +1446,6 @@ def build_scene_tree(
         labs = np.arange(n, dtype=int)
         return labs + 1, n
 
-    # --- 1) BRIGHT graph by bbox intersections
-    geoms_B = [geoms[i] for i in B]
-    tree_B = STRtree(geoms_B)
-
-    ii_b: list[int] = []
-    jj_b: list[int] = []
-    for k, gi in enumerate(geoms_B):
-        js = tree_B.query(gi, predicate="intersects")
-        if js.size:
-            js = js[js > k]  # undirected edges (j>i)
-            if js.size:
-                ii_b.extend([k] * js.size)
-                jj_b.extend(js.tolist())
-
-    if ii_b:
-        adj_b = coo_matrix((np.ones(len(ii_b), np.uint8), (ii_b, jj_b)), shape=(B.size, B.size))
-        adj_b = adj_b + adj_b.T
-        ncomp_b, labs_B_local = csgraph.connected_components(adj_b.tocsr(), directed=False)
-    else:
-        ncomp_b = B.size
-        labs_B_local = np.arange(B.size, dtype=int)
-
-    # --- 2) Merge underfilled BRIGHT components by nearest component centroid
-    # Compact to 0..K-1
-    uniqB, invB = np.unique(labs_B_local, return_inverse=True)
-    labs_B_local = invB
-    K = uniqB.size
-
-    # component centroids from bright centroids
-    bx = cx[B]
-    by = cy[B]
-
-    # Loop until every bright component has >= p brights or only one remains
-    max_iter = 256
-    for _ in range(max_iter):
-        counts = np.bincount(labs_B_local, minlength=K)
-        valid = counts > 0
-        ids = np.nonzero(valid)[0]
-        if ids.size <= 1:
-            break
-
-        # Underfilled comps
-        under = ids[counts[ids] < minimum_bright]
-        if under.size == 0:
-            break
-
-        # Component centroids (mean of member bright centroids)
-        sumx = np.bincount(labs_B_local, weights=bx, minlength=K)
-        sumy = np.bincount(labs_B_local, weights=by, minlength=K)
-        cxC = np.empty(K, float)
-        cxC.fill(np.nan)
-        cyC = np.empty(K, float)
-        cyC.fill(np.nan)
-        cxC[valid] = sumx[valid] / counts[valid]
-        cyC[valid] = sumy[valid] / counts[valid]
-
-        # STRtree over all current component centroids
-        pts = [Point(cxC[i], cyC[i]) for i in ids]
-        treeC = STRtree(pts)
-        q_pts = [Point(cxC[i], cyC[i]) for i in under]
-
-        # Bulk nearest; may return multiple ties per query → reduce to min distance
-        (q_idx, t_idx), dists = treeC.query_nearest(q_pts, return_distance=True)
-        q_idx = np.asarray(q_idx, int)  # indices into q_pts
-        t_idx = np.asarray(t_idx, int)  # indices into pts
-        dists = np.asarray(dists, float)
-
-        best_to = np.full(under.size, -1, int)
-        best_d = np.full(under.size, np.inf, float)
-        for qi, ti, d in zip(q_idx, t_idx, dists):
-            # Map local indices back to component ids
-            src_comp = under[qi]
-            dst_comp = ids[ti]
-            if src_comp == dst_comp:
-                continue
-            if d < best_d[qi]:
-                best_d[qi] = d
-                best_to[qi] = dst_comp
-
-        # Apply merges (dedup)
-        pairs = [(u, v) for u, v in zip(under, best_to) if v >= 0 and u != v]
-        if not pairs:
-            break
-        pairs = list(dict.fromkeys(pairs))
-        u = np.array([a for a, _ in pairs], int)
-        v = np.array([b for _, b in pairs], int)
-
-        remap = np.arange(K, dtype=int)
-        remap[u] = v
-        new_labs = remap[labs_B_local]
-        if np.array_equal(new_labs, labs_B_local):
-            break
-        labs_B_local = new_labs
-
-        # Repack component ids 0..K'-1
-        uniqB, invB = np.unique(labs_B_local, return_inverse=True)
-        labs_B_local = invB
-        K = uniqB.size
-
-    # Assign bright template labels
-    labels[B] = labs_B_local
-
-    # --- 3) Attach FAINT templates
-    # Prefer overlap with any bright template; choose the bright component with max area
-    if F.size:
-        # Tree on BRIGHT template bboxes for overlap checks
-        tree_overlap_B = STRtree(geoms_B)
-
-        for i in F:
-            gi = geoms[i]
-            js = tree_overlap_B.query(gi, predicate="intersects")
-            if js.size:
-                # choose component with maximum intersection area
-                areas = [gi.intersection(geoms_B[int(j)]).area for j in js]
-                if areas and np.max(areas) > 0.0:
-                    jbest = int(js[int(np.argmax(areas))])
-                    labels[i] = labs_B_local[jbest]
-
-        # Remaining faint → nearest component centroid
-        rem = np.where(labels[F] < 0)[0]
-        if rem.size:
-            # Component centroid points (after merges)
-            counts = np.bincount(labs_B_local)
-            sumx = np.bincount(labs_B_local, weights=bx)
-            sumy = np.bincount(labs_B_local, weights=by)
-            cxC = sumx / counts
-            cyC = sumy / counts
-            ptsC = [Point(float(xc), float(yc)) for xc, yc in zip(cxC, cyC)]
-            treeC = STRtree(ptsC)
-
-            q_pts = [Point(cx[F[k]], cy[F[k]]) for k in rem]
-            (qa, qb), dists = treeC.query_nearest(q_pts, return_distance=True)
-            qa = np.asarray(qa, int)
-            qb = np.asarray(qb, int)
-            dists = np.asarray(dists, float)
-
-            # Reduce ties per query
-            m = rem.size
-            best_d = np.full(m, np.inf, float)
-            best_qb = np.full(m, -1, int)
-            for q, bidx, d in zip(qa, qb, dists):
-                if d < best_d[q]:
-                    best_d[q] = d
-                    best_qb[q] = bidx
-
-            good = best_qb >= 0
-            if np.any(good):
-                labels[F[rem[good]]] = best_qb[good]
-
-    # Any still -1 (shouldn’t happen) → give own component
-    if np.any(labels < 0):
-        miss = np.where(labels < 0)[0]
-        start = labels.max() + 1
-        labels[miss] = np.arange(start, start + miss.size, dtype=int)
-
-    # Pack to 1..K
-    uniq, inv = np.unique(labels, return_inverse=True)
-    return (inv + 1).astype(int), int(uniq.size)
-
-
-def build_scene_tree(
-    templates: List[Template],
-    bright_mask: np.ndarray,
-    minimum_bright: int = 3,
-) -> tuple[np.ndarray, int]:
-    """
-    Bright-seeded scene builder (Shapely 2.x), minimal knobs.
-
-    1) Make components among BRIGHT via bbox intersects.
-    2) Greedily merge underfilled bright components by nearest component centroid
-       (exclusive=True) until each has >= minimum_bright, or only one remains.
-    3) Attach FAINT: if overlaps any BRIGHT template → join the bright component
-       with max overlap area; else join nearest component centroid.
-    4) Final guarantee: if any scene still has < minimum_bright brights, merge
-       those scenes into their nearest scene with >= minimum_bright (or chain
-       until one scene if necessary).
-
-    Returns (labels_1based, nscene).
-    """
-    import numpy as np
-    from shapely.geometry import box, Point
-    from shapely.strtree import STRtree
-    from scipy.sparse import coo_matrix, csgraph
-
-    n = len(templates)
-    if n == 0:
-        return np.zeros(0, dtype=int), 0
-
-    bright_mask = np.asarray(bright_mask, bool)
-    B = np.flatnonzero(bright_mask)
-    F = np.flatnonzero(~bright_mask)
-
-    # ---- geometry + centroids (robust to degenerate boxes)
-    geoms = []
-    cx = np.empty(n, float)
-    cy = np.empty(n, float)
-    for i, t in enumerate(templates):
-        (ymin, ymax), (xmin, xmax) = t.bbox_original
-        g = box(xmin, ymin, xmax, ymax)
-        if g.is_empty or g.area <= 0:
-            x0, y0 = t.position_original
-            e = 0.5
-            g = box(x0 - e, y0 - e, x0 + e, y0 + e)
-        geoms.append(g)
-        c = g.centroid
-        cx[i], cy[i] = float(c.x), float(c.y)
-
-    labels = -np.ones(n, dtype=int)
-
-    # No brights → aggressive split (each its own)
-    if B.size == 0:
-        labs = np.arange(n, dtype=int)
-        return labs + 1, n
-
     # If total brights less than threshold, put all into one seed scene
     if B.size < minimum_bright:
         labels[B] = 0
@@ -1730,7 +1576,7 @@ def build_scene_tree(
                 areas = [gi.intersection(geoms_B[int(j)]).area for j in js]
                 if areas and np.max(areas) > 0.0:
                     jbest = int(js[int(np.argmax(areas))])
-                    labels[i] = labels[B[jbest]]
+                    labels[i] = labs_B_local[jbest]
 
         # nearest centroid fallback
         rem = np.where(labels[F] < 0)[0]
@@ -1896,7 +1742,7 @@ def merge_small_scenes_old(
     # compact labels to 0..k-1
     unique_labels, new_labs = np.unique(labs, return_inverse=True)
 
-    return new
+    return new_labs
 
     def solve_scene_shifts(
         self,

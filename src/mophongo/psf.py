@@ -875,6 +875,7 @@ class DrizzlePSF:
             hdr = fits.Header()
             for col in tab.colnames:
                 val = row[col]
+                #                print(col, val, val is np.ma.masked, getattr(val, "masked", False))
                 if val is np.ma.masked or getattr(val, "masked", False):
                     continue  # skip masked entries
                 hdr[col] = val

@@ -366,13 +366,27 @@ def convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     return np.einsum("ijkl,kl->ij", windows, kernel)
 
 
+def retile_blocked(arr, B=64):
+    """Return a blocked copy with shape (nby, nbx, B, B), plus timings."""
+    H, W = arr.shape
+    if H % B != 0 or W % B != 0:
+        raise ValueError(f"Array shape {H}x{W} must be divisible by block size {B}.")
+    HH, WW = (H // B) * B, (W // B) * B
+    t0 = time.perf_counter()
+    blocked = arr[:HH, :WW].reshape(HH // B, B, WW // B, B).swapaxes(1, 2).copy()
+    t = time.perf_counter() - t0
+    bytes_moved = blocked.nbytes * 2  # read + write
+    return blocked.reshape(H, W), HH, WW, t, bytes_moved
+
+
 # wrapper around astropy matching kernel that handles padding and recentering
 def matching_kernel(
-    psf_hi: np.ndarray,
-    psf_lo: np.ndarray,
+    psf_hi_in: np.ndarray,
+    psf_lo_in: np.ndarray,
     *,
     window: object | None = None,
     recenter: bool = True,
+    pixel_ratio: float = 1.0,
 ) -> np.ndarray:
     """Compute a convolution kernel matching ``psf_hi`` to ``psf_lo``.
 
@@ -397,6 +411,30 @@ def matching_kernel(
     kernel: ``np.ndarray``
         Convolution kernel with shape equal to the larger of the two input PSFs.
     """
+    # pixel_ratio > 0
+    # @@@ it is actually better for well sampled kernels to have even size throughout
+    # so we can easily bin up and down without resampling / shifting the center
+    if pixel_ratio == 1.0:
+        psf_hi = psf_hi_in.copy()
+        psf_lo = psf_lo_in.copy()
+    else:
+        from scipy.ndimage import zoom
+
+        if pixel_ratio > 1.0:
+            psf_hi = psf_hi_in.copy()
+            nsize = psf_hi.shape[-1]
+            odd = nsize & 1
+            psf_lo = zoom(psf_lo_in, pixel_ratio, order=2, prefilter=True)[
+                odd : odd + nsize, odd : odd + nsize
+            ]
+        else:
+            psf_lo = psf_lo_in.copy()
+            nsize = psf_lo.shape[-1]
+            odd = nsize & 1
+            psf_hi = zoom(psf_hi_in, pixel_ratio, order=2, prefilter=True)[
+                odd : odd + nsize, odd : odd + nsize
+            ]
+
     if psf_hi.shape != psf_lo.shape:
         ny = max(psf_hi.shape[0], psf_lo.shape[0])
         nx = max(psf_hi.shape[1], psf_lo.shape[1])
@@ -413,6 +451,7 @@ def matching_kernel(
         psf_lo[~np.isfinite(psf_lo)] = 0.0
 
     if window is None:
+        # @@@@ need to find a better way to set the window.
         window = matching.SplitCosineBellWindow(alpha=0.4, beta=0.1)
     #        window = matching.TukeyWindow(alpha=0.4)
 

@@ -825,6 +825,27 @@ def make_testdata():
     # size_y_40mas = 7600
     # postfix = "half"
 
+    center_ra, center_dec = 34.509876, -5.27539
+    xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
+    xy_even = xy + xy % 2
+    size_x_40mas = 4300
+    size_y_40mas = 4300
+    postfix = "ahstar"
+
+    center_ra, center_dec = 34.371547, -5.139044
+    xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
+    xy_even = xy + xy % 2
+    size_x_40mas = 1400
+    size_y_40mas = 1000
+    postfix = "bright"
+
+    center_ra, center_dec = 34.486225, -5.1324948
+    xy = np.round(ref_wcs.wcs_world2pix(center_ra, center_dec, 0))
+    xy_even = xy + xy % 2
+    size_x_40mas = 1600
+    size_y_40mas = 2000
+    postfix = "ahtwin"
+
     center_radec = SkyCoord(center_ra, center_dec, unit="deg")
     size = (size_y_40mas, size_x_40mas)  # Cutout2D expects (ny, nx)
 
@@ -939,6 +960,8 @@ def make_testdata():
             cutout_80mas = Cutout2D(
                 data, position=center_radec_even, size=size_80mas, wcs=WCS(hdr)
             )
+
+            continue
 
             # Reproject to 40mas grid
             reprojected_data, _ = reproject_interp(

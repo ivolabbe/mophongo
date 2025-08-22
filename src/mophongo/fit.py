@@ -27,7 +27,7 @@ logger.setLevel(logging.INFO)  # show info for *this* logger only
 if not logger.handlers:  # avoid duplicate handlers on reloads
     handler = logging.StreamHandler()
     handler.setLevel(logging.INFO)
-    handler.setFormatter(logging.Formatter("[%(module)s.%(funcName)s: %(message)s"))
+    handler.setFormatter(logging.Formatter("%(module)s.%(funcName)s: %(message)s"))
     logger.addHandler(handler)
 
 # full weights need to be calcuate like
@@ -50,16 +50,14 @@ class FitConfig:
     """Configuration options for :class:`SparseFitter`."""
 
     positivity: bool = False
-    # ``reg`` is interpreted as an absolute value when > 0. When set to 0 the
-    # fitter will compute a default regularisation strength based on the median
-    # of the normal matrix diagonal.
     reg: float = 0.0
     bad_value: float = np.nan
     solve_method: str = "scene"  # 'all', 'scene', 'lo' (linear operator)
     cg_kwargs: Dict[str, Any] = field(
         default_factory=lambda: {"M": None, "maxiter": 500, "atol": 1e-6}
     )
-    fit_covariances: bool = False  # Use simple fitting errors from diagonal of normal matrix
+    fit_covariances: bool = False
+
     fft_fast: float | bool = False  # False for full kernel, 0.1-1.0 for truncated FFT
     # condense fit astrometry flags into one: fit_astrometry_niter = 0, means not fitting astrometry
     fit_astrometry_niter: int = 2  # Number of astrometry refinement passes (0 → disabled)
@@ -82,7 +80,15 @@ class FitConfig:
     normal: str = "tree"  # 'loop' or 'tree'
     scene_merge_small: bool = True  # Merge small scenes before building bases
     scene_minimum_bright: int = 10  # Minimum bright sources per scene (default: 10)
-    negative_snr_thresh: float = -3.0  # Threshold for negative SNR fluxes to apply soft priors
+    negative_snr_thresh: float = -1.0  # Threshold for negative SNR fluxes to apply soft priors
+
+    # Photometry aperture control:
+    # - float/int: fixed aperture diameter size (in arcsec or pixels per `aperture_units`)
+    # - str: column name in the input catalog for per-source aperture sizes
+    # - None: fallback to 1.5 * FWHM (in pixels) measured from template
+    aperture_diam: float | np.ndarray | None = None  # image measurement aperture (diameter)
+    aperture_catalog: float | str | None = None  # catalog aperture (diameter or table column name)
+    aperture_units: str = "arcsec"  # "arcsec" or "pix"
 
 
 def _diag_inv_hutch(A, k=32, rtol=1e-4, maxiter=None, seed=0):
@@ -811,64 +817,54 @@ class SparseFitter:
             self.build_normal()
         return self._atb
 
-    def add_flux_priors(self, idx, fprior, eprior):
+    def add_flux_priors(self, idx, mu, sigma, *, floor=1e-12):
         """
-        Add Gaussian priors on selected flux parameters directly to the internal
-        normal equations (ata, atb).
+        Add Gaussian flux priors to the UNwhitened normal:
+            (x_i - mu_i)^2 / sigma_i^2  for i in sel.
 
-        Prior form: (x_i - mu_i)^2 / sigma_i^2, where mu=fprior, sigma=eprior.
-
-        This works in both unwhitened and whitened coordinate systems:
-        - If solver is unwhitened: ata += Λ, atb += Λ * mu
-        - If solver is whitened with diag scale d: ata += Λ_w, atb += r_w
-              Λ_w = diag(1 / (d^2 * sigma^2)),  r_w = Λ_w * (d * mu)
-
-        Args:
-            idx    : 1D int array of parameter indices to which priors apply.
-            fprior : 1D float array (mu) of prior means, same length as idx.
-            eprior : 1D or scalar float prior stddev(s) (sigma), broadcastable to fprior.
-
-        Notes:
-            - Only modifies the diagonal of ata and the corresponding entries of atb.
-            - Safe to call multiple times; contributions accumulate.
-            - Assumes `self.ata` is square and `self.atb` length matches its dimension.
-            - Whitened detection uses a 1D scale vector attribute if present:
-              tries one of: ('whiten_d','_whiten_d','d','_d','scale_d','_scale_d')
+        sel   : bool mask of length n or 1D integer indices
+        mu    : scalar or array broadcastable to n (or |sel|); prior mean(s)
+        sigma : scalar or array broadcastable to n (or |sel|); prior stddev(s)
         """
-        if len(idx) == 0:
+        import numpy as np
+        import scipy.sparse as sp
+
+        # Ensure normal is built (triggers pruning, etc., via properties)
+        if self._ata is None or self._atb is None:
+            _ = self.ata  # builds and caches
+            _ = self.atb
+
+        A = self._ata.tocsr()
+        b = np.asarray(self._atb, dtype=float)
+        n = b.shape[0]
+
+        # normalize selection to integer indices
+        if idx.size == 0:
             return
+        nsel = len(idx)
 
-        n = self.atb.shape[0]
-        idx = np.asarray(idx, dtype=np.int64)
-        mu = np.asarray(fprior, dtype=np.float64)
-        if np.isscalar(eprior):
-            sigma = np.full_like(mu, float(eprior), dtype=np.float64)
-        else:
-            sigma = np.asarray(eprior, dtype=np.float64)
+        # broadcast mu/sigma to selected size
+        mu_all = np.broadcast_to(mu, (nsel,)) if np.ndim(mu) else float(mu)
+        sig_all = np.broadcast_to(sigma, (nsel,)) if np.ndim(sigma) else float(sigma)
 
-        if mu.shape != sigma.shape or mu.shape != idx.shape:
-            raise ValueError(
-                "idx, fprior, eprior must have the same shape (after broadcasting for sigma)."
-            )
+        mu_sel = (mu_all if np.ndim(mu_all) else np.full(nsel, mu_all))[idx]
+        sig_sel = (sig_all if np.ndim(sig_all) else np.full(nsel, sig_all))[idx]
 
-        # Numerically safe inverse variances
-        eps = 1e-30
-        sigma = np.maximum(sigma, eps)
+        # guards
+        sig_sel = np.maximum(np.asarray(sig_sel, float), floor)
+        lam = 1.0 / (sig_sel**2)  # precisions
 
-        # Build diagonal increment vector (size n), default zeros
-        diag_inc = np.zeros(n, dtype=np.float64)
+        # RHS: b[i] += λ_i * μ_i
+        b[idx] += lam * np.asarray(mu_sel, float)
 
-        # Unwhitened system: Λ = 1/sigma^2, rhs += Λ * mu
-        lam = 1.0 / (sigma * sigma)
+        # Diagonal: A_ii += λ_i
+        diag_inc = np.zeros(n, float)
         diag_inc[idx] = lam
-        # Apply to atb
-        self.atb = np.asarray(self.atb, dtype=np.float64)
-        self.atb[idx] += lam * mu
+        A = A + sp.diags(diag_inc, 0, shape=A.shape, format="csr")
 
-        # Apply diagonal increment to ata
-        # Keep ata format CSR for efficient algebra
-        ata = self.ata.tocsr() if not isinstance(self.ata, sp.csr_matrix) else self.ata
-        self.ata = ata + sp.diags(diag_inc, 0, shape=ata.shape, format="csr")
+        # write back
+        self._ata = A
+        self._atb = b
 
     def solve(self, config: FitConfig | None = None) -> Tuple[np.ndarray, np.ndarray, dict]:
         """Solve for template fluxes using conjugate gradient."""
@@ -1141,7 +1137,7 @@ class SparseFitter:
             tmpl.err = err
             tmpl.is_bright = bool(err > 0 and flux / err > cfg.snr_thresh_astrom)
 
-        return x_full, e_full, {"cg_info": info, "nscene": nscene}
+        return x_full, e_full, {"cg_info": info}
 
     def residual(self) -> np.ndarray:
         return self.image - self.model_image()
@@ -1299,12 +1295,20 @@ def assemble_scene_system_old(
             sl_j = tj.slices_original
             sl_j_local = (
                 slice(
-                    inter[0].start - sl_j[0].start + tj.slices_cutout[0].start,
-                    inter[0].stop - sl_j[0].start + tj.slices_cutout[0].start,
+                    inter[0].start
+                    - tmpl_j.slices_original[0].start
+                    + tmpl_j.slices_cutout[0].start,
+                    inter[0].stop
+                    - tmpl_j.slices_original[0].start
+                    + tmpl_j.slices_cutout[0].start,
                 ),
                 slice(
-                    inter[1].start - sl_j[1].start + tj.slices_cutout[1].start,
-                    inter[1].stop - sl_j[1].start + tj.slices_cutout[1].start,
+                    inter[1].start
+                    - tmpl_j.slices_original[1].start
+                    + tmpl_j.slices_cutout[1].start,
+                    inter[1].stop
+                    - tmpl_j.slices_original[1].start
+                    + tmpl_j.slices_cutout[1].start,
                 ),
             )
             w = weights[inter]
@@ -1677,18 +1681,6 @@ def merge_small_scenes_old(
     minimum_bright: int | None = None,
     max_merge_radius: float = np.inf,  # pixels; keep ∞ for no distance limit
 ) -> np.ndarray:
-    """
-    Merge scenes that have < minimum_bright bright sources into their nearest scene.
-    Nearest is by centroid of template positions. In-place relabel (returns new labels).
-    """
-    if minimum_bright is None:
-        minimum_bright = len(cheb_basis(0.0, 0.0, order))  # p terms
-
-    logger.info(
-        "Merging small scenes with minimum_bright=%d, max_merge_radius=%.1f pixels",
-        minimum_bright,
-        max_merge_radius,
-    )
 
     labs = labels.copy()
     while True:

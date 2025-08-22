@@ -13,10 +13,352 @@ from scipy.signal import fftconvolve
 from scipy.interpolate import interp1d
 from astropy.nddata import block_reduce
 
-from .utils import measure_shape
+from .utils import measure_shape, bin_remap
 from .psf_map import PSFRegionMap
 
 logger = logging.getLogger(__name__)
+
+import numpy as np
+from copy import deepcopy
+
+try:
+    from astropy.wcs import WCS, Sip
+except Exception:  # if astropy not available / SIP missing
+    WCS = None
+    Sip = None
+
+__all__ = [
+    "AlignedCutout",
+    "as_block_reduce",
+    "as_block_replicate",
+    "scale_wcs_pixel",
+]
+
+# ───────────────────────── helpers ─────────────────────────
+
+
+def _round_half_up(x: float) -> int:
+    return int(np.floor(x + 0.5))
+
+
+def _aligned_bounds_1d(pos: float, size_min: int, align: int) -> tuple[int, int]:
+    """
+    Return [imin, imax) bounds with:
+      • lower bound divisible by `align` (align≥1)
+      • length >= size_min
+      • length is a multiple of `align`
+      • center close to `pos`
+    """
+    size_min = int(size_min)
+    align = int(max(1, align))
+
+    if align == 1:
+        imin = int(np.ceil(pos - size_min / 2.0))
+        imax = imin + size_min
+        return imin, imax
+
+    size_min = max(size_min, align)
+
+    imin0 = int(np.ceil(pos - size_min / 2.0))
+    dx_min = imin0 % align
+    imin = imin0 - dx_min
+
+    imax_f = pos + max((pos - imin), size_min / 2.0)
+    #    print(pos, size_min)
+    dx_max = (-imax_f) % align
+    imax = int(np.rint(imax_f + dx_max))
+
+    print(imin0, dx_min, imin)
+    print(imax_f, dx_max, imax)
+    L = imax - imin
+    if L <= 0 or (L % align) != 0:
+        imax = imin + ((L + align - 1) // align) * align
+    return int(imin), int(imax)
+
+
+def _bbox_from_slices(sl):
+    return ((sl[0].start, sl[0].stop - 1), (sl[1].start, sl[1].stop - 1))
+
+
+def _block_reduce(arr: np.ndarray, fact: int, func=np.sum) -> np.ndarray:
+    """
+    Fast 2-D block reduction by integer `fact` (flux-conserving with func=np.sum).
+    """
+    a = np.asarray(arr, dtype=np.float32, order="C")
+    H, W = a.shape
+    H2, W2 = (H // fact) * fact, (W // fact) * fact
+    if H2 != H or W2 != W:
+        a = a[:H2, :W2]
+    a = a.reshape(H2 // fact, fact, W2 // fact, fact)
+    return func(a, axis=(1, 3), dtype=np.float32)
+
+
+def _block_replicate(arr: np.ndarray, fact: int, conserve_sum: bool = True) -> np.ndarray:
+    """
+    Fast 2-D nearest upsampling by integer `fact`. If `conserve_sum` True,
+    each pixel is divided by fact**2 (so flux is preserved).
+    """
+    a = np.asarray(arr, dtype=np.float32, order="C")
+    tile = np.ones((fact, fact), dtype=np.float32)
+    if conserve_sum:
+        tile /= fact * fact
+    return np.kron(a, tile)
+
+
+def scale_wcs_pixel(
+    wcs: WCS | None, pixel_scale_factor: float, new_shape: tuple[int, int] | None = None
+) -> WCS | None:
+    """
+    Scale a WCS by a pixel-size factor (>=0), **preserving sky coordinates**.
+      pixel_scale_factor > 1  → pixels get larger (downsampling)
+      pixel_scale_factor < 1  → pixels get smaller (upsampling)
+
+    cd/cdelt ← cd/cdelt * pixel_scale_factor
+    crpix   ← (crpix - 0.5)/pixel_scale_factor + 0.5
+    """
+    if wcs is None:
+        return None
+    w2 = deepcopy(wcs)
+
+    f = float(pixel_scale_factor)
+    if hasattr(w2.wcs, "cd") and w2.wcs.cd is not None and w2.wcs.cd.size:
+        w2.wcs.cd = w2.wcs.cd * f
+    else:
+        w2.wcs.cdelt = w2.wcs.cdelt * f
+
+    old_crpix = w2.wcs.crpix.copy()
+    w2.wcs.crpix = (old_crpix - 0.5) / f + 0.5
+
+    if new_shape is not None:
+        try:
+            w2.pixel_shape = (int(new_shape[0]), int(new_shape[1]))
+        except Exception:
+            pass
+
+    if getattr(wcs, "sip", None) is not None and Sip is not None:
+        # SIP polynomials evaluated relative to their CRPIX (in pixel units):
+        # just shift SIP CRPIX the same way as WCS CRPIX
+        off = old_crpix - w2.wcs.crpix
+        w2.sip = Sip(wcs.sip.a, wcs.sip.b, wcs.sip.ap, wcs.sip.bp, wcs.sip.crpix - off)
+
+    w2.wcs.set()
+    return w2
+
+
+# ──────────────────────── main class ─────────────────────────
+
+
+class AlignedCutout:
+    """
+    Minimal 2-D cutout that:
+      • uses *partial* mode only (zero outside the image)
+      • `size` is a **minimum**; actual data may be enlarged by `align`
+      • lower-left bound is aligned to a multiple of `align` (per axis)
+      • shape is a multiple of `align`
+      • stores an adjusted WCS (incl. SIP if present)
+
+    Parameters
+    ----------
+    data : 2D ndarray
+    position : (x, y) float — pixel-center coords
+    size : (ny, nx) int or scalar
+    align : int >= 1
+    copy : bool
+    fill_value : float
+    wcs : astropy.wcs.WCS (optional)
+    """
+
+    def __init__(
+        self,
+        data: np.ndarray,
+        position: tuple[float, float],
+        size: tuple[int, int] | int,
+        *,
+        align: int = 1,
+        copy: bool = False,
+        fill_value: float | int = 0.0,
+        wcs: WCS | None = None,
+    ):
+        arr = np.asarray(data)
+        self.align = int(max(1, align))
+        self.shape_input = arr.shape  # (ny, nx)
+
+        x, y = float(position[0]), float(position[1])
+        if np.isscalar(size):
+            ny = nx = int(size)
+        else:
+            ny, nx = int(size[0]), int(size[1])
+
+        # aligned bounds in ORIGINAL coords
+        x0, x1 = _aligned_bounds_1d(x, nx, self.align)
+        y0, y1 = _aligned_bounds_1d(y, ny, self.align)
+        h = y1 - y0
+        w = x1 - x0
+
+        # overlap with source image
+        Y0 = max(0, y0)
+        X0 = max(0, x0)
+        Y1 = min(arr.shape[0], y1)
+        X1 = min(arr.shape[1], x1)
+
+        dy = Y0 - y0
+        dx = X0 - x0
+        yslice_dst = slice(dy, dy + (Y1 - Y0))
+        xslice_dst = slice(dx, dx + (X1 - X0))
+        yslice_src = slice(Y0, Y1)
+        xslice_src = slice(X0, X1)
+
+        fully_inside = (y0 >= 0) and (x0 >= 0) and (y1 <= arr.shape[0]) and (x1 <= arr.shape[1])
+
+        if not fully_inside or copy:
+            out = np.zeros((h, w), dtype=arr.dtype)
+            if fill_value != 0:
+                out[...] = out.dtype.type(fill_value)
+            if (Y1 > Y0) and (X1 > X0):
+                out[yslice_dst, xslice_dst] = arr[yslice_src, xslice_src]
+            self.data = out
+        else:
+            self.data = arr[y0:y1, x0:x1]
+
+        self.shape = self.data.shape
+        self.input_position_original = (x, y)
+        self.input_position_cutout = (x - x0, y - y0)
+
+        self.slices_original = (yslice_src, xslice_src)
+        self.slices_cutout = (yslice_dst, xslice_dst)
+
+        self.bbox_original = _bbox_from_slices(self.slices_original)
+        self.bbox_cutout = _bbox_from_slices(self.slices_cutout)
+
+        self.origin_original = (
+            self.slices_original[1].start,
+            self.slices_original[0].start,
+        )  # (x, y)
+        self.origin_cutout = (self.slices_cutout[1].start, self.slices_cutout[0].start)  # (x, y)
+
+        # “true” cutout origin relative to original, including any fill padding
+        self._origin_original_true = (
+            self.origin_original[0] - self.slices_cutout[1].start,
+            self.origin_original[1] - self.slices_cutout[0].start,
+        )
+
+        self.position_original = (_round_half_up(x), _round_half_up(y))
+        self.position_cutout = (
+            _round_half_up(self.input_position_cutout[0]),
+            _round_half_up(self.input_position_cutout[1]),
+        )
+
+        so, sc = self.slices_original, self.slices_cutout
+        self.center_original = (
+            0.5 * (so[1].start + so[1].stop - 1),
+            0.5 * (so[0].start + so[0].stop - 1),
+        )
+        self.center_cutout = (
+            0.5 * (sc[1].start + sc[1].stop - 1),
+            0.5 * (sc[0].start + sc[0].stop - 1),
+        )
+
+        # WCS adjusted to the cutout (shift CRPIX, keep SIP consistent)
+        if wcs is not None:
+            off_xy = np.array(self._origin_original_true, dtype=float)  # (x, y)
+            w2 = deepcopy(wcs)
+            if getattr(w2, "wcs", None) is not None and getattr(w2.wcs, "crpix", None) is not None:
+                w2.wcs.crpix -= off_xy
+            try:
+                w2.array_shape = self.data.shape
+                w2.pixel_shape = self.data.shape
+            except Exception:
+                pass
+            if getattr(wcs, "sip", None) is not None and Sip is not None:
+                w2.sip = Sip(wcs.sip.a, wcs.sip.b, wcs.sip.ap, wcs.sip.bp, wcs.sip.crpix - off_xy)
+            w2.wcs.set()
+            self.wcs = w2
+        else:
+            self.wcs = None
+
+    # ───────────── array-only helpers (no geometry changes) ─────────────
+
+    def as_block_reduced(self, factor: int, func=np.sum) -> np.ndarray:
+        """Return block-reduced self.data by `factor` (trims edges as needed)."""
+        if factor < 1 or int(factor) != factor:
+            raise ValueError("factor must be a positive integer")
+        return _block_reduce(self.data, int(factor), func=func)
+
+    def as_block_replicated(self, factor: int, conserve_sum: bool = True) -> np.ndarray:
+        """Return block-replicated self.data by `factor` (nearest upsample)."""
+        if factor < 1 or int(factor) != factor:
+            raise ValueError("factor must be a positive integer")
+        if factor == 1:
+            return np.asarray(self.data, dtype=np.float32, order="C")
+        return _block_replicate(self.data, int(factor), conserve_sum=conserve_sum)
+
+    # ───────────── geometry-aware resampling (returns new cutouts) ────────────
+
+    def downsample(self, factor: int) -> "AlignedCutout":
+        """
+        Return a new cutout binned by integer `factor`:
+          • flux-conserving (sum)
+          • correct position & WCS updates
+          • exact only if origin and shape are divisible by `factor`
+        """
+        f = int(factor)
+        if f < 1:
+            raise ValueError("factor must be >= 1")
+        if f == 1:
+            return deepcopy(self)
+
+        H, W = self.shape
+        x0, y0 = self.origin_original
+
+        if (x0 % f) or (y0 % f) or (H % f) or (W % f):
+            raise ValueError(
+                "Downsample requires origin and size divisible by factor "
+                f"(origin=({x0},{y0}), shape=({H},{W}), factor={f})."
+            )
+
+        data_lo = _block_reduce(self.data, f, func=np.sum)  # float32
+
+        pos_lo = bin_remap(self.input_position_original, f)  # (x, y)
+        shape_input_lo = (self.shape_input[0] // f, self.shape_input[1] // f)
+        wcs_lo = scale_wcs_pixel(self.wcs, pixel_scale_factor=f, new_shape=shape_input_lo)
+
+        # alignment propagates: new origin = old_origin / f
+        align_lo = max(1, self.align // f)
+
+        # build a new cutout on a dummy parent (zeros), then insert data
+        dummy = np.zeros(shape_input_lo, dtype=np.float32)
+        out = AlignedCutout(
+            dummy, tuple(pos_lo), data_lo.shape, align=align_lo, copy=True, wcs=wcs_lo
+        )
+        out.data[...] = data_lo
+        return out
+
+    def upsample(self, factor: int, conserve_sum: bool = True) -> "AlignedCutout":
+        """
+        Return a new cutout expanded by integer `factor`:
+          • uses block replication (optionally flux-conserving)
+          • correct position & WCS updates
+        """
+        f = int(factor)
+        if f < 1:
+            raise ValueError("factor must be >= 1")
+        if f == 1:
+            return deepcopy(self)
+
+        data_hi = _block_replicate(self.data, f, conserve_sum=conserve_sum)
+
+        pos_hi = expand_remap(self.input_position_original, f)  # (x, y)
+        shape_input_hi = (self.shape_input[0] * f, self.shape_input[1] * f)
+        wcs_hi = scale_wcs_pixel(self.wcs, pixel_scale_factor=1.0 / f, new_shape=shape_input_hi)
+
+        align_hi = self.align * f
+
+        dummy = np.zeros(shape_input_hi, dtype=np.float32)
+        out = AlignedCutout(
+            dummy, tuple(pos_hi), data_hi.shape, align=align_hi, copy=True, wcs=wcs_hi
+        )
+        out.data[...] = data_hi
+        return out
 
 
 class Template(Cutout2D):
@@ -194,7 +536,7 @@ class Template(Cutout2D):
 
         return new_cut
 
-    def downsample(self, k: int) -> "Template":
+    def downsample_old(self, k: int) -> "Template":
         """Return a new template averaged by ``k×k`` blocks.
 
         Parameters
@@ -323,18 +665,6 @@ class Template(Cutout2D):
         idxmin = rfunc(pos - size_new[::-1] / 2.0).astype(np.int64)
         return size_new, idxmin
 
-    @staticmethod
-    def bin_remap(x: float | tuple[float, float], k: int) -> np.ndarray:
-        """Map center-of-pixel coords (origin at pixel centers, 0-based) from hi→lo."""
-        shift = (k - 1) / 2.0
-        return (np.array(x) - shift) / k
-
-    @staticmethod
-    def expand_remap(x: float | tuple[float, float], k: int) -> np.ndarray:
-        """Map center-of-pixel coords (origin at pixel centers, 0-based) from hi→lo."""
-        shift = (k - 1) / 2.0
-        return (np.array(x) + shift) * k
-
     # verified for k=2,4 for sizes 4-16
     def downsample(
         self, k: int, image: np.ndarray | None = None, wcs_lo: WCS | None = None
@@ -372,7 +702,7 @@ class Template(Cutout2D):
         # print(hlo, wlo, k, lo_block.shape, hi_aligned.shape)
 
         # Map the *center* correctly
-        x_lo, y_lo = self.bin_remap(self.input_position_original, k)
+        x_lo, y_lo = bin_remap(self.input_position_original, k)
         shape_input = np.array(self.shape_input) // k
 
         if image is None:

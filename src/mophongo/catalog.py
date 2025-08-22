@@ -8,7 +8,7 @@ from typing import Tuple
 
 import numpy as np
 from scipy import ndimage as ndi
-from astropy.convolution import Gaussian2DKernel, Box2DKernel, convolve
+from astropy.convolution import Gaussian2DKernel, Box2DKernel
 from astropy.io import fits
 from astropy.table import Table
 from photutils.background import MADStdBackgroundRMS
@@ -133,7 +133,7 @@ def expand_to_full(img_binned: np.ndarray, step: int, full_shape: tuple[int, int
     return out.astype(np.float32)
 
 
-def calibrate_ivar_with_bg(
+def get_bg_and_ivar(
     sci: np.ndarray,
     wht: np.ndarray,
     *,
@@ -227,7 +227,7 @@ def calibrate_ivar_with_bg(
     bg_img = expand_to_full(bg_img_bin.astype(np.float32), step, s.shape)
     bg_img[~valid_w] = 0.0  # zero out invalid pixels
 
-    return ivar_new, bg_img
+    return bg_img, ivar_new
 
 
 def calibrate_ivar_with_bg_median(
@@ -411,7 +411,9 @@ def detect_peaks(
 ) -> tuple[SegmentationImage, SourceCatalog]:
     """Detect peaks in a noise-equalised image."""
 
-    sm = convolve(img_eq, Box2DKernel(kernel_w), normalize_kernel=True)
+    kernel = Gaussian2DKernel(kernel_w / 2.355, x_size=npix_min, y_size=npix_min)
+
+    sm = fftconvolve(img_eq, kernel.array, mode="same")
     std = mad_std(sm)
     seg = detect_sources(sm, sigma * std, npixels=npix_min)
     props = SourceCatalog(img_eq, seg)
@@ -444,6 +446,117 @@ def vet_by_chi2(star_list: Table, chi2_max: float = 3.0) -> Table:
     return star_list[mask]
 
 
+import numpy as np
+from astropy.nddata import block_reduce
+from astropy.table import Table
+from astropy.stats import mad_std
+from photutils.segmentation import detect_sources, SourceCatalog
+from scipy.ndimage import minimum_filter
+
+
+def _expand_remap(pos_xy, k):
+    # center-of-pixel convention (pixel centers at integers)
+    shift = (k - 1) / 2.0
+    x, y = pos_xy
+    return (x + shift) * k, (y + shift) * k
+
+
+import numpy as np
+from astropy.nddata import block_reduce
+from astropy.table import Table
+from astropy.stats import mad_std
+from photutils.segmentation import detect_sources, SourceCatalog
+from scipy.ndimage import minimum_filter
+
+
+def _expand_remap(pos_xy, k):
+    # center-of-pixel convention (pixel centers at integers)
+    shift = (k - 1) / 2.0
+    x, y = pos_xy
+    return (x + shift) * k, (y + shift) * k
+
+
+def find_saturated_stars(
+    sci: np.ndarray,
+    wht: np.ndarray,
+    *,
+    nbin: int = 8,
+    ncen: int = 3,  # odd; min over ncen×ncen binned pixels at centroid
+    sigma: float = 5.0,
+    npixels: int = 50,
+    return_seg: bool = False,
+):
+    """
+    Fast saturated-star finder with neighborhood min in the binned weight.
+
+    Steps:
+      1) sci_b = mean nbin×nbin; wht_b_min = min nbin×nbin
+      2) det = sci_b * sqrt(max(wht_b_min, 0))  (noise–equalized)
+      3) detect_sources(det, threshold=sigma*mad_std(det), npixels=npixels)
+      4) for each source, compute min over an ncen×ncen window of wht_b_min
+         centered on the (binned) centroid; flag saturated if that min ≤ 0
+      5) return centroids on binned grid and mapped back to full-res
+    """
+    # sanitize & bin
+    sci = np.asarray(sci, dtype=np.float32)
+    wht = np.asarray(wht, dtype=np.float32)
+    wht = np.where(np.isfinite(wht) & (wht > 0), wht, 0.0)
+
+    sci_b = block_reduce(sci, (nbin, nbin), func=np.mean).astype(np.float32)
+    wht_b_min = block_reduce(wht, (nbin, nbin), func=np.min).astype(np.float32)
+
+    # detector image & threshold
+    det = sci_b * np.sqrt(np.maximum(wht_b_min, 0.0, dtype=np.float32))
+    thr = float(sigma * mad_std(det, ignore_nan=True))
+
+    # empty outputs on degenerate case
+    def _empty(seg=None):
+        out = Table(
+            names=["id", "x_b", "y_b", "x", "y", "npix_b", "sat_flag"],
+            dtype=[int, float, float, float, float, int, bool],
+        )
+        return (out, seg) if return_seg else out
+
+    if not np.isfinite(thr) or thr <= 0:
+        return _empty()
+
+    seg = detect_sources(det, threshold=thr, npixels=npixels)
+    if seg is None or seg.nlabels == 0:
+        return _empty(seg)
+
+    # catalog on the binned grid
+    cat = SourceCatalog(sci_b, seg)
+    xb = np.asarray(cat.xcentroid.value, dtype=np.float32)
+    yb = np.asarray(cat.ycentroid.value, dtype=np.float32)
+
+    # min over ncen×ncen around each centroid (on binned weight map)
+    if ncen is None or ncen < 1:
+        ncen = 1
+    if ncen % 2 == 0:
+        ncen += 1  # force odd
+    wht_b_cenmin = minimum_filter(wht_b_min, size=(ncen, ncen), mode="nearest")
+
+    yb_i = np.clip(np.rint(yb).astype(int), 0, wht_b_cenmin.shape[0] - 1)
+    xb_i = np.clip(np.rint(xb).astype(int), 0, wht_b_cenmin.shape[1] - 1)
+    sat_flag = wht_b_cenmin[yb_i, xb_i] <= 0.0
+
+    # map centroids back to full-res
+    x_full, y_full = _expand_remap((xb, yb), nbin)
+
+    out = Table()
+    out["id"] = np.asarray(cat.labels, dtype=int)
+    out["x_b"] = xb
+    out["y_b"] = yb
+    out["x"] = x_full.astype(np.float32)
+    out["y"] = y_full.astype(np.float32)
+    out["npix_b"] = np.asarray(cat.area.value, dtype=int)  # binned-pixel area
+    out["sat_flag"] = sat_flag
+    # optionally expose the actual min value for debugging:
+    # out["wht_b_cenmin"] = wht_b_cenmin[yb_i, xb_i].astype(np.float32)
+
+    return (out, seg) if return_seg else out
+
+
 # Add 'eccentricity' to the default columns for SourceCatalog
 # if 'eccentricity' not in DEFAULT_COLUMNS:
 #    DEFAULT_COLUMNS.append(['ra','dec','eccentricity'])
@@ -467,6 +580,15 @@ DEFAULT_COLUMNS = [
     "kron_flux",
     "kron_fluxerr",
 ]
+
+
+@dataclass
+class CatConfig:
+    """Configuration options for :class:`SparseFitter`."""
+
+    # aperture in
+    aperture: float | str = "use_aper"
+    aperture_units: str = "arcsec"
 
 
 @dataclass
@@ -549,10 +671,8 @@ class Catalog:
         kernel = Gaussian2DKernel(
             self.params["kernel_size"] / 2.355, x_size=kernel_pix, y_size=kernel_pix
         )
-        from astropy.convolution import convolve
-
         print(f"Convolving with kernel size {self.params['kernel_size']} pixels")
-        smooth = convolve(self.det_img, kernel, normalize_kernel=True)
+        smooth = fftconvolve(self.det_img, kernel.array, mode="same")
         print("Detecting sources...")
         segmap = detect_sources(
             smooth,
@@ -580,7 +700,7 @@ class Catalog:
     def run(self) -> None:
         if self.estimate_background or self.estimate_ivar:
             print("Estimating background and inverse variance...")
-            ivar, background = calibrate_ivar_with_bg(
+            background, ivar = get_bg_and_ivar(
                 self.sci,
                 self.wht,
                 bg_filter_sigma=self.params.get("background_filter_sigma", 64.0),

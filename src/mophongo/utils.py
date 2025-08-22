@@ -30,6 +30,17 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# remaps (center-of-pixel convention; origin at pixel centers, 0-based)
+def bin_remap(x: float | tuple[float, float], k: int) -> np.ndarray:
+    shift = (k - 1) / 2.0
+    return (np.array(x, dtype=np.float64) - shift) / k
+
+
+def expand_remap(x: float | tuple[float, float], k: int) -> np.ndarray:
+    shift = (k - 1) / 2.0
+    return (np.array(x, dtype=np.float64) + shift) * k
+
+
 def intersection(
     a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]
 ) -> Tuple[int, int, int, int] | None:
@@ -76,7 +87,7 @@ def downsample_psf(psf: np.ndarray, k: int) -> np.ndarray:
     return block_reduce(psf, k, func=np.sum)
 
 
-def bin_factor_from_wcs(w_det: WCS, w_img: WCS, tol: float = 0.02) -> int:
+def bin_factor_from_wcs(w_det: WCS, w_img: WCS, tol: float = 0.001) -> int:
     """Return the integer pixel-scale factor between two WCS objects.
 
     Parameters
@@ -111,9 +122,9 @@ def bin_factor_from_wcs(w_det: WCS, w_img: WCS, tol: float = 0.02) -> int:
     return max(k, 1)
 
 
-def rebin_wcs(wcs: WCS, n: int) -> WCS:
+def rebin_wcs(wcs: WCS, factor: int) -> WCS:
     """
-    Up‐ or down‐sample a WCS by a power of two, *exactly* preserving the
+    Up‐ or down‐sample a WCS by factor, *exactly* preserving the
     tangent point (CRVALs), and updating CRPIX and NAXIS accordingly.
 
     Parameters
@@ -1675,3 +1686,318 @@ def compare_psf_to_star(
     else:
         plt.show()
     return fig
+
+
+import os, re, csv, logging, glob
+from pathlib import Path
+from astropy.io import fits
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+log = logging.getLogger("jwst_wcs")
+
+# --- CSV schema (note: no 'xposure' column; we map header XPOSURE/EXPTIME/EFFEXPTM -> exptime) ---
+FIELDS = [
+    "file",
+    "ext",
+    "exptime",
+    "wcsaxes",
+    "crpix1",
+    "crpix2",
+    "cd1_1",
+    "cd1_2",
+    "cd2_1",
+    "cd2_2",
+    "cdelt1",
+    "cdelt2",
+    "cunit1",
+    "cunit2",
+    "ctype1",
+    "ctype2",
+    "crval1",
+    "crval2",
+    "lonpole",
+    "latpole",
+    "wcsname",
+    "mjdref",
+    "date-beg",
+    "mjd-beg",
+    "date-avg",
+    "mjd-avg",
+    "date-end",
+    "mjd-end",
+    "telapse",
+    "obsgeo-x",
+    "obsgeo-y",
+    "obsgeo-z",
+    "radesys",
+    "velosys",
+    "a_order",
+    "a_0_2",
+    "a_0_3",
+    "a_0_4",
+    "a_0_5",
+    "a_1_1",
+    "a_1_2",
+    "a_1_3",
+    "a_1_4",
+    "a_2_0",
+    "a_2_1",
+    "a_2_2",
+    "a_2_3",
+    "a_3_0",
+    "a_3_1",
+    "a_3_2",
+    "a_4_0",
+    "a_4_1",
+    "a_5_0",
+    "b_order",
+    "b_0_2",
+    "b_0_3",
+    "b_0_4",
+    "b_0_5",
+    "b_1_1",
+    "b_1_2",
+    "b_1_3",
+    "b_1_4",
+    "b_2_0",
+    "b_2_1",
+    "b_2_2",
+    "b_2_3",
+    "b_3_0",
+    "b_3_1",
+    "b_3_2",
+    "b_4_0",
+    "b_4_1",
+    "b_5_0",
+    "naxis",
+    "naxis1",
+    "naxis2",
+    "sipcrpx1",
+    "sipcrpx2",
+]
+
+SIP_A_KEYS = ["A_ORDER"] + [
+    f"A_{i}_{j}"
+    for (i, j) in [
+        (0, 2),
+        (0, 3),
+        (0, 4),
+        (0, 5),
+        (1, 1),
+        (1, 2),
+        (1, 3),
+        (1, 4),
+        (2, 0),
+        (2, 1),
+        (2, 2),
+        (2, 3),
+        (3, 0),
+        (3, 1),
+        (3, 2),
+        (4, 0),
+        (4, 1),
+        (5, 0),
+    ]
+]
+SIP_B_KEYS = ["B_ORDER"] + [
+    f"B_{i}_{j}"
+    for (i, j) in [
+        (0, 2),
+        (0, 3),
+        (0, 4),
+        (0, 5),
+        (1, 1),
+        (1, 2),
+        (1, 3),
+        (1, 4),
+        (2, 0),
+        (2, 1),
+        (2, 2),
+        (2, 3),
+        (3, 0),
+        (3, 1),
+        (3, 2),
+        (4, 0),
+        (4, 1),
+        (5, 0),
+    ]
+]
+
+MAST_TOKEN = os.environ.get("MAST_TOKEN")  # optional for proprietary
+FSSPEC_HEADERS = {"Authorization": f"token {MAST_TOKEN}"} if MAST_TOKEN else {}
+
+
+def mast_url_for_filename(filename: str) -> str:
+    return f"https://mast.stsci.edu/api/v0.1/Download/file?uri=mast:JWST/product/{filename}"
+
+
+# dataset prefix + detector
+JW_DATASET_RE = re.compile(r"(jw\d{11}_[0-9]{5}_[0-9]{5})_([a-z0-9]+)", re.IGNORECASE | re.DOTALL)
+
+
+def extract_dataset_from_comments(hdr: fits.Header):
+    """Robustly gather COMMENT text (cards can be split/continued)."""
+    comments = []
+    for card in hdr.cards:
+        if card.keyword == "COMMENT" and card.value is not None:
+            comments.append(str(card.value))
+    blob = " ".join(comments)  # join; breaks across cards are common
+    pairs = JW_DATASET_RE.findall(blob)
+    out, seen = [], set()
+    for ds, det in pairs:
+        key = (ds.lower(), det.lower())
+        if key not in seen:
+            seen.add(key)
+            out.append(ds + "_" + det + "_rate.fits")
+    return out
+
+
+def cd_from_header(h):
+    if all(k in h for k in ("CD1_1", "CD1_2", "CD2_1", "CD2_2")):
+        return h["CD1_1"], h["CD1_2"], h["CD2_1"], h["CD2_2"]
+    if all(k in h for k in ("PC1_1", "PC1_2", "PC2_1", "PC2_2", "CDELT1", "CDELT2")):
+        return (
+            h["CDELT1"] * h["PC1_1"],
+            h["CDELT1"] * h["PC1_2"],
+            h["CDELT2"] * h["PC2_1"],
+            h["CDELT2"] * h["PC2_2"],
+        )
+    return (None, None, None, None)
+
+
+def mjdref_from_header(h):
+    if "MJDREF" in h:
+        return h["MJDREF"]
+    a, b = h.get("MJDREFI", 0.0), h.get("MJDREFF", 0.0)
+    try:
+        return float(a) + float(b)
+    except Exception:
+        return None
+
+
+def pick_exptime(h):
+    # Map header exposure keywords into single CSV 'exptime'
+    for k in ("XPOSURE", "EXPTIME", "EFFEXPTM"):
+        if k in h:
+            return h[k]
+    return None
+
+
+def open_remote_sci_header(url: str):
+    """Open remote FITS; return (header, ext_index). Try 'SCI' else [1]."""
+    with fits.open(
+        url, use_fsspec=True, fsspec_kwargs={"headers": FSSPEC_HEADERS} if FSSPEC_HEADERS else {}
+    ) as hdul:
+        try:
+            hdr = hdul["SCI"].header
+            return hdr, hdul.index_of("SCI")
+        except Exception:
+            hdr = hdul[1].header
+            return hdr, 1
+
+
+def row_from_header(filename: str, ext: int, h: fits.Header):
+    cd11, cd12, cd21, cd22 = cd_from_header(h)
+    g = lambda k: h.get(k)
+    row = {
+        "file": filename,
+        "ext": ext,
+        "exptime": pick_exptime(h),
+        "wcsaxes": g("WCSAXES"),
+        "crpix1": g("CRPIX1"),
+        "crpix2": g("CRPIX2"),
+        "cd1_1": cd11,
+        "cd1_2": cd12,
+        "cd2_1": cd21,
+        "cd2_2": cd22,
+        "cdelt1": g("CDELT1"),
+        "cdelt2": g("CDELT2"),
+        "cunit1": g("CUNIT1"),
+        "cunit2": g("CUNIT2"),
+        "ctype1": g("CTYPE1"),
+        "ctype2": g("CTYPE2"),
+        "crval1": g("CRVAL1"),
+        "crval2": g("CRVAL2"),
+        "lonpole": g("LONPOLE"),
+        "latpole": g("LATPOLE"),
+        "wcsname": g("WCSNAME"),
+        "mjdref": mjdref_from_header(h),
+        "date-beg": g("DATE-BEG"),
+        "mjd-beg": g("MJD-BEG"),
+        "date-avg": g("DATE-AVG"),
+        "mjd-avg": g("MJD-AVG"),
+        "date-end": g("DATE-END"),
+        "mjd-end": g("MJD-END"),
+        "telapse": g("TELAPSE"),
+        "obsgeo-x": g("OBSGEO-X"),
+        "obsgeo-y": g("OBSGEO-Y"),
+        "obsgeo-z": g("OBSGEO-Z"),
+        "radesys": g("RADESYS"),
+        "velosys": g("VELOSYS"),
+        "naxis": g("NAXIS"),
+        "naxis1": g("NAXIS1"),
+        "naxis2": g("NAXIS2"),
+        "sipcrpx1": g("SIPCRPX1"),
+        "sipcrpx2": g("SIPCRPX2"),
+    }
+    for k in SIP_A_KEYS:
+        row[k.lower()] = g(k)
+    for k in SIP_B_KEYS:
+        row[k.lower()] = g(k)
+    for f in FIELDS:
+        row.setdefault(f, None)
+    return row
+
+
+def output_csv_path(mosaic_path: Path) -> Path:
+    base = mosaic_path.stem
+    for suf in ("_drz_wht", "_drz_sci", "_i2d", "_wht", "_sci"):
+        if base.endswith(suf):
+            base = base[: -len(suf)]
+            break
+    return mosaic_path.with_name(f"{base}_wcs.csv")
+
+
+# write_wcs_csv_from_mosaic('uds-sbkgsub-v2.0-80mas-f770w_drz_wht.fits')
+# write_wcs_csv_from_mosaic('data/*/F770W/stage2/*cal.fits', out_csv='uds-v2.0_f770_wcs.csv')
+def write_wcs_csv(mosaic_or_glob: Path | str, out_csv: str | None = None):
+    if any(ch in str(mosaic_or_glob) for ch in "*?["):
+        files = sorted(glob.glob(str(mosaic_or_glob)))
+        if not files:
+            raise RuntimeError(f"Glob matched zero files: {mosaic_or_glob}")  # minimal guard
+        files = [(Path(f).name, f) for f in files]
+        base_for_csv = Path(files[0][1])  # <-- needed for output name
+    else:
+        hdr0 = fits.getheader(mosaic_or_glob, ext=0)  # PRIMARY only
+        files = extract_dataset_from_comments(hdr0)
+        if not files:
+            raise RuntimeError("No JWST dataset references found in PRIMARY COMMENT cards.")
+        files = [(f, mast_url_for_filename(f)) for f in files]
+        base_for_csv = Path(mosaic_or_glob)
+
+    rows = []
+    for file_name, path_or_url in files:
+        print(f"Processing {path_or_url}...")
+        continue
+        try:
+            hdr, ext = open_remote_sci_header(path_or_url)  # SCI else [1]
+        except Exception as e:
+            log.warning(f"could not open rate header for {path_or_url}: {e}")
+            continue
+        rows.append(row_from_header(file_name, ext, hdr))
+
+    out_csv_path = Path(out_csv) if out_csv else output_csv_path(base_for_csv)
+    with out_csv_path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=FIELDS)
+        w.writeheader()
+        w.writerows(rows)
+
+    log.info(f"Wrote {len(rows)} rows -> {out_csv_path}")
+    return out_csv_path, len(rows)
+
+
+# Online: parse mosaic → fetch headers from MAST
+# write_wcs_csv_from_mosaic("uds-sbkgsub-v2.0-80mas-f770w_drz_wht.fits")
+
+# Offline: glob local CAL/RATE files; override output name
+# write_wcs_csv_from_mosaic("data/*/F770W/stage2/*cal.fits", out_csv="uds-v2.0_f770_wcs.csv")

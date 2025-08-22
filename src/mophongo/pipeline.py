@@ -19,13 +19,25 @@ from collections import defaultdict
 from astropy.table import Table
 from astropy.wcs import WCS
 from astropy.nddata import Cutout2D, block_replicate, block_reduce
+from photutils.aperture import CircularAperture, aperture_photometry
+from astropy.wcs.utils import proj_plane_pixel_scales
+from astropy.wcs.utils import proj_plane_pixel_scales
 
 from .psf_map import PSFRegionMap
-from .utils import bin_factor_from_wcs, downsample_psf
+from .utils import bin_factor_from_wcs, downsample_psf, bin_remap
 from .templates import Templates, Template
 from .fit import FitConfig as _FitConfig
 
+
+import logging
+
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)  # show info for *this* logger only
+if not logger.handlers:  # avoid duplicate handlers on reloads
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(module)s.%(funcName)s: %(message)s"))
+    logger.addHandler(handler)
 
 memory = lambda: psutil.Process(os.getpid()).memory_info().rss / 1e9
 
@@ -169,10 +181,11 @@ class Pipeline:
         self.infos: list[dict] = []
         self.tmpls: Templates()
 
+        print(f"Pipeline (init) memory: {memory():.1f} GB")
+
     # ------------------------------------------------------------------
     # Helper methods
     # ------------------------------------------------------------------
-
     def _add_templates_for_bad_fits(
         self,
         templates: list[Template],
@@ -288,75 +301,224 @@ class Pipeline:
             cat[f"err_{idx}"][ci] = err_sum[pid]
             cat[f"err_pred_{idx}"][ci] = err_pred_sum[pid]
 
+    def _pixel_scale_arcsec(self, w: WCS | None) -> float | None:
+        try:
+            if w is None:
+                return None
+            # (dy, dx) scale; pick x
+            return float(proj_plane_pixel_scales(w)[0] * 3600.0)
+        except Exception:
+            return None
+
+    def _gaussian_fwhm_pix(self, psf: np.ndarray | None) -> float | None:
+        if psf is None:
+            return None
+        try:
+            from .utils import measure_shape
+
+            mask = psf > (0.0 if np.min(psf) >= 0 else np.median(psf))
+            _, _, sx, sy, _ = measure_shape(psf.astype(np.float32), mask.astype(bool))
+            return 2.354820045 * float(np.sqrt(sx * sy))
+        except Exception:
+            return None
+
+    def _resolve_image_ap_radius_pix(self, idx: int, cfg: _FitConfig) -> float:
+        """
+        Diameter source: cfg.aperture_diam
+        - float/int => same for all images
+        - np.ndarray(len(images)-1) => per image (idx>=1), pick [idx-1]
+        - None => 1.5 × FWHM of PSF[idx] (in *pixels* of image idx),
+                    fallback 3.0 pixels if PSF is missing.
+        Units: cfg.aperture_units ("arcsec" or "pix")
+        """
+        diam = None
+        if isinstance(cfg.aperture_diam, (int, float)):
+            diam = float(cfg.aperture_diam)
+        elif isinstance(cfg.aperture_diam, np.ndarray):
+            # array corresponds to images[1:], so use [idx-1]
+            if cfg.aperture_diam.size != (len(self.images) - 1):
+                raise ValueError("aperture_diam array must have len(images)-1 elements")
+            diam = float(cfg.aperture_diam[idx - 1])  # idx>=1 by construction here
+
+        if diam is None:
+            # default: 1.5×FWHM of this image PSF (pixels)
+            psf_i = None
+            if self.psfs is not None and len(self.psfs) > idx:
+                psf_i = self.psfs[idx]
+                if isinstance(psf_i, np.ndarray):
+                    fwhm_pix = self._gaussian_fwhm_pix(psf_i)
+                else:
+                    # PSFRegionMap: use the first PSF as a representative
+                    try:
+                        fwhm_pix = self._gaussian_fwhm_pix(psf_i.psfs[0])
+                    except Exception:
+                        fwhm_pix = None
+            else:
+                fwhm_pix = None
+            rad_pix = 1.5 * fwhm_pix if fwhm_pix and fwhm_pix > 0 else 3.0
+            return float(rad_pix)
+
+        # convert diameter to pixels if needed
+        if cfg.aperture_units.lower().startswith("arc"):
+            pscale = self._pixel_scale_arcsec(self.wcs[idx] if self.wcs is not None else None)
+            if not pscale or pscale <= 0:
+                raise ValueError("aperture_diam in arcsec requires valid WCS for each image")
+            return float(diam / (2.0 * pscale))
+        else:
+            return float(diam / 2.0)  # already in pixels
+
+    def _resolve_catalog_ap_radius_pix(self, cat: Table, cfg: _FitConfig) -> dict[int, float]:
+        """
+        Return per-source catalog aperture *radius in pixels of the reference image (idx=0)*.
+
+        Source:
+        - str => table column name with per-source *diameters*
+        - float/int => fixed *diameter* for all sources
+        - None => default 1.5 × FWHM of PSF[0] in pixels (fallback 3.0)
+
+        Units: cfg.aperture_units ("arcsec" or "pix")
+        """
+        # get reference pixel scale
+        pscale_ref = self._pixel_scale_arcsec(self.wcs[0] if self.wcs is not None else None)
+
+        # default diameter if None: 1.5 × FWHM(PSF[0]) in pixels
+        def _default_rad_pix():
+            fwhm0 = None
+            if self.psfs is not None and len(self.psfs) > 0:
+                psf0 = self.psfs[0]
+                if isinstance(psf0, np.ndarray):
+                    fwhm0 = self._gaussian_fwhm_pix(psf0)
+                else:
+                    try:
+                        fwhm0 = self._gaussian_fwhm_pix(psf0.psfs[0])
+                    except Exception:
+                        fwhm0 = None
+            return float(1.5 * fwhm0) if fwhm0 and fwhm0 > 0 else 3.0
+
+        out: dict[int, float] = {}
+
+        if cfg.aperture_catalog is None:
+            rad_pix = _default_rad_pix()
+            for i, _ in enumerate(cat["id"]):
+                out[int(cat["id"][i])] = rad_pix
+            return out
+
+        if isinstance(cfg.aperture_catalog, (int, float)):
+            diam = float(cfg.aperture_catalog)
+            if cfg.aperture_units.lower().startswith("arc"):
+                if not pscale_ref or pscale_ref <= 0:
+                    raise ValueError("aperture_catalog in arcsec requires valid ref WCS")
+                rad = diam / (2.0 * pscale_ref)
+            else:
+                rad = diam / 2.0
+            for i, _ in enumerate(cat["id"]):
+                out[int(cat["id"][i])] = float(rad)
+            return out
+
+        # string column name
+        col = str(cfg.aperture_catalog)
+        if col not in cat.colnames:
+            raise ValueError(f"aperture_catalog column '{col}' not found in table")
+        if cfg.aperture_units.lower().startswith("arc"):
+            if not pscale_ref or pscale_ref <= 0:
+                raise ValueError("aperture_catalog in arcsec requires valid ref WCS")
+            for i, _ in enumerate(cat["id"]):
+                diam = float(cat[col][i])
+                out[int(cat["id"][i])] = float(diam / (2.0 * pscale_ref))
+        else:
+            for i, _ in enumerate(cat["id"]):
+                diam = float(cat[col][i])
+                out[int(cat["id"][i])] = float(diam / 2.0)
+
+        return out
+
+    def _aperture_sum_on_template(self, tmpl: Template, radius_pix: float) -> float:
+        """Exact aperture sum on a template image centered on its own center."""
+        x0 = tmpl.input_position_cutout[0] - tmpl.slices_cutout[1].start
+        y0 = tmpl.input_position_cutout[1] - tmpl.slices_cutout[0].start
+        aper = CircularAperture((float(x0), float(y0)), r=float(radius_pix))
+        phot = aperture_photometry(tmpl.data, aper, method="exact")
+        return float(phot["aperture_sum"][0])
+
     def _add_aperture_photometry(
         self,
         cat: Table,
-        templates: list[Template],
-        fluxes: np.ndarray,
-        residual: np.ndarray,
+        templates: list[Template],  # post-conv templates (current band)
+        fluxes: np.ndarray,  # best-fit per-template fluxes
+        residual: np.ndarray,  # residual image (same grid as ref if you upsampled)
         psf: np.ndarray | PSFRegionMap | None,
-        idx: int,
+        idx: int,  # current image index (>=1)
     ) -> None:
-        """Add aperture photometry measurements to the catalog.
-
-        The aperture flux is measured on the best-fit model for each source
-        with the residuals added back in. A simple PSF correction factor is
-        derived from the ratio of fluxes measured on the pre- and
-        post-convolution PSF images.
         """
+        Measure aperture flux on (model+residual) and PSF-correct it using
+        the ratio of pre/post-convolution *template* aperture integrals:
 
+            corr = F_cat(tmpl_ref_preconv) / F_img(tmpl_ref_postconv)
+
+        Writes:
+        ap_flux_raw_{idx}  – raw aperture sum on model+residual
+        ap_corr_{idx}      – correction factor
+        ap_flux_{idx}      – corrected flux
+        """
         from photutils.aperture import CircularAperture, aperture_photometry
-        from .utils import measure_shape
 
-        id_to_index = {id_: i for i, id_ in enumerate(cat["id"])}
-        cat[f"ap_flux_{idx}"] = self.config.bad_value
-        cat[f"ap_corr_{idx}"] = self.config.bad_value
+        cfg = self.config
+        id_to_row = {int(i): k for k, i in enumerate(cat["id"])}
 
+        # ensure columns exist
+        for name in (f"ap_flux_raw_{idx}", f"ap_corr_{idx}", f"ap_flux_{idx}"):
+            if name not in cat.colnames:
+                cat[name] = cfg.bad_value
+
+        # radii
+        r_img_pix = self._resolve_image_ap_radius_pix(
+            idx, cfg
+        )  # same for all in this band (by design)
+        r_cat_pix_by_id = self._resolve_catalog_ap_radius_pix(cat, cfg)
+
+        # map parent id -> original (pre-convolution) template on the ref image
+        ref_tmpls = {int(t.id): t for t in self.tmpls.templates}
+
+        # residual+model patch measurement (raw)
         for tmpl, fl in zip(templates, fluxes):
             pid = tmpl.id_parent if getattr(tmpl, "parent_id", None) is not None else tmpl.id
-            ci = id_to_index.get(pid)
-            if ci is None:
+            row = id_to_row.get(int(pid))
+            if row is None:
                 continue
 
+            # --- raw aperture flux on (model + residual) in the *current image* ---
             res_patch = residual[tmpl.slices_original]
             model_patch = fl * tmpl.data[tmpl.slices_cutout]
             patch = res_patch + model_patch
 
-            try:
-                psf_stamp = _extract_psf_at(tmpl, psf) if psf is not None else tmpl.data
-                _, _, sx, sy, _ = measure_shape(psf_stamp, psf_stamp > 0)
-                fwhm = 2.355 * float(np.mean([sx, sy]))
-            except Exception:
-                fwhm = 1.0
-            radius = 1.5 * fwhm
-
             x0 = tmpl.input_position_cutout[0] - tmpl.slices_cutout[1].start
             y0 = tmpl.input_position_cutout[1] - tmpl.slices_cutout[0].start
-            aper = CircularAperture((x0, y0), r=radius)
-            phot = aperture_photometry(patch, aper, method="exact")
-            ap_flux = float(phot["aperture_sum"][0])
+            aper_img = CircularAperture((float(x0), float(y0)), r=float(r_img_pix))
+            phot = aperture_photometry(patch, aper_img, method="exact")
+            ap_raw = float(phot["aperture_sum"][0])
 
-            corr = 1.0
-            if self.psfs is not None and self.psfs[0] is not None and psf is not None:
-                psf_hi = _extract_psf_at(tmpl, self.psfs[0])
-                psf_lo = _extract_psf_at(tmpl, psf)
-                aper_psf_hi = aperture_photometry(
-                    psf_hi,
-                    CircularAperture((psf_hi.shape[1] / 2, psf_hi.shape[0] / 2), r=radius),
-                    method="exact",
-                )["aperture_sum"][0]
-                aper_psf_lo = aperture_photometry(
-                    psf_lo,
-                    CircularAperture((psf_lo.shape[1] / 2, psf_lo.shape[0] / 2), r=radius),
-                    method="exact",
-                )["aperture_sum"][0]
-                if aper_psf_lo != 0:
-                    corr = float(aper_psf_hi / aper_psf_lo)
+            # --- PSF correction from templates (pre vs post conv) -----------------
+            # numerator: ref pre-convolution template with *catalog* aperture (per source)
+            tmpl_ref = ref_tmpls.get(int(pid))
+            r_cat_pix = r_cat_pix_by_id.get(int(pid), np.nan)
+            num = (
+                self._aperture_sum_on_template(tmpl_ref, r_cat_pix)
+                if (tmpl_ref and np.isfinite(r_cat_pix))
+                else np.nan
+            )
 
-            cat[f"ap_flux_{idx}"][ci] = ap_flux
-            cat[f"ap_corr_{idx}"][ci] = corr
+            # denominator: current *convolved* template with *image* aperture
+            den = self._aperture_sum_on_template(tmpl, r_img_pix)
 
-    def run(self) -> tuple[Table, list[np.ndarray], SparseFitter]:
+            # safe correction
+            corr = num / den if (np.isfinite(num) and np.isfinite(den) and den > 0) else 1.0
+            ap_corr = ap_raw * corr
+
+            cat[f"ap_flux_raw_{idx}"][row] = ap_raw
+            cat[f"ap_corr_{idx}"][row] = corr
+            cat[f"ap_flux_{idx}"][row] = ap_corr
+
+    def run(self, config: FitConfig | None = None) -> tuple[Table, list[np.ndarray], SparseFitter]:
         """Run photometry on the configured images.
 
         Returns
@@ -381,7 +543,8 @@ class Pipeline:
         weights = self.weights
         kernels = self.kernels
         wcs = self.wcs
-        config = self.config
+        if config is None:
+            config = self.config
 
         print(f"Pipeline (start) memory: {memory():.1f} GB")
         print(f"Pipeline config: {config}")
@@ -407,39 +570,39 @@ class Pipeline:
 
         astro = AstroCorrect(config)
         residuals: list[np.ndarray] = []
-        for idx in range(1, len(images)):
-            weights_i = weights[idx] if weights is not None else None
+        for ifilt in range(1, len(images)):
+            weights_i = weights[ifilt] if weights is not None else None
 
             kernel = None
             if kernels is not None:
-                kernel = kernels[idx]
+                kernel = kernels[ifilt]
                 if kernel is None:
                     kernel = np.array([[1.0]])
                 elif isinstance(kernel, PSFRegionMap):
                     print(f"Using kernel lookup table {kernel.name}")
 
             if wcs is not None:
-                k = bin_factor_from_wcs(wcs[0], wcs[idx])
+                k = bin_factor_from_wcs(wcs[0], wcs[ifilt])
             else:
                 k = 1
 
             if k > 1:
                 if config.multi_resolution_method == "upsample":
-                    print(f"upsampling image {idx} by factor {k}")
-                    images[idx] = block_replicate(images[idx], k, conserve_sum=True).astype(
+                    print(f"upsampling image {ifilt} by factor {k}")
+                    images[ifilt] = block_replicate(images[ifilt], k, conserve_sum=True).astype(
                         np.float32
                     )
                     if weights_i is not None:
-                        weights_i = block_replicate(weights[idx], k).astype(np.float32) * k**2
+                        weights_i = block_replicate(weights[ifilt], k).astype(np.float32) * k**2
                     if wcs is not None:
-                        wcs[idx] = wcs[0]
+                        wcs[ifilt] = wcs[0]
                 else:
                     print(f"Downsampling templates and kernels by factor {k}")
                     tmpls_lo = Templates()
-                    tmpls_lo.original_shape = images[idx].shape
-                    tmpls_lo.wcs = wcs[idx]
+                    tmpls_lo.original_shape = images[ifilt].shape
+                    tmpls_lo.wcs = wcs[ifilt]
                     tmpls_lo._templates = [
-                        t.downsample(k, wcs_lo=wcs[idx]) for t in self.tmpls._templates
+                        t.downsample(k, wcs_lo=wcs[ifilt]) for t in self.tmpls._templates
                     ]
 
                     if isinstance(kernel, PSFRegionMap):
@@ -456,24 +619,24 @@ class Pipeline:
             templates = tmpls_lo.convolve_templates(kernel, inplace=False)
             print(f"Pipeline (convolved) memory: {memory():.1f} GB")
 
-            assert np.all(np.isfinite(images[idx])), "Image contains NaN values"
+            assert np.all(np.isfinite(images[ifilt])), "Image contains NaN values"
             if weights_i is not None:
                 assert np.all(np.isfinite(weights_i)), "Weights contain NaN values"
             for t in templates:
                 assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
 
-            fitter_cls = (
-                GlobalAstroFitter
-                if (config.fit_astrometry_niter > 0 and config.fit_astrometry_joint)
-                else SparseFitter
-            )
+            # fitter_cls = (
+            #     GlobalAstroFitter
+            #     if (config.fit_astrometry_niter > 0 and config.fit_astrometry_joint)
+            #     else SparseFitter
+            # )
             fitter_cls = SparseFitter
 
             niter = max(config.fit_astrometry_niter, 1)
             for j in range(niter):
                 print(f"Running iteration {j+1} of {niter}")
 
-                fitter = fitter_cls(templates, images[idx], weights_i, config)
+                fitter = fitter_cls(templates, images[ifilt], weights_i, config)
                 fluxes, errs, info = fitter.solve()
                 print(f"Pipeline (residual) memory: {memory():.1f} GB")
 
@@ -493,23 +656,25 @@ class Pipeline:
             templates, fitter = self._add_templates_for_bad_fits(
                 templates,
                 tmpls_lo,
-                psfs[idx] if psfs is not None else None,
+                psfs[ifilt] if psfs is not None else None,
                 weights_i,
                 fitter,
-                images[idx],
+                images[ifilt],
                 fitter_cls,
                 config,
             )
 
             # add soft non-negative priors if fluxes are < 0.0 and resolve.
+            # note idx is relative to initial list of templates. But additional templates were added at the end, so idx still works
             snr = np.divide(fluxes, errs, out=np.zeros_like(errs), where=errs > 0)
-            if np.any(snr < config.negative_snr_thresh):
-                warnings.warn(
-                    "Some fluxes are negative, applying non-negative prior and resolving."
+            selneg = snr < config.negative_snr_thresh
+            if np.any(selneg):
+                logger.info(
+                    f"{selneg.sum()} fluxes are negative, applying soft non-negative prior and resolving."
                 )
-                idx = snr < config.negative_snr_thresh
                 # this updates ata and atb, so we can resolve again
-                fitter.add_flux_priors(idx, np.zeros_like(idx), errs)
+                scale = np.clip(-snr, 1.0, 5.0)  # more negative → tighter prior
+                fitter.add_flux_priors(selneg, mu=0.0, sigma=(errs / scale))
 
             fluxes, errs, info = fitter.solve(config=cfg_noshift)
             err_pred = fitter.predicted_errors()
@@ -517,14 +682,14 @@ class Pipeline:
 
             print("Done...")
 
-            self._update_catalog_with_fluxes(cat, templates, fluxes, errs, err_pred, idx)
+            self._update_catalog_with_fluxes(cat, templates, fluxes, errs, err_pred, ifilt)
             self._add_aperture_photometry(
                 cat,
                 templates,
                 fluxes,
                 res,
-                psfs[idx] if psfs is not None else None,
-                idx,
+                psfs[ifilt] if psfs is not None else None,
+                ifilt,
             )
 
             if "astro" in locals():
@@ -542,7 +707,7 @@ class Pipeline:
 
     def plot_result(
         self,
-        idx: int = 1,
+        ifilt: int = 1,
         scene_id: int | None = None,
         source_id: int | None = None,
         display_sig: float = 3.0,
@@ -555,7 +720,7 @@ class Pipeline:
         template and low-resolution images is also displayed.
 
         Args:
-            idx: Index of the low-resolution image to display. Defaults to ``1``.
+            ifilt: Index of the low-resolution image to display. Defaults to ``1``.
             scene_id: Optional scene identifier to zoom into. Defaults to ``None``.
             source_id: Optional source identifier to zoom into. Defaults to
                 ``None``. Ignored if ``scene_id`` is provided.
@@ -572,10 +737,10 @@ class Pipeline:
         from astropy.visualization import make_lupton_rgb
         from photutils.segmentation import SegmentationImage
 
-        if idx <= 0 or idx >= len(self.images):
+        if ifilt <= 0 or ifilt >= len(self.images):
             raise ValueError("idx must be between 1 and len(images)-1")
 
-        nscenes = len(np.unique(self.fit[idx - 1].scene_ids))
+        nscenes = len(np.unique(self.fit[ifilt - 1].scene_ids))
 
         segmap = self.segmap
         segm = SegmentationImage(segmap)
@@ -583,7 +748,7 @@ class Pipeline:
         scene_cmap = deepcopy(segmap_cmap)
         scene_cmap.colors[0] = (1.0, 1.0, 1.0, 0.0)
 
-        fitter = self.fit[idx - 1]
+        fitter = self.fit[ifilt - 1]
 
         if not hasattr(self, "scenes"):
             logger.info("Building scene map for diagnostics")
@@ -595,7 +760,7 @@ class Pipeline:
                 scenes_slice = scenes[sl]
                 scenes_slice[segm.data[sl] == tmpl.id] = tmpl.id_scene
 
-        logger.info(f"Plotting image {idx} with {nscenes} scenes")
+        logger.info(f"Plotting image {ifilt} with {nscenes} scenes")
 
         mask: np.ndarray | None = None
         if scene_id is not None:
@@ -613,14 +778,12 @@ class Pipeline:
             y1, x1 = segmap.shape
 
         sl_hi = (slice(y0, y1), slice(x0, x1))
-        kbin = bin_factor_from_wcs(self.wcs[0], self.wcs[idx])
-        y0_lo, y1_lo, x0_lo, x1_lo = np.round(Template.bin_remap([y0, y1, x0, x1], kbin)).astype(
-            int
-        )
+        kbin = bin_factor_from_wcs(self.wcs[0], self.wcs[ifilt])
+        y0_lo, y1_lo, x0_lo, x1_lo = np.round(bin_remap([y0, y1, x0, x1], kbin)).astype(int)
         sl_lo = (slice(y0_lo, y1_lo), slice(x0_lo, x1_lo))
 
         img_hi = self.images[0]
-        img_lo = self.images[idx]
+        img_lo = self.images[ifilt]
 
         img_cut = img_lo[sl_lo]
         model_cut = fitter.model_image()[sl_lo]
@@ -629,7 +792,7 @@ class Pipeline:
         seg_cut = segmap[sl_hi]
         scenes_cut = scenes[sl_hi]
         # @@@ for now assume upsampled residual image
-        res_cut = self.residuals[idx - 1][sl_hi]
+        res_cut = self.residuals[ifilt - 1][sl_hi]
 
         # RGB composite using template as blue and low-res as red
         tmpl_cut_lo = block_reduce(tmpl_cut, kbin, func=np.mean)
@@ -654,8 +817,8 @@ class Pipeline:
         titles = [
             f"template + scenes",
             "segmap",
-            f"image{idx}",
-            f"model image{idx}",
+            f"image{ifilt}",
+            f"model image{ifilt}",
             "residual",
             "color",
         ]

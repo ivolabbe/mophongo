@@ -450,9 +450,9 @@ class AstroMap:
                 x_c, y_c = wcs1.wcs_world2pix(ra, dec, 0)
                 x2, y2 = wcs2.wcs_world2pix(ra, dec, 0)
                 # Use same bounding box in pixels, but center on sky position
-                cut1 = Cutout2D(img1, (x_c, y_c), 3 * self.box_size + 1, mode="partial")
+                cut1 = Cutout2D(img1, (x_c, y_c), 3 * self.box_size + 1, mode="partial", wcs=wcs1)
                 #             print(x_c, y_c, x2, y2)
-                cut2 = Cutout2D(img2, (x2, y2), 3 * self.box_size + 1, mode="partial")
+                cut2 = Cutout2D(img2, (x2, y2), 3 * self.box_size + 1, mode="partial", wcs=wcs2)
                 centre1 = cut1.input_position_cutout
                 centre2 = cut2.input_position_cutout
             else:
@@ -475,9 +475,11 @@ class AstroMap:
                     continue
                 if wcs1 is not None and wcs2 is not None:
                     # Convert to pixel shifts
-                    r2, d2 = wcs2.wcs_pix2world(cx2, cy2, 0)
-                    cx2, cy2 = wcs2.wcs_world2pix(r2, d2, 0)
+                    r1, d1 = cut1.wcs.wcs_pix2world(cx1, cy1, 0)
+                    r2, d2 = cut2.wcs.wcs_pix2world(cx2, cy2, 0)
+                    cx2, cy2 = cut1.wcs.wcs_world2pix(r2, d2, 0)
 
+                # shift = np.array([r1-r2, d2 - d1]) * 3600 times cos delta for ra
                 shift = np.array([cx2 - cx1, cy2 - cy1]) * pixel_scale
             if np.isnan(shift).any():
                 continue

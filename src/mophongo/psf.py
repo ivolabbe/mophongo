@@ -34,13 +34,14 @@ from .utils import (
     to_header,
     fit_kernel_fourier,
     pad_to_shape,
-    matching_kernel
+    matching_kernel,
 )
 from astropy.nddata import Cutout2D
 from astropy.coordinates import SkyCoord
- 
+
 
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class GaussianFit:
@@ -53,12 +54,21 @@ class GaussianFit:
     yc: float
     flux: float
     shape: tuple = None  # Store the original array shape
-    
+
     def model(self) -> np.ndarray:
         """Generate the best fit Gaussian model."""
         from .utils import gaussian
-        return gaussian(self.shape, self.fwhm_x, self.fwhm_y, self.theta, 
-                       x0=self.xc, y0=self.yc, flux=self.flux)
+
+        return gaussian(
+            self.shape,
+            self.fwhm_x,
+            self.fwhm_y,
+            self.theta,
+            x0=self.xc,
+            y0=self.yc,
+            flux=self.flux,
+        )
+
 
 @dataclass
 class MoffatFit:
@@ -72,12 +82,22 @@ class MoffatFit:
     yc: float
     flux: float
     shape: tuple = None  # Store the original array shape
-    
+
     def model(self) -> np.ndarray:
         """Generate the best fit Moffat model."""
         from .utils import moffat
-        return moffat(self.shape, self.fwhm_x, self.fwhm_y, self.beta, 
-                     self.theta, x0=self.xc, y0=self.yc, flux=self.flux)
+
+        return moffat(
+            self.shape,
+            self.fwhm_x,
+            self.fwhm_y,
+            self.beta,
+            self.theta,
+            x0=self.xc,
+            y0=self.yc,
+            flux=self.flux,
+        )
+
 
 @dataclass
 class PSF:
@@ -180,8 +200,7 @@ class PSF:
     def from_data(
         cls,
         data: np.ndarray,
-        position: tuple[float, float] | tuple["Quantity", "Quantity"]
-        | None = None,
+        position: tuple[float, float] | tuple["Quantity", "Quantity"] | None = None,
         *,
         search_boxsize: int | tuple[int, int] | None = None,
         fit_boxsize: int | tuple[int, int] = 5,
@@ -219,15 +238,14 @@ class PSF:
             position_pix = ((data.shape[1] - 1) // 2, (data.shape[0] - 1) / 2)
         else:
             # If position is given as (Quantity, Quantity) and wcs is supplied, convert to pixel
-            if (hasattr(position[0], "unit") and hasattr(position[1], "unit")
-                    and wcs is not None):
+            if hasattr(position[0], "unit") and hasattr(position[1], "unit") and wcs is not None:
                 sky = SkyCoord(position[0], position[1])
                 x, y = wcs.world_to_pixel(sky)
                 position_pix = (x, y)
             else:
                 position_pix = position
 
-    # If either search_boxsize or fit_boxsize is None, skip recentering
+        # If either search_boxsize or fit_boxsize is None, skip recentering
         if search_boxsize is None:
             x_cen, y_cen = position_pix
         else:
@@ -252,9 +270,7 @@ class PSF:
             fill_value=0.0,
             copy=True,
         )
-        return cls(array=np.asarray(cut.data),
-                   wcs=cut.wcs,
-                   pos=cut.input_position_cutout)
+        return cls(array=np.asarray(cut.data), wcs=cut.wcs, pos=cut.input_position_cutout)
 
     def matching_kernel(
         self,
@@ -264,14 +280,14 @@ class PSF:
         recenter: bool = True,
     ) -> np.ndarray:
         """Return the convolution kernel that matches ``self`` to ``other``.
-        
+
         Parameters
         ----------
         other : PSF or np.ndarray
             The target PSF. If np.ndarray, it's assumed to be a normalized PSF.
         window : optional
             Window function passed to ``create_matching_kernel``. Defaults to TukeyWindow(alpha=0.4).
-        
+
         Parameters
         ----------
         recenter : bool, optional
@@ -296,10 +312,7 @@ class PSF:
         if psf_lo.sum() != 0:
             psf_lo = psf_lo / psf_lo.sum()
 
-        kernel = matching_kernel(psf_hi,
-                                     psf_lo,
-                                     window=window,
-                                     recenter=recenter)
+        kernel = matching_kernel(psf_hi, psf_lo, window=window, recenter=recenter)
         return kernel.astype(np.float32)
 
     def matching_kernel_basis(
@@ -339,42 +352,47 @@ class PSF:
                 kernel = shift(kernel, (cy - ycen, cx - xcen), order=3, mode="nearest")
         return kernel
 
-    def _fit_profile(self, model_func, default_params, free_params, xc=None, yc=None, result_class=None):
+    def _fit_profile(
+        self, model_func, default_params, free_params, xc=None, yc=None, result_class=None
+    ):
         """Shared fitting logic for both Gaussian and Moffat profiles."""
         from scipy.optimize import least_squares
-        
+
         y, x = np.indices(self.array.shape)
         cy = (self.array.shape[0] - 1) / 2 if yc is None else yc
         cx = (self.array.shape[1] - 1) / 2 if xc is None else xc
 
         _, _, sigma_x, sigma_y, theta0 = measure_shape(
-            self.array, np.ones_like(self.array, dtype=bool))
+            self.array, np.ones_like(self.array, dtype=bool)
+        )
         theta0 = ((theta0 + np.pi / 2) % np.pi) - np.pi / 2
 
         params = default_params.copy()
-        params.update({
-            'fwhm_x': 2.355 * sigma_x,
-            'fwhm_y': 2.355 * sigma_y,
-            'theta': theta0,
-            'xc': cx,
-            'yc': cy,
-            'flux': self.array.sum()  # Initial flux estimate
-        })
+        params.update(
+            {
+                "fwhm_x": 2.355 * sigma_x,
+                "fwhm_y": 2.355 * sigma_y,
+                "theta": theta0,
+                "xc": cx,
+                "yc": cy,
+                "flux": self.array.sum(),  # Initial flux estimate
+            }
+        )
 
         # Build optimization parameter list and mapping
-        free_list = [p.strip() for p in free_params.split(',')]
+        free_list = [p.strip() for p in free_params.split(",")]
         opt_params = []
         param_map = {}
         bounds_lower, bounds_upper = [], []
-        
+
         for param in free_list:
-            if param == 'fwhm':  # Special case for symmetric fwhm
+            if param == "fwhm":  # Special case for symmetric fwhm
                 # Use fwhm_x as the initial value for symmetric fitting
-                opt_params.append(params['fwhm_x'])
+                opt_params.append(params["fwhm_x"])
                 param_map[param] = len(opt_params) - 1
                 bounds_lower.append(1e-3)
                 bounds_upper.append(np.inf)
-            elif param.startswith('fwhm') and param in params:
+            elif param.startswith("fwhm") and param in params:
                 opt_params.append(params[param])
                 param_map[param] = len(opt_params) - 1
                 bounds_lower.append(1e-3)
@@ -382,77 +400,78 @@ class PSF:
             elif param in params:
                 opt_params.append(params[param])
                 param_map[param] = len(opt_params) - 1
-                
+
                 # Set bounds based on parameter type
-                if param == 'beta':
+                if param == "beta":
                     bounds_lower.append(0.5)
                     bounds_upper.append(20.0)
-                elif param == 'theta':
+                elif param == "theta":
                     bounds_lower.append(-np.pi / 2)
                     bounds_upper.append(np.pi / 2)
-                elif param in ['xc', 'yc']:
-                    max_val = self.array.shape[1 if param == 'xc' else 0] - 1
+                elif param in ["xc", "yc"]:
+                    max_val = self.array.shape[1 if param == "xc" else 0] - 1
                     bounds_lower.append(0)
                     bounds_upper.append(max_val)
-                elif param == 'flux':
+                elif param == "flux":
                     bounds_lower.append(1e-10)
                     bounds_upper.append(np.inf)
 
         def residual(p):
             # Map optimization parameters back to model parameters
             current_params = params.copy()
-            
+
             for param_name, idx in param_map.items():
-                if param_name == 'fwhm':  # Symmetric case
-                    current_params['fwhm_x'] = current_params['fwhm_y'] = p[idx]
+                if param_name == "fwhm":  # Symmetric case
+                    current_params["fwhm_x"] = current_params["fwhm_y"] = p[idx]
                 else:
                     current_params[param_name] = p[idx]
-            
+
             model = model_func(self.array.shape, **current_params)
             return (model - self.array).ravel()
 
         result = least_squares(residual, opt_params, bounds=(bounds_lower, bounds_upper))
-        
+
         # Update parameters with fitted values
         for param_name, idx in param_map.items():
-            if param_name == 'fwhm':  # Symmetric case
+            if param_name == "fwhm":  # Symmetric case
                 fwhm_val = float(result.x[idx])
-                params['fwhm_x'] = params['fwhm_y'] = fwhm_val
+                params["fwhm_x"] = params["fwhm_y"] = fwhm_val
             else:
                 params[param_name] = float(result.x[idx])
-        
+
         # Return result with appropriate parameter names
         result_params = {}
         for field_name in result_class.__annotations__:
-            if field_name != 'shape':  # Skip the shape field
+            if field_name != "shape":  # Skip the shape field
                 result_params[field_name] = params[field_name]
-        
+
         # Add the shape information
-        result_params['shape'] = self.array.shape
-        
+        result_params["shape"] = self.array.shape
+
         return result_class(**result_params)
 
-    def fit_moffat(self, free_params: str = "fwhm_x,fwhm_y,beta,theta,flux", 
-                   xc: float = None, yc: float = None) -> MoffatFit:
+    def fit_moffat(
+        self,
+        free_params: str = "fwhm_x,fwhm_y,beta,theta,flux",
+        xc: float = None,
+        yc: float = None,
+    ) -> MoffatFit:
         from .utils import moffat
-        
+
         def model_func(shape, fwhm_x, fwhm_y, beta, theta, xc, yc, flux, **kwargs):
             return moffat(shape, fwhm_x, fwhm_y, beta, theta, x0=xc, y0=yc, flux=flux)
-        
-        return self._fit_profile(
-            model_func, {'beta': 2.5}, free_params, xc, yc, MoffatFit
-        )
 
-    def fit_gaussian(self, free_params: str = "fwhm_x,fwhm_y,theta,flux",
-                     xc: float = None, yc: float = None) -> GaussianFit:
+        return self._fit_profile(model_func, {"beta": 2.5}, free_params, xc, yc, MoffatFit)
+
+    def fit_gaussian(
+        self, free_params: str = "fwhm_x,fwhm_y,theta,flux", xc: float = None, yc: float = None
+    ) -> GaussianFit:
         from .utils import gaussian
-        
+
         def model_func(shape, fwhm_x, fwhm_y, theta, xc, yc, flux, **kwargs):
             return gaussian(shape, fwhm_x, fwhm_y, theta, x0=xc, y0=yc, flux=flux)
-        
-        return self._fit_profile(
-            model_func, {}, free_params, xc, yc, GaussianFit
-        )
+
+        return self._fit_profile(model_func, {}, free_params, xc, yc, GaussianFit)
 
 
 def psf_matching_kernel_basis(
@@ -479,18 +498,20 @@ def psf_matching_kernel_basis(
 from pathlib import Path
 import re
 
+
 # ---------------------------------------------------------------------
 # Minimal EffectivePSF implementation (JWST STDPSF)
 # ---------------------------------------------------------------------
-# @@@ change this to an overloaded astropy PSF gridded model 
+# @@@ change this to an overloaded astropy PSF gridded model
 class EffectivePSF:
 
     def __init__(self, **kwargs):
         self.epsf = OrderedDict()
         self.extended_epsf = {}
         self.extended_N = None
-#        if kwargs.get("jwst_stdpsf", True):
-#            self.load_jwst_stdpsf()
+
+    #        if kwargs.get("jwst_stdpsf", True):
+    #            self.load_jwst_stdpsf()
 
     def load_jwst_stdpsf(
         self,
@@ -512,8 +533,8 @@ class EffectivePSF:
         if local_dir is not None and filter_pattern is not None:
             self.filter_pattern = filter_pattern
             p = Path(local_dir)
-            files_dir = list(p.rglob('*.fits'))
-            #rx = re.compile(filter_pattern)
+            files_dir = list(p.rglob("*.fits"))
+            # rx = re.compile(filter_pattern)
             rx = re.compile(f"{filter_pattern}(?!_EXTENDED)")
             files = [f for f in files_dir if rx.search(os.path.basename(f))]
             for f in files:
@@ -527,7 +548,7 @@ class EffectivePSF:
                             f"{h.get('FILTER',   '?')} "
                             f"{float(h.get('MJD-AVG', 0.0)):6.1f}"
                         )
-                        print(f"Loading {f} {hstr}")       
+                        print(f"Loading {f} {hstr}")
                     data = np.array([d.T for d in im[0].data]).T
                     if clip_negative:
                         data[data < 0] = 0
@@ -566,8 +587,11 @@ class EffectivePSF:
             nircam_lw_detectors = ["AL", "BL"]
 
         base = "https://www.stsci.edu/~jayander/JWST1PASS/LIB/PSFs/STDPSFs/"
-        miri_path = ("MIRI/EXTENDED/STDPSF_MIRI_{filter}_EXTENDED.fits"
-                     if miri_extended else "MIRI/STDPSF_MIRI_{filter}.fits")
+        miri_path = (
+            "MIRI/EXTENDED/STDPSF_MIRI_{filter}_EXTENDED.fits"
+            if miri_extended
+            else "MIRI/STDPSF_MIRI_{filter}.fits"
+        )
 
         for filt in miri_filters:
             url = base + miri_path.format(filter=filt)
@@ -614,7 +638,7 @@ class EffectivePSF:
                     print(f"Failed to download {url}: {e}")
 
     # do this with PSFgriddedmodel.eval
-    # and change hardcoded depenendence on grid size and detector oversampling 
+    # and change hardcoded depenendence on grid size and detector oversampling
     # --- PSF evaluation -------------------------------------------------
     def get_at_position(self, x, y, filter, rot90=0):
         """Interpolate the ePSF grid to a detector position."""
@@ -622,7 +646,7 @@ class EffectivePSF:
 
         self.eval_psf_type = "HST/Optical"
 
-        if  "MIRI" in filter:
+        if "MIRI" in filter:
             self.eval_psf_type = "MIRI"
             ndet = int(np.sqrt(epsf.shape[2]))
             rx = np.interp(x, [1, 358, 1032], [1, 2, 3]) - 1
@@ -724,7 +748,6 @@ class EffectivePSF:
         return out
 
 
-
 def to_header(wcs, add_naxis=True, relax=True, key=None):
     """Convert WCS to a FITS header with a few extra keywords."""
     hdr = wcs.to_header(relax=relax, key=key)
@@ -779,11 +802,10 @@ def get_slice_wcs(wcs, slx, sly):
     return swcs
 
 
-
-
 # ---------------------------------------------------------------------
 # Drizzle PSF class
 # ---------------------------------------------------------------------
+
 
 class DrizzlePSF:
 
@@ -800,7 +822,8 @@ class DrizzlePSF:
 
         import warnings
         from astropy.wcs import FITSFixedWarning
-        warnings.simplefilter('ignore', FITSFixedWarning)
+
+        warnings.simplefilter("ignore", FITSFixedWarning)
 
         if info is None:
             info = self.read_wcs_csv(driz_image, csv_file=csv_file)
@@ -809,7 +832,7 @@ class DrizzlePSF:
         self.flt_files = list({k[0] for k in self.flt_keys})
 
         if epsf_obj is None:
-#            epsf_obj = NEffectivePSF()
+            #            epsf_obj = NEffectivePSF()
             epsf_obj = EffectivePSF()
         self.epsf_obj = epsf_obj
 
@@ -819,7 +842,7 @@ class DrizzlePSF:
         else:
             self.driz_image = driz_image
             self.driz_header = driz_hdu.header
-            
+
         self.driz_wcs = WCS(self.driz_header)
         self.driz_pscale = get_wcs_pscale(self.driz_wcs)
         self.driz_wcs.pscale = self.driz_pscale
@@ -827,13 +850,12 @@ class DrizzlePSF:
 
         self._next_odd_int = lambda x: int(round(x)) | 1
 
-
     # ---------------------------------------------------------------
     # ---------------------------------------------------------------------
     # WCS information from CSV
     # ---------------------------------------------------------------------
     @staticmethod
-    def read_wcs_csv(drz_file:str, csv_file=None):
+    def read_wcs_csv(drz_file: str, csv_file=None):
         """Read exposure WCS info from a CSV table."""
         if csv_file is None:
             csv_file = (
@@ -852,7 +874,10 @@ class DrizzlePSF:
             key = (row["file"], row["ext"])
             hdr = fits.Header()
             for col in tab.colnames:
-                hdr[col] = row[col]
+                val = row[col]
+                if val is np.ma.masked or getattr(val, "masked", False):
+                    continue  # skip masked entries
+                hdr[col] = val
 
             wcs = WCS(hdr, relax=True)
             get_wcs_pscale(wcs)
@@ -880,49 +905,51 @@ class DrizzlePSF:
         return outsci, outwht, outctx
 
     # always return odd size
-    def get_driz_cutout(self,
-                        ra,
-                        dec,
-                        size=None,
-                        size_native=None,
-                        recenter=False,
-                        search_boxsize=11,
-                        fit_boxsize=5,
-                        cutout_data = None,                
-                        verbose=False):
+    def get_driz_cutout(
+        self,
+        ra,
+        dec,
+        size=None,
+        size_native=None,
+        recenter=False,
+        search_boxsize=11,
+        fit_boxsize=5,
+        cutout_data=None,
+        verbose=False,
+    ):
         """Return a drizzle Cutout2D, including WCS."""
 
         # default size to size of the ePSF model
         if size is None:
-            if size_native is None:    # get from the first filter
+            if size_native is None:  # get from the first filter
                 first_key, first_value = next(iter(self.epsf_obj.epsf.items()))
                 size_native = first_value.shape[0] / 4  # 4x oversampling
                 if verbose:
-                    print(f"Using native size {size_native} from {first_key} assuming 4x oversampling.")
+                    print(
+                        f"Using native size {size_native} from {first_key} assuming 4x oversampling."
+                    )
 
             size = size_native * self.wcs[self.flt_keys[0]].pscale / self.driz_pscale
-            
+
         size_odd = self._next_odd_int(size)
 
         xc, yc = self.driz_wcs.world_to_pixel_values(ra, dec)
 
         if cutout_data is None:
-            data = fits.getdata(self.driz_image)         
+            data = fits.getdata(self.driz_image)
         else:
             data = cutout_data
-        
+
         # if data is 3D cube or list of 2D images, take loop over and append to output list
         # check if data is a 2D array or a list of 2D arrays
         if not isinstance(data, list):
-            if data.ndim == 2: 
+            if data.ndim == 2:
                 data = [data]
 
         # get accurate centroid from first image
         if recenter:
             xc, yc = centroid_quadratic(
-                data[0], xpeak = xc, ypeak = yc,
-                fit_boxsize=fit_boxsize,
-                search_boxsize=search_boxsize
+                data[0], xpeak=xc, ypeak=yc, fit_boxsize=fit_boxsize, search_boxsize=search_boxsize
             )
 
         # get cutouts for all images
@@ -940,7 +967,6 @@ class DrizzlePSF:
             cutout_list.append(cutout)
 
         return cutout_list if len(cutout_list) > 1 else cutout_list[0]
-                
 
     # ---------------------------------------------------------------
     def get_psf(
@@ -948,8 +974,8 @@ class DrizzlePSF:
         ra,
         dec,
         filter=None,
-        pixfrac=0.1,
-        kernel="point",
+        pixfrac=0.75,
+        kernel="square",
         verbose=False,
         wcs_slice=None,
         get_extended=True,
@@ -959,14 +985,14 @@ class DrizzlePSF:
         renormalize=True,
         xphase=0,
         yphase=0,
-        taper_alpha=0.05, # radial percent of tapering
+        taper_alpha=0.05,  # radial percent of tapering
         return_hdul=False,
     ):
         """Drizzle a PSF model at ``ra``, ``dec`` onto ``wcs_slice``."""
         if wcs_slice is None:
             wcs_slice = self.driz_wcs.copy()
-        
-        # default: adopt the filter pattern used to load the ePSF models 
+
+        # default: adopt the filter pattern used to load the ePSF models
         if filter is None:
             filter = self.epsf_obj.filter_pattern
 
@@ -974,10 +1000,10 @@ class DrizzlePSF:
 
         tukey_taper = TukeyWindow(alpha=0.05)(outsci.shape)
 
-        if npix is None:    
-            # Calculate npix based on the WCS pixel scale            
+        if npix is None:
+            # Calculate npix based on the WCS pixel scale
             N = outsci.shape[0] // 2
-            npix = int(np.ceil((N * self.driz_pscale / self.wcs[self.flt_keys[0]].pscale)))            
+            npix = int(np.ceil((N * self.driz_pscale / self.wcs[self.flt_keys[0]].pscale)))
 
         pix = np.arange(-npix, npix + 1)
         for key in self.flt_keys:
@@ -994,25 +1020,25 @@ class DrizzlePSF:
                 # here get the riġht inst, dector, and MJD
                 # for NIRCam select detector from flt file name if the filter is a regexp
                 # do this with a more robust lookup. Parse the file name into a instrument / detector
-                # @@ then pull the PSF from the ePSF object 
-                if 'NRC..' in filter:
-                    det = Path(file).stem.split('_')[-2][0:5].upper()
-                    det = det.replace('L','5')
-                    flt_filter = filter.replace('NRC..', det)
+                # @@ then pull the PSF from the ePSF object
+                if "NRC.." in filter:
+                    det = Path(file).stem.split("_")[-2][0:5].upper()
+                    det = det.replace("L", "5")
+                    flt_filter = filter.replace("NRC..", det)
                 else:
                     flt_filter = filter
 
                 if verbose:
-                    print(   f"Position: {xy}, Filter: {flt_filter}, in frame: {file}[SCI,{ext}]" )
+                    print(f"Position: {xy}, Filter: {flt_filter}, in frame: {file}[SCI,{ext}]")
 
-                psf_xy = self.epsf_obj.get_at_position(xy[0],
-                                                       xy[1] + chip_offset,
-                                                       filter=flt_filter)
+                psf_xy = self.epsf_obj.get_at_position(
+                    xy[0], xy[1] + chip_offset, filter=flt_filter
+                )
                 yp, xp = np.meshgrid(pix - dy, pix - dx, indexing="ij")
-                extended_data = (self.epsf_obj.extended_epsf.get(flt_filter)
-                                 if get_extended else None)
-                psf = self.epsf_obj.eval_ePSF(psf_xy,  xp,  yp,
-                                              extended_data=extended_data)
+                extended_data = (
+                    self.epsf_obj.extended_epsf.get(flt_filter) if get_extended else None
+                )
+                psf = self.epsf_obj.eval_ePSF(psf_xy, xp, yp, extended_data=extended_data)
 
                 flt_weight = self.wcs[key].expweight
                 N = npix
@@ -1051,24 +1077,25 @@ class DrizzlePSF:
             # rtaper is maximum radial extent of drizzled footprint
             shape = int(np.sqrt((outwht > 0).sum()))
             tukey_taper = pad_to_shape(
-                TukeyWindow(alpha=taper_alpha)((shape,shape)),
-                outsci.shape
-            )                        
-            outsci *= tukey_taper 
+                TukeyWindow(alpha=taper_alpha)((shape, shape)), outsci.shape
+            )
+            outsci *= tukey_taper
 
-        if 'psf' not in locals():
+        if "psf" not in locals():
             logger.warning(
                 f"No PSF found, position possibly outside footprint for {ra}, {dec} in filter {filter}. Returning empty output."
             )
             scale = 1.0
         else:
             scale = psf.sum() / outsci.sum() if renormalize else 1.0
-        
+
         if return_hdul is True:
-            return fits.HDUList([
-                fits.PrimaryHDU(),
-                fits.ImageHDU(data=outsci * scale, header=to_header(wcs_slice))
-            ])
+            return fits.HDUList(
+                [
+                    fits.PrimaryHDU(),
+                    fits.ImageHDU(data=outsci * scale, header=to_header(wcs_slice)),
+                ]
+            )
         else:
             return outsci * scale
 
@@ -1079,6 +1106,8 @@ class DrizzlePSF:
         filter: str | None = None,
         size: float | int = 51,
         verbose: bool = False,
+        kernel: str = "square",
+        pixfrac: float = 0.75,
     ) -> np.ndarray:
         """Return a cube of drizzled PSFs evaluated at given coordinates.
 
@@ -1105,7 +1134,7 @@ class DrizzlePSF:
         # ------------------------------------------------------------
         if not isinstance(size, (int, np.integer)):
             # user gave a physical size (arcsec) → convert to pixels
-            size_pix    = int(round(size / self.driz_pscale))
+            size_pix = int(round(size / self.driz_pscale))
         else:
             # already an integer → treat as pixels
             size_pix = int(size)
@@ -1120,7 +1149,7 @@ class DrizzlePSF:
                 size=size_pix,
                 verbose=verbose,
                 recenter=False,
-                search_boxsize=11,                
+                search_boxsize=11,
             )
 
             psf = self.get_psf(
@@ -1128,15 +1157,15 @@ class DrizzlePSF:
                 dec=dec,
                 filter=filter,
                 wcs_slice=cutout.wcs,
-                kernel=self.driz_header["KERNEL"],
-                pixfrac=self.driz_header["PIXFRAC"],
+                kernel=self.driz_header["KERNEL"] if "KERNEL" in self.driz_header else kernel,
+                pixfrac=self.driz_header["PIXFRAC"] if "PIXFRAC" in self.driz_header else pixfrac,
                 verbose=verbose,
-#                npix=size // 2,
+                #                npix=size // 2,
             )
             psf_cube.append(psf)
 
         return np.asarray(psf_cube)
-    
+
     def register(
         self,
         ra: float,
@@ -1146,6 +1175,8 @@ class DrizzlePSF:
         max_iterations: int = 3,
         convergence_threshold: float = 0.05,
         verbose: bool = False,
+        kernel: str = "square",
+        pixfrac: float = 0.75,
     ) -> tuple[tuple[float, float], np.ndarray, np.ndarray]:
         """Register a PSF model to match the data centroid.
 
@@ -1183,16 +1214,16 @@ class DrizzlePSF:
                 dec=di,
                 filter=filter,
                 wcs_slice=cutout.wcs,
-                kernel=self.driz_header["KERNEL"],
-                pixfrac=self.driz_header["PIXFRAC"],
+                kernel=self.driz_header["KERNEL"] if "KERNEL" in self.driz_header else kernel,
+                pixfrac=self.driz_header["PIXFRAC"] if "PIXFRAC" in self.driz_header else pixfrac,
                 verbose=verbose,
             )
 
             xc, yc = centroid_quadratic(
-                 psf,
-                 xpeak=cutout.input_position_cutout[0],
-                 ypeak=cutout.input_position_cutout[1],
-                 fit_boxsize=5,
+                psf,
+                xpeak=cutout.input_position_cutout[0],
+                ypeak=cutout.input_position_cutout[1],
+                fit_boxsize=5,
             )
 
             if not np.isnan(yc) and not np.isnan(xc):
@@ -1215,9 +1246,9 @@ class DrizzlePSF:
             if verbose:
                 print(f"Maximum iterations {max_iterations} reached")
 
-  
         ri, di = cutout.wcs.pixel_to_world_values(xi, yi)
         return (ri, di), cutout.data, psf
+
 
 # ------------------------------------------------------------------
 # EffectivePSF  —  now grid-agnostic (MIRI & NIRCam)
@@ -1229,19 +1260,21 @@ import numpy as np
 from astropy.io import fits
 from astropy.utils.data import download_file
 
+
 class NEffectivePSF:
     """
     Minimal JWST STDPSF loader/evaluator that *learns* the grid break-points
     (IPSFX## / JPSFY##) from every cube it opens, so it works with any SIAF
     release.
     """
+
     # ──────────────────────────────────────────────────────────────
     def __init__(self):
-        self.epsf           = OrderedDict()   # key → (Ny, Nx, Ncube)
-        self.grid_breaks    = {}              # key → {'x':[...], 'y':[...]}
-        self.extended_epsf  = {}              # unchanged
-        self.extended_N     = None
-        self.eval_psf_type  = None            # set in get_at_position
+        self.epsf = OrderedDict()  # key → (Ny, Nx, Ncube)
+        self.grid_breaks = {}  # key → {'x':[...], 'y':[...]}
+        self.extended_epsf = {}  # unchanged
+        self.extended_N = None
+        self.eval_psf_type = None  # set in get_at_position
 
     # ──────────────────────────────────────────────────────────────
     # 1. LOAD CUBES ─ exactly as before, but store the break-points
@@ -1253,12 +1286,12 @@ class NEffectivePSF:
             dat[dat < 0] = 0
         self.epsf[key] = dat
 
-        hdr  = hdu.header
-        nxps = hdr.get('NXPSFS', 1)
-        nyps = hdr.get('NYPSFS', 1)
-        xk   = [hdr[f'IPSFX{i:02d}'] for i in range(1, nxps+1)]
-        yk   = [hdr[f'JPSFY{i:02d}'] for i in range(1, nyps+1)]
-        self.grid_breaks[key] = {'x': xk, 'y': yk}
+        hdr = hdu.header
+        nxps = hdr.get("NXPSFS", 1)
+        nyps = hdr.get("NYPSFS", 1)
+        xk = [hdr[f"IPSFX{i:02d}"] for i in range(1, nxps + 1)]
+        yk = [hdr[f"JPSFY{i:02d}"] for i in range(1, nyps + 1)]
+        self.grid_breaks[key] = {"x": xk, "y": yk}
 
     def load_jwst_stdpsf(
         self,
@@ -1276,7 +1309,8 @@ class NEffectivePSF:
             for fp in Path(local_dir).rglob("*.fits"):
                 if regex.search(fp.name):
                     with fits.open(fp) as hdul:
-                        if verbose: print(f"Loading {fp}")
+                        if verbose:
+                            print(f"Loading {fp}")
                         key = fp.stem
                         self._store_cube(key, hdul[0], clip_negative)
             return
@@ -1287,37 +1321,39 @@ class NEffectivePSF:
         # # ---- MIRI ----
         # miri_fmt = ("MIRI/EXTENDED/STDPSF_MIRI_{filt}_EXTENDED.fits"
         #             if miri_extended else "MIRI/STDPSF_MIRI_{filt}.fits")
-   
+
     # ──────────────────────────────────────────────────────────────
     # 2. GET AT POSITION ─ use stored break-points, not literals
     # ──────────────────────────────────────────────────────────────
     def get_at_position(self, x, y, filter, rot90=0):
         """Return the oversampled PSF at (x,y) detector coords."""
-        epsf = self.epsf[filter]            # cube (Ny,Nx,N)
-        br   = self.grid_breaks[filter]     # {'x': [...], 'y': [...]}
+        epsf = self.epsf[filter]  # cube (Ny,Nx,N)
+        br = self.grid_breaks[filter]  # {'x': [...], 'y': [...]}
 
         # Determine flavour
         self.eval_psf_type = "HST/Optical"
-        if  'MIRI' in  filter: self.eval_psf_type = "MIRI"
-        if  'NRC' in  filter: self.eval_psf_type = "NRC"
+        if "MIRI" in filter:
+            self.eval_psf_type = "MIRI"
+        if "NRC" in filter:
+            self.eval_psf_type = "NRC"
 
         # ---- generic 2×2 (MIRI) or 3×3 / 5×5 (NIRCam) bilinear blend
-        xk, yk = br['x'], br['y']
+        xk, yk = br["x"], br["y"]
         nxps, nyps = len(xk), len(yk)
         ndet = int(np.sqrt(epsf.shape[2]))  # 3×3 → 3 etc.
 
         # 0-based fractional indices within the grid
         rx = np.interp(x, xk, np.arange(nxps)) - 0
         ry = np.interp(y, yk, np.arange(nyps)) - 0
-        ix, iy  = np.clip(rx.astype(int), 0, nxps-2), np.clip(ry.astype(int), 0, nyps-2)
-        fx, fy  = rx - ix, ry - iy
+        ix, iy = np.clip(rx.astype(int), 0, nxps - 2), np.clip(ry.astype(int), 0, nyps - 2)
+        fx, fy = rx - ix, ry - iy
 
         # Bilinear combination
-        psf_xy  = (1-fx)*(1-fy)*epsf[:,:, ix   + iy   *ndet]
-        psf_xy +=   fx *(1-fy)*epsf[:,:, ix+1 + iy   *ndet]
-        psf_xy += (1-fx)*  fy *epsf[:,:, ix   +(iy+1)*ndet]
-        psf_xy +=   fx *  fy *epsf[:,:, ix+1 +(iy+1)*ndet]
-        psf_xy  = psf_xy.T          # your historical transpose
+        psf_xy = (1 - fx) * (1 - fy) * epsf[:, :, ix + iy * ndet]
+        psf_xy += fx * (1 - fy) * epsf[:, :, ix + 1 + iy * ndet]
+        psf_xy += (1 - fx) * fy * epsf[:, :, ix + (iy + 1) * ndet]
+        psf_xy += fx * fy * epsf[:, :, ix + 1 + (iy + 1) * ndet]
+        psf_xy = psf_xy.T  # your historical transpose
 
         if rot90:
             psf_xy = np.rot90(psf_xy, rot90)
@@ -1331,22 +1367,54 @@ class NEffectivePSF:
         from scipy.ndimage import map_coordinates
 
         if self.eval_psf_type in ("WFC3/IR", "HST/Optical"):
-            ok = (np.abs(dx)<=12.5) & (np.abs(dy)<=12.5)
-            coords = np.array([50 + 4*dx[ok], 50 + 4*dy[ok]])
+            ok = (np.abs(dx) <= 12.5) & (np.abs(dy) <= 12.5)
+            coords = np.array([50 + 4 * dx[ok], 50 + 4 * dy[ok]])
         else:
-            sz   = (psf_xy.shape[0]-1)//4
-            x0   = sz*2
-            cen  = (x0-1)//2
-            ok   = (np.abs(dx)<=cen) & (np.abs(dy)<=cen)
-            coords = np.array([x0 + 4*dx[ok], x0 + 4*dy[ok]])
+            sz = (psf_xy.shape[0] - 1) // 4
+            x0 = sz * 2
+            cen = (x0 - 1) // 2
+            ok = (np.abs(dx) <= cen) & (np.abs(dy) <= cen)
+            coords = np.array([x0 + 4 * dx[ok], x0 + 4 * dy[ok]])
 
         out = np.zeros_like(dx, dtype=np.float32)
         out[ok] = map_coordinates(psf_xy, coords, order=3)
 
         # optional extended halo
         if extended_data is not None:
-            ok2 = (np.abs(dx)<self.extended_N) & (np.abs(dy)<self.extended_N)
-            coords = np.array([self.extended_N+dy[ok2],
-                               self.extended_N+dx[ok2]])
+            ok2 = (np.abs(dx) < self.extended_N) & (np.abs(dy) < self.extended_N)
+            coords = np.array([self.extended_N + dy[ok2], self.extended_N + dx[ok2]])
             out[ok2] += map_coordinates(extended_data, coords, order=0)
         return out
+
+
+def jwst_header(dataset_prefix, detector="mirimage", suffix="cal", ext=0):
+    """
+    dataset_prefix: e.g. 'jw01837001001_06101_00002'
+    detector: e.g. 'mirimage', 'nrca1', 'nrcblong', 'nrs1', ...
+    suffix: 'cal' or 'rate'
+    ext: 0 for primary, or 'SCI' / 1 etc.
+    """
+    filename = f"{dataset_prefix}_{detector}_{suffix}.fits"
+    uri = f"mast:JWST/product/{filename}"
+    url = f"https://mast.stsci.edu/api/v0.1/Download/file?uri={uri}"
+    # fsspec streaming: headers are fetched without pulling the whole file
+    with fits.open(url, use_fsspec=True) as hdul:
+        return hdul[ext].header, url
+
+
+# Try CAL then RATE; return the first that exists
+def jwst_probe_headers(dataset_prefix, detector="mirimage", try_suffixes=("cal", "rate"), ext=0):
+    last_err = None
+    for sfx in try_suffixes:
+        try:
+            hdr, url = jwst_header(dataset_prefix, detector=detector, suffix=sfx, ext=ext)
+            return hdr, url
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err
+
+
+# Example:
+# hdr, url = jwst_probe_headers("jw01837001001_06101_00002", detector="mirimage", try_suffixes=("cal","rate"), ext=0)
+# print(url); print(hdr.tostring(sep="\n")[:600])

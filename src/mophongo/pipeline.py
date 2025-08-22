@@ -533,6 +533,8 @@ class Pipeline:
         from .fit import SparseFitter
         from .astro_fit import GlobalAstroFitter
         from .astrometry import AstroCorrect
+        import zarr
+        from numcodecs import Blosc
         from . import utils
         import warnings
 
@@ -549,12 +551,19 @@ class Pipeline:
         print(f"Pipeline (start) memory: {memory():.1f} GB")
         print(f"Pipeline config: {config}")
 
+        # test for NaN values in images and weights
+        for i in range(len(images)):
+            if images[i] is None:
+                assert np.all(np.isfinite(images[i])), "Image contains NaN values"
+            if weights[i] is not None:
+                assert np.all(np.isfinite(weights[i])), "Weights contain NaN values"
+
         cat = catalog.copy() if catalog is not None else None
         positions = list(zip(catalog["x"], catalog["y"])) if catalog is not None else []
 
         self.tmpls = Templates()
         self.tmpls.extract_templates(
-            np.nan_to_num(images[0], copy=False, nan=0.0, posinf=0.0, neginf=0.0),
+            images[0],
             segmap,
             positions,
             wcs=wcs[0] if wcs is not None else None,
@@ -619,12 +628,8 @@ class Pipeline:
             templates = tmpls_lo.convolve_templates(kernel, inplace=False)
             print(f"Pipeline (convolved) memory: {memory():.1f} GB")
 
-            assert np.all(np.isfinite(images[ifilt])), "Image contains NaN values"
-            if weights_i is not None:
-                assert np.all(np.isfinite(weights_i)), "Weights contain NaN values"
             for t in templates:
                 assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
-
             # fitter_cls = (
             #     GlobalAstroFitter
             #     if (config.fit_astrometry_niter > 0 and config.fit_astrometry_joint)
@@ -895,3 +900,41 @@ def run(
         config=config,
     )
     return pipeline.run()
+
+    # # EXTREMELY SLOW
+    # # block into tiles for faster access
+    # store = zarr.storage.MemoryStore()
+    # group = zarr.group(store=store)  # container
+    # fast = Blosc(cname="lz4", clevel=1, shuffle=Blosc.BITSHUFFLE)  # fastest
+    # tight = Blosc(cname="zstd", clevel=1, shuffle=Blosc.BITSHUFFLE)  # better ratio, still fast
+    # # You can control threads with Blosc(nthreads=<N>) if desired.
+    # for i in range(len(images)):
+    #     if images[i] is not None:
+    #         img = group.create_array(
+    #             f"images/{i}",
+    #             shape=(images[i].shape),
+    #             chunks=(512, 512),
+    #             dtype="float32",
+    #             compressors=None,  # <- critical
+    #             filters=None,  # <- critical
+    #             overwrite=True,
+    #             fill_value=0.0,
+    #         )
+    #         img[:] = images[i]
+    #         images[i] = img
+
+    #     if weights[i] is not None:
+    #         wht = group.create_array(
+    #             f"weights/{i}",
+    #             shape=(weights[i].shape),
+    #             chunks=(512, 512),
+    #             dtype="float32",
+    #             compressors=None,  # <- critical
+    #             filters=None,  # <- critical
+    #             overwrite=True,
+    #             fill_value=0.0,
+    #         )
+    #         wht[:] = weights[i]
+    #         weights[i] = wht
+
+    # # print(f"Pipeline (blocked storage) memory: {memory():.1f} GB")

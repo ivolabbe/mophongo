@@ -2682,28 +2682,28 @@ numpy = ">=1.24,<2.3"
 
 [[package]]
 name = "numcodecs"
-version = "0.16.1"
+version = "0.16.2"
 description = "A Python package providing buffer compression and transformation codecs for use in data storage and communication applications."
 optional = false
 python-versions = ">=3.11"
 groups = ["main"]
 files = [
-    {file = "numcodecs-0.16.1-cp311-cp311-macosx_10_13_x86_64.whl", hash = "sha256:5348a25aefbce37ea7c00c3363d36176155233c95597e5905a932e9620df960d"},
-    {file = "numcodecs-0.16.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:2058b0a985470809c720d2457758b61e6c9495a49d5f20dfac9b5ebabd8848eb"},
-    {file = "numcodecs-0.16.1-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:6b216b6d7bc207b85d41fddbc25b09fd00d76e265454db6e3fb09d5da0216397"},
-    {file = "numcodecs-0.16.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:2308d56c4f84a5b942f8668b4adedd3d9cdd6a22e6e6e20768ec356c77050f38"},
-    {file = "numcodecs-0.16.1-cp311-cp311-win_amd64.whl", hash = "sha256:acd8d68b4b815e62cb91e6064a53dac51ee99849350784ee16dd52cdbb4bc70f"},
-    {file = "numcodecs-0.16.1-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:1abe0651ecb6f207656ebfc802effa55c4ae3136cf172c295a067749a2699122"},
-    {file = "numcodecs-0.16.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:abb39b7102d0816c8563669cdddca40392d34d0cbf31e3e996706b244586a458"},
-    {file = "numcodecs-0.16.1-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:f3359a951f8b23317f12736a7ad1e7375ec3d735465f92049c76d032ebca4c40"},
-    {file = "numcodecs-0.16.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:82cc70592ec18060786b1bfa0da23afd2a7807d7975d766e626954d6628ec609"},
-    {file = "numcodecs-0.16.1-cp312-cp312-win_amd64.whl", hash = "sha256:4b48ddc8a7d132b7808bc53eb2705342de5c1e39289d725f988bd143c0fd86df"},
-    {file = "numcodecs-0.16.1-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:2ad8ee940315f59188accfc3f2d39726a4ca0d76b49bf8d0018e121f01c49028"},
-    {file = "numcodecs-0.16.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:179ca7bf3525a0f7379df7767d87dd495253de44597cb7e511198b28b09da633"},
-    {file = "numcodecs-0.16.1-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:6e2babbb50bf348ae982818d5560af330eab0dcd925fb0e49509785ad57d11db"},
-    {file = "numcodecs-0.16.1-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:a4b29d8d3284b72bfad4fb83d672a17f497ae86ee1ef8087bac7222b620d3d91"},
-    {file = "numcodecs-0.16.1-cp313-cp313-win_amd64.whl", hash = "sha256:06489635f43e1a959aea73cb830d78cf3adb07ac5f34daccb92091e4d9ac6b07"},
-    {file = "numcodecs-0.16.1.tar.gz", hash = "sha256:c47f20d656454568c6b4697ce02081e6bbb512f198738c6a56fafe8029c97fb1"},
+    {file = "numcodecs-0.16.2-cp311-cp311-macosx_10_13_x86_64.whl", hash = "sha256:4c1f1357896cfc5451157fd90a2858aa0f6a66409f91f3016d257b76c4c244c1"},
+    {file = "numcodecs-0.16.2-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:d88aa4f82bb8fe3fa2e9c19fd44b6c268acec6fc7bcff59c92e169830d09531a"},
+    {file = "numcodecs-0.16.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:276f657ec4ffef9e2cc344b732b8906fe8612c3b9484504830ccdc7a2dd0715a"},
+    {file = "numcodecs-0.16.2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b1b7d8174e14c66191e0e1a4a44dd264bd776fb96b1ce3adc0216154f34b755c"},
+    {file = "numcodecs-0.16.2-cp311-cp311-win_amd64.whl", hash = "sha256:559163a7d97ec8aef1654e47c6e97f88dcc4c38a975338bf1bfb214d3c8d70f9"},
+    {file = "numcodecs-0.16.2-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:30f04c2b7bb802133866e7fb554d47943864f977dfe8a95c814eb801c797df3c"},
+    {file = "numcodecs-0.16.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:8ee0b2776cf47b7702ba0ccc0b6afaad28afbf8d5bb7b9a5274b5f08ecc651b2"},
+    {file = "numcodecs-0.16.2-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:4c8e94f0e90aaf4d01b2e26476d3b081c2cf8c17036af45e04e735de9c0cf64f"},
+    {file = "numcodecs-0.16.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:7b565b16366749011e290343617571db861b2b2e58b038697afde6d02f537c91"},
+    {file = "numcodecs-0.16.2-cp312-cp312-win_amd64.whl", hash = "sha256:e4cfdde4e99bf47580f4eb3a876630c73ba14e4a1380fec5959ac727e22ce0d2"},
+    {file = "numcodecs-0.16.2-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:0f965ccb2f6d215ffd2e3239ec02e33139d7ce311ff49704d340704b81dda653"},
+    {file = "numcodecs-0.16.2-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:b4bc110b73d59de7f46310c680f075f9007ead915174c895368274c646c9ea74"},
+    {file = "numcodecs-0.16.2-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:51615cf2811343a8a3fa42953cb4120ac7187875a161260444f53ada5710063e"},
+    {file = "numcodecs-0.16.2-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:8a18ced1ecbdd0e9ee716820dbb3a094c896eed8005273bbcab9980bdac270ae"},
+    {file = "numcodecs-0.16.2-cp313-cp313-win_amd64.whl", hash = "sha256:f640ed8406e1eb5806787a3e5be223d455b75c99eb2088a290947ed6dbd77e8e"},
+    {file = "numcodecs-0.16.2.tar.gz", hash = "sha256:9922dae0c3b01b5bed3b4bae239f4787e891daa3262c27971298669d029d10e9"},
 ]
 
 [package.dependencies]
@@ -2716,7 +2716,7 @@ crc32c = ["crc32c (>=2.7)"]
 docs = ["numpydoc", "pydata-sphinx-theme", "sphinx", "sphinx-issues"]
 msgpack = ["msgpack"]
 pcodec = ["pcodec (>=0.3,<0.4)"]
-test = ["coverage", "pytest", "pytest-cov"]
+test = ["coverage", "pytest", "pytest-cov", "pyzstd"]
 test-extras = ["importlib_metadata"]
 zfpy = ["zfpy (>=1.0.0)"]
 
@@ -5154,14 +5154,14 @@ propcache = ">=0.2.1"
 
 [[package]]
 name = "zarr"
-version = "3.1.0"
+version = "3.1.1"
 description = "An implementation of chunked, compressed, N-dimensional arrays for Python"
 optional = false
 python-versions = ">=3.11"
 groups = ["main"]
 files = [
-    {file = "zarr-3.1.0-py3-none-any.whl", hash = "sha256:bd3d2f88d602d43f81df82e26dd115ea66635a2af5bf6da261d3c640bb4c1ce4"},
-    {file = "zarr-3.1.0.tar.gz", hash = "sha256:ace5b111dc69d5315cb1655dfd0f816c5acf9798d2ad92f43b608a52c8c8ac2b"},
+    {file = "zarr-3.1.1-py3-none-any.whl", hash = "sha256:9a0b7e7c27bf62965b8eef6b8b8fdb9b47381f0738be35e40f37be6479b546be"},
+    {file = "zarr-3.1.1.tar.gz", hash = "sha256:17db72f37f2489452d2137ac891c4133b8f976f9189d8efd3e75f3b3add84e8c"},
 ]
 
 [package.dependencies]
@@ -5177,7 +5177,7 @@ gpu = ["cupy-cuda12x"]
 optional = ["rich", "universal-pathlib"]
 remote = ["fsspec (>=2023.10.0)", "obstore (>=0.5.1)"]
 remote-tests = ["botocore", "fsspec (>=2023.10.0)", "moto[s3,server]", "obstore (>=0.5.1)", "requests", "s3fs (>=2023.10.0)"]
-test = ["coverage", "hypothesis", "mypy", "packaging", "pytest (<8.4)", "pytest-accept", "pytest-asyncio", "pytest-cov", "pytest-xdist", "rich", "tomlkit", "uv"]
+test = ["coverage (>=7.10)", "hypothesis", "mypy", "packaging", "pytest (<8.4)", "pytest-accept", "pytest-asyncio", "pytest-cov", "pytest-xdist", "rich", "tomlkit", "uv"]
 
 [[package]]
 name = "zipp"
@@ -5203,4 +5203,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.13"
-content-hash = "ef2dd16e1c96c978a27729d3c651b26be4fba60f33a0d3559b92efa898f3f9b0"
+content-hash = "062d7ce352f0d16f7eb1bde80cde2a9b3425f4975a1c19dc4b93b07138e270ab"

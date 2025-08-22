@@ -364,6 +364,13 @@ class AlignedCutout:
 class Template(Cutout2D):
     """Cutout-based template storing slice bookkeeping."""
 
+    FLAG_VALID = 0x01  # 0001: Template is valid
+    FLAG_CONVOLVED = 0x02  # 0010: Template has been convolved
+    FLAG_SUM_ZERO = 0x04  # 0100: Template sum is zero
+    FLAG_HAS_NAN = 0x08  # 1000: Template contains NaN values
+    FLAG_OUTSIDE_WEIGHT = 0x10  # 1 0000: Template is outside weight map
+    FLAG_SHIFTED = 0x20  # 10 0000: Template has been shifted
+
     def __init__(
         self,
         data: np.ndarray,
@@ -403,6 +410,10 @@ class Template(Cutout2D):
         self.id_parent = label  # @@@ this is redundant -> remove
         self.id_scene = 1
         self.name = "main"  # component name
+        # Diagnostic flags (bitwise)
+
+        self.flag = 0  # bitwise flag for diagnostics
+        self.flag |= Template.FLAG_VALID
 
         # flux
         self.flux = 0.0
@@ -533,6 +544,7 @@ class Template(Cutout2D):
         data[y0 : y0 + ny, x0 : x0 + nx] = full
         new_cut.data = data
         #        new_cut.base_data = data  # also store it in base data
+        new_cut.flag |= Template.FLAG_CONVOLVED  # mark as convolved
 
         return new_cut
 
@@ -856,8 +868,7 @@ class Templates:
             )
             tmpl.shifted += [dx, dy]  # accumulate in case of iterating
             tmpl.to_shift[:] = 0.0
-
-    #            tmpl.is_dirty = False
+            tmpl.flag |= Template.FLAG_SHIFTED  # mark as shifted
 
     @staticmethod
     def _prepare_fft_fast(psf: np.ndarray) -> tuple[np.ndarray, np.ndarray, interp1d]:
@@ -950,7 +961,14 @@ class Templates:
         pred = np.empty(len(templates), dtype=float)
         for i, tmpl in enumerate(templates):
             w = weights[tmpl.slices_original]
-            pred[i] = 1.0 / np.sqrt(np.sum(w * tmpl.data[tmpl.slices_cutout] ** 2))
+            inverse_epred = np.sqrt(np.sum(w * tmpl.data[tmpl.slices_cutout] ** 2))
+            if inverse_epred > 0:
+                pred[i] = 1.0 / inverse_epred
+            else:
+                print(
+                    f"error for template {i}: {inverse_epred} FLAG_SUM_ZERO {tmpl.flag & Template.FLAG_SUM_ZERO}"
+                )
+                tmpl.flag |= Template.FLAG_SUM_ZERO
             tmpl.err = pred[i]  # Store RMS in the template for later use
         return pred
 
@@ -1034,7 +1052,12 @@ class Templates:
 
             # sum data should never be zero. There should
             # there should also never be NaNs.
-            cut.data /= np.sum(cut.data)
+            # Normalize the template so its sum is 1 (if nonzero)
+            total = cut.data.sum()
+            if total != 0:
+                cut.data /= total
+            else:
+                cut.flag |= Template.FLAG_SUM_ZERO
 
             templates.append(cut)
 

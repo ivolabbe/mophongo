@@ -90,6 +90,9 @@ class FitConfig:
     aperture_catalog: float | str | None = None  # catalog aperture (diameter or table column name)
     aperture_units: str = "arcsec"  # "arcsec" or "pix"
 
+    # Internal options: don't change unless you know what you're doing
+    block_size: int = 64  # Block size for tiled processing
+
 
 def _diag_inv_hutch(A, k=32, rtol=1e-4, maxiter=None, seed=0):
     """
@@ -978,7 +981,7 @@ class SparseFitter:
 
             sol, info = cg(K, rhs, atol=0.0, rtol=rtol, maxiter=maxiter)
             if info > 0:
-                sol, info = minres(K, rhs, atol=0.0, rtol=rtol, maxiter=maxiter)
+                sol, info = minres(K, rhs, rtol=rtol, maxiter=maxiter)
 
             na = idx.size
             xw_scene = sol[:na]
@@ -1201,6 +1204,10 @@ class SparseFitter:
         off.setdiag(0)
         covar_power = np.sqrt((off.data**2).sum()) / A.diagonal().sum()
         if covar_power < 1e-3 or not self.config.fit_covariances:
+            ibad = np.where(A.diagonal() < eps_pd)[0]
+            if ibad.size > 0:
+                print(f"Warning: {len(ibad)} pixels have low diagonal values in A")
+            return np.sqrt(A.diagonal()) * covar_power
             return 1 / np.sqrt(A.diagonal())
         else:
             return _diag_inv_hutch(A, k=16, rtol=1e-4)

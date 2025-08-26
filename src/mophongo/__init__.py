@@ -1,5 +1,7 @@
 from .templates import Templates, Template
 from .fit import SparseFitter
+from .scene_fitter import SceneFitter
+from .scene import Scene
 from .astrometry import AstroCorrect, AstroMap
 from .catalog import Catalog
 #from .deblender import deblend_sources_symmetry, deblend_sources_hybrid
@@ -19,6 +21,8 @@ __all__ = [
 #    "Template",
 #    "FitConfig",
     "SparseFitter",
+    "SceneFitter",
+    "Scene",
     "AstroCorrect",
     "AstroMap",
     "Catalog",

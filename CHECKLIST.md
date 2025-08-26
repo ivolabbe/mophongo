@@ -69,6 +69,8 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
 - [x] Added integer-factor multi-resolution support with template and kernel downsampling
 - [x] Block templates and PSFs before convolution with `block_reduce` and centroid-preserving PSF shifts
 - [x] Downsample templates and kernels in the pipeline prior to convolution to avoid per-source PSF rebinning
+- [x] **Scene utilities** (`src/mophongo/scene.py`, `src/mophongo/fitter_scene.py`)
+  - [x] Added `Scene` container and stateless `SceneFitter` for per-scene solving
 - [x] **Simulation utilities for tests** (`tests/utils.py`)
   - [x] Create fake catalogs and images with Moffat sources of varying size and ellipticity. positions are ra,dec
   - [x] Produce matching high‑res and low‑res PSFs, with low res PSF at least 5x high res PSF.

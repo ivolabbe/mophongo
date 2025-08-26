@@ -71,6 +71,7 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
 - [x] Downsample templates and kernels in the pipeline prior to convolution to avoid per-source PSF rebinning
 - [x] **Scene utilities** (`src/mophongo/scene.py`, `src/mophongo/fitter_scene.py`)
   - [x] Added `Scene` container and stateless `SceneFitter` for per-scene solving
+  - [x] Added CG-based solver with whitening and optional shift parameters
 - [x] **Simulation utilities for tests** (`tests/utils.py`)
   - [x] Create fake catalogs and images with Moffat sources of varying size and ellipticity. positions are ra,dec
   - [x] Produce matching high‑res and low‑res PSFs, with low res PSF at least 5x high res PSF.

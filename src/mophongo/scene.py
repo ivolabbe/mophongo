@@ -4,9 +4,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Sequence
 import logging
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix, lil_matrix
 from scipy.sparse import csgraph
-from scipy.sparse.linalg import LinearOperator
 
 from .templates import Template
 
@@ -26,6 +25,40 @@ def _bbox_union(templates: Sequence[Template]) -> Tuple[int, int, int, int]:
     x0 = min(t.bbox[2] for t in templates)
     x1 = max(t.bbox[3] for t in templates)
     return y0, y1, x0, x1
+
+
+def _intersection(
+    a: Tuple[int, int, int, int],
+    b: Tuple[int, int, int, int],
+) -> Tuple[int, int, int, int] | None:
+    """Return the intersection of two integer bounding boxes."""
+    y0 = max(a[0], b[0])
+    y1 = min(a[1], b[1])
+    x0 = max(a[2], b[2])
+    x1 = min(a[3], b[3])
+    if y0 >= y1 or x0 >= x1:
+        return None
+    return y0, y1, x0, x1
+
+
+def _bbox_to_slices(bbox: Tuple[int, int, int, int]) -> Tuple[slice, slice]:
+    """Convert integer bounding box to slices for array indexing."""
+    y0, y1, x0, x1 = bbox
+    return slice(y0, y1), slice(x0, x1)
+
+
+def _slice_intersection(
+    a: tuple[slice, slice],
+    b: tuple[slice, slice],
+) -> tuple[slice, slice] | None:
+    """Return the intersection between two slice pairs."""
+    y0 = max(a[0].start, b[0].start)
+    y1 = min(a[0].stop, b[0].stop)
+    x0 = max(a[1].start, b[1].start)
+    x1 = min(a[1].stop, b[1].stop)
+    if y0 >= y1 or x0 >= x1:
+        return None
+    return slice(y0, y1), slice(x0, x1)
 
 
 def _bbox_overlap(a: Tuple[int, int, int, int],
@@ -119,38 +152,75 @@ class Scene:
             self._weight = weight[self._bbox_slices]
         self._psf = psf
         self._cfg = config
+        self._psf = psf
 
-    def build_operator(self) -> LinearOperator:
-        """Return a whitened linear operator for the scene."""
+    # ------------------------------------------------------------------
+    # System assembly and solving
+    # ------------------------------------------------------------------
+    def assemble_system(
+        self,
+    ) -> tuple[csr_matrix, np.ndarray, csr_matrix | None, csr_matrix | None, np.ndarray | None]:
+        """Assemble the normal equations for this scene.
+
+        Returns ``(A, b, AB, BB, bB)`` where ``A`` and ``b`` describe the
+        flux parameters.  The remaining terms are ``None`` placeholders for
+        optional shift parameters handled elsewhere.
+        """
         if self._image is None or self._weight is None:
             raise RuntimeError("Band data has not been set")
-        ny, nx = self._image.shape
-        n_pix = ny * nx
-        n_tmpl = len(self.templates)
-        w = np.sqrt(self._weight).reshape(-1)
-        mat = np.zeros((n_pix, n_tmpl), dtype=float)
-        for j, tmpl in enumerate(self.templates):
-            tmpl_data = tmpl.data[tmpl.slices_cutout]
-            mat[:, j] = (tmpl_data * w.reshape(ny, nx)).ravel()
-        self._operator_matrix = mat
 
-        def mv(x: np.ndarray) -> np.ndarray:
-            return mat @ x
+        n = len(self.templates)
+        ata = lil_matrix((n, n))
+        atb = np.zeros(n)
 
-        def rmv(y: np.ndarray) -> np.ndarray:
-            return mat.T @ y
+        for i, tmpl in enumerate(self.templates):
+            sl_i = tmpl.slices_original
+            data_i = tmpl.data[tmpl.slices_cutout]
+            w_i = self._weight[sl_i]
+            img_i = self._image[sl_i]
+            atb[i] = np.sum(data_i * w_i * img_i)
+            ata[i, i] = np.sum(data_i * w_i * data_i)
+            for j in range(i + 1, n):
+                sl_j = self.templates[j].slices_original
+                inter = _slice_intersection(sl_i, sl_j)
+                if inter is None:
+                    continue
+                w = self._weight[inter]
+                sl_i_local = (
+                    slice(
+                        inter[0].start - sl_i[0].start + tmpl.slices_cutout[0].start,
+                        inter[0].stop - sl_i[0].start + tmpl.slices_cutout[0].start,
+                    ),
+                    slice(
+                        inter[1].start - sl_i[1].start + tmpl.slices_cutout[1].start,
+                        inter[1].stop - sl_i[1].start + tmpl.slices_cutout[1].start,
+                    ),
+                )
+                sl_j_local = (
+                    slice(
+                        inter[0].start - sl_j[0].start + self.templates[j].slices_cutout[0].start,
+                        inter[0].stop - sl_j[0].start + self.templates[j].slices_cutout[0].start,
+                    ),
+                    slice(
+                        inter[1].start - sl_j[1].start + self.templates[j].slices_cutout[1].start,
+                        inter[1].stop - sl_j[1].start + self.templates[j].slices_cutout[1].start,
+                    ),
+                )
+                arr_i = tmpl.data[sl_i_local]
+                arr_j = self.templates[j].data[sl_j_local]
+                val = np.sum(arr_i * arr_j * w)
+                ata[i, j] = val
+                ata[j, i] = val
 
-        op = LinearOperator((n_pix, n_tmpl), matvec=mv, rmatvec=rmv)
-        op.matrix = mat  # stash for diagnostics
-        return op
+        A = ata.tocsr()
+        b = atb
+        # Shift terms are constructed externally; return ``None`` placeholders.
+        return A, b, None, None, None
 
     def solve(self, fitter: "SceneFitter", config: Optional[object] = None):
         """Solve for template fluxes using ``fitter``."""
-        if self._image is None or self._weight is None:
-            raise RuntimeError("Band data has not been set")
-        A = self.build_operator()
-        b = (self._image * np.sqrt(self._weight)).ravel()
-        sol = fitter.solve(A, b, config=config)
+        A, b, AB, BB, bB = self.assemble_system()
+        sol = fitter.solve(A, b, AB=AB, BB=BB, bB=bB, config=config)
         self._solution = sol
         self.meta.update(getattr(sol, "info", {}))
         return sol

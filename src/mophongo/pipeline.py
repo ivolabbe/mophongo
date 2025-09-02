@@ -583,6 +583,7 @@ class Pipeline:
 
         astro = AstroCorrect(config)
         residuals: list[np.ndarray] = []
+        all_templates: list[Template] = []
         for ifilt in range(1, len(images)):
             weights_i = weights[ifilt] if weights is not None else None
 
@@ -730,14 +731,15 @@ class Pipeline:
                 self.astro.append(astro)
             self.residuals.append(res)
             self.fit.append(fitter)
-            self.templates.append(templates)
+            self.all_templates.append(templates)
+            self.all_scenes.append(scenes)
             self.infos.append(info)
 
         print(f"Pipeline (end) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB")
 
         self.table = cat
 
-        return self.table, self.residuals, self.fit, scenes
+        return self.table, self.residuals, self.fit, self.all_templates, self.all_scenes
 
     def plot_result(
         self,

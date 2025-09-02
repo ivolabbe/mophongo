@@ -991,7 +991,7 @@ class SparseFitter:
                 BB_reg = BB
 
             # Solve joint whitened system
-            K = bmat([[A_w_blk, AB_w], [AB_w.T, BB]], format="csr")
+            K = bmat([[A_w_blk, AB_w], [AB_w.T, BB_reg]], format="csr")
             rhs = np.concatenate([b_w_blk, bB])
 
             sol, info = cg(K, rhs, atol=0.0, rtol=rtol, maxiter=maxiter)
@@ -1005,7 +1005,7 @@ class SparseFitter:
             infos.append(int(info))
 
             # --- Flux errors via whitened Schur complement (stay in whitened flux space)
-            BB_dense = BB.toarray()
+            BB_dense = BB_reg.toarray()
             try:
                 # X solves: BB * X = AB_w.T   → X: (nB, nA)
                 X = np.linalg.solve(BB_dense, AB_w.T.toarray())

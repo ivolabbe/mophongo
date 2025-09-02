@@ -1,9 +1,13 @@
 import numpy as np
+import pytest
 import scipy.sparse as sp
 
-from mophongo.scene_fitter import SceneFitter
+from mophongo.scene_fitter import SceneFitter, build_normal
 from mophongo.scene import Scene
-from mophongo.templates import Template
+from mophongo.templates import Templates, Template
+from mophongo.fit import SparseFitter, FitConfig
+from mophongo.psf import PSF
+from utils import make_simple_data
 
 
 def test_scene_fitter_flux_only():
@@ -33,6 +37,30 @@ def test_scene_fitter_with_shift_block():
     np.testing.assert_allclose(beta, dense[2:])
 
 
+@pytest.mark.parametrize("order", [0, 1, 2])
+def test_solve_flux_and_shifts_matches_dense(order):
+    nA = 4
+    p = (order + 1) * (order + 2) // 2
+    nB = p * 2
+    A = sp.eye(nA, format="csr") * 2.0
+    AB = np.full((nA, nB), 0.1)
+    BB = sp.eye(nB, format="csr") * 3.0
+    b = np.arange(1, nA + 1, dtype=float)
+    bB = np.arange(1, nB + 1, dtype=float)
+    cfg = FitConfig(cg_kwargs={"rtol": 1e-10, "maxiter": 1000})
+    x, err, beta, info = SceneFitter._solve_flux_and_shifts(
+        A, b, sp.csr_matrix(AB), BB, bB, config=cfg
+    )
+    M = np.block([[A.toarray(), AB], [AB.T, BB.toarray()]])
+    rhs = np.concatenate([b, bB])
+    dense = np.linalg.solve(M, rhs)
+    cov = np.linalg.inv(M)
+    np.testing.assert_allclose(x, dense[:nA], rtol=1e-3)
+    np.testing.assert_allclose(beta, dense[nA:], rtol=1e-3)
+    np.testing.assert_allclose(err, np.sqrt(np.diag(cov)[:nA]), rtol=1e-3)
+    assert info["cg_info"] == 0
+
+
 def test_scene_graph_and_residuals():
     img = np.zeros((10, 10))
     size = (3, 3)
@@ -55,3 +83,57 @@ def test_scene_graph_and_residuals():
     expected[t1.slices_original] -= 2.0
     expected[t2.slices_original] -= 3.0
     np.testing.assert_array_almost_equal(res, expected)
+
+
+@pytest.mark.parametrize("order", [1, 2])
+def test_scene_solve_matches_legacy_solver(order):
+    images, segmap, catalog, psfs, truth, wht = make_simple_data(
+        nsrc=5, size=51, peak_snr=5, seed=order
+    )
+    psf_hi = PSF.from_array(psfs[0])
+    psf_lo = PSF.from_array(psfs[1])
+    kernel = psf_hi.matching_kernel(psf_lo)
+    positions = list(zip(catalog["x"], catalog["y"]))
+    tmpls = Templates.from_image(images[0], segmap, positions, kernel)
+    image = images[1]
+    weight = wht[1]
+    cfg = FitConfig(
+        fit_astrometry_joint=True,
+        snr_thresh_astrom=0.0,
+        astrom_kwargs={"poly": {"order": order}},
+    )
+    fitter = SparseFitter(tmpls.templates, image, weight, cfg)
+    A, b, _ = build_normal(tmpls.templates, image, weight)
+    d = np.sqrt(A.diagonal())
+    Dinv = sp.diags(1.0 / d)
+    A_w = Dinv @ A @ Dinv
+    b_w = b / d
+    scene_ids = np.ones(len(tmpls.templates), dtype=int)
+    bright = np.ones(len(tmpls.templates), dtype=bool)
+    alpha_legacy, err_legacy, betas, infos = fitter._solve_scenes_with_shifts(
+        A_w,
+        b_w,
+        d,
+        scene_ids,
+        tmpls.templates,
+        bright,
+        order=order,
+        include_y=True,
+        ab_from_bright_only=True,
+    )
+    beta_legacy = betas[0][1]
+
+    scene = Scene(id=1, templates=list(tmpls.templates), fitter=SceneFitter())
+    scene.A = A
+    scene.b = b
+    scene.image = image
+    scene.weights = weight
+    flux, err, beta_scene, info = scene.solve(
+        config=FitConfig(
+            fit_astrometry_joint=True,
+            snr_thresh_astrom=0.0,
+            astrom_kwargs={"poly": {"order": order}},
+        ),
+        apply_shifts=False,
+    )
+    np.testing.assert_allclose(flux, alpha_legacy, rtol=1e-3)

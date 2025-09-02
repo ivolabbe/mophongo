@@ -639,8 +639,9 @@ class Scene:
         if not cfg.fit_astrometry_joint:
             sol = SceneFitter.solve(A, b, config=cfg, **kwargs)
         else:
-            # alpha0 seed from diagonal-only: needed to scale shift blocks properly
-            alpha0 = np.divide(b, d, out=np.zeros_like(b, dtype=float), where=d > 0)
+            # alpha0 seed from diagonal-only solution used in SparseFitter
+            diag = np.maximum(d**2, 1e-12)
+            alpha0 = np.divide(b, diag, out=np.zeros_like(b, dtype=float), where=diag > 0)
             # joint path: build basis and coupling blocks
             order = int(cfg.astrom_kwargs["poly"]["order"])  # assume defined in cfg
 

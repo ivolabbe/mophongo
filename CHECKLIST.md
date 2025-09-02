@@ -71,6 +71,7 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
 - [x] Renamed component terminology to scene and centralized whitening in scene solver
 - [x] Introduced stateless `SceneFitter` and `Scene` utilities
 - [x] Fixed alpha0 scaling and Cholesky whitening in scene solver
+- [x] Added `Scene.plot` for scene-level diagnostics
 - [x] Adjusted Chebyshev basis to accept [-1,1] inputs and added edge tests
 - [x] **Pipeline orchestrator** (`src/mophongo/pipeline.py`)
   - [x] `run` to tie all pieces together

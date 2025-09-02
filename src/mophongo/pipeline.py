@@ -181,7 +181,7 @@ class Pipeline:
         self.residuals: list[np.ndarray] = []
         self.fit: list[np.ndarray] = []
         self.astro: list[np.ndarray] = []
-        self.templates: list[np.ndarray] = []
+        #        self.templates: list[np.ndarray] = []
         self.infos: list[dict] = []
         self.tmpls: Templates()
 
@@ -583,7 +583,8 @@ class Pipeline:
 
         astro = AstroCorrect(config)
         residuals: list[np.ndarray] = []
-        all_templates: list[Template] = []
+        self.all_templates: list[Template] = []
+        self.all_scenes: list[Scene] = []
         for ifilt in range(1, len(images)):
             weights_i = weights[ifilt] if weights is not None else None
 
@@ -739,7 +740,7 @@ class Pipeline:
 
         self.table = cat
 
-        return self.table, self.residuals, self.fit, self.all_templates, self.all_scenes
+        return self.table, self.residuals  # , self.all_templates, self.all_scenes
 
     def plot_result(
         self,

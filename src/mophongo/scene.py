@@ -15,6 +15,7 @@ import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.csgraph import connected_components
 from .fit import FitConfig as FitConfig
+from .templates import _slices_from_bbox
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # show info for *this* logger only
@@ -619,7 +620,7 @@ class Scene:
                 "Scene image/weights not set. Call set_band() or generate_scenes()."
             )
 
-        # ensure flux block is available
+        # ensure flux block is available or rebuild
         if self.A is None or self.b is None:
             # build normal from current band
             from .scene_fitter import build_normal
@@ -669,8 +670,10 @@ class Scene:
             for k, tmpl in enumerate(self.templates):
                 tmpl.to_shift = np.array([float(dx[k]), float(dy[k])], dtype=float)
 
+            # optionally apply shifts to templates now and clear A/b
             if apply_shifts:
                 Templates.apply_template_shifts(self.templates)
+                self.A, self.b = None, None
 
             sid = getattr(self, "id", -1)
             beta_scene = self.shifts
@@ -695,6 +698,7 @@ class Scene:
             logger.debug(f"[scenes] betas {self.id}:{self.shifts}")
 
         # store solution
+
         self.solution = sol
         #        self.flux, self.err, self.info = sol.flux, sol.err, sol.shifts, sol.info
         for tmpl, flux, err, bright in zip(self.templates, sol.flux, sol.err, self.is_bright):
@@ -725,7 +729,8 @@ class Scene:
 
     def plot(
         self,
-        image: np.ndarray,
+        tmpl_image: np.ndarray,
+        seg_image: np.ndarray,
         display_sig: float = 3.0,
         ax=None,
         **imshow_kwargs,
@@ -761,18 +766,9 @@ class Scene:
 
         y0, y1, x0, x1 = self.bbox
 
-        tmpl_cut = image[y0:y1, x0:x1]
+        tmpl_cut = tmpl_image[y0:y1, x0:x1]
+        seg_cut = seg_image[y0:y1, x0:x1]
         img_cut = self.image[y0:y1, x0:x1]
-
-        seg_cut = np.zeros_like(img_cut, dtype=int)
-        for tmpl in self.templates:
-            sl = tmpl.slices_original
-            sl_local = (
-                slice(sl[0].start - y0, sl[0].stop - y0),
-                slice(sl[1].start - x0, sl[1].stop - x0),
-            )
-            mask = tmpl.data[tmpl.slices_cutout] != 0
-            seg_cut[sl_local][mask] = int(getattr(tmpl, "id", 0))
 
         scene_cut = np.zeros_like(seg_cut)
         scene_cut[seg_cut > 0] = int(self.id)
@@ -847,7 +843,7 @@ class Scene:
         if self.solution is None:
             raise RuntimeError("No solution available")
         bb = self.bbox
-        model_scene = np.zeros((bb[1] - bb[0], bb[3] - bb[2]), dtype=float)
+        model_scene = np.zeros((bb[1] - bb[0] + 1, bb[3] - bb[2] + 1), dtype=float)
         for t in self.templates:
             sl = t.slices_original
             sl_local_scene = (
@@ -860,7 +856,8 @@ class Scene:
     def residual(self) -> np.ndarray:
         """Return image-model residual over the scene's bounding box."""
         bb = self.bbox
-        res_scene = self.image[bb[0] : bb[1], bb[2] : bb[3]] - self.model_image()
+        sl = _slices_from_bbox(bb)
+        res_scene = self.image[sl] - self.model_image()
         return res_scene
 
     # ------------------------------------------------------------------

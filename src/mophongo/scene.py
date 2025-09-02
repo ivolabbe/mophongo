@@ -660,6 +660,7 @@ class Scene:
                 ab_from_bright_only=True,
             )
             # if no valid AB BB solve will fall back to flux-only
+            # @@@ scenefitter.solve should not take config but reg and cg_kwargs
             sol = SceneFitter.solve(A, b, AB=AB, BB=BB, bB=bB, config=cfg, **kwargs)
             self.shifts = sol.shifts
 

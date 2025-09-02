@@ -153,11 +153,23 @@ class SceneFitter:
             Unwhitened fluxes, their 1σ errors, optional shift coefficients
             and the CG exit flag.
         """
+        # do regularization here
+        reg = getattr(config, "reg_astrom", 0)
+        if reg <= 0:
+            reg = 1e-6 * np.median(A.diagonal())
+        Areg = A + sp.eye(A.shape[0], format="csr") * reg
 
         if AB is not None and BB is not None and bB is not None:
-            flux, err, shifts, info = SceneFitter._solve_flux_and_shifts(A, b, AB, BB, bB, config)
+            diag_BB = BB.diagonal()
+            scale_BB = np.median(diag_BB[diag_BB > 0]) if np.any(diag_BB > 0) else 1.0
+            lam_b = getattr(config, "reg_astrom", 1e-4) * scale_BB
+            BBreg = BB + sp.eye(BB.shape[0], format="csr") * lam_b
+
+            flux, err, shifts, info = SceneFitter._solve_flux_and_shifts(
+                Areg, b, AB, BBreg, bB, config
+            )
         else:
-            flux, err, info = SceneFitter.solve_flux(A, b, config)
+            flux, err, info = SceneFitter.solve_flux(Areg, b, config)
             shifts = None
 
         return SimpleNamespace(flux=flux, err=err, shifts=shifts, info=info)
@@ -169,9 +181,6 @@ class SceneFitter:
         """Solve ``A x = b`` for flux parameters using conjugate gradient."""
         cfg = config or FitConfig()
         A = A.tocsr()
-        reg = cfg.reg
-        if reg > 0:
-            A = A + eye(A.shape[0], format="csr") * reg
 
         d = np.sqrt(np.maximum(A.diagonal(), 1e-12))
         Dinv = diags(1.0 / d, 0, format="csr")
@@ -181,6 +190,10 @@ class SceneFitter:
         x_w, info = cg(A_w, b_w, **cfg.cg_kwargs)
         x = x_w / d
         err = SceneFitter._flux_errors(A_w) / d
+
+        if cfg.positivity:
+            x = np.maximum(0.0, x)
+
         return x, err, {"cg_info": info}
 
     @staticmethod
@@ -197,25 +210,15 @@ class SceneFitter:
         AB = AB.tocsr()
         BB = BB.tocsr()
 
-        # --- regularize BEFORE building the scalings
-        lam_x = max(cfg.reg, 0.0)
-        diagB = np.asarray(BB.diagonal()).ravel()
-        finite_pos = np.isfinite(diagB) & (diagB > 0)
-        scaleB = float(np.median(diagB[finite_pos])) if finite_pos.any() else 1.0
-        lam_b = float(getattr(cfg, "reg_astrom", 1e-4)) * scaleB
-
-        Areg = A + sp.eye(A.shape[0], format="csr") * lam_x
-        BBreg = BB + sp.eye(BB.shape[0], format="csr") * lam_b
-
         # --- flux whitening
-        d = np.sqrt(np.maximum(Areg.diagonal(), 1e-12))
+        d = np.sqrt(np.maximum(A.diagonal(), 1e-12))
         Dinv = sp.diags(1.0 / d, 0, format="csr")
 
         # --- shift whitening
-        L = np.linalg.cholesky(BBreg.toarray())
+        L = np.linalg.cholesky(BB.toarray())
         Linv = np.linalg.inv(L)
 
-        A_w = Dinv @ Areg @ Dinv
+        A_w = Dinv @ A @ Dinv
         # whiten flux-shift coupling with inverse Cholesky factor
         AB_w = (Dinv @ AB) @ Linv.T
         #        AB_w = (Dinv @ AB) @ Linv.T
@@ -249,6 +252,9 @@ class SceneFitter:
             # AB_w is dense (nA x nB). diag(AB_w AB_wᵀ) = row-wise sum of squares
             S_w_diag = A_w.diagonal() - np.einsum("ij,ij->i", AB_w, AB_w)
         err = 1.0 / np.sqrt(np.maximum(S_w_diag, 1e-12)) / d
+
+        if cfg.positivity:
+            x = np.maximum(0.0, x)
 
         return x, err, beta, {"cg_info": int(info)}
 

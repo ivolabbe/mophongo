@@ -682,18 +682,18 @@ class Pipeline:
             #            print("END of TEMPLATES FITTING")
 
             # one final flux only solve after astrometry
-            cfg_noshift = _FitConfig(**config.__dict__)
-            cfg_noshift.fit_astrometry_niter = 0
-            templates, fitter = self._add_templates_for_bad_fits(
-                templates,
-                tmpls_lo,
-                psfs[ifilt] if psfs is not None else None,
-                weights_i,
-                fitter,
-                images[ifilt],
-                fitter_cls,
-                config,
-            )
+            # cfg_noshift = _FitConfig(**config.__dict__)
+            # cfg_noshift.fit_astrometry_niter = 0
+            # templates, fitter = self._add_templates_for_bad_fits(
+            #     templates,
+            #     tmpls_lo,
+            #     psfs[ifilt] if psfs is not None else None,
+            #     weights_i,
+            #     fitter,
+            #     images[ifilt],
+            #     fitter_cls,
+            #     config,
+            # )
 
             # add soft non-negative priors if fluxes are < 0.0 and resolve.
             # note idx is relative to initial list of templates. But additional templates were added at the end, so idx still works
@@ -716,6 +716,23 @@ class Pipeline:
 
             res = fitter.residual()
 
+            # calculate a full image residual from the scenes and their slice
+            #            res_scene
+            if getattr(config, "run_scene_solver", False):
+                from .templates import _slices_from_bbox
+
+                res_scene = np.zeros_like(images[ifilt])
+                for s in scenes:
+                    sl = _slices_from_bbox(s.bbox)
+                    res_scene[sl] += s.residual()
+                # sanity check
+                diff = np.abs(res - res_scene)
+                maxdiff = np.nanmax(diff)
+                if maxdiff > 1e-5 * np.nanmax(np.abs(res)):
+                    warnings.warn(f"Scene residual differs from full residual: max diff {maxdiff}")
+                else:
+                    print(f"Scene residual matches full residual: max diff {maxdiff}")
+            #                res = res_scene
             print("Done...")
 
             self._update_catalog_with_fluxes(cat, templates, fluxes, errs, err_pred, ifilt)

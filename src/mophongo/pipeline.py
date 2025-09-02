@@ -27,6 +27,7 @@ from .psf_map import PSFRegionMap
 from .utils import bin_factor_from_wcs, downsample_psf, bin_remap
 from .templates import Templates, Template
 from .fit import FitConfig as _FitConfig
+from .scene import generate_scenes
 
 
 import logging
@@ -145,7 +146,6 @@ class Pipeline:
         catalog: Table | None = None,
         psfs: Sequence[np.ndarray] | None = None,
         weights: Sequence[np.ndarray] | None = None,
-        wht_images: Sequence[np.ndarray] | None = None,
         kernels: Sequence[np.ndarray | PSFRegionMap] | None = None,
         wcs: Sequence[WCS] | None = None,
         window: Window | None = None,
@@ -167,12 +167,16 @@ class Pipeline:
         self.catalog = catalog
         self.psfs = psfs
         self.weights = weights
-        self.wht_images = wht_images
         self.kernels = kernels
         self.wcs = wcs
         self.window = window
         self.extend_templates = extend_templates
         self.config = config
+
+        if kernels is None:
+            kernels = [None] * len(images)
+        if psfs is None:
+            psfs = [None] * len(images)
 
         self.residuals: list[np.ndarray] = []
         self.fit: list[np.ndarray] = []
@@ -533,8 +537,6 @@ class Pipeline:
         from .fit import SparseFitter
         from .astro_fit import GlobalAstroFitter
         from .astrometry import AstroCorrect
-        import zarr
-        from numcodecs import Blosc
         from . import utils
         import warnings
 
@@ -544,6 +546,8 @@ class Pipeline:
         psfs = self.psfs
         weights = self.weights
         kernels = self.kernels
+        if kernels is None:
+            kernels = [None] * len(images)
         wcs = self.wcs
         if config is None:
             config = self.config
@@ -582,18 +586,13 @@ class Pipeline:
         for ifilt in range(1, len(images)):
             weights_i = weights[ifilt] if weights is not None else None
 
-            kernel = None
-            if kernels is not None:
-                kernel = kernels[ifilt]
-                if kernel is None:
-                    kernel = np.array([[1.0]])
-                elif isinstance(kernel, PSFRegionMap):
-                    print(f"Using kernel lookup table {kernel.name}")
+            kernel = kernels[ifilt]
+            if kernel is None:
+                kernel = np.array([[1.0]])  # @@@ this shouldnt be necessary?
+            elif isinstance(kernel, PSFRegionMap):
+                print(f"Using kernel lookup table {kernel.name}")
 
-            if wcs is not None:
-                k = bin_factor_from_wcs(wcs[0], wcs[ifilt])
-            else:
-                k = 1
+            k = bin_factor_from_wcs(wcs[0], wcs[ifilt]) if wcs is not None else 1
 
             if k > 1:
                 if config.multi_resolution_method == "upsample":
@@ -603,8 +602,7 @@ class Pipeline:
                     )
                     if weights_i is not None:
                         weights_i = block_replicate(weights[ifilt], k).astype(np.float32) * k**2
-                    if wcs is not None:
-                        wcs[ifilt] = wcs[0]
+                    wcs[ifilt] = wcs[0]
                 else:
                     print(f"Downsampling templates and kernels by factor {k}")
                     tmpls_lo = Templates()
@@ -630,13 +628,37 @@ class Pipeline:
 
             for t in templates:
                 assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
+
+            # @@@ split scenes here
+            # Optional scene-based solver: does not alter legacy path
+            if getattr(config, "run_scene_solver", False):
+                # Work on a copy of templates to avoid affecting legacy loop
+                templates_scene = deepcopy(templates)
+                scenes, labels = generate_scenes(
+                    templates_scene,
+                    images[ifilt],
+                    weights_i,
+                    coupling_thresh=float(config.scene_coupling_thresh),
+                    snr_thresh_astrom=float(config.snr_thresh_astrom),
+                    minimum_bright=int(config.scene_minimum_bright),
+                    max_merge_radius=float(getattr(config, "scene_max_merge_radius", np.inf)),
+                )
+                for s in scenes:
+                    logger.info(f" Scene {s.id}: {len(s.templates)} (bright: {s.is_bright.sum()})")
+
+                niter_scene = max(config.fit_astrometry_niter, 1)
+                for j in range(niter_scene):
+                    logger.info(f"[Scenes] Running iteration {j+1} of {niter_scene}")
+                    for scn in scenes:
+                        scn.set_band(images[ifilt], weights_i, config=config)
+                        scn.solve(config=config, apply_shifts=False)
+
             # fitter_cls = (
             #     GlobalAstroFitter
             #     if (config.fit_astrometry_niter > 0 and config.fit_astrometry_joint)
             #     else SparseFitter
             # )
             fitter_cls = SparseFitter
-
             niter = max(config.fit_astrometry_niter, 1)
             for j in range(niter):
                 print(f"Running iteration {j+1} of {niter}")
@@ -655,6 +677,8 @@ class Pipeline:
                 if config.fit_astrometry_niter > 0 and config.fit_astrometry_joint:
                     Templates.apply_template_shifts(templates)
 
+            print("END of TEMPLATES FITTING")
+
             # one final flux only solve after astrometry
             cfg_noshift = _FitConfig(**config.__dict__)
             cfg_noshift.fit_astrometry_niter = 0
@@ -671,15 +695,16 @@ class Pipeline:
 
             # add soft non-negative priors if fluxes are < 0.0 and resolve.
             # note idx is relative to initial list of templates. But additional templates were added at the end, so idx still works
-            snr = np.divide(fluxes, errs, out=np.zeros_like(errs), where=errs > 0)
-            selneg = snr < config.negative_snr_thresh
-            if np.any(selneg):
-                logger.info(
-                    f"{selneg.sum()} fluxes are negative, applying soft non-negative prior and resolving."
-                )
-                # this updates ata and atb, so we can resolve again
-                scale = np.clip(-snr, 1.0, 5.0)  # more negative → tighter prior
-                fitter.add_flux_priors(selneg, mu=0.0, sigma=(errs / scale))
+
+            # snr = np.divide(fluxes, errs, out=np.zeros_like(errs), where=errs > 0)
+            # selneg = snr < config.negative_snr_thresh
+            # if np.any(selneg):
+            #     logger.info(
+            #         f"{selneg.sum()} fluxes are negative, applying soft non-negative prior and resolving."
+            #     )
+            #     # this updates ata and atb, so we can resolve again
+            #     scale = np.clip(-snr, 1.0, 5.0)  # more negative → tighter prior
+            #     fitter.add_flux_priors(selneg, mu=0.0, sigma=(errs / scale))
 
             fluxes, errs, info = fitter.solve(config=cfg_noshift)
             err_pred = fitter.predicted_errors()
@@ -708,7 +733,7 @@ class Pipeline:
 
         self.table = cat
 
-        return self.table, self.residuals, self.fit
+        return self.table, self.residuals, self.fit, scenes
 
     def plot_result(
         self,

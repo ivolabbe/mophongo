@@ -23,7 +23,7 @@ from .templates import Template, Templates
 import logging
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)  # show info for *this* logger only
+logger.setLevel(logging.DEBUG)  # show info for *this* logger only
 if not logger.handlers:  # avoid duplicate handlers on reloads
     handler = logging.StreamHandler()
     handler.setLevel(logging.INFO)
@@ -64,22 +64,22 @@ class FitConfig:
     fit_astrometry_joint: bool = False  # Use joint astrometry fitting, or separate step
     # --- astrometry options -------------------------------------------------
     reg_astrom: float = 1e-4
-    snr_thresh_astrom: float = 10.0  # 0 → keep all sources (current behaviour)
+    snr_thresh_astrom: float = 15.0  # 0 → keep all sources
     astrom_model: str = "gp"  # 'polynomial' or 'gp'
     astrom_centroid: str = "centroid"  # "centroid" (=old) | "correlation"
-    #    astrom_basis_order: int = 1
     astrom_kwargs: dict[str, dict] = field(
         default_factory=lambda: {"poly": {"order": 1}, "gp": {"length_scale": 400}}
     )
     #    astrom_kwargs={'poly': {'order': 2}, 'gp': {'length_scale': 400}}
     multi_tmpl_chi2_thresh: float = 5.0
-    multi_tmpl_psf_core: bool = True
+    multi_tmpl_psf_core: bool = False
     multi_tmpl_colour: bool = False
     #    multi_resolution_method: str = "upsample"  # 'upsample' or 'downsample'
     multi_resolution_method: str = "upsample"  # 'upsample' or 'downsample'
     normal: str = "tree"  # 'loop' or 'tree'
     scene_merge_small: bool = True  # Merge small scenes before building bases
-    scene_minimum_bright: int = 10  # Minimum bright sources per scene (default: 10)
+    # None → derive from astrometric model order in __post_init__
+    scene_minimum_bright: Optional[int] = None  # Minimum bright sources per scene
     negative_snr_thresh: float = -1.0  # Threshold for negative SNR fluxes to apply soft priors
 
     # Photometry aperture control:
@@ -92,6 +92,21 @@ class FitConfig:
 
     # Internal options: don't change unless you know what you're doing
     block_size: int = 64  # Block size for tiled processing
+
+    # scene processing
+    run_scene_solver: bool = True  # Whether to run the scene solver at all
+    scene_coupling_thresh: float = 1e-4  # 0.1% leakage threshold for scene splitting
+
+    def __post_init__(self):
+        # Derive scene_minimum_bright from astrometric polynomial order if not provided
+        if self.scene_minimum_bright is None:
+            try:
+                poly_order = int(self.astrom_kwargs.get("poly", {}).get("order", 1))
+            except Exception:
+                poly_order = 1
+            # number of Chebyshev terms; fallback formula if n_terms not available
+            n_poly = (poly_order + 1) * (poly_order + 2) // 2
+            self.scene_minimum_bright = n_poly + 1
 
 
 def _diag_inv_hutch(A, k=32, rtol=1e-4, maxiter=None, seed=0):
@@ -1040,6 +1055,15 @@ class SparseFitter:
                 )
             )
 
+            logger.debug(
+                "Scene %d astrometry basis: center=(%.3f, %.3f) scale=(%.3f, %.3f) order=%d",
+                sid,
+                x_cen,
+                y_cen,
+                Sx,
+                Sy,
+                int(order),
+            )
             logger.debug("betas for scene %d: %s", sid, betas[-1][1])
             logger.debug("Scene %d: solved with %d templates, info=%d", sid, len(idx), info)
 
@@ -1120,6 +1144,7 @@ class SparseFitter:
                 maxiter=maxit,
             )
             info = {"cg_info": infos, "nscene": nscene, "betas": betas}
+            print("betas: ", getattr(info, "betas", None))
         else:
             x_w, info = solve_scene_cg(A_w, b_w, scene_ids, rtol=rtol, maxiter=maxit)
             x = x_w / d
@@ -1407,276 +1432,6 @@ def build_scene_tree_old(
     nscene, labels = csgraph.connected_components(adj.tocsr(), directed=False)
 
     return labels.astype(int) + 1, int(nscene)
-
-
-def build_scene_tree(
-    templates: List[Template],
-    bright_mask: np.ndarray,
-    minimum_bright: int = 5,
-) -> tuple[np.ndarray, int]:
-    """
-    Bright-seeded scene builder (Shapely 2.x).
-    1) Components among BRIGHT via bbox intersects.
-    2) Merge underfilled bright components (nearest component centroid) until
-       each has >= p bright sources, where p = len(cheb_basis(0,0,order)).
-    3) Attach FAINT: overlap→component with max area; else nearest component centroid.
-    Returns (labels_1based, nscene).
-    """
-    import numpy as np
-    from shapely.geometry import box, Point
-    from shapely.strtree import STRtree
-    from scipy.sparse import coo_matrix, csgraph
-
-    n = len(templates)
-    if n == 0:
-        return np.zeros(0, dtype=int), 0
-
-    bright_mask = np.asarray(bright_mask, dtype=bool)
-    B = np.flatnonzero(bright_mask)
-    F = np.flatnonzero(~bright_mask)
-
-    # Geometries + centroids (robust to degenerate boxes)
-    geoms = []
-    cx = np.empty(n, float)
-    cy = np.empty(n, float)
-    for i, t in enumerate(templates):
-        (ymin, ymax), (xmin, xmax) = t.bbox_original
-        g = box(xmin, ymin, xmax, ymax)
-        if g.is_empty or g.area <= 0:
-            x0, y0 = t.position_original
-            e = 0.5
-            g = box(x0 - e, y0 - e, x0 + e, y0 + e)
-        geoms.append(g)
-        c = g.centroid
-        cx[i], cy[i] = float(c.x), float(c.y)
-
-    labels = -np.ones(n, dtype=int)
-
-    # If no brights → each template is its own scene (aggressive split)
-    if B.size == 0:
-        labs = np.arange(n, dtype=int)
-        return labs + 1, n
-
-    # If total brights less than threshold, put all into one seed scene
-    if B.size < minimum_bright:
-        labels[B] = 0
-        # attach all faint later to that single component
-        single_seed = True
-    else:
-        single_seed = False
-
-    # ---- 1) bright components via bbox intersects
-    if not single_seed:
-        geoms_B = [geoms[i] for i in B]
-        tree_B = STRtree(geoms_B)
-        ii: list[int] = []
-        jj: list[int] = []
-        for k, gi in enumerate(geoms_B):
-            js = tree_B.query(gi, predicate="intersects")
-            if js.size:
-                js = js[js > k]  # undirected edges
-                if js.size:
-                    ii.extend([k] * js.size)
-                    jj.extend(js.tolist())
-        if ii:
-            adj = coo_matrix((np.ones(len(ii), np.uint8), (ii, jj)), shape=(B.size, B.size))
-            adj = adj + adj.T
-            _, labs_B = csgraph.connected_components(adj.tocsr(), directed=False)
-        else:
-            labs_B = np.arange(B.size, dtype=int)
-
-        # compact 0..K-1
-        _, labs_B = np.unique(labs_B, return_inverse=True)
-        K = int(labs_B.max() + 1)
-
-        # ---- 2) merge underfilled bright components by nearest centroid (exclusive)
-        bx = cx[B]
-        by = cy[B]
-
-        def merge_underfilled(labs_B, K):
-            # union-find helpers
-            parent = np.arange(K, dtype=int)
-
-            def find(a):
-                while parent[a] != a:
-                    parent[a] = parent[parent[a]]
-                    a = parent[a]
-                return a
-
-            def union(a, b):
-                ra, rb = find(a), find(b)
-                if ra != rb:
-                    if ra < rb:
-                        parent[rb] = ra
-                    else:
-                        parent[ra] = rb
-
-            counts = np.bincount(labs_B, minlength=K)
-            valid = counts > 0
-            ids = np.nonzero(valid)[0]
-            if ids.size <= 1:
-                return labs_B, K, False
-
-            under = ids[counts[ids] < minimum_bright]
-            if under.size == 0:
-                return labs_B, K, False
-
-            sumx = np.bincount(labs_B, weights=bx, minlength=K)
-            sumy = np.bincount(labs_B, weights=by, minlength=K)
-            cxC = np.full(K, np.nan)
-            cyC = np.full(K, np.nan)
-            cxC[valid] = sumx[valid] / counts[valid]
-            cyC[valid] = sumy[valid] / counts[valid]
-
-            pts_all = [Point(cxC[i], cyC[i]) for i in ids]
-            treeC = STRtree(pts_all)
-            q_pts = [Point(cxC[i], cyC[i]) for i in under]
-
-            # critical: exclusive=True avoids self-pairing (distance 0).
-            (qa, qb), dists = treeC.query_nearest(q_pts, return_distance=True, exclusive=True)
-            qa = np.asarray(qa, int)
-            qb = np.asarray(qb, int)
-            dists = np.asarray(dists, float)
-
-            # pick the closest target per query (handles ties)
-            best_to = np.full(under.size, -1, int)
-            best_d = np.full(under.size, np.inf, float)
-            for q, b, d in zip(qa, qb, dists):
-                src_comp = under[q]
-                dst_comp = ids[b]
-                if d < best_d[q]:
-                    best_d[q] = d
-                    best_to[q] = dst_comp
-
-            pairs = [(u, v) for u, v in zip(under, best_to) if v >= 0 and u != v]
-            if not pairs:
-                return labs_B, K, False
-
-            # union merges
-            for u, v in dict.fromkeys(pairs):
-                union(u, v)
-
-            reps = np.array([find(i) for i in range(K)], int)
-            new_labs = reps[labs_B]
-            if np.array_equal(new_labs, labs_B):
-                return labs_B, K, False
-
-            # re-pack to 0..K'-1
-            _, new_labs = np.unique(new_labs, return_inverse=True)
-            return new_labs, int(new_labs.max() + 1), True
-
-        changed = True
-        it = 0
-        while changed and it < 256:
-            labs_B, K, changed = merge_underfilled(labs_B, K)
-            it += 1
-
-        labels[B] = labs_B
-    # else: single_seed already set labels[B]=0
-
-    # ---- 3) attach FAINT
-    if F.size:
-        geoms_B = [geoms[i] for i in B]
-        tree_overlap_B = STRtree(geoms_B)
-
-        # overlap preference
-        for i in F:
-            gi = geoms[i]
-            js = tree_overlap_B.query(gi, predicate="intersects")
-            if js.size:
-                areas = [gi.intersection(geoms_B[int(j)]).area for j in js]
-                if areas and np.max(areas) > 0.0:
-                    jbest = int(js[int(np.argmax(areas))])
-                    labels[i] = labs_B_local[jbest]
-
-        # nearest centroid fallback
-        rem = np.where(labels[F] < 0)[0]
-        if rem.size:
-            # current scene ids among brights
-            sc_ids = np.unique(labels[B])
-            sc_ids = sc_ids[sc_ids >= 0]
-            # centroids per scene from *bright* members
-            bx = cx[B]
-            by = cy[B]
-            labsB = labels[B]
-            counts = np.bincount(labsB)
-            sumx = np.bincount(labsB, weights=bx)
-            sumy = np.bincount(labsB, weights=by)
-            cxC = sumx / np.maximum(counts, 1)
-            cyC = sumy / np.maximum(counts, 1)
-            ptsC = [Point(float(cxC[s]), float(cyC[s])) for s in range(cxC.size)]
-            treeC = STRtree(ptsC)
-
-            q_pts = [Point(cx[F[k]], cy[F[k]]) for k in rem]
-            (qa, qb), dists = treeC.query_nearest(q_pts, return_distance=True)
-            qa = np.asarray(qa, int)
-            qb = np.asarray(qb, int)
-
-            m = rem.size
-            best_d = np.full(m, np.inf, float)
-            best_qb = np.full(m, -1, int)
-            for q, b, d in zip(qa, qb, dists):
-                if d < best_d[q]:
-                    best_d[q] = d
-                    best_qb[q] = b
-
-            good = best_qb >= 0
-            if np.any(good):
-                labels[F[rem[good]]] = best_qb[good]
-
-    # ---- 4) final guarantee on bright counts
-    labs = labels.copy()
-    # pack to 0..K-1 first
-    _, labs = np.unique(labs, return_inverse=True)
-    # bright counts per scene
-    bcounts = np.bincount(labs[B], minlength=labs.max() + 1)
-    under = np.flatnonzero(bcounts < minimum_bright)
-    if under.size and (labs.max() + 1) > 1:
-        # scene centroids from *bright* members when present, else all members
-        K = labs.max() + 1
-        cxS = np.zeros(K)
-        cyS = np.zeros(K)
-        cntS = np.zeros(K)
-        # try bright-only
-        for s in range(K):
-            idx = B[labs[B] == s]
-            if idx.size:
-                cxS[s] = cx[idx].mean()
-                cyS[s] = cy[idx].mean()
-                cntS[s] = idx.size
-        # fill scenes without brights using all members
-        for s in range(K):
-            if cntS[s] == 0:
-                idx = np.flatnonzero(labs == s)
-                cxS[s] = cx[idx].mean()
-                cyS[s] = cy[idx].mean()
-
-        from shapely.strtree import STRtree
-
-        pts_all = [Point(cxS[s], cyS[s]) for s in range(K)]
-        treeS = STRtree(pts_all)
-
-        strong = np.flatnonzero(bcounts >= minimum_bright)
-        if strong.size == 0:
-            # collapse everything into one
-            labs[:] = 0
-        else:
-            q_pts = [pts_all[s] for s in under]
-            tgt_pts = [pts_all[s] for s in strong]
-            # map under → nearest strong (build tree only on strong)
-            treeStrong = STRtree(tgt_pts)
-            (qa, qb), _ = treeStrong.query_nearest(q_pts, return_distance=True)
-            qa = np.asarray(qa, int)
-            qb = np.asarray(qb, int)
-            # apply merges
-            remap = np.arange(K, dtype=int)
-            for src, ti in zip(under[qa], strong[qb]):
-                remap[src] = ti
-            labs = remap[labs]
-
-    # final pack 1..K
-    uniq, inv = np.unique(labs, return_inverse=True)
-    return (inv + 1).astype(int), int(uniq.size)
 
 
 def merge_small_scenes_old(

@@ -726,14 +726,26 @@ class Scene:
     def plot(self, image: np.ndarray, ax=None, **imshow_kwargs):
         pass
 
+    def model_image(self) -> np.ndarray:
+        """Return the model image over the scene's bounding box."""
+        if self.solution is None:
+            raise RuntimeError("No solution available")
+        bb = self.bbox
+        model_scene = np.zeros((bb[1] - bb[0], bb[3] - bb[2]), dtype=float)
+        for t in self.templates:
+            sl = t.slices_original
+            sl_local_scene = (
+                slice(sl[0].start - bb[0], sl[0].stop - bb[0]),
+                slice(sl[1].start - bb[2], sl[1].stop - bb[2]),
+            )
+            model_scene[sl_local_scene] += t.flux * t.data[t.slices_cutout]
+        return model_scene
+
     def residual(self) -> np.ndarray:
         """Return image-model residual over the scene's bounding box."""
-        if self._solution is None:
-            raise RuntimeError("No solution available")
-        model = np.zeros_like(self.image)
-        for amp, tmpl in zip(self._solution.flux, self.templates):
-            model += tmpl.data[tmpl.slices_cutout] * amp
-        return self._image - model
+        bb = self.bbox
+        res_scene = self.image[bb[0] : bb[1], bb[2] : bb[3]] - self.model_image()
+        return res_scene
 
     # ------------------------------------------------------------------
     # Placeholders for future extensions

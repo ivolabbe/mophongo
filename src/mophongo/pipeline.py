@@ -728,8 +728,6 @@ class Pipeline:
                 ifilt,
             )
 
-            if "astro" in locals():
-                self.astro.append(astro)
             self.residuals.append(res)
             self.fit.append(fitter)
             self.all_templates.append(templates)

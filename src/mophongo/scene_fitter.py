@@ -216,11 +216,11 @@ class SceneFitter:
         Linv = np.linalg.inv(L)
 
         A_w = Dinv @ Areg @ Dinv
-        # AB_w becomes dense due to @ Linv; that’s fine, keep dense and avoid sparse ops later
-        AB_w = (Dinv @ AB) @ Linv
+        # whiten flux-shift coupling with inverse Cholesky factor
+        AB_w = (Dinv @ AB) @ Linv.T
         BB_wI = sp.eye(BB.shape[0], format="csr")
         b_w = Dinv @ b
-        bB_w = Linv.T @ bB
+        bB_w = Linv @ bB
 
         # --- joint solve in whitened variables
         K = sp.bmat([[A_w, AB_w], [AB_w.T, BB_wI]], format="csr")
@@ -239,7 +239,7 @@ class SceneFitter:
 
         # unwhiten
         x = xw / d
-        beta = np.linalg.solve(L, betaw)
+        beta = np.linalg.solve(L.T, betaw)
 
         # errors: diagonal of Schur(A_w - AB_w AB_wᵀ) without mixing sparse/dense
         if sp.isspmatrix(AB_w):

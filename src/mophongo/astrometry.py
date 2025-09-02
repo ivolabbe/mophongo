@@ -31,12 +31,18 @@ warnings.filterwarnings("ignore", module="photutils.centroids.core")
 
 
 def cheb_basis(x: float, y: float, order: int) -> np.ndarray:
-    """Return Chebyshev basis values T_i(x)T_j(y) up to ``order``."""
-    u = 2 * x - 1.0
-    v = 2 * y - 1.0
-    tx = [chebval(u, [0] * i + [1]) for i in range(order + 1)]
-    ty = [chebval(v, [0] * j + [1]) for j in range(order + 1)]
-    phi = []
+    """Return Chebyshev basis values ``T_i(x) T_j(y)`` up to ``order``.
+
+    Parameters
+    ----------
+    x, y : float
+        Coordinates scaled to the ``[-1, 1]`` range.
+    order : int
+        Maximum polynomial order.
+    """
+    tx = [chebval(x, [0] * i + [1]) for i in range(order + 1)]
+    ty = [chebval(y, [0] * j + [1]) for j in range(order + 1)]
+    phi: list[float] = []
     for i in range(order + 1):
         for j in range(order + 1 - i):
             phi.append(tx[i] * ty[j])
@@ -68,7 +74,7 @@ def basis_matrix(templates, shape, order):
     mat = np.zeros((len(templates), n_terms(order)), dtype=float)
     for i, tmpl in enumerate(templates):
         x, y = tmpl.input_position_original
-        mat[i] = cheb_basis(x / (w - 1), y / (h - 1), order)
+        mat[i] = cheb_basis(2 * x / (w - 1) - 1, 2 * y / (h - 1) - 1, order)
     return mat
 
 
@@ -242,13 +248,23 @@ def fit_polynomial_field(
 ) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]:
     """Fit a polynomial shift field and return a prediction function."""
 
-    phi = np.array([cheb_basis(x / (shape[1] - 1), y / (shape[0] - 1), order) for x, y in pos])
+    phi = np.array(
+        [
+            cheb_basis(2 * x / (shape[1] - 1) - 1, 2 * y / (shape[0] - 1) - 1, order)
+            for x, y in pos
+        ]
+    )
     W = np.diag(w)
     coeff_x = np.linalg.solve(phi.T @ W @ phi, phi.T @ (w * dx))
     coeff_y = np.linalg.solve(phi.T @ W @ phi, phi.T @ (w * dy))
 
     def predict(p):
-        phi_p = np.array([cheb_basis(x / (shape[1] - 1), y / (shape[0] - 1), order) for x, y in p])
+        phi_p = np.array(
+            [
+                cheb_basis(2 * x / (shape[1] - 1) - 1, 2 * y / (shape[0] - 1) - 1, order)
+                for x, y in p
+            ]
+        )
         return phi_p @ coeff_x, phi_p @ coeff_y
 
     return predict

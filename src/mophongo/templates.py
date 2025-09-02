@@ -80,6 +80,10 @@ def _bbox_from_slices(sl):
     return ((sl[0].start, sl[0].stop - 1), (sl[1].start, sl[1].stop - 1))
 
 
+def _slices_from_bbox(bbox):
+    return (slice(bbox[0], bbox[1] + 1), slice(bbox[2], bbox[3] + 1))
+
+
 def _block_reduce(arr: np.ndarray, fact: int, func=np.sum) -> np.ndarray:
     """
     Fast 2-D block reduction by integer `fact` (flux-conserving with func=np.sum).

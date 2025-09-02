@@ -18,7 +18,7 @@ from .fit import FitConfig as FitConfig
 from .templates import _slices_from_bbox
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)  # show info for *this* logger only
+logger.setLevel(logging.INFO)  # show info for *this* logger only
 if not logger.handlers:  # avoid duplicate handlers on reloads
     handler = logging.StreamHandler()
     handler.setLevel(logging.INFO)
@@ -575,15 +575,17 @@ class Scene:
     image: np.ndarray | None = None
     weights: np.ndarray | None = None
     config: FitConfig | None = None
-    shift_basis: np.ndarray | None = None
+    shift_basis: List | None = None
     flux: np.ndarray | None = None
     err: np.ndarray | None = None
-    beta: np.ndarray | None = None
+    shifts: np.ndarray | None = None
     is_bright: np.ndarray | None = None  # per-template
-    info: int | None = None
+    #    info: int | None = None
+    solution: SimpleNamespace | None = None
     # store per-scene normal blocks (scene-local ordering)
     A: sp.csr_matrix | None = None
     b: np.ndarray | None = None
+    tree: STRtree | None = None  # STRtree over templates in this scene
 
     def __post_init__(self) -> None:
         pass
@@ -625,7 +627,7 @@ class Scene:
             # build normal from current band
             from .scene_fitter import build_normal
 
-            self.A, self.b, _ = build_normal(self.templates, self.image, self.weights)
+            self.A, self.b, self.tree = build_normal(self.templates, self.image, self.weights)
 
         A, b = self.A, self.b
 
@@ -646,14 +648,16 @@ class Scene:
             # joint path: build basis and coupling blocks
             order = int(cfg.astrom_kwargs["poly"]["order"])  # assume defined in cfg
 
-            self.basis, (x0, y0), (Sx, Sy) = make_scene_basis(
+            basis, (x0, y0), (Sx, Sy) = make_scene_basis(
                 self.templates, self.is_bright, order=order
             )
+            self.shift_basis = [basis, (x0, y0), (Sx, Sy)]
+
             AB, BB, bB = assemble_scene_system_AB(
                 self.templates,
                 self.image,
                 self.weights,
-                self.basis,
+                basis,
                 alpha0=alpha0,
                 order=order,
                 include_y=True,
@@ -699,8 +703,8 @@ class Scene:
             logger.debug(f"[scenes] betas {self.id}:{self.shifts}")
 
         # store solution
-
         self.solution = sol
+
         #        self.flux, self.err, self.info = sol.flux, sol.err, sol.shifts, sol.info
         for tmpl, flux, err, bright in zip(self.templates, sol.flux, sol.err, self.is_bright):
             tmpl.flux = flux
@@ -708,6 +712,38 @@ class Scene:
             tmpl.is_bright = bright
 
         return sol.flux, sol.err, sol.shifts, sol.info
+
+    def shift_at(self, x: ndarray, y: ndarray) -> Tuple[ndarray, ndarray]:
+        """Evaluate the fitted shift at positions (x, y)."""
+
+        if self.shifts is None or self.shift_basis is None or self.tree is None:
+            return np.zeros_like(x), np.zeros_like(y)
+
+        # Ensure x, y are arrays
+        x = np.atleast_1d(x)
+        y = np.atleast_1d(y)
+
+        # Convert coordinates to Shapely Point objects
+        from shapely.geometry import Point
+
+        pts = [Point(float(xi), float(yi)) for xi, yi in zip(x, y)]
+
+        # Query nearest template(s) for each (x, y)
+        nearest_idxs = self.tree.nearest(pts)
+        # nearest_idxs: indices into self.templates
+
+        # For each query point, get the shift of the nearest template
+        shifts = np.zeros((len(pts), 2), dtype=float)
+        for i, idx in enumerate(nearest_idxs):
+            if hasattr(self.templates[idx], "to_shift"):
+                shifts[i] = self.templates[idx].shifted
+            else:
+                shifts[i] = [0.0, 0.0]
+
+        # If input was scalar, return scalars
+        if np.isscalar(x) and np.isscalar(y):
+            return float(shifts[0, 0]), float(shifts[0, 1])
+        return shifts[:, 0], shifts[:, 1]
 
     @staticmethod
     def overlay_scene_graph(
@@ -757,19 +793,19 @@ class Scene:
         """
 
         from copy import deepcopy
-        import matplotlib.pyplot as plt
-        import numpy as np
         from astropy.visualization import make_lupton_rgb
         from photutils.segmentation import SegmentationImage
+        import matplotlib.pyplot as plt
+        from astropy.wcs.utils import proj_plane_pixel_scales
 
         if self.image is None or self.bbox is None:
-            raise RuntimeError("Scene image/bbox not set")
+            raise ValueError("Scene has no image data or bounding box")
 
         y0, y1, x0, x1 = self.bbox
-
-        tmpl_cut = tmpl_image[y0:y1, x0:x1]
-        seg_cut = seg_image[y0:y1, x0:x1]
-        img_cut = self.image[y0:y1, x0:x1]
+        sl = _slices_from_bbox(self.bbox)
+        tmpl_cut = tmpl_image[sl]
+        seg_cut = seg_image[sl]
+        img_cut = self.image[sl]
 
         scene_cut = np.zeros_like(seg_cut)
         scene_cut[seg_cut > 0] = int(self.id)
@@ -788,56 +824,169 @@ class Scene:
         col_cut = make_lupton_rgb(r, g, b, stretch=display_sig / 1.5)
 
         aspect = img_cut.shape[1] / img_cut.shape[0]
+
+        # Create figure if not provided
         if ax is None:
-            fig, ax = plt.subplots(3, 2, figsize=(10, 13 / aspect))
+            fig, ax = plt.subplots(2, 3, figsize=(15, 10))
             ax = ax.flatten()
+            created_fig = True
         else:
-            ax = np.asarray(ax).flatten()
             fig = ax[0].figure
+            created_fig = False
 
-        images = [tmpl_cut, seg_cut, img_cut, model_cut, res_cut, col_cut]
-        titles = [
-            "template + scenes",
-            "segmap",
-            "image",
-            "model image",
-            "residual",
-            "color",
-        ]
+        # Plot panels
+        images = [tmpl_cut, img_cut, model_cut, seg_cut, res_cut, col_cut]
+        titles = ["Template", "Image", "Model", "Segmap", "Residual", "Color"]
 
-        ivalid = img_cut != 0
-        v = (
-            display_sig * np.nanstd(img_cut[ivalid])
-            if np.any(np.isfinite(img_cut[ivalid]))
-            else 1.0
-        )
-
-        for i, (im, title) in enumerate(zip(images, titles)):
-            if title == "segmap":
-                ax[i].imshow(im, origin="lower", cmap=segmap_cmap, interpolation="nearest")
-            elif title == "color":
-                ax[i].imshow(im, origin="lower", interpolation="nearest")
-            else:
+        for i, (img, title) in enumerate(zip(images, titles)):
+            if "Segmap" in title:
+                ax[i].imshow(img, origin="lower", cmap=segmap_cmap, interpolation="nearest")
+            elif "Residual" in title:  # residual
+                std = np.nanstd(img)
                 ax[i].imshow(
-                    im,
+                    img,
                     origin="lower",
                     cmap="gray",
-                    vmin=-v,
-                    vmax=v,
+                    vmin=-display_sig * std,
+                    vmax=display_sig * std,
                     **imshow_kwargs,
                 )
-                if i == 0:
-                    ax[i].imshow(
-                        scene_cut,
-                        origin="lower",
-                        cmap=scene_cmap,
-                        alpha=0.5,
-                        interpolation="nearest",
-                    )
-            ax[i].set_title(title)
+            elif "Color" in title:  # color
+                ax[i].imshow(img, origin="lower", **imshow_kwargs)
+            else:
+                std = np.nanstd(img)
+                ax[i].imshow(
+                    img,
+                    origin="lower",
+                    cmap="gray",
+                    vmin=-display_sig * std,
+                    vmax=display_sig * std,
+                    **imshow_kwargs,
+                )
 
-        plt.tight_layout()
-        return fig, ax
+            ax[i].set_title(title)
+            ax[i].set_xticks([])
+            ax[i].set_yticks([])
+
+        # Add shift field overlay on the model panel (index 3)
+        if self.shifts is not None and self.shift_basis is not None and len(self.templates) > 0:
+            model_ax = ax[2]
+
+            # Create a coarse grid for displaying shifts
+            h, w = model_cut.shape
+            step = max(h // 7, w // 7, 10)  # ~15 arrows per dimension, minimum 10 pixels
+
+            y_grid, x_grid = np.mgrid[step // 2 : h : step, step // 2 : w : step]
+            dx_grid = np.zeros_like(x_grid, dtype=float)
+            dy_grid = np.zeros_like(y_grid, dtype=float)
+
+            # Get shifts at grid positions (convert to scene coordinates)
+            for i in range(x_grid.shape[0]):
+                for j in range(x_grid.shape[1]):
+                    # Convert cutout coordinates to original image coordinates
+                    x_orig = x_grid[i, j] + x0
+                    y_orig = y_grid[i, j] + y0
+
+                    try:
+                        dx, dy = self.shift_at(x_orig, y_orig)
+                        dx_grid[i, j] = dx
+                        dy_grid[i, j] = dy
+                    except:
+                        # If shift_at fails, use zero shift
+                        dx_grid[i, j] = 0.0
+                        dy_grid[i, j] = 0.0
+
+            # Scale arrows for visibility (make them ~1/20 of the image size)
+            max_shift = np.sqrt(dx_grid**2 + dy_grid**2).max()
+            if max_shift > 0:
+                arrow_scale = min(h, w) / 20.0 / max_shift
+                dx_display = dx_grid * arrow_scale
+                dy_display = dy_grid * arrow_scale
+
+                # Plot quiver arrows
+                model_ax.quiver(
+                    x_grid,
+                    y_grid,
+                    dx_display,
+                    dy_display,
+                    color="red",
+                    angles="xy",
+                    scale_units="xy",
+                    scale=1,
+                    alpha=0.8,
+                    width=0.003,
+                    headwidth=3,
+                    headlength=3,
+                )
+
+            # Add size bar to show 1 pixel scale
+            # Try to get pixel scale from template WCS if available
+            pixel_scale_arcsec = None
+            if hasattr(self.templates[0], "wcs") and self.templates[0].wcs is not None:
+                try:
+                    scales = proj_plane_pixel_scales(self.templates[0].wcs)
+                    pixel_scale_arcsec = float(scales[0] * 3600)  # convert to arcsec
+                except:
+                    pass
+
+            # Position size bar in bottom-right corner
+            bar_length = 1.0  # 1 pixel
+            bar_x = w - 0.15 * w
+            bar_y = 0.1 * h
+
+            # Draw the size bar
+            model_ax.plot(
+                [bar_x, bar_x + bar_length],
+                [bar_y, bar_y],
+                color="white",
+                linewidth=3,
+                solid_capstyle="butt",
+            )
+            model_ax.plot(
+                [bar_x, bar_x + bar_length],
+                [bar_y, bar_y],
+                color="black",
+                linewidth=1,
+                solid_capstyle="butt",
+            )
+
+            # Add label
+            if pixel_scale_arcsec is not None:
+                label = f'1 pix = {pixel_scale_arcsec:.3f}"'
+            else:
+                label = "1 pixel"
+
+            model_ax.text(
+                bar_x + bar_length / 2,
+                bar_y - 0.03 * h,
+                label,
+                ha="center",
+                va="top",
+                color="white",
+                fontsize=8,
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="black", alpha=0.7),
+            )
+
+            # Add shift scale indicator
+            if max_shift > 0:
+                shift_text = f"Max shift: {max_shift:.2f} pix"
+                model_ax.text(
+                    0.02,
+                    0.98,
+                    shift_text,
+                    transform=model_ax.transAxes,
+                    va="top",
+                    ha="left",
+                    color="red",
+                    fontsize=8,
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8),
+                )
+
+        if created_fig:
+            plt.tight_layout()
+            return fig, ax
+        else:
+            return fig, ax
 
     def model_image(self) -> np.ndarray:
         """Return the model image over the scene's bounding box."""

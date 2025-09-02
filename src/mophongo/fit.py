@@ -49,7 +49,7 @@ if not logger.handlers:  # avoid duplicate handlers on reloads
 class FitConfig:
     """Configuration options for :class:`SparseFitter`."""
 
-    positivity: bool = False
+    positivity: bool = True
     reg: float = 0.0
     bad_value: float = np.nan
     solve_method: str = "scene"  # 'all', 'scene', 'lo' (linear operator)
@@ -68,7 +68,7 @@ class FitConfig:
     astrom_model: str = "gp"  # 'polynomial' or 'gp'
     astrom_centroid: str = "centroid"  # "centroid" (=old) | "correlation"
     astrom_kwargs: dict[str, dict] = field(
-        default_factory=lambda: {"poly": {"order": 1}, "gp": {"length_scale": 400}}
+        default_factory=lambda: {"poly": {"order": 0}, "gp": {"length_scale": 400}}
     )
     #    astrom_kwargs={'poly': {'order': 2}, 'gp': {'length_scale': 400}}
     multi_tmpl_chi2_thresh: float = 5.0
@@ -95,7 +95,7 @@ class FitConfig:
 
     # scene processing
     run_scene_solver: bool = True  # Whether to run the scene solver at all
-    scene_coupling_thresh: float = 1e-4  # 0.1% leakage threshold for scene splitting
+    scene_coupling_thresh: float = 1e-2  # 1% leakage threshold for scene splitting
 
     def __post_init__(self):
         # Derive scene_minimum_bright from astrometric polynomial order if not provided

@@ -219,7 +219,9 @@ class GlobalAstroFitter(SparseFitter):
             return 0.0, 0.0
 
         h, w = self.image.shape
-        phi = astrometry.cheb_basis(x_pix / (w - 1), y_pix / (h - 1), self.basis_order)
+        phi = astrometry.cheb_basis(
+            2 * x_pix / (w - 1) - 1, 2 * y_pix / (h - 1) - 1, self.basis_order
+        )
         return float(self.alpha @ phi), float(self.beta @ phi)
 
     # ------------------------------------------------------------

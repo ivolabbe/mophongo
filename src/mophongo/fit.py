@@ -104,7 +104,7 @@ class FitConfig:
             try:
                 poly_order = int(self.astrom_kwargs.get("poly", {}).get("order", 1))
             except Exception:
-                poly_order = 1
+                poly_order = 0
             # default to 2x # of Chebyshev terms + 1
             n_poly = (poly_order + 1) * (poly_order + 2)
             self.scene_minimum_bright = n_poly + 1

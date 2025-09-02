@@ -32,7 +32,7 @@ from .scene import generate_scenes
 import logging
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)  # show info for *this* logger only
+# logger.setLevel(logging.INFO)  # show info for *this* logger only
 if not logger.handlers:  # avoid duplicate handlers on reloads
     handler = logging.StreamHandler()
     handler.setLevel(logging.INFO)
@@ -359,6 +359,7 @@ class Pipeline:
             else:
                 fwhm_pix = None
             rad_pix = 1.5 * fwhm_pix if fwhm_pix and fwhm_pix > 0 else 3.0
+            logger.info(f"Using aperture diam 1.5x fwhm {2*rad_pix:.2f} pix for image {idx}")
             return float(rad_pix)
 
         # convert diameter to pixels if needed
@@ -370,7 +371,9 @@ class Pipeline:
         else:
             return float(diam / 2.0)  # already in pixels
 
-    def _resolve_catalog_ap_radius_pix(self, cat: Table, cfg: _FitConfig) -> dict[int, float]:
+    def _resolve_catalog_ap_radius_pix(
+        self, cat: Table, cfg: _FitConfig, r_default: float | None = None
+    ) -> dict[int, float]:
         """
         Return per-source catalog aperture *radius in pixels of the reference image (idx=0)*.
 
@@ -384,28 +387,15 @@ class Pipeline:
         # get reference pixel scale
         pscale_ref = self._pixel_scale_arcsec(self.wcs[0] if self.wcs is not None else None)
 
-        # default diameter if None: 1.5 × FWHM(PSF[0]) in pixels
-        def _default_rad_pix():
-            fwhm0 = None
-            if self.psfs is not None and len(self.psfs) > 0:
-                psf0 = self.psfs[0]
-                if isinstance(psf0, np.ndarray):
-                    fwhm0 = self._gaussian_fwhm_pix(psf0)
-                else:
-                    try:
-                        fwhm0 = self._gaussian_fwhm_pix(psf0.psfs[0])
-                    except Exception:
-                        fwhm0 = None
-            return float(1.5 * fwhm0) if fwhm0 and fwhm0 > 0 else 3.0
-
         out: dict[int, float] = {}
 
+        # if no catalog, default to r_default for all (if given)
         if cfg.aperture_catalog is None:
-            rad_pix = _default_rad_pix()
             for i, _ in enumerate(cat["id"]):
-                out[int(cat["id"][i])] = rad_pix
+                out[int(cat["id"][i])] = r_default
             return out
 
+        # get from catalog
         if isinstance(cfg.aperture_catalog, (int, float)):
             diam = float(cfg.aperture_catalog)
             if cfg.aperture_units.lower().startswith("arc"):
@@ -437,8 +427,8 @@ class Pipeline:
 
     def _aperture_sum_on_template(self, tmpl: Template, radius_pix: float) -> float:
         """Exact aperture sum on a template image centered on its own center."""
-        x0 = tmpl.input_position_cutout[0] - tmpl.slices_cutout[1].start
-        y0 = tmpl.input_position_cutout[1] - tmpl.slices_cutout[0].start
+        x0 = tmpl.input_position_cutout[0]  # - tmpl.slices_cutout[1].start
+        y0 = tmpl.input_position_cutout[1]  # - tmpl.slices_cutout[0].start
         aper = CircularAperture((float(x0), float(y0)), r=float(radius_pix))
         phot = aperture_photometry(tmpl.data, aper, method="exact")
         return float(phot["aperture_sum"][0])
@@ -469,7 +459,7 @@ class Pipeline:
         id_to_row = {int(i): k for k, i in enumerate(cat["id"])}
 
         # ensure columns exist
-        for name in (f"ap_flux_raw_{idx}", f"ap_corr_{idx}", f"ap_flux_{idx}"):
+        for name in (f"ap_model_{idx}", f"ap_flux_{idx}", f"ap_corr_{idx}", f"ap_flux_corr_{idx}"):
             if name not in cat.colnames:
                 cat[name] = cfg.bad_value
 
@@ -477,7 +467,7 @@ class Pipeline:
         r_img_pix = self._resolve_image_ap_radius_pix(
             idx, cfg
         )  # same for all in this band (by design)
-        r_cat_pix_by_id = self._resolve_catalog_ap_radius_pix(cat, cfg)
+        r_cat_pix_by_id = self._resolve_catalog_ap_radius_pix(cat, cfg, r_default=r_img_pix)
 
         # map parent id -> original (pre-convolution) template on the ref image
         ref_tmpls = {int(t.id): t for t in self.tmpls.templates}
@@ -513,15 +503,18 @@ class Pipeline:
             # denominator: current *convolved* template with *image* aperture
             den = self._aperture_sum_on_template(tmpl, r_img_pix)
 
+            ap_model = fl * den  # aperture flux on model only (for info)
+
             # safe correction
             corr = num / den if (np.isfinite(num) and np.isfinite(den) and den > 0) else 1.0
             ap_corr = ap_raw * corr
 
-            cat[f"ap_flux_raw_{idx}"][row] = ap_raw
+            cat[f"ap_model_{idx}"][row] = ap_model
+            cat[f"ap_flux_{idx}"][row] = ap_raw
             cat[f"ap_corr_{idx}"][row] = corr
-            cat[f"ap_flux_{idx}"][row] = ap_corr
+            cat[f"ap_flux_corr_{idx}"][row] = ap_corr
 
-    def run(self, config: FitConfig | None = None) -> tuple[Table, list[np.ndarray], SparseFitter]:
+    def run(self, config: FitConfig | None = None) -> tuple[Table, list[np.ndarray]]:
         """Run photometry on the configured images.
 
         Returns
@@ -550,6 +543,8 @@ class Pipeline:
         wcs = self.wcs
         if config is None:
             config = self.config
+        else:
+            self.config = config
 
         print(f"Pipeline (start) memory: {memory():.1f} GB")
         print(f"Pipeline config: {config}")

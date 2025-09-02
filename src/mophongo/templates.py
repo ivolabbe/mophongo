@@ -915,11 +915,12 @@ class Templates:
             inverse_epred = np.sqrt(np.sum(w * tmpl.data[tmpl.slices_cutout] ** 2))
             if inverse_epred > 0:
                 pred[i] = 1.0 / inverse_epred
-            else:
-                print(
+            else:  # @@@ need to debug why this happens should never have zero weight
+                logger.debug(
                     f"error for template {i}: {inverse_epred} FLAG_SUM_ZERO {tmpl.flag & Template.FLAG_SUM_ZERO}"
                 )
                 tmpl.flag |= Template.FLAG_SUM_ZERO
+
             tmpl.err = pred[i]  # Store RMS in the template for later use
         return pred
 

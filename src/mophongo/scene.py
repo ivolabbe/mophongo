@@ -723,8 +723,124 @@ class Scene:
         y0b, y1b, x0b, x1b = b
         return not (y1a <= y0b or y1b <= y0a or x1a <= x0b or x1b <= x0a)
 
-    def plot(self, image: np.ndarray, ax=None, **imshow_kwargs):
-        pass
+    def plot(
+        self,
+        image: np.ndarray,
+        display_sig: float = 3.0,
+        ax=None,
+        **imshow_kwargs,
+    ) -> tuple["matplotlib.figure.Figure", np.ndarray]:
+        """Plot diagnostic view of the scene.
+
+        Parameters
+        ----------
+        image
+            High-resolution template image corresponding to ``self.image``.
+        display_sig
+            Sigma level used to scale grayscale panels. Defaults to ``3``.
+        ax
+            Optional array of matplotlib axes to draw on.
+        **imshow_kwargs
+            Additional keyword arguments forwarded to ``imshow`` for grayscale
+            panels.
+
+        Returns
+        -------
+        tuple
+            Matplotlib figure and flattened array of axes.
+        """
+
+        from copy import deepcopy
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from astropy.visualization import make_lupton_rgb
+        from photutils.segmentation import SegmentationImage
+
+        if self.image is None or self.bbox is None:
+            raise RuntimeError("Scene image/bbox not set")
+
+        y0, y1, x0, x1 = self.bbox
+
+        tmpl_cut = image[y0:y1, x0:x1]
+        img_cut = self.image[y0:y1, x0:x1]
+
+        seg_cut = np.zeros_like(img_cut, dtype=int)
+        for tmpl in self.templates:
+            sl = tmpl.slices_original
+            sl_local = (
+                slice(sl[0].start - y0, sl[0].stop - y0),
+                slice(sl[1].start - x0, sl[1].stop - x0),
+            )
+            mask = tmpl.data[tmpl.slices_cutout] != 0
+            seg_cut[sl_local][mask] = int(getattr(tmpl, "id", 0))
+
+        scene_cut = np.zeros_like(seg_cut)
+        scene_cut[seg_cut > 0] = int(self.id)
+
+        segm = SegmentationImage(seg_cut)
+        segmap_cmap = segm.cmap
+        scene_cmap = deepcopy(segmap_cmap)
+        scene_cmap.colors[0] = (1.0, 1.0, 1.0, 0.0)
+
+        model_cut = self.model_image()
+        res_cut = self.residual()
+
+        b = tmpl_cut / np.nanstd(tmpl_cut) if np.nanstd(tmpl_cut) != 0 else tmpl_cut
+        r = img_cut / np.nanstd(img_cut) if np.nanstd(img_cut) != 0 else img_cut
+        g = (r + b) / 2.0
+        col_cut = make_lupton_rgb(r, g, b, stretch=display_sig / 1.5)
+
+        aspect = img_cut.shape[1] / img_cut.shape[0]
+        if ax is None:
+            fig, ax = plt.subplots(3, 2, figsize=(10, 13 / aspect))
+            ax = ax.flatten()
+        else:
+            ax = np.asarray(ax).flatten()
+            fig = ax[0].figure
+
+        images = [tmpl_cut, seg_cut, img_cut, model_cut, res_cut, col_cut]
+        titles = [
+            "template + scenes",
+            "segmap",
+            "image",
+            "model image",
+            "residual",
+            "color",
+        ]
+
+        ivalid = img_cut != 0
+        v = (
+            display_sig * np.nanstd(img_cut[ivalid])
+            if np.any(np.isfinite(img_cut[ivalid]))
+            else 1.0
+        )
+
+        for i, (im, title) in enumerate(zip(images, titles)):
+            if title == "segmap":
+                ax[i].imshow(im, origin="lower", cmap=segmap_cmap, interpolation="nearest")
+            elif title == "color":
+                ax[i].imshow(im, origin="lower", interpolation="nearest")
+            else:
+                ax[i].imshow(
+                    im,
+                    origin="lower",
+                    cmap="gray",
+                    vmin=-v,
+                    vmax=v,
+                    **imshow_kwargs,
+                )
+                if i == 0:
+                    ax[i].imshow(
+                        scene_cut,
+                        origin="lower",
+                        cmap=scene_cmap,
+                        alpha=0.5,
+                        interpolation="nearest",
+                    )
+            ax[i].set_title(title)
+
+        plt.tight_layout()
+        return fig, ax
 
     def model_image(self) -> np.ndarray:
         """Return the model image over the scene's bounding box."""

@@ -639,9 +639,9 @@ class Scene:
         if not cfg.fit_astrometry_joint:
             sol = SceneFitter.solve(A, b, config=cfg, **kwargs)
         else:
-            # alpha0 seed from diagonal-only solution used in SparseFitter
-            diag = np.maximum(d**2, 1e-12)
-            alpha0 = np.divide(b, diag, out=np.zeros_like(b, dtype=float), where=diag > 0)
+            # first guess solution from diagonal-only solution
+            # used to correctly scale the AB/BB blocks
+            alpha0 = np.divide(b, d, out=np.zeros_like(b, dtype=float), where=d > 0)
             # joint path: build basis and coupling blocks
             order = int(cfg.astrom_kwargs["poly"]["order"])  # assume defined in cfg
 
@@ -680,20 +680,19 @@ class Scene:
             phi0 = cheb_basis(0.0, 0.0, order)
             mean_dx = float(phi0 @ bx)
             mean_dy = float(phi0 @ by)
-            logger.debug(
-                "[Scenes] Scene %s mean-shift near center ≈ (%.3f, %.3f) px", sid, mean_dx, mean_dy
+            logger.info(
+                "[Scenes] Scene %s shift at x0,y0 ≈ (%.3f, %.3f) px", sid, mean_dx, mean_dy
             )
 
             logger.debug(
-                "[Scenes] Scene %d astrometry basis: center=(%.3f, %.3f) scale=(%.3f, %.3f) order=%d",
-                sid,
+                "[Scenes] center=(%.3f, %.3f) scale=(%.3f, %.3f) order=%d",
                 x0,
                 y0,
                 Sx,
                 Sy,
                 int(order),
             )
-            logger.debug(f"[scenes] betas for scene {self.id}:{self.shifts}")
+            logger.debug(f"[scenes] betas {self.id}:{self.shifts}")
 
         # store solution
         self.solution = sol

@@ -651,7 +651,7 @@ class Pipeline:
                     logger.info(f"[Scenes] Running iteration {j+1} of {niter_scene}")
                     for scn in scenes:
                         scn.set_band(images[ifilt], weights_i, config=config)
-                        scn.solve(config=config, apply_shifts=False)
+                        scn.solve(config=config, apply_shifts=True)
 
             # fitter_cls = (
             #     GlobalAstroFitter
@@ -677,7 +677,7 @@ class Pipeline:
                 if config.fit_astrometry_niter > 0 and config.fit_astrometry_joint:
                     Templates.apply_template_shifts(templates)
 
-            print("END of TEMPLATES FITTING")
+            #            print("END of TEMPLATES FITTING")
 
             # one final flux only solve after astrometry
             cfg_noshift = _FitConfig(**config.__dict__)
@@ -706,8 +706,12 @@ class Pipeline:
             #     scale = np.clip(-snr, 1.0, 5.0)  # more negative → tighter prior
             #     fitter.add_flux_priors(selneg, mu=0.0, sigma=(errs / scale))
 
-            fluxes, errs, info = fitter.solve(config=cfg_noshift)
-            err_pred = fitter.predicted_errors()
+            #            fluxes, errs, info = fitter.solve(config=cfg_noshift)
+
+            fluxes = [t.flux for t in templates]
+            errs = [t.err for t in templates]
+            err_pred = Templates.predicted_errors(templates, weights_i)
+
             res = fitter.residual()
 
             print("Done...")

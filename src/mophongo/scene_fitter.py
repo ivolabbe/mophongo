@@ -218,6 +218,7 @@ class SceneFitter:
         A_w = Dinv @ Areg @ Dinv
         # whiten flux-shift coupling with inverse Cholesky factor
         AB_w = (Dinv @ AB) @ Linv.T
+        #        AB_w = (Dinv @ AB) @ Linv.T
         BB_wI = sp.eye(BB.shape[0], format="csr")
         b_w = Dinv @ b
         bB_w = Linv @ bB

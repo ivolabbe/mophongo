@@ -5,6 +5,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(os.path.join(os.path.dirname(__file__), "."))
 
 import numpy as np
+from numpy.polynomial.chebyshev import chebval
 from scipy.ndimage import shift as nd_shift
 
 from pathlib import Path
@@ -142,3 +143,15 @@ def test_build_poly_predictor_returns_expected_shift():
     phi = cheb_basis(x - x0, y - y0, order)
     assert np.allclose(dx, phi @ betax)
     assert np.allclose(dy, phi @ betay)
+
+
+def test_cheb_basis_handles_domain_edges():
+    order = 2
+    phi = cheb_basis(1.0, -1.0, order)
+    tx = [chebval(1.0, [0] * i + [1]) for i in range(order + 1)]
+    ty = [chebval(-1.0, [0] * j + [1]) for j in range(order + 1)]
+    expected = []
+    for i in range(order + 1):
+        for j in range(order + 1 - i):
+            expected.append(tx[i] * ty[j])
+    assert np.allclose(phi, expected)

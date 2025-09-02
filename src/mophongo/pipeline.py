@@ -640,7 +640,7 @@ class Pipeline:
                     max_merge_radius=float(getattr(config, "scene_max_merge_radius", np.inf)),
                 )
                 for s in scenes:
-                    logger.info(f" Scene {s.id}: {len(s.templates)} (bright: {s.is_bright.sum()})")
+                    logger.info(f"Scene {s.id}: {len(s.templates)} (bright: {s.is_bright.sum()})")
 
                 niter_scene = max(config.fit_astrometry_niter, 1)
                 for j in range(niter_scene):

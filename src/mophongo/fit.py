@@ -61,7 +61,7 @@ class FitConfig:
     fft_fast: float | bool = False  # False for full kernel, 0.1-1.0 for truncated FFT
     # condense fit astrometry flags into one: fit_astrometry_niter = 0, means not fitting astrometry
     fit_astrometry_niter: int = 2  # Number of astrometry refinement passes (0 → disabled)
-    fit_astrometry_joint: bool = False  # Use joint astrometry fitting, or separate step
+    fit_astrometry_joint: bool = True  # Use joint astrometry fitting, or separate step
     # --- astrometry options -------------------------------------------------
     reg_astrom: float = 1e-4
     snr_thresh_astrom: float = 15.0  # 0 → keep all sources
@@ -79,7 +79,8 @@ class FitConfig:
     normal: str = "tree"  # 'loop' or 'tree'
     scene_merge_small: bool = True  # Merge small scenes before building bases
     # None → derive from astrometric model order in __post_init__
-    scene_minimum_bright: Optional[int] = None  # Minimum bright sources per scene
+    # Minimum bright sources per scene. If None reverts to (n_poly+1)*(n_poly+2)
+    scene_minimum_bright: int = 5
     negative_snr_thresh: float = -1.0  # Threshold for negative SNR fluxes to apply soft priors
 
     # Photometry aperture control:
@@ -95,7 +96,7 @@ class FitConfig:
 
     # scene processing
     run_scene_solver: bool = True  # Whether to run the scene solver at all
-    scene_coupling_thresh: float = 1e-2  # 1% leakage threshold for scene splitting
+    scene_coupling_thresh: float = 1e-3  # 1% leakage threshold for scene splitting
 
     def __post_init__(self):
         # Derive scene_minimum_bright from astrometric polynomial order if not provided
@@ -104,8 +105,8 @@ class FitConfig:
                 poly_order = int(self.astrom_kwargs.get("poly", {}).get("order", 1))
             except Exception:
                 poly_order = 1
-            # number of Chebyshev terms; fallback formula if n_terms not available
-            n_poly = (poly_order + 1) * (poly_order + 2) // 2
+            # default to 2x # of Chebyshev terms + 1
+            n_poly = (poly_order + 1) * (poly_order + 2)
             self.scene_minimum_bright = n_poly + 1
 
 

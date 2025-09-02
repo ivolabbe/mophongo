@@ -18,7 +18,7 @@ from .fit import FitConfig as FitConfig
 from .templates import _slices_from_bbox
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)  # show info for *this* logger only
+# logger.setLevel(logging.INFO)  # show info for *this* logger only
 if not logger.handlers:  # avoid duplicate handlers on reloads
     handler = logging.StreamHandler()
     handler.setLevel(logging.INFO)
@@ -476,7 +476,7 @@ def generate_scenes(
     image: np.ndarray,
     weight: np.ndarray | None = None,
     *,
-    coupling_thresh: float = 0.03,
+    coupling_thresh: float = 0.01,
     snr_thresh_astrom: float = 7.0,
     minimum_bright: int | None = None,
     max_merge_radius: float = np.inf,

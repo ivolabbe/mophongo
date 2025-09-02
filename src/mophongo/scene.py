@@ -704,14 +704,6 @@ class Scene:
 
         return sol.flux, sol.err, sol.shifts, sol.info
 
-    def add_residuals(self, image: np.ndarray, coeffs: np.ndarray) -> np.ndarray:
-        """Subtract model contributions from ``image`` in-place."""
-        for c, tmpl in zip(coeffs, self.templates):
-            sl = tmpl.slices_original
-            cut = tmpl.data[tmpl.slices_cutout]
-            image[sl] -= c * cut
-        return image
-
     @staticmethod
     def overlay_scene_graph(
         templates: List[Template], shape: Tuple[int, int]
@@ -732,23 +724,13 @@ class Scene:
         return not (y1a <= y0b or y1b <= y0a or x1a <= x0b or x1b <= x0a)
 
     def plot(self, image: np.ndarray, ax=None, **imshow_kwargs):
-        """Plot the scene on top of ``image``."""
-        import matplotlib.pyplot as plt
-
-        if ax is None:
-            ax = plt.gca()
-        ax.imshow(image, origin="lower", **imshow_kwargs)
-        for tmpl in self.templates:
-            y0, y1, x0, x1 = tmpl.bbox
-            rect = plt.Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, color="r")
-            ax.add_patch(rect)
-        return ax
+        pass
 
     def residual(self) -> np.ndarray:
         """Return image-model residual over the scene's bounding box."""
         if self._solution is None:
             raise RuntimeError("No solution available")
-        model = np.zeros_like(self._image)
+        model = np.zeros_like(self.image)
         for amp, tmpl in zip(self._solution.flux, self.templates):
             model += tmpl.data[tmpl.slices_cutout] * amp
         return self._image - model

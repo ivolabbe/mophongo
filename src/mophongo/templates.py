@@ -436,7 +436,7 @@ class Template(Cutout2D):
     @property
     def bbox(self) -> tuple[int, int, int, int]:  # pragma: no cover - simple alias
         (ymin, ymax), (xmin, xmax) = self.bbox_original
-        return int(ymin), int(ymax) + 1, int(xmin), int(xmax) + 1
+        return int(ymin), int(ymax), int(xmin), int(xmax)
 
     def pad(
         self,
@@ -551,59 +551,6 @@ class Template(Cutout2D):
         new_cut.flag |= Template.FLAG_CONVOLVED  # mark as convolved
 
         return new_cut
-
-    def downsample_old(self, k: int) -> "Template":
-        """Return a new template averaged by ``k×k`` blocks.
-
-        Parameters
-        ----------
-        k : int
-            Integer downsampling factor.
-
-        Returns
-        -------
-        Template
-            New downsampled template; the original is untouched.
-        """
-        if k == 1:
-            return self
-
-        hi = self
-        lo = deepcopy(hi)
-
-        # pixel data and bounding box
-        lo.data = block_reduce(hi.data, k, func=np.sum)
-        ny_lo, nx_lo = lo.data.shape
-        y0, _, x0, _ = hi.bbox
-        bbox = (y0 // k, y0 // k + ny_lo, x0 // k, x0 // k + nx_lo)
-
-        from .fit import SparseFitter  # local import to avoid circular dependency
-
-        lo.bbox_original = ((bbox[0], bbox[1] - 1), (bbox[2], bbox[3] - 1))
-        lo.slices_original = SparseFitter._bbox_to_slices(bbox)
-        lo.slices_cutout = (slice(0, ny_lo), slice(0, nx_lo))
-        hi_shape = getattr(hi, "shape_input", hi.data.shape)
-        lo.shape_input = (hi_shape[0] // k, hi_shape[1] // k)
-
-        # centroid-sensitive attributes
-        shift = (k - 1) / 2.0
-
-        def _map(coord: float) -> float:
-            return (coord - shift) / k
-
-        for attr in (
-            "input_position_cutout",
-            #            "input_position_original",
-            "center_cutout",
-            #            "center_original",
-            "y",
-            "x",
-        ):
-            if hasattr(lo, attr):
-                y, x = getattr(lo, attr)
-                setattr(lo, attr, (_map(y), _map(x)))
-
-        return lo
 
     def downsample_wcs_old(self, image_lo: np.ndarray, wcs_lo, k: int) -> "Template":
         """

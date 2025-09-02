@@ -25,10 +25,9 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 
 from .psf_map import PSFRegionMap
 from .utils import bin_factor_from_wcs, downsample_psf, bin_remap
-from .templates import Templates, Template
+from .templates import Templates, Template, _slices_from_bbox
 from .fit import FitConfig as _FitConfig
 from .scene import generate_scenes
-
 
 import logging
 
@@ -635,7 +634,7 @@ class Pipeline:
             # Optional scene-based solver: does not alter legacy path
             if getattr(config, "run_scene_solver", False):
                 # Work on a copy of templates to avoid affecting legacy loop
-                templates_scene = deepcopy(templates)
+                templates_scene = templates
                 scenes, labels = generate_scenes(
                     templates_scene,
                     images[ifilt],
@@ -655,85 +654,89 @@ class Pipeline:
                         scn.set_band(images[ifilt], weights_i, config=config)
                         scn.solve(config=config, apply_shifts=True)
 
-            # fitter_cls = (
-            #     GlobalAstroFitter
-            #     if (config.fit_astrometry_niter > 0 and config.fit_astrometry_joint)
-            #     else SparseFitter
-            # )
-            fitter_cls = SparseFitter
-            niter = max(config.fit_astrometry_niter, 1)
-            for j in range(niter):
-                print(f"Running iteration {j+1} of {niter}")
+                # build model in res first, then subtract from image
+                res = np.zeros_like(images[ifilt])
+                for s in scenes:
+                    sl = _slices_from_bbox(s.bbox)
+                    res[sl] += s.model_image()  # adds models in place
+                # then subtract from image to get residual
+                res = images[ifilt] - res
 
-                fitter = fitter_cls(templates, images[ifilt], weights_i, config)
-                fluxes, errs, info = fitter.solve()
-                print(f"Pipeline (residual) memory: {memory():.1f} GB")
+            else:
+                print("Running legacy solver")
+                # fitter_cls = (
+                #     GlobalAstroFitter
+                #     if (config.fit_astrometry_niter > 0 and config.fit_astrometry_joint)
+                #     else SparseFitter
+                # )
+                fitter_cls = SparseFitter
+                niter = max(config.fit_astrometry_niter, 1)
+                for j in range(niter):
+                    print(f"Running iteration {j+1} of {niter}")
 
-                if config.fit_astrometry_niter > 0 and not config.fit_astrometry_joint:
-                    # @@@ this is very expensive. We dont need to form the whole residual image
-                    # can do it on the stamps only
-                    res = fitter.residual()
-                    logger.info("fitting astrometry separately")
-                    astro.fit(templates, res, fitter.solution)
+                    fitter = fitter_cls(templates, images[ifilt], weights_i, config)
+                    fluxes, errs, info = fitter.solve()
+                    print(f"Pipeline (residual) memory: {memory():.1f} GB")
 
-                if config.fit_astrometry_niter > 0 and config.fit_astrometry_joint:
-                    Templates.apply_template_shifts(templates)
+                    # if config.fit_astrometry_niter > 0 and not config.fit_astrometry_joint:
+                    #     # @@@ this is very expensive. We dont need to form the whole residual image
+                    #     # can do it on the stamps only
+                    #     res = fitter.residual()
+                    #     logger.info("fitting astrometry separately")
+                    #     astro.fit(templates, res, fitter.solution)
 
-            #            print("END of TEMPLATES FITTING")
+                    if config.fit_astrometry_niter > 0 and config.fit_astrometry_joint:
+                        Templates.apply_template_shifts(templates)
 
-            # one final flux only solve after astrometry
-            # cfg_noshift = _FitConfig(**config.__dict__)
-            # cfg_noshift.fit_astrometry_niter = 0
-            # templates, fitter = self._add_templates_for_bad_fits(
-            #     templates,
-            #     tmpls_lo,
-            #     psfs[ifilt] if psfs is not None else None,
-            #     weights_i,
-            #     fitter,
-            #     images[ifilt],
-            #     fitter_cls,
-            #     config,
-            # )
+                res = fitter.residual()
 
-            # add soft non-negative priors if fluxes are < 0.0 and resolve.
-            # note idx is relative to initial list of templates. But additional templates were added at the end, so idx still works
+                #            print("END of TEMPLATES FITTING")
 
-            # snr = np.divide(fluxes, errs, out=np.zeros_like(errs), where=errs > 0)
-            # selneg = snr < config.negative_snr_thresh
-            # if np.any(selneg):
-            #     logger.info(
-            #         f"{selneg.sum()} fluxes are negative, applying soft non-negative prior and resolving."
-            #     )
-            #     # this updates ata and atb, so we can resolve again
-            #     scale = np.clip(-snr, 1.0, 5.0)  # more negative → tighter prior
-            #     fitter.add_flux_priors(selneg, mu=0.0, sigma=(errs / scale))
+                # one final flux only solve after astrometry
+                # cfg_noshift = _FitConfig(**config.__dict__)
+                # cfg_noshift.fit_astrometry_niter = 0
+                # templates, fitter = self._add_templates_for_bad_fits(
+                #     templates,
+                #     tmpls_lo,
+                #     psfs[ifilt] if psfs is not None else None,
+                #     weights_i,
+                #     fitter,
+                #     images[ifilt],
+                #     fitter_cls,
+                #     config,
+                # )
 
-            #            fluxes, errs, info = fitter.solve(config=cfg_noshift)
+                # add soft non-negative priors if fluxes are < 0.0 and resolve.
+                # note idx is relative to initial list of templates. But additional templates were added at the end, so idx still works
+
+                # snr = np.divide(fluxes, errs, out=np.zeros_like(errs), where=errs > 0)
+                # selneg = snr < config.negative_snr_thresh
+                # if np.any(selneg):
+                #     logger.info(
+                #         f"{selneg.sum()} fluxes are negative, applying soft non-negative prior and resolving."
+                #     )
+                #     # this updates ata and atb, so we can resolve again
+                #     scale = np.clip(-snr, 1.0, 5.0)  # more negative → tighter prior
+                #     fitter.add_flux_priors(selneg, mu=0.0, sigma=(errs / scale))
+
+                #            fluxes, errs, info = fitter.solve(config=cfg_noshift)
 
             fluxes = [t.flux for t in templates]
             errs = [t.err for t in templates]
             err_pred = Templates.predicted_errors(templates, weights_i)
 
-            res = fitter.residual()
-
             # calculate a full image residual from the scenes and their slice
             #            res_scene
-            if getattr(config, "run_scene_solver", False):
-                from .templates import _slices_from_bbox
-
-                res_scene = np.zeros_like(images[ifilt])
-                for s in scenes:
-                    sl = _slices_from_bbox(s.bbox)
-                    res_scene[sl] += s.residual()
-                # sanity check
-                diff = np.abs(res - res_scene)
-                maxdiff = np.nanmax(diff)
-                if maxdiff > 1e-5 * np.nanmax(np.abs(res)):
-                    warnings.warn(f"Scene residual differs from full residual: max diff {maxdiff}")
-                else:
-                    print(f"Scene residual matches full residual: max diff {maxdiff}")
-            #                res = res_scene
-            print("Done...")
+            # if getattr(config, "run_scene_solver", False):
+            #     # sanity check
+            #     diff = np.abs(res - res_scene)
+            #     maxdiff = np.nanmax(diff)
+            #     if maxdiff > 1e-5 * np.nanmax(np.abs(res)):
+            #         warnings.warn(f"Scene residual differs from full residual: max diff {maxdiff}")
+            #     else:
+            #         print(f"Scene residual matches full residual: max diff {maxdiff}")
+            # #                res = res_scene
+            # print("Done...")
 
             self._update_catalog_with_fluxes(cat, templates, fluxes, errs, err_pred, ifilt)
             self._add_aperture_photometry(
@@ -746,10 +749,10 @@ class Pipeline:
             )
 
             self.residuals.append(res)
-            self.fit.append(fitter)
+            #            self.fit.append(fitter)
             self.all_templates.append(templates)
             self.all_scenes.append(scenes)
-            self.infos.append(info)
+        #            self.infos.append(info)
 
         print(f"Pipeline (end) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB")
 

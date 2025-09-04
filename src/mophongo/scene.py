@@ -793,6 +793,7 @@ class Scene:
         """
 
         from copy import deepcopy
+        from astropy.stats import mad_std
         from astropy.visualization import make_lupton_rgb
         from photutils.segmentation import SegmentationImage
         import matplotlib.pyplot as plt
@@ -842,7 +843,7 @@ class Scene:
             if "Segmap" in title:
                 ax[i].imshow(img, origin="lower", cmap=segmap_cmap, interpolation="nearest")
             elif "Residual" in title:  # residual
-                std = np.nanstd(img)
+                std = np.std(img[img != 0])
                 ax[i].imshow(
                     img,
                     origin="lower",
@@ -854,7 +855,7 @@ class Scene:
             elif "Color" in title:  # color
                 ax[i].imshow(img, origin="lower", **imshow_kwargs)
             else:
-                std = np.nanstd(img)
+                std = np.std(img[img != 0])
                 ax[i].imshow(
                     img,
                     origin="lower",

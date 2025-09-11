@@ -5,9 +5,11 @@ data/*
 data/PSF/*
 examples/*fits
 examples/stars/
+examples/*
 legacy/autopilot/*png
 legacy/autopilot/*pdf
 !data/*test*
 !data/PSF/
 !data/PSF/*OS4_GRID25*
 !data/PSF/*OS4_GRID9*
+!data/examples/*ipynb

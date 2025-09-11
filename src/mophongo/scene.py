@@ -798,6 +798,7 @@ class Scene:
         from photutils.segmentation import SegmentationImage
         import matplotlib.pyplot as plt
         from astropy.wcs.utils import proj_plane_pixel_scales
+        from matplotlib.colors import ListedColormap
 
         if self.image is None or self.bbox is None:
             raise ValueError("Scene has no image data or bounding box")
@@ -835,8 +836,21 @@ class Scene:
             fig = ax[0].figure
             created_fig = False
 
-        # Plot panels
-        images = [tmpl_cut, img_cut, model_cut, seg_cut, res_cut, col_cut]
+        # Create scene-specific segmap overlay for template panel
+        scene_segmap = np.zeros_like(seg_cut)
+        template_ids = [t.id for t in self.templates]  # Get all template IDs in this scene
+        for template_id in template_ids:
+            scene_segmap[seg_cut == template_id] = 1
+
+        # Mask residual to only show pixels belonging to this scene
+        res_cut_masked = res_cut.copy()
+        # Set residual to zero where segmap shows sources NOT in this scene
+        # (i.e., where seg_cut > 0 but scene_segmap == 0)
+        other_sources_mask = (seg_cut > 0) & (scene_segmap == 0)
+        res_cut_masked[other_sources_mask] = 0.0
+
+        # Plot panels - use the masked residual
+        images = [tmpl_cut, img_cut, model_cut, seg_cut, res_cut_masked, col_cut]
         titles = ["Template", "Image", "Model", "Segmap", "Residual", "Color"]
 
         for i, (img, title) in enumerate(zip(images, titles)):
@@ -864,6 +878,14 @@ class Scene:
                     vmax=display_sig * std,
                     **imshow_kwargs,
                 )
+
+                # Overlay scene segmentation on template panel
+                if "Template" in title:
+                    # Create a masked array where 0 values are transparent
+                    scene_overlay = np.ma.masked_where(scene_segmap == 0, scene_segmap)
+                    ax[i].imshow(
+                        scene_overlay, origin="lower", cmap="autumn", alpha=0.15, vmin=0, vmax=1
+                    )
 
             ax[i].set_title(title)
             ax[i].set_xticks([])
@@ -1009,6 +1031,7 @@ class Scene:
         bb = self.bbox
         sl = _slices_from_bbox(bb)
         res_scene = self.image[sl] - self.model_image()
+        res_scene[self.weights[sl] <= 0 | np.isnan(self.weights[sl])] = 0.0
         return res_scene
 
     # ------------------------------------------------------------------

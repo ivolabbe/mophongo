@@ -556,22 +556,29 @@ class Pipeline:
             if weights[i] is not None:
                 assert np.all(np.isfinite(weights[i])), "Weights contain NaN values"
 
-        cat = catalog.copy() if catalog is not None else None
-        positions = list(zip(catalog["x"], catalog["y"])) if catalog is not None else []
+        if catalog is None:
+            # use astropy to make catalog from image[0] + segmap
+            print("No catalog provided, generating from segmap")
+            raise NotImplementedError("Catalog generation not implemented yet")
+        else:
+            cat = catalog.copy()
+            cat = cat["id", "x", "y"]  # minimal set required
+            if config.aperture_catalog is not None:
+                cat[config.aperture_catalog] = catalog[config.aperture_catalog]
 
         self.tmpls = Templates()
         self.tmpls.extract_templates(
             images[0],
             segmap,
-            positions,
+            list(zip(cat["x"], cat["y"])),
             wcs=wcs[0] if wcs is not None else None,
         )
         templates = self.tmpls.templates
         for t in templates:
             assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
 
-        ndropped = len(positions) - len(templates)
-        # @@@ this is because of reliance of x,y in catalog -> use segmap?
+        ndropped = len(cat) - len(templates)
+        # @@@ this is because of reliance of x,y in catalog -> use segmap + weight?
         print(f"Pipepline: {len(templates)} extracted templates, dropped {ndropped}.")
         print(f"Pipeline (templates) memory: {memory():.1f} GB")
 
@@ -639,6 +646,37 @@ class Pipeline:
                     minimum_bright=int(config.scene_minimum_bright),
                     max_merge_radius=float(getattr(config, "scene_max_merge_radius", np.inf)),
                 )
+                # Assume each scene has .ra and .dec attributes (center coordinates)
+                # Compute RA/Dec for each scene center using WCS
+                if config.generate_scene_catalog:
+                    self.all_scenes.append(scenes)
+                    ras, decs = [], []
+                    for s in scenes:
+                        xy_mean = np.mean([t.position_original for t in s.templates], axis=0)
+                        if wcs[0] is not None:
+                            ra, dec = wcs[0].wcs_pix2world([xy_mean], 0)[0]
+                        else:
+                            ra, dec = np.nan, np.nan
+                        ras.append(ra)
+                        decs.append(dec)
+
+                    scene_table = Table(
+                        {
+                            "id": [s.id for s in scenes],
+                            "n_templates": [len(s.templates) for s in scenes],
+                            "is_bright": [s.is_bright.sum() for s in scenes],
+                            "ra": ras,
+                            "dec": decs,
+                        }
+                    )
+                    scene_table.write(
+                        f"scene_catalog_{ifilt}.ecsv", format="ascii.ecsv", overwrite=True
+                    )
+                    print(f"Wrote scene catalog scene_catalog_{ifilt}.ecsv")
+                    import sys
+
+                    sys.exit()
+
                 for s in scenes:
                     logger.info(f"Scene {s.id}: {len(s.templates)} (bright: {s.is_bright.sum()})")
 
@@ -733,6 +771,13 @@ class Pipeline:
             # #                res = res_scene
             # print("Done...")
 
+            if config.aperture_diam is not None:
+                pscale = self._pixel_scale_arcsec(
+                    self.wcs[ifilt] if self.wcs is not None else None
+                )
+                r_img_pix = self._resolve_image_ap_radius_pix(ifilt, config)
+                r_img_arcsec = r_img_pix * pscale
+                cat["aper_" + str(ifilt)] = 2 * r_img_arcsec
             self._update_catalog_with_fluxes(cat, templates, fluxes, errs, err_pred, ifilt)
             self._add_aperture_photometry(
                 cat,
@@ -750,7 +795,6 @@ class Pipeline:
         #            self.infos.append(info)
 
         print(f"Pipeline (end) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB")
-
         self.table = cat
 
         return self.table, self.residuals  # , self.all_templates, self.all_scenes
@@ -786,6 +830,7 @@ class Pipeline:
         from copy import deepcopy
         from astropy.visualization import make_lupton_rgb
         from photutils.segmentation import SegmentationImage
+        from astropy.table import Table
 
         if ifilt <= 0 or ifilt >= len(self.images):
             raise ValueError("idx must be between 1 and len(images)-1")

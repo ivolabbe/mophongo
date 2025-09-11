@@ -97,6 +97,7 @@ class FitConfig:
     # scene processing
     run_scene_solver: bool = True  # Whether to run the scene solver at all
     scene_coupling_thresh: float = 1e-3  # 1% leakage threshold for scene splitting
+    generate_scene_catalog: bool = False  # If True, generate scene catalog and exit
 
     def __post_init__(self):
         # Derive scene_minimum_bright from astrometric polynomial order if not provided

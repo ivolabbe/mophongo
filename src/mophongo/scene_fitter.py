@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 import scipy.sparse as sp
-from scipy.sparse.linalg import cg
+from scipy.sparse.linalg import cg, spsolve
 from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
@@ -186,7 +186,8 @@ class SceneFitter:
         A_w = Dinv @ A @ Dinv
         b_w = Dinv @ b
 
-        x_w, info = cg(A_w, b_w, **cfg.cg_kwargs)
+        x_w = spsolve(A_w, b_w)
+        info = 0
         x = x_w / d
         err = SceneFitter._flux_errors(A_w) / d
 
@@ -228,13 +229,8 @@ class SceneFitter:
         # --- joint solve in whitened variables
         K = sp.bmat([[A_w, AB_w], [AB_w.T, BB_wI]], format="csr")
         rhs = np.concatenate([b_w, bB_w])
-        sol, info = cg(
-            K,
-            rhs,
-            atol=0.0,
-            rtol=cfg.cg_kwargs.get("rtol", 1e-6),
-            maxiter=cfg.cg_kwargs.get("maxiter", 2000),
-        )
+        sol = spsolve(K, rhs)
+        info = 0
 
         na = A.shape[0]
         xw = sol[:na]

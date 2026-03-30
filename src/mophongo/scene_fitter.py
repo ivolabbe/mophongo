@@ -153,11 +153,10 @@ class SceneFitter:
             Unwhitened fluxes, their 1σ errors, optional shift coefficients
             and the CG exit flag.
         """
-        # do regularization here
-        reg = getattr(config, "reg_astrom", 0)
-        if reg <= 0:
-            reg = 1e-6 * np.median(A.diagonal())
-        Areg = A + sp.eye(A.shape[0], format="csr") * reg
+        # Flux block: adaptive regularization relative to ATA scale (avoids biasing fluxes).
+        # reg_astrom is reserved for the shift block only.
+        flux_reg = 1e-6 * np.median(A.diagonal())
+        Areg = A + sp.eye(A.shape[0], format="csr") * flux_reg
 
         if AB is not None and BB is not None and bB is not None:
             diag_BB = BB.diagonal()
@@ -176,14 +175,14 @@ class SceneFitter:
 
     @staticmethod
     def solve_flux(
-        self, A: sp.spmatrix, b: np.ndarray, config: Optional[FitConfig] = None
+        A: sp.spmatrix, b: np.ndarray, config: Optional[FitConfig] = None
     ) -> tuple[np.ndarray, np.ndarray, dict]:
         """Solve ``A x = b`` for flux parameters using conjugate gradient."""
         cfg = config or FitConfig()
         A = A.tocsr()
 
         d = np.sqrt(np.maximum(A.diagonal(), 1e-12))
-        Dinv = diags(1.0 / d, 0, format="csr")
+        Dinv = sp.diags(1.0 / d, 0, format="csr")
         A_w = Dinv @ A @ Dinv
         b_w = Dinv @ b
 

@@ -97,6 +97,7 @@ class FitConfig:
     # scene processing
     run_scene_solver: bool = True  # Whether to run the scene solver at all
     scene_coupling_thresh: float = 1e-3  # 1% leakage threshold for scene splitting
+    scene_max_merge_radius: float = np.inf  # Max distance (px) to merge underfilled scenes (default: inf = no limit)
     generate_scene_catalog: bool = False  # If True, generate scene catalog and exit
 
     def __post_init__(self):

@@ -132,6 +132,21 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
 - [ ] optimizations
   - [x] adaptive kernel size depending on SNR
   - [x] preconditioning matrix
+- [ ] scene size guard and template radius limiting
+  - [ ] **Test needed first**: run F1800W without `max_template_radius` to confirm whether `scene_coupling_thresh` alone is sufficient to prevent ginormous scenes, or if radius capping is also required.
+  - [ ] **Scene size inspection**: after `generate_scenes` in pipeline, compute per-scene template count and pixel footprint. If any scene exceeds a configurable threshold (e.g. `max_scene_templates: int = None` in FitConfig), halt and print a summary table of scene sizes so the user can decide whether to tighten `scene_coupling_thresh` or enable radius capping.
+  - [ ] **`max_template_radius` feature** (implemented but not yet validated — discard from codebase until tested):
+    - `FitConfig.max_template_radius: float | None = None` — max footprint radius in arcsec (None = unlimited).
+    - In `pipeline.py` before `convolve_templates`: `max_radius_pix = config.max_template_radius / pscale_arcsec` (uses `proj_plane_pixel_scales(wcs[0])[0] * 3600`).
+    - In `Templates.convolve_templates(kernel, max_radius_pix=None)`: after each `convolve_cutout`, zero pixels beyond radius — `dist = sqrt((y-yc)^2 + (x-xc)^2); new_tmpl.data[dist > max_radius_pix] = 0.0` where `xc, yc = new_tmpl.input_position_cutout`.
+    - Also add `FitConfig.scene_max_merge_radius: float = np.inf` which is already wired in pipeline via `getattr`.
+- [ ] astrometric shift quality improvements
+  - [ ] `astrom_isolation_thresh` in FitConfig: per-source isolation cut for bright-source astrometry mask.
+        Compute max off-diagonal coupling score from scene.A (same metric as scene_coupling_thresh) per
+        source; only use sources where max neighbour contamination < threshold for shift estimation.
+        Addresses inflated alpha0 from blending biasing shift estimates (shift ∝ 1/alpha0).
+        Threshold must be > scene_coupling_thresh (else all blended-scene sources are excluded).
+        Suggested default ~0.2 (20%); needs empirical tuning on F1800W fields.
 - [ ] strong residuals
   - [ ] handle saturated stars in 444 -> catalog pre pass detection
   - [ ] fit as PSF both 444, 770, fit for centroid, mask center

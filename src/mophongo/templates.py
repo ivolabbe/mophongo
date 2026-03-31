@@ -418,6 +418,7 @@ class Template(Cutout2D):
 
         self.flag = 0  # bitwise flag for diagnostics
         self.flag |= Template.FLAG_VALID
+        self.is_star: bool = False  # set by pipeline from catalog flag_star
 
         # flux
         self.flux = 0.0

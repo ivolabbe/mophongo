@@ -65,6 +65,7 @@ class FitConfig:
     # --- astrometry options -------------------------------------------------
     reg_astrom: float = 1e-4
     snr_thresh_astrom: float = 15.0  # 0 → keep all sources
+    astrom_isolation_thresh: float = 0.5  # min flux dominance to include in astrometry (0–1); 0.0 = no cut
     astrom_model: str = "gp"  # 'polynomial' or 'gp'
     astrom_centroid: str = "centroid"  # "centroid" (=old) | "correlation"
     astrom_kwargs: dict[str, dict] = field(

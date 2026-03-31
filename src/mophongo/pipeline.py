@@ -577,6 +577,13 @@ class Pipeline:
         for t in templates:
             assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
 
+        if catalog is not None and "flag_star" in catalog.colnames:
+            star_ids = set(int(r["id"]) for r in catalog if r["flag_star"] == 1)
+            for t in templates:
+                if int(t.id) in star_ids:
+                    t.is_star = True
+            logger.info("Marked %d templates as stars (excluded from astrometry)", sum(t.is_star for t in templates))
+
         ndropped = len(cat) - len(templates)
         # @@@ this is because of reliance of x,y in catalog -> use segmap + weight?
         print(f"Pipepline: {len(templates)} extracted templates, dropped {ndropped}.")

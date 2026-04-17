@@ -13,3 +13,4 @@ legacy/autopilot/*pdf
 !data/PSF/*OS4_GRID25*
 !data/PSF/*OS4_GRID9*
 !data/examples/*ipynb
+!data/examples/*py

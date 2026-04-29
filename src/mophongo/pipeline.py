@@ -467,11 +467,6 @@ class Pipeline:
         r_img_pix = self._resolve_image_ap_radius_pix(
             idx, cfg
         )  # same for all in this band (by design)
-        r_cat_pix_by_id = self._resolve_catalog_ap_radius_pix(cat, cfg, r_default=r_img_pix)
-
-        # map parent id -> original (pre-convolution) template on the ref image
-        ref_tmpls = {int(t.id): t for t in self.tmpls.templates}
-
         # residual+model patch measurement (raw)
         for tmpl, fl in zip(templates, fluxes):
             pid = tmpl.id_parent if getattr(tmpl, "parent_id", None) is not None else tmpl.id
@@ -490,15 +485,16 @@ class Pipeline:
             phot = aperture_photometry(patch, aper_img, method="exact")
             ap_raw = float(phot["aperture_sum"][0])
 
-            # --- PSF correction from templates (pre vs post conv) -----------------
-            # numerator: ref pre-convolution template with *catalog* aperture (per source)
-            tmpl_ref = ref_tmpls.get(int(pid))
-            r_cat_pix = r_cat_pix_by_id.get(int(pid), np.nan)
-            num = (
-                self._aperture_sum_on_template(tmpl_ref, r_cat_pix)
-                if (tmpl_ref and np.isfinite(r_cat_pix))
-                else np.nan
-            )
+            # --- correction from aperture flux to total flux via template EE -----------
+            # numerator: total flux of the convolved template (= post-conv sum).
+            # Using the post-conv total (rather than 1.0) accounts for any flux lost
+            # at the template boundary during convolution.
+            # denominator: flux of the convolved template within the photometric aperture.
+            # corr = num/den = post_conv_total / post_conv_aperture = 1/EE_source_MIRI(r),
+            # which converts ap_raw (partial aperture flux) to total flux.
+            # Previously num used aperture_sum(pre_conv_template, r), which gave
+            # EE_source_F444W(r) ~ 0.3 in the numerator and caused a ~1.2 mag offset.
+            num = float(tmpl.data.sum())
 
             # denominator: current *convolved* template with *image* aperture
             den = self._aperture_sum_on_template(tmpl, r_img_pix)

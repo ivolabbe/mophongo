@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 import scipy.sparse as sp
-from scipy.sparse.linalg import cg
+from scipy.sparse.linalg import cg, spsolve
 from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
@@ -153,11 +153,10 @@ class SceneFitter:
             Unwhitened fluxes, their 1σ errors, optional shift coefficients
             and the CG exit flag.
         """
-        # do regularization here
-        reg = getattr(config, "reg_astrom", 0)
-        if reg <= 0:
-            reg = 1e-6 * np.median(A.diagonal())
-        Areg = A + sp.eye(A.shape[0], format="csr") * reg
+        # Flux block: adaptive regularization relative to ATA scale (avoids biasing fluxes).
+        # reg_astrom is reserved for the shift block only.
+        flux_reg = 1e-6 * np.median(A.diagonal())
+        Areg = A + sp.eye(A.shape[0], format="csr") * flux_reg
 
         if AB is not None and BB is not None and bB is not None:
             diag_BB = BB.diagonal()
@@ -176,18 +175,19 @@ class SceneFitter:
 
     @staticmethod
     def solve_flux(
-        self, A: sp.spmatrix, b: np.ndarray, config: Optional[FitConfig] = None
+        A: sp.spmatrix, b: np.ndarray, config: Optional[FitConfig] = None
     ) -> tuple[np.ndarray, np.ndarray, dict]:
         """Solve ``A x = b`` for flux parameters using conjugate gradient."""
         cfg = config or FitConfig()
         A = A.tocsr()
 
         d = np.sqrt(np.maximum(A.diagonal(), 1e-12))
-        Dinv = diags(1.0 / d, 0, format="csr")
+        Dinv = sp.diags(1.0 / d, 0, format="csr")
         A_w = Dinv @ A @ Dinv
         b_w = Dinv @ b
 
-        x_w, info = cg(A_w, b_w, **cfg.cg_kwargs)
+        x_w = spsolve(A_w, b_w)
+        info = 0
         x = x_w / d
         err = SceneFitter._flux_errors(A_w) / d
 
@@ -229,13 +229,8 @@ class SceneFitter:
         # --- joint solve in whitened variables
         K = sp.bmat([[A_w, AB_w], [AB_w.T, BB_wI]], format="csr")
         rhs = np.concatenate([b_w, bB_w])
-        sol, info = cg(
-            K,
-            rhs,
-            atol=0.0,
-            rtol=cfg.cg_kwargs.get("rtol", 1e-6),
-            maxiter=cfg.cg_kwargs.get("maxiter", 2000),
-        )
+        sol = spsolve(K, rhs)
+        info = 0
 
         na = A.shape[0]
         xw = sol[:na]

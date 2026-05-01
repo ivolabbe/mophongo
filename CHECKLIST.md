@@ -132,12 +132,32 @@ This checklist tracks tasks for building the photometry pipeline using Poetry an
 - [ ] optimizations
   - [x] adaptive kernel size depending on SNR
   - [x] preconditioning matrix
+- [ ] scene size guard and template radius limiting
+  - [ ] **Test needed first**: run F1800W without `max_template_radius` to confirm whether `scene_coupling_thresh` alone is sufficient to prevent ginormous scenes, or if radius capping is also required.
+  - [ ] **Scene size inspection**: after `generate_scenes` in pipeline, compute per-scene template count and pixel footprint. If any scene exceeds a configurable threshold (e.g. `max_scene_templates: int = None` in FitConfig), halt and print a summary table of scene sizes so the user can decide whether to tighten `scene_coupling_thresh` or enable radius capping.
+  - [ ] **`max_template_radius` feature** (implemented but not yet validated — discard from codebase until tested):
+    - `FitConfig.max_template_radius: float | None = None` — max footprint radius in arcsec (None = unlimited).
+    - In `pipeline.py` before `convolve_templates`: `max_radius_pix = config.max_template_radius / pscale_arcsec` (uses `proj_plane_pixel_scales(wcs[0])[0] * 3600`).
+    - In `Templates.convolve_templates(kernel, max_radius_pix=None)`: after each `convolve_cutout`, zero pixels beyond radius — `dist = sqrt((y-yc)^2 + (x-xc)^2); new_tmpl.data[dist > max_radius_pix] = 0.0` where `xc, yc = new_tmpl.input_position_cutout`.
+    - Also add `FitConfig.scene_max_merge_radius: float = np.inf` which is already wired in pipeline via `getattr`.
+- [x] astrometric shift quality improvements
+  - [x] `astrom_isolation_thresh` in FitConfig: sources used for astrometry must contribute >= thresh
+        fraction of the flux at their own location (coupling-weighted template overlap). Stars excluded
+        via `flag_star` catalog column. `merge_small_scenes` now uses bright non-star count so
+        star-dominated scenes are merged into neighbors before solve.
+  - [ ] Scene with no bright non-star isolated sources skips astrometry with a warning.
+        TODO: consider merging such scenes with a neighbor rather than skipping — isolation filtering
+        can't be applied at merge time, so all-blended scenes currently fall through to the guard.
 - [ ] strong residuals
   - [ ] handle saturated stars in 444 -> catalog pre pass detection
   - [ ] fit as PSF both 444, 770, fit for centroid, mask center
 - [ ]  wavelength dependent morphology: only where residuals are significant.
   - [ ] Add point source, if PSF not given start with marginally sampled Gaussian?  
   - [ ] add second bluer band
+- [ ] stale tests in `tests/test_fit.py` — 8 tests reference old `SparseFitter` method names
+        (`build_normal_matrix`, `solve_lo`, `bright_mask`, `solve_scene_shifts`) that have been
+        renamed or removed. Also `test_pipeline.py::test_download_rate` hangs on MAST network call.
+        Either update tests to match current API or delete if no longer relevant.
 - [ ] refactoring for readibility and modularity
   - [ ] split off PSF map / drizzle PSF / PSFs module, make submodule
   - [ ] split off real data as submodule?

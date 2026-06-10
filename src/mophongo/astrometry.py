@@ -12,7 +12,7 @@ from astropy.table import Table
 from numpy.polynomial.chebyshev import chebval
 from photutils.centroids import centroid_com, centroid_quadratic
 from scipy.ndimage import shift as nd_shift
-from scipy.signal import correlate2d, fftconvolve
+from scipy.signal import correlate2d
 from sklearn.base import clone
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import ConstantKernel, RBF, WhiteKernel
@@ -21,6 +21,7 @@ from astropy.coordinates import SkyCoord
 from astropy.wcs.utils import skycoord_to_pixel
 
 from .templates import Template
+from .utils import fftconvolve
 
 import warnings
 import logging

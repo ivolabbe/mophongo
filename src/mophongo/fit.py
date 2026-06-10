@@ -50,7 +50,7 @@ class FitConfig:
     """Configuration options for :class:`SparseFitter`."""
 
     positivity: bool = True
-    reg: float = 0.0
+    reg_flux: float = 0.0
     bad_value: float = np.nan
     solve_method: str = "scene"  # 'all', 'scene', 'lo' (linear operator)
     cg_kwargs: Dict[str, Any] = field(
@@ -60,7 +60,12 @@ class FitConfig:
 
     fft_fast: float | bool = False  # False for full kernel, 0.1-1.0 for truncated FFT
     # condense fit astrometry flags into one: fit_astrometry_niter = 0, means not fitting astrometry
-    fit_astrometry_niter: int = 2  # Number of astrometry refinement passes (0 → disabled)
+    fit_astrometry_niter: int = 5  # Max astrometry refinement passes (0 → disabled)
+    # Stop iterating early once the largest per-template shift increment of a
+    # pass drops below this tolerance (fit-grid pixels). The linearized shift
+    # solve only captures part of a large offset per pass, so set
+    # fit_astrometry_niter to the maximum passes allowed and let this tol stop.
+    astrom_shift_tol: float = 0.05
     fit_astrometry_joint: bool = True  # Use joint astrometry fitting, or separate step
     # --- astrometry options -------------------------------------------------
     reg_astrom: float = 1e-4
@@ -90,6 +95,21 @@ class FitConfig:
     aperture_diam: float | np.ndarray | None = None  # image measurement aperture (diameter)
     aperture_catalog: float | str | None = None  # catalog aperture (diameter or table column name)
     aperture_units: str = "arcsec"  # "arcsec" or "pix"
+
+    # Template extraction: dilate each segment by this many pixels (disk radius)
+    # so the template captures more of the point-source PSF wings. The input
+    # catalog segmap is typically 2-σ detection with minimal dilation — that
+    # misses ~10% of the PSF EE for bright sources, biasing template fits low.
+    # 0 disables dilation; 2 is a good default for JWST NIRCam LW at 40 mas.
+    template_dilate_segmap: int = 2
+    # By default template extension is applied to every source, including
+    # catalog deblend children. Set True to preserve deblended child templates
+    # without PSF-wing/model completion when that is desired for a validation run.
+    skip_template_extension_for_deblended: bool = False
+    # PSF-wing completion fills only background pixels of the (dilated)
+    # segmentation map by default, so blended neighbours keep ownership of
+    # their own segment pixels. Set False to fill every zero template pixel.
+    extend_wings_background_only: bool = True
 
     # Internal options: don't change unless you know what you're doing
     block_size: int = 64  # Block size for tiled processing
@@ -1085,14 +1105,14 @@ class SparseFitter:
         A, b = self.ata, self.atb
 
         # regularization: add a small ridge to the diagonal
-        reg = cfg.reg
-        if reg <= 0:
-            reg = 1e-6 * np.median(A.diagonal())
-        if reg > 0:
-            A = A + eye(A.shape[0], format="csr") * reg
+        reg_flux = cfg.reg_flux
+        if reg_flux <= 0:
+            reg_flux = 1e-6 * np.median(A.diagonal())
+        if reg_flux > 0:
+            A = A + eye(A.shape[0], format="csr") * reg_flux
 
         # clamp diagonal to avoid numerical issues
-        d = np.sqrt(np.maximum(A.diagonal(), reg))
+        d = np.sqrt(np.maximum(A.diagonal(), reg_flux))
         # whiten the normal equations
         # A_w = D^-1 A D^-1, b_w = b / d
         Dinv = diags(1.0 / d, 0, format="csr")

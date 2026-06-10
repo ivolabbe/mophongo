@@ -9,7 +9,7 @@ def test_pipeline_deduplicates_templates():
     dup_catalog = catalog[:2].copy()
     dup_catalog.add_row(catalog[0])  # duplicate first source
     kernel = [mutils.matching_kernel(psfs[0], p) for p in psfs]
-    kernel[0] = np.array([[1.0]])
+    kernel[0] = None
     from mophongo.fit import FitConfig
     table, resid, fitter = pipeline.run(
         images,

@@ -9,9 +9,13 @@ array. A method is included to compute a matching kernel between two PSFs.
 from __future__ import annotations
 
 from collections import OrderedDict
+from pathlib import Path
+from typing import Any
 
 import logging
 import os
+from contextlib import contextmanager
+
 import numpy as np
 from scipy.ndimage import shift as shift
 from dataclasses import dataclass
@@ -22,7 +26,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.table import Table
 from astropy.utils.data import download_file
-from photutils.psf.matching import TukeyWindow
+from photutils.psf.matching import SplitCosineBellWindow, TukeyWindow
 from photutils.centroids import centroid_quadratic
 
 from tqdm import tqdm
@@ -33,6 +37,7 @@ from .utils import (
     get_slice_wcs,
     to_header,
     fit_kernel_fourier,
+    fftconvolve,
     pad_to_shape,
     matching_kernel,
 )
@@ -41,6 +46,29 @@ from astropy.coordinates import SkyCoord
 
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _quiet_drizzle():
+    """Silence routine drizzlepac/stwcs chatter during per-stamp PSF drizzles.
+
+    Each ``DrizzlePSF.get_psf`` call drizzles one small output cutout per
+    contributing frame. drizzlepac logs INFO lines per frame and warns that
+    input points fall outside the output image — expected here because the
+    evaluated ePSF input grid is deliberately larger than the cutout. With
+    thousands of stamps this floods the log, so suppress below ERROR for the
+    duration of the call.
+    """
+    names = ["drizzlepac", "stwcs", "stsci"]
+    loggers = [logging.getLogger(n) for n in names]
+    old_levels = [lg.level for lg in loggers]
+    for lg in loggers:
+        lg.setLevel(logging.ERROR)
+    try:
+        yield
+    finally:
+        for lg, level in zip(loggers, old_levels):
+            lg.setLevel(level)
 
 
 @dataclass
@@ -100,6 +128,719 @@ class MoffatFit:
 
 
 @dataclass
+class MatchingKernelWindowFit:
+    """Result of a split-cosine-bell PSF matching window grid search."""
+
+    alpha: float
+    beta: float
+    score: float
+    kernel: np.ndarray
+    matched_psf: np.ndarray
+    score_grid: np.ndarray
+    growth_error_grid: np.ndarray
+    core_error_grid: np.ndarray
+    l2_error_grid: np.ndarray
+    kernel_regularization_grid: np.ndarray
+    kernel_high_frequency_grid: np.ndarray
+    kernel_cancellation_grid: np.ndarray
+    alpha_grid: np.ndarray
+    beta_grid: np.ndarray
+    radii: np.ndarray
+    target_growth: np.ndarray
+    matched_growth: np.ndarray
+    target_profile: np.ndarray
+    matched_profile: np.ndarray
+
+
+@dataclass
+class MatchingKernelRegFit:
+    """Result of a 1D regularization-parameter scan for a matching method."""
+
+    method: str
+    reg: float
+    score: float
+    kernel: np.ndarray
+    matched_psf: np.ndarray
+    reg_grid: np.ndarray
+    score_grid: np.ndarray
+    growth_error_grid: np.ndarray
+    core_error_grid: np.ndarray
+    l2_error_grid: np.ndarray
+    kernel_regularization_grid: np.ndarray
+    kernel_high_frequency_grid: np.ndarray
+    kernel_cancellation_grid: np.ndarray
+    radii: np.ndarray
+    target_growth: np.ndarray
+    matched_growth: np.ndarray
+    target_profile: np.ndarray
+    matched_profile: np.ndarray
+    extra: dict[str, Any]
+
+
+def _center_crop_even_axes_to_odd(arr: np.ndarray) -> np.ndarray:
+    """Crop one leading pixel on even axes for optional odd-grid diagnostics."""
+    y0 = 1 if arr.shape[0] % 2 == 0 else 0
+    x0 = 1 if arr.shape[1] % 2 == 0 else 0
+    if y0 == 0 and x0 == 0:
+        return arr
+    return arr[y0:, x0:]
+
+
+def _prepare_psf_pair(
+    psf_hi: np.ndarray,
+    psf_lo: np.ndarray,
+    *,
+    force_odd: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sanitize and pad PSFs to a common matching shape."""
+    psf_hi = np.asarray(psf_hi, dtype=float).copy()
+    psf_lo = np.asarray(psf_lo, dtype=float).copy()
+    psf_hi[~np.isfinite(psf_hi)] = 0.0
+    psf_lo[~np.isfinite(psf_lo)] = 0.0
+    if psf_hi.shape != psf_lo.shape:
+        shape = (max(psf_hi.shape[0], psf_lo.shape[0]), max(psf_hi.shape[1], psf_lo.shape[1]))
+        psf_hi = pad_to_shape(psf_hi, shape)
+        psf_lo = pad_to_shape(psf_lo, shape)
+    if force_odd:
+        psf_hi = _center_crop_even_axes_to_odd(psf_hi)
+        psf_lo = _center_crop_even_axes_to_odd(psf_lo)
+    return psf_hi, psf_lo
+
+
+def _radius_image(shape: tuple[int, int]) -> np.ndarray:
+    """Return pixel radius from the image center."""
+    y, x = np.indices(shape)
+    cy = (shape[0] - 1) / 2.0
+    cx = (shape[1] - 1) / 2.0
+    return np.hypot(x - cx, y - cy)
+
+
+def _encircled_energy(image: np.ndarray, radii: np.ndarray) -> np.ndarray:
+    """Return encircled-energy profile at the requested radii."""
+    radius = _radius_image(image.shape).ravel()
+    values = np.asarray(image, dtype=float).ravel()
+    order = np.argsort(radius)
+    radius = radius[order]
+    cumulative = np.cumsum(values[order])
+    total = cumulative[-1]
+    if total != 0:
+        cumulative = cumulative / total
+    return np.interp(radii, radius, cumulative, left=0.0, right=cumulative[-1])
+
+
+def _radial_profile(image: np.ndarray, radii: np.ndarray) -> np.ndarray:
+    """Return annular mean profile at the requested radii."""
+    radius = _radius_image(image.shape)
+    values = np.asarray(image, dtype=float)
+    edges = np.concatenate(
+        [
+            [0.0],
+            0.5 * (radii[:-1] + radii[1:]),
+            [radii[-1] + 0.5 * (radii[-1] - radii[-2])],
+        ]
+    )
+    profile = np.empty_like(radii, dtype=float)
+    for idx, (lo, hi) in enumerate(zip(edges[:-1], edges[1:])):
+        mask = (radius >= lo) & (radius < hi)
+        profile[idx] = np.nanmean(values[mask]) if np.any(mask) else np.nan
+    valid = np.isfinite(profile)
+    if not np.all(valid) and np.any(valid):
+        profile[~valid] = np.interp(radii[~valid], radii[valid], profile[valid])
+    return profile
+
+
+def _growth_curve_error(target: np.ndarray, matched: np.ndarray) -> float:
+    """Return mean squared encircled-energy mismatch."""
+    return float(np.nanmean((matched - target) ** 2))
+
+
+def _growth_curve_ratio_for_plot(
+    radii: np.ndarray,
+    numerator: np.ndarray,
+    denominator: np.ndarray,
+    *,
+    min_radius: float = 0.7,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return finite growth-curve ratio samples outside ``min_radius``."""
+    radii = np.asarray(radii, dtype=float)
+    numerator = np.asarray(numerator, dtype=float)
+    denominator = np.asarray(denominator, dtype=float)
+    ratio = np.divide(
+        numerator,
+        denominator,
+        out=np.full_like(numerator, np.nan, dtype=float),
+        where=denominator != 0,
+    )
+    mask = (radii > min_radius) & np.isfinite(ratio)
+    return radii[mask], ratio[mask]
+
+
+def _growth_curve_ratio_plot_samples(
+    matched_psf: np.ndarray,
+    target_psf: np.ndarray,
+    radius_max: float,
+    *,
+    min_radius: float = 0.7,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return dense diagnostic-only growth-ratio samples above ``min_radius``."""
+    radius_max = float(radius_max)
+    if not np.isfinite(radius_max) or radius_max <= min_radius:
+        return np.array([], dtype=float), np.array([], dtype=float)
+
+    r0 = np.nextafter(float(min_radius), np.inf)
+    core_max = min(5.0, radius_max)
+    parts: list[np.ndarray] = []
+    if core_max > r0:
+        parts.append(np.linspace(r0, core_max, 80))
+    if radius_max > core_max:
+        parts.append(np.geomspace(max(core_max, r0), radius_max, 120))
+    radii = np.unique(np.concatenate(parts)) if parts else np.array([r0], dtype=float)
+    return _growth_curve_ratio_for_plot(
+        radii,
+        _encircled_energy(matched_psf, radii),
+        _encircled_energy(target_psf, radii),
+        min_radius=min_radius,
+    )
+
+
+def _core_profile_error(
+    target: np.ndarray,
+    matched: np.ndarray,
+    radii: np.ndarray,
+    core_radius: float,
+) -> float:
+    """Return mean squared log-profile mismatch inside ``core_radius``."""
+    mask = radii <= core_radius
+    if not np.any(mask):
+        mask = np.ones_like(radii, dtype=bool)
+    floor = max(float(np.nanmax(target)) * 1e-6, np.finfo(float).tiny)
+    target_log = np.log10(np.maximum(target[mask], floor))
+    matched_log = np.log10(np.maximum(matched[mask], floor))
+    return float(np.nanmean((matched_log - target_log) ** 2))
+
+
+def _kernel_high_frequency_power(
+    kernel: np.ndarray,
+    *,
+    high_frequency_radius: float = 0.7,
+) -> float:
+    """Return the fraction of kernel Fourier power near the Nyquist scale.
+
+    ``high_frequency_radius`` is expressed in Nyquist units: 1 is the axis
+    Nyquist frequency and sqrt(2) is the corner of the Fourier grid.  This
+    penalizes pixel-scale ringing that can match the PSF pair but is unstable
+    when applied to real templates.
+    """
+    kernel = np.asarray(kernel, dtype=float)
+    power = np.abs(np.fft.fft2(np.fft.ifftshift(kernel))) ** 2
+    fy = np.fft.fftfreq(kernel.shape[0]) / 0.5
+    fx = np.fft.fftfreq(kernel.shape[1]) / 0.5
+    qy, qx = np.meshgrid(fy, fx, indexing="ij")
+    q = np.hypot(qx, qy)
+    total = float(np.sum(power))
+    if total <= 0:
+        return 0.0
+    high = q >= high_frequency_radius
+    return float(np.sum(power[high]) / total)
+
+
+def _kernel_flux_cancellation(kernel: np.ndarray) -> float:
+    """Return excess absolute flux from positive/negative kernel oscillations."""
+    kernel = np.asarray(kernel, dtype=float)
+    net = abs(float(np.sum(kernel)))
+    if net <= 0:
+        return np.inf
+    return float(max(0.0, np.sum(np.abs(kernel)) / net - 1.0))
+
+
+def _kernel_regularization(
+    kernel: np.ndarray,
+    *,
+    high_frequency_radius: float = 0.7,
+    high_frequency_weight: float = 0.0,
+    cancellation_weight: float = 1.0,
+) -> tuple[float, float, float]:
+    """Return kernel stability penalty and its components."""
+    high_frequency = _kernel_high_frequency_power(
+        kernel,
+        high_frequency_radius=high_frequency_radius,
+    )
+    cancellation = _kernel_flux_cancellation(kernel)
+    regularization = (
+        high_frequency_weight * high_frequency
+        + cancellation_weight * cancellation**2
+    )
+    return float(regularization), float(high_frequency), float(cancellation)
+
+
+_FOM_PRESETS: dict[str, dict[str, float]] = {
+    "growth_core_only": {
+        "kernel_high_frequency_weight": 0.0,
+        "kernel_cancellation_weight": 0.0,
+    },
+    "growth_core_hf": {
+        "kernel_high_frequency_weight": 1.0,
+        "kernel_cancellation_weight": 0.0,
+    },
+    "growth_core_cancel": {
+        "kernel_high_frequency_weight": 0.0,
+        "kernel_cancellation_weight": 1.0,
+    },
+    "growth_core_hf_cancel": {
+        "kernel_high_frequency_weight": 1.0,
+        "kernel_cancellation_weight": 1.0,
+    },
+}
+
+_FOM_ALIASES = {
+    "default": "growth_core_cancel",
+    "c": "growth_core_cancel",
+    "c2": "growth_core_cancel",
+    "c^2": "growth_core_cancel",
+    "cancel": "growth_core_cancel",
+    "cancellation": "growth_core_cancel",
+    "hf": "growth_core_hf",
+    "hf_cancel": "growth_core_hf_cancel",
+    "none": "growth_core_only",
+}
+
+_KERNEL_WINDOW_BASE_ALPHA_COUNT = 23
+_KERNEL_WINDOW_BASE_BETA_COUNT = 19
+_PROFILE_XTICKS = np.array([1, 2, 4, 10, 20, 50, 100], dtype=float)
+_GROWTH_RATIO_MIN_RADIUS_PIX = 0.7
+
+
+def _kernel_window_default_grids(grid_oversample: int = 2) -> tuple[np.ndarray, np.ndarray]:
+    """Return default split-cosine-bell search grids."""
+    factor = max(1, int(grid_oversample))
+    alpha_count = (_KERNEL_WINDOW_BASE_ALPHA_COUNT - 1) * factor + 1
+    beta_count = (_KERNEL_WINDOW_BASE_BETA_COUNT - 1) * factor + 1
+    return (
+        np.linspace(0.02, 0.90, alpha_count),
+        np.linspace(0.05, 0.95, beta_count),
+    )
+
+
+def _resolve_kernel_window_fom(fom: str) -> tuple[str, dict[str, float]]:
+    """Return optimizer weights for a named kernel-window figure of merit."""
+    key = fom.strip().lower().replace("-", "_").replace(" ", "_")
+    key = _FOM_ALIASES.get(key, key)
+    if key not in _FOM_PRESETS:
+        choices = ", ".join(sorted(_FOM_PRESETS | _FOM_ALIASES))
+        raise ValueError(f"Unknown kernel window FOM {fom!r}. Expected one of: {choices}")
+    return key, dict(_FOM_PRESETS[key])
+
+
+def _log10_score_grid(score_grid: np.ndarray) -> np.ma.MaskedArray:
+    """Return a masked log10 score grid for diagnostics."""
+    score = np.asarray(score_grid, dtype=float)
+    log_score = np.full_like(score, np.nan, dtype=float)
+    valid = np.isfinite(score) & (score > 0)
+    log_score[valid] = np.log10(score[valid])
+    return np.ma.masked_invalid(log_score)
+
+
+def _finite_percentile(values: np.ndarray, percentile: float, fallback: float) -> float:
+    """Percentile helper that is robust to fully masked diagnostic arrays."""
+    finite = np.asarray(values, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return fallback
+    return float(np.nanpercentile(finite, percentile))
+
+
+def _shared_asinh_scale(images: list[np.ndarray]) -> tuple[float, float, float]:
+    """Return shared physical limit, linear width, and transformed limit."""
+    abs_stack = np.concatenate([np.ravel(np.abs(np.asarray(image, dtype=float))) for image in images])
+    finite = abs_stack[np.isfinite(abs_stack)]
+    limit = float(np.nanpercentile(finite, 99.0)) if finite.size else 1.0
+    limit = max(limit, np.finfo(float).eps)
+    stretch = limit / 120.0
+    transformed_limit = float(np.arcsinh(limit / stretch))
+    return limit, stretch, transformed_limit
+
+
+def _add_shared_asinh_colorbar(
+    fig,
+    *,
+    stretch: float,
+    limit: float,
+    mappable,
+    cax_bounds: list[float] | tuple[float, float, float, float] = (0.86, 0.14, 0.018, 0.40),
+) -> None:
+    """Add one physical-value colorbar for shared asinh diagnostic panels."""
+    ticks_physical = np.array([-limit, -limit / 10.0, 0.0, limit / 10.0, limit])
+    ticks_transformed = np.arcsinh(ticks_physical / stretch)
+    cax = fig.add_axes(cax_bounds)
+    cbar = fig.colorbar(
+        mappable,
+        cax=cax,
+        ticks=ticks_transformed,
+    )
+    cbar.ax.set_yticklabels([f"{value:.2e}" for value in ticks_physical])
+    cbar.set_label("image value")
+
+
+def _save_matching_kernel_window_diagnostic(
+    path: str | Path,
+    result: MatchingKernelWindowFit,
+    psf_hi: np.ndarray,
+    psf_lo: np.ndarray,
+    *,
+    fom_name: str,
+    core_radius: float,
+    source_label: str,
+    target_label: str,
+    reg_lambda: float,
+    title: str | None = None,
+    aperture_radius: float | None = None,
+) -> None:
+    """Write a production-style diagnostic for an optimized PSF matching window."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path = Path(path)
+    if path.suffix == "":
+        path = path / "diagnostic_window.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    radii = result.radii
+    residual = result.matched_psf - psf_lo
+    alpha_idx = int(np.argmin(np.abs(result.alpha_grid - result.alpha)))
+    beta_idx = int(np.argmin(np.abs(result.beta_grid - result.beta)))
+    opt_growth = float(result.growth_error_grid[beta_idx, alpha_idx])
+    opt_core = float(result.core_error_grid[beta_idx, alpha_idx])
+    opt_l2 = float(result.l2_error_grid[beta_idx, alpha_idx])
+    opt_kernel_reg = float(result.kernel_regularization_grid[beta_idx, alpha_idx])
+    opt_kernel_hf = float(result.kernel_high_frequency_grid[beta_idx, alpha_idx])
+    opt_kernel_cancel = float(result.kernel_cancellation_grid[beta_idx, alpha_idx])
+
+    image_panels = [
+        (psf_hi, source_label),
+        (psf_lo, target_label),
+        (result.kernel, "kernel"),
+        (result.matched_psf, f"K * {source_label}"),
+        (residual, f"K * {source_label} - {target_label}"),
+    ]
+    physical_limit, stretch, transformed_limit = _shared_asinh_scale(
+        [image for image, _ in image_panels]
+    )
+
+    fig, axes = plt.subplots(3, 3, figsize=(15, 13))
+
+    score = _log10_score_grid(result.score_grid)
+    score_values = score.filled(np.nan)
+    im = axes[0, 0].imshow(
+        score,
+        origin="lower",
+        aspect="auto",
+        extent=[
+            float(result.alpha_grid.min()),
+            float(result.alpha_grid.max()),
+            float(result.beta_grid.min()),
+            float(result.beta_grid.max()),
+        ],
+        vmin=_finite_percentile(score_values, 1, -12.0),
+        vmax=_finite_percentile(score_values, 95, 0.0),
+    )
+    axes[0, 0].plot(
+        result.alpha,
+        result.beta,
+        "r*",
+        ms=15,
+        label=f"alpha={result.alpha:.3f}\nbeta={result.beta:.3f}\nscore={result.score:.3g}",
+    )
+    axes[0, 0].set_xlabel("alpha")
+    axes[0, 0].set_ylabel("beta")
+    axes[0, 0].set_title(f"log10(FOM): {fom_name}")
+    axes[0, 0].legend(fontsize=8, loc="upper right")
+    fig.colorbar(im, ax=axes[0, 0], fraction=0.046, pad=0.04)
+
+    profile_radius_max = float(min(psf_hi.shape) / 2.0 - 1.0)
+    axes[0, 1].plot(radii, result.target_profile, "k-", lw=2, label=target_label)
+    axes[0, 1].plot(radii, result.matched_profile, "r-.", lw=1.5, label="matched")
+    axes[0, 1].set_xscale("symlog", linthresh=1.0)
+    axes[0, 1].set_yscale("log")
+    axes[0, 1].set_xlabel("radius [pix]")
+    axes[0, 1].set_ylabel("annular mean intensity")
+    axes[0, 1].set_title("radial profiles")
+    axes[0, 1].set_xlim(0.9, profile_radius_max)
+    profile_ticks = _PROFILE_XTICKS[_PROFILE_XTICKS <= profile_radius_max]
+    axes[0, 1].set_xticks(profile_ticks)
+    axes[0, 1].set_xticklabels([f"{tick:g}" for tick in profile_ticks])
+    axes[0, 1].set_ylim(bottom=1e-7)
+    axes[0, 1].grid(alpha=0.25)
+    axes[0, 1].legend(fontsize=8)
+
+    growth_ratio_radii, growth_ratio = _growth_curve_ratio_plot_samples(
+        result.matched_psf,
+        psf_lo,
+        profile_radius_max,
+        min_radius=_GROWTH_RATIO_MIN_RADIUS_PIX,
+    )
+    growth_ticks = np.concatenate(
+        ([float(_GROWTH_RATIO_MIN_RADIUS_PIX)], profile_ticks[profile_ticks > _GROWTH_RATIO_MIN_RADIUS_PIX])
+    )
+    axes[0, 2].plot(
+        growth_ratio_radii,
+        growth_ratio,
+        "r-",
+        label=f"SCB({result.alpha:.2f}, {result.beta:.2f})",
+    )
+    axes[0, 2].axhline(1.0, color="k", lw=1, alpha=0.7)
+    axes[0, 2].axhline(0.98, color="0.45", lw=1, ls=":", alpha=0.8)
+    axes[0, 2].axhline(1.02, color="0.45", lw=1, ls=":", alpha=0.8, label="+/-2%")
+    if aperture_radius is not None:
+        axes[0, 2].axvline(
+            aperture_radius,
+            color="0.3",
+            lw=1.2,
+            ls="--",
+            alpha=0.8,
+            label=f"r={aperture_radius:g} pix",
+        )
+    axes[0, 2].set_xscale("symlog", linthresh=1.0)
+    axes[0, 2].set_xlabel("radius [pix]")
+    axes[0, 2].set_ylabel("EE(match) / EE(target)")
+    axes[0, 2].set_ylim(0.8, 1.2)
+    axes[0, 2].set_xlim(_GROWTH_RATIO_MIN_RADIUS_PIX, profile_radius_max)
+    axes[0, 2].set_xticks(growth_ticks)
+    axes[0, 2].set_xticklabels([f"{tick:g}" for tick in growth_ticks])
+    axes[0, 2].set_title("growth-curve ratio")
+    axes[0, 2].grid(alpha=0.25)
+    axes[0, 2].legend(fontsize=8)
+
+    def show_panel(ax, image: np.ndarray, panel_title: str) -> None:
+        im = ax.imshow(
+            np.arcsinh(np.asarray(image, dtype=float) / stretch),
+            origin="lower",
+            cmap="RdBu_r",
+            vmin=-transformed_limit,
+            vmax=transformed_limit,
+        )
+        ax.set_title(panel_title)
+        ax.set_xlabel("x [pix]")
+        ax.set_ylabel("y [pix]")
+        return im
+
+    image_mappable = None
+    for ax, (image, panel_title) in zip(
+        [axes[1, 0], axes[1, 1], axes[1, 2], axes[2, 0], axes[2, 1]],
+        image_panels,
+    ):
+        image_mappable = show_panel(ax, image, panel_title)
+    _add_shared_asinh_colorbar(
+        fig,
+        stretch=stretch,
+        limit=physical_limit,
+        mappable=image_mappable,
+        cax_bounds=(0.86, 0.14, 0.018, 0.40),
+    )
+
+    info_ax = axes[2, 2]
+    info_ax.axis("off")
+    info_ax.text(
+        0.02,
+        0.98,
+        f"FOM preset: {fom_name}\n"
+        "FOM = growth MSE + core MSE + lambda * R(K)\n"
+        "C = sum(abs(K)) / abs(sum(K)) - 1\n\n"
+        f"alpha={result.alpha:.3f} beta={result.beta:.3f}\n"
+        f"score={result.score:.4g}\n"
+        f"RMS residual={np.sqrt(np.mean(residual**2)):.4g}\n"
+        f"growth MSE={opt_growth:.3g}\n"
+        f"core log MSE={opt_core:.3g} inside r<={core_radius:.3g} pix\n"
+        f"L2 image MSE={opt_l2:.3g}\n"
+        f"lambda={reg_lambda:.3g}\n"
+        f"kernel R={opt_kernel_reg:.3g}\n"
+        f"  high-freq={opt_kernel_hf:.3g}\n"
+        f"  cancellation={opt_kernel_cancel:.3g}",
+        transform=info_ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=10,
+    )
+
+    fig.suptitle(title or "PSF matching kernel-window diagnostic", y=0.995)
+    fig.subplots_adjust(left=0.06, right=0.82, top=0.93, bottom=0.06, wspace=0.42, hspace=0.55)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def _save_matching_kernel_regularization_diagnostic(
+    path: str | Path,
+    result: MatchingKernelRegFit,
+    psf_hi: np.ndarray,
+    psf_lo: np.ndarray,
+    *,
+    source_label: str,
+    target_label: str,
+    title: str | None = None,
+    aperture_radius: float | None = None,
+    target_note: str | None = None,
+) -> None:
+    """Write the standard diagnostic for a scalar-regularized matching kernel."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path = Path(path)
+    if path.suffix == "":
+        path = path / f"diagnostic_{result.method}.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    radii = result.radii
+    residual = result.matched_psf - psf_lo
+    opt_idx = int(np.argmin(np.abs(result.reg_grid - result.reg)))
+    opt_growth = float(result.growth_error_grid[opt_idx])
+    opt_core = float(result.core_error_grid[opt_idx])
+    opt_l2 = float(result.l2_error_grid[opt_idx])
+    opt_kernel_reg = float(result.kernel_regularization_grid[opt_idx])
+    opt_kernel_hf = float(result.kernel_high_frequency_grid[opt_idx])
+    opt_kernel_cancel = float(result.kernel_cancellation_grid[opt_idx])
+
+    image_panels = [
+        (psf_hi, source_label),
+        (psf_lo, target_label),
+        (result.kernel, "kernel"),
+        (result.matched_psf, f"K * {source_label}"),
+        (residual, f"K * {source_label} - {target_label}"),
+    ]
+    physical_limit, stretch, transformed_limit = _shared_asinh_scale(
+        [image for image, _ in image_panels]
+    )
+
+    fig, axes = plt.subplots(3, 3, figsize=(15, 13))
+
+    valid_score = np.isfinite(result.score_grid) & (result.score_grid > 0)
+    axes[0, 0].semilogx(result.reg_grid, result.score_grid, "o-", color="C0", ms=4)
+    axes[0, 0].axvline(
+        result.reg,
+        color="r",
+        lw=1.2,
+        ls="--",
+        label=f"lambda*={result.reg:.2e}\nscore={result.score:.3g}",
+    )
+    axes[0, 0].set_xlabel("lambda")
+    axes[0, 0].set_ylabel("FOM")
+    if np.any(valid_score):
+        axes[0, 0].set_yscale("log")
+    axes[0, 0].set_title(f"FOM vs lambda: {result.method}")
+    axes[0, 0].grid(alpha=0.3, which="both")
+    axes[0, 0].legend(fontsize=8, loc="best")
+
+    profile_radius_max = float(min(psf_hi.shape) / 2.0 - 1.0)
+    profile_ticks = _PROFILE_XTICKS[_PROFILE_XTICKS <= profile_radius_max]
+    axes[0, 1].plot(radii, result.target_profile, "k-", lw=2, label=target_label)
+    axes[0, 1].plot(radii, result.matched_profile, "r-.", lw=1.5, label="matched")
+    axes[0, 1].set_xscale("symlog", linthresh=1.0)
+    axes[0, 1].set_yscale("log")
+    axes[0, 1].set_xlabel("radius [pix]")
+    axes[0, 1].set_ylabel("annular mean intensity")
+    axes[0, 1].set_title("radial profiles")
+    axes[0, 1].set_xlim(0.9, profile_radius_max)
+    axes[0, 1].set_xticks(profile_ticks)
+    axes[0, 1].set_xticklabels([f"{tick:g}" for tick in profile_ticks])
+    axes[0, 1].set_ylim(bottom=1e-7)
+    axes[0, 1].grid(alpha=0.25)
+    axes[0, 1].legend(fontsize=8)
+
+    growth_ratio_radii, growth_ratio = _growth_curve_ratio_plot_samples(
+        result.matched_psf,
+        psf_lo,
+        profile_radius_max,
+        min_radius=_GROWTH_RATIO_MIN_RADIUS_PIX,
+    )
+    growth_ticks = np.concatenate(
+        ([float(_GROWTH_RATIO_MIN_RADIUS_PIX)], profile_ticks[profile_ticks > _GROWTH_RATIO_MIN_RADIUS_PIX])
+    )
+    axes[0, 2].plot(growth_ratio_radii, growth_ratio, "r-", label=f"lambda={result.reg:.2e}")
+    axes[0, 2].axhline(1.0, color="k", lw=1, alpha=0.7)
+    axes[0, 2].axhline(0.98, color="0.45", lw=1, ls=":", alpha=0.8)
+    axes[0, 2].axhline(1.02, color="0.45", lw=1, ls=":", alpha=0.8, label="+/-2%")
+    if aperture_radius is not None:
+        axes[0, 2].axvline(
+            aperture_radius,
+            color="0.3",
+            lw=1.2,
+            ls="--",
+            alpha=0.8,
+            label=f"r={aperture_radius:g} pix",
+        )
+    axes[0, 2].set_xscale("symlog", linthresh=1.0)
+    axes[0, 2].set_xlabel("radius [pix]")
+    axes[0, 2].set_ylabel("EE(match) / EE(target)")
+    axes[0, 2].set_ylim(0.8, 1.2)
+    axes[0, 2].set_xlim(_GROWTH_RATIO_MIN_RADIUS_PIX, profile_radius_max)
+    axes[0, 2].set_xticks(growth_ticks)
+    axes[0, 2].set_xticklabels([f"{tick:g}" for tick in growth_ticks])
+    axes[0, 2].set_title("growth-curve ratio")
+    axes[0, 2].grid(alpha=0.25)
+    axes[0, 2].legend(fontsize=8)
+
+    image_mappable = None
+    for ax, (image, panel_title) in zip(
+        [axes[1, 0], axes[1, 1], axes[1, 2], axes[2, 0], axes[2, 1]],
+        image_panels,
+    ):
+        image_mappable = ax.imshow(
+            np.arcsinh(np.asarray(image, dtype=float) / stretch),
+            origin="lower",
+            cmap="RdBu_r",
+            vmin=-transformed_limit,
+            vmax=transformed_limit,
+        )
+        ax.set_title(panel_title)
+        ax.set_xlabel("x [pix]")
+        ax.set_ylabel("y [pix]")
+    _add_shared_asinh_colorbar(
+        fig,
+        stretch=stretch,
+        limit=physical_limit,
+        mappable=image_mappable,
+        cax_bounds=(0.86, 0.14, 0.018, 0.40),
+    )
+
+    core_radius = float(result.extra.get("core_radius", np.nan))
+    growth_weight = float(result.extra.get("growth_weight", np.nan))
+    core_weight = float(result.extra.get("core_weight", np.nan))
+    l2_weight = float(result.extra.get("l2_weight", np.nan))
+    kernel_weight = float(result.extra.get("kernel_regularization_weight", np.nan))
+    note = "" if target_note is None else f"\n\ndata: {target_note}"
+    info_ax = axes[2, 2]
+    info_ax.axis("off")
+    info_ax.text(
+        0.02,
+        0.98,
+        f"method: {result.method}\n"
+        f"lambda={result.reg:.4g}\n"
+        f"score={result.score:.4g}\n"
+        f"growth MSE={opt_growth:.3g}\n"
+        f"core log MSE={opt_core:.3g} inside r<={core_radius:.3g} pix\n"
+        f"L2 image MSE={opt_l2:.3g}\n"
+        f"RMS residual={np.sqrt(np.mean(residual**2)):.4g}\n\n"
+        f"FOM weights: growth={growth_weight:g}, core={core_weight:g}, "
+        f"L2={l2_weight:g}, kernel={kernel_weight:g}\n"
+        f"kernel R={opt_kernel_reg:.3g}\n"
+        f"  high-freq={opt_kernel_hf:.3g}\n"
+        f"  cancellation={opt_kernel_cancel:.3g}"
+        f"{note}",
+        transform=info_ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=9,
+    )
+
+    fig.suptitle(title or f"PSF matching kernel diagnostic - {result.method}", y=0.995)
+    fig.subplots_adjust(left=0.06, right=0.82, top=0.93, bottom=0.06, wspace=0.42, hspace=0.55)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+@dataclass
 class PSF:
     """Discrete point spread function."""
 
@@ -113,11 +854,7 @@ class PSF:
         return self.array
 
     def __post_init__(self) -> None:
-        arr = np.asarray(self.array, dtype=float)
-        s = arr.sum()
-        if s != 0:
-            arr = arr / s
-        self.array = arr
+        self.array = np.asarray(self.array, dtype=float)
 
     @classmethod
     def moffat(
@@ -278,21 +1015,39 @@ class PSF:
         window: object | None = None,
         *,
         recenter: bool = True,
+        method: str = "window",
+        reg: float = 1e-3,
+        wavelet: str = "db4",
+        levels: int = 3,
+        threshold_factor: float = 3.0,
+        noise_sigma: float | None = None,
+        forward_wavelet_wiener: bool = True,
+        signal_psd: np.ndarray | None = None,
     ) -> np.ndarray:
         """Return the convolution kernel that matches ``self`` to ``other``.
 
         Parameters
         ----------
         other : PSF or np.ndarray
-            The target PSF. If np.ndarray, it's assumed to be a normalized PSF.
+            The target PSF. If an array is supplied, its flux is used as given.
         window : optional
-            Window function passed to ``create_matching_kernel``. Defaults to TukeyWindow(alpha=0.4).
-
-        Parameters
-        ----------
+            Fourier-domain window function used when ``method="window"``.
+            Defaults to ``SplitCosineBellWindow(alpha=0.4, beta=0.1)``.
         recenter : bool, optional
-            If ``True`` the resulting kernel is shifted to its centroid using
-            bicubic interpolation. Defaults to ``True``.
+            If ``True`` the resulting kernel is shifted to its centroid.
+        method : str, optional
+            ``"window"`` (default), ``"tikhonov"``, ``"wiener"`` or
+            ``"forward"`` (ForWaRD Fourier+wavelet regularized deconvolution,
+            Neelamani et al. 2004).
+        reg : float, optional
+            Regularization parameter for ``tikhonov``, ``wiener``, and
+            ``forward``.  Scaled by ``max(|H_hi|^2)`` so it is dimensionless.
+        wavelet, levels, threshold_factor, noise_sigma, forward_wavelet_wiener :
+            ``forward``-only options.  ``threshold_factor`` controls the hard
+            threshold on detail coefficients in units of estimated per-subband
+            noise.  Pass ``forward_wavelet_wiener=False`` to skip step 5.
+        signal_psd : np.ndarray, optional
+            Signal power spectral density for ``method="wiener"``.
 
         Returns
         -------
@@ -308,12 +1063,438 @@ class PSF:
             psf_lo = np.asarray(other.array, dtype=float)
         else:
             psf_lo = np.asarray(other, dtype=float)
-        # Normalize if not already normalized
-        if psf_lo.sum() != 0:
-            psf_lo = psf_lo / psf_lo.sum()
+        psf_hi, psf_lo = _prepare_psf_pair(psf_hi, psf_lo)
 
-        kernel = matching_kernel(psf_hi, psf_lo, window=window, recenter=recenter)
+        kernel = matching_kernel(
+            psf_hi,
+            psf_lo,
+            window=window,
+            recenter=recenter,
+            method=method,
+            reg=reg,
+            wavelet=wavelet,
+            levels=levels,
+            threshold_factor=threshold_factor,
+            noise_sigma=noise_sigma,
+            forward_wavelet_wiener=forward_wavelet_wiener,
+            signal_psd=signal_psd,
+        )
         return kernel.astype(np.float32)
+
+    def optimize_matching_kernel_window(
+        self,
+        other: "PSF" | np.ndarray,
+        *,
+        alpha_grid: np.ndarray | None = None,
+        beta_grid: np.ndarray | None = None,
+        grid_oversample: int = 2,
+        core_radius: float | None = None,
+        growth_weight: float = 1.0,
+        core_weight: float = 1.0,
+        l2_weight: float = 0.0,
+        kernel_regularization_weight: float = 1e-3,
+        kernel_high_frequency_radius: float = 0.7,
+        kernel_high_frequency_weight: float = 0.0,
+        kernel_cancellation_weight: float = 1.0,
+        recenter: bool = False,
+    ) -> MatchingKernelWindowFit:
+        """Grid-search split-cosine-bell parameters for PSF matching.
+
+        The optimizer evaluates ``SplitCosineBellWindow(alpha, beta)`` values
+        satisfying ``alpha + beta <= 1``.  Each kernel is generated with the
+        same :func:`mophongo.utils.matching_kernel` routine used elsewhere in
+        the pipeline, then scored using squared encircled-energy mismatch,
+        squared log radial-profile mismatch in the core, and a configurable
+        kernel stability penalty.  The default stability term is signed-flux
+        cancellation only, i.e. ``1e-3 * C(K)^2``.  High-frequency kernel
+        power is still available as an optional additional term.
+
+        Parameters
+        ----------
+        other : PSF or np.ndarray
+            Target PSF that ``self`` should be convolved into.
+        alpha_grid, beta_grid : np.ndarray, optional
+            Split-cosine-bell grid values.  Defaults cover broad windows
+            without including the singular endpoints.
+        grid_oversample : int, optional
+            Refinement factor for the default alpha/beta grids.  Defaults to
+            ``2``, i.e. twice the historical default sampling. Ignored when
+            explicit grids are supplied.
+        core_radius : float, optional
+            Maximum radius in pixels for the core radial-profile term.
+            Defaults to one quarter of the PSF size.
+        growth_weight, core_weight, l2_weight : float, optional
+            Weights for the growth-curve, radial-core, and image-space mean
+            square terms in the score.
+        kernel_regularization_weight : float, optional
+            Overall weight for the kernel stability term.
+        kernel_high_frequency_radius : float, optional
+            Fourier radius, in Nyquist units, above which kernel power is
+            penalized as pixel-scale ringing.
+        kernel_high_frequency_weight, kernel_cancellation_weight : float, optional
+            Relative weights for high-frequency kernel power and excess
+            positive/negative L1 flux cancellation.
+        recenter : bool, optional
+            Passed to :func:`mophongo.utils.matching_kernel`.  Defaults to
+            ``False`` so already-centered PSFs are not shifted during scoring.
+
+        Returns
+        -------
+        MatchingKernelWindowFit
+            Best-fit parameters, kernel, matched PSF, and diagnostic grids.
+        """
+        psf_hi = np.asarray(self.array, dtype=float)
+        psf_lo = other.array if isinstance(other, PSF) else np.asarray(other, dtype=float)
+        psf_hi, psf_lo = _prepare_psf_pair(psf_hi, psf_lo)
+
+        default_alpha_grid, default_beta_grid = _kernel_window_default_grids(grid_oversample)
+        alpha_grid = default_alpha_grid if alpha_grid is None else np.asarray(alpha_grid, dtype=float)
+        beta_grid = default_beta_grid if beta_grid is None else np.asarray(beta_grid, dtype=float)
+        if core_radius is None:
+            core_radius = min(psf_hi.shape) / 4.0
+
+        radii = np.linspace(0.5, min(psf_hi.shape) / 2.0 - 1.0, 100)
+        target_growth = _encircled_energy(psf_lo, radii)
+        target_profile = _radial_profile(psf_lo, radii)
+
+        score_grid = np.full((len(beta_grid), len(alpha_grid)), np.nan, dtype=float)
+        growth_error_grid = np.full_like(score_grid, np.nan)
+        core_error_grid = np.full_like(score_grid, np.nan)
+        l2_error_grid = np.full_like(score_grid, np.nan)
+        kernel_regularization_grid = np.full_like(score_grid, np.nan)
+        kernel_high_frequency_grid = np.full_like(score_grid, np.nan)
+        kernel_cancellation_grid = np.full_like(score_grid, np.nan)
+
+        best: tuple[float, int, int, np.ndarray, np.ndarray] | None = None
+        for ib, beta in enumerate(beta_grid):
+            for ia, alpha in enumerate(alpha_grid):
+                if alpha < 0 or beta < 0 or alpha + beta > 1:
+                    continue
+                window = SplitCosineBellWindow(alpha=float(alpha), beta=float(beta))
+                kernel = matching_kernel(psf_hi, psf_lo, window=window, recenter=recenter)
+                matched = fftconvolve(psf_hi, kernel, mode="same")
+
+                growth = _encircled_energy(matched, radii)
+                profile = _radial_profile(matched, radii)
+                growth_error = _growth_curve_error(target_growth, growth)
+                core_error = _core_profile_error(target_profile, profile, radii, core_radius)
+                l2_error = float(np.nanmean((matched - psf_lo) ** 2))
+                kernel_regularization, kernel_high_frequency, kernel_cancellation = (
+                    _kernel_regularization(
+                        kernel,
+                        high_frequency_radius=kernel_high_frequency_radius,
+                        high_frequency_weight=kernel_high_frequency_weight,
+                        cancellation_weight=kernel_cancellation_weight,
+                    )
+                )
+                score = (
+                    growth_weight * growth_error
+                    + core_weight * core_error
+                    + l2_weight * l2_error
+                    + kernel_regularization_weight * kernel_regularization
+                )
+
+                growth_error_grid[ib, ia] = growth_error
+                core_error_grid[ib, ia] = core_error
+                l2_error_grid[ib, ia] = l2_error
+                kernel_regularization_grid[ib, ia] = kernel_regularization
+                kernel_high_frequency_grid[ib, ia] = kernel_high_frequency
+                kernel_cancellation_grid[ib, ia] = kernel_cancellation
+                score_grid[ib, ia] = score
+                if np.isfinite(score) and (best is None or score < best[0]):
+                    best = (score, ib, ia, kernel, matched)
+
+        if best is None:
+            raise ValueError("No valid split-cosine-bell window parameters were evaluated.")
+
+        score, ib, ia, kernel, matched = best
+        return MatchingKernelWindowFit(
+            alpha=float(alpha_grid[ia]),
+            beta=float(beta_grid[ib]),
+            score=float(score),
+            kernel=np.asarray(kernel),
+            matched_psf=np.asarray(matched),
+            score_grid=score_grid,
+            growth_error_grid=growth_error_grid,
+            core_error_grid=core_error_grid,
+            l2_error_grid=l2_error_grid,
+            kernel_regularization_grid=kernel_regularization_grid,
+            kernel_high_frequency_grid=kernel_high_frequency_grid,
+            kernel_cancellation_grid=kernel_cancellation_grid,
+            alpha_grid=alpha_grid,
+            beta_grid=beta_grid,
+            radii=radii,
+            target_growth=target_growth,
+            matched_growth=_encircled_energy(matched, radii),
+            target_profile=target_profile,
+            matched_profile=_radial_profile(matched, radii),
+        )
+
+    def optimize_matching_kernel_regularization(
+        self,
+        other: "PSF" | np.ndarray,
+        *,
+        method: str = "tikhonov",
+        reg_grid: np.ndarray | None = None,
+        core_radius: float | None = None,
+        growth_weight: float = 1.0,
+        core_weight: float = 1.0,
+        l2_weight: float = 0.0,
+        kernel_regularization_weight: float = 1e-3,
+        kernel_high_frequency_radius: float = 0.7,
+        kernel_high_frequency_weight: float = 0.0,
+        kernel_cancellation_weight: float = 1.0,
+        recenter: bool = False,
+        wavelet: str = "db4",
+        levels: int = 3,
+        threshold_factor: float = 3.0,
+        noise_sigma: float | None = None,
+        forward_wavelet_wiener: bool = True,
+        signal_psd: np.ndarray | None = None,
+        diagnostic_path: str | Path | None = None,
+        source_label: str = "source PSF",
+        target_label: str = "target PSF",
+        diagnostic_title: str | None = None,
+        aperture_radius: float | None = None,
+        diagnostic_note: str | None = None,
+    ) -> MatchingKernelRegFit:
+        """Grid-search the scalar regularization parameter for non-windowed methods.
+
+        Identical figure of merit to
+        :meth:`optimize_matching_kernel_window`; mostly used to find the best
+        ``reg`` for ``method="tikhonov" | "wiener" | "forward"``.
+
+        If ``diagnostic_path`` is provided, the standard PSF matching
+        diagnostic is written. Passing a directory writes
+        ``diagnostic_<method>.png`` inside that directory.
+        """
+        psf_hi = np.asarray(self.array, dtype=float)
+        psf_lo = other.array if isinstance(other, PSF) else np.asarray(other, dtype=float)
+        psf_hi, psf_lo = _prepare_psf_pair(psf_hi, psf_lo)
+
+        if reg_grid is None:
+            reg_grid = np.logspace(-6, -1, 21)
+        reg_grid = np.asarray(reg_grid, dtype=float)
+
+        if core_radius is None:
+            core_radius = min(psf_hi.shape) / 4.0
+
+        radii = np.linspace(0.5, min(psf_hi.shape) / 2.0 - 1.0, 100)
+        target_growth = _encircled_energy(psf_lo, radii)
+        target_profile = _radial_profile(psf_lo, radii)
+
+        n = len(reg_grid)
+        score_grid = np.full(n, np.nan)
+        growth_error_grid = np.full(n, np.nan)
+        core_error_grid = np.full(n, np.nan)
+        l2_error_grid = np.full(n, np.nan)
+        kernel_regularization_grid = np.full(n, np.nan)
+        kernel_high_frequency_grid = np.full(n, np.nan)
+        kernel_cancellation_grid = np.full(n, np.nan)
+
+        best: tuple[float, int, np.ndarray, np.ndarray] | None = None
+        for i, reg in enumerate(reg_grid):
+            try:
+                kernel = matching_kernel(
+                    psf_hi,
+                    psf_lo,
+                    method=method,
+                    reg=float(reg),
+                    recenter=recenter,
+                    wavelet=wavelet,
+                    levels=levels,
+                    threshold_factor=threshold_factor,
+                    noise_sigma=noise_sigma,
+                    forward_wavelet_wiener=forward_wavelet_wiener,
+                    signal_psd=signal_psd,
+                )
+            except Exception as exc:
+                logger.warning("matching_kernel failed at reg=%g: %s", reg, exc)
+                continue
+            if not np.all(np.isfinite(kernel)):
+                continue
+            matched = fftconvolve(psf_hi, kernel, mode="same")
+            growth = _encircled_energy(matched, radii)
+            profile = _radial_profile(matched, radii)
+            growth_error = _growth_curve_error(target_growth, growth)
+            core_error = _core_profile_error(target_profile, profile, radii, core_radius)
+            l2_error = float(np.nanmean((matched - psf_lo) ** 2))
+            kreg, khf, kcancel = _kernel_regularization(
+                kernel,
+                high_frequency_radius=kernel_high_frequency_radius,
+                high_frequency_weight=kernel_high_frequency_weight,
+                cancellation_weight=kernel_cancellation_weight,
+            )
+            score = (
+                growth_weight * growth_error
+                + core_weight * core_error
+                + l2_weight * l2_error
+                + kernel_regularization_weight * kreg
+            )
+            growth_error_grid[i] = growth_error
+            core_error_grid[i] = core_error
+            l2_error_grid[i] = l2_error
+            kernel_regularization_grid[i] = kreg
+            kernel_high_frequency_grid[i] = khf
+            kernel_cancellation_grid[i] = kcancel
+            score_grid[i] = score
+            if np.isfinite(score) and (best is None or score < best[0]):
+                best = (score, i, kernel, matched)
+
+        if best is None:
+            raise ValueError(
+                f"No valid {method!r} kernel produced over reg grid [{reg_grid.min()}, {reg_grid.max()}]."
+            )
+
+        score, i, kernel, matched = best
+        result = MatchingKernelRegFit(
+            method=method,
+            reg=float(reg_grid[i]),
+            score=float(score),
+            kernel=np.asarray(kernel),
+            matched_psf=np.asarray(matched),
+            reg_grid=reg_grid,
+            score_grid=score_grid,
+            growth_error_grid=growth_error_grid,
+            core_error_grid=core_error_grid,
+            l2_error_grid=l2_error_grid,
+            kernel_regularization_grid=kernel_regularization_grid,
+            kernel_high_frequency_grid=kernel_high_frequency_grid,
+            kernel_cancellation_grid=kernel_cancellation_grid,
+            radii=radii,
+            target_growth=target_growth,
+            matched_growth=_encircled_energy(matched, radii),
+            target_profile=target_profile,
+            matched_profile=_radial_profile(matched, radii),
+            extra={
+                "wavelet": wavelet,
+                "levels": levels,
+                "threshold_factor": threshold_factor,
+                "noise_sigma": noise_sigma,
+                "forward_wavelet_wiener": forward_wavelet_wiener,
+                "core_radius": float(core_radius),
+                "growth_weight": float(growth_weight),
+                "core_weight": float(core_weight),
+                "l2_weight": float(l2_weight),
+                "kernel_regularization_weight": float(kernel_regularization_weight),
+            },
+        )
+
+        if diagnostic_path is not None:
+            _save_matching_kernel_regularization_diagnostic(
+                diagnostic_path,
+                result,
+                psf_hi,
+                psf_lo,
+                source_label=source_label,
+                target_label=target_label,
+                title=diagnostic_title,
+                aperture_radius=aperture_radius,
+                target_note=diagnostic_note,
+            )
+
+        return result
+
+    def auto_matching_kernel_window(
+        self,
+        other: "PSF" | np.ndarray,
+        *,
+        fom: str = "c2",
+        alpha_grid: np.ndarray | None = None,
+        beta_grid: np.ndarray | None = None,
+        grid_oversample: int = 2,
+        core_radius: float | None = None,
+        growth_weight: float = 1.0,
+        core_weight: float = 1.0,
+        l2_weight: float = 0.0,
+        reg_lambda: float = 1e-3,
+        kernel_high_frequency_radius: float = 0.7,
+        recenter: bool = False,
+        diagnostic_path: str | Path | None = None,
+        source_label: str = "source PSF",
+        target_label: str = "target PSF",
+        diagnostic_title: str | None = None,
+        aperture_radius: float | None = None,
+        return_result: bool = False,
+    ) -> SplitCosineBellWindow | tuple[SplitCosineBellWindow, MatchingKernelWindowFit]:
+        """Return the optimized split-cosine-bell window for matching to ``other``.
+
+        This is the lightweight API intended for production use.  It wraps
+        :meth:`optimize_matching_kernel_window`, maps a named figure of merit
+        to the regularization weights, and returns the
+        ``SplitCosineBellWindow`` object that can be passed directly to
+        :meth:`matching_kernel`.
+
+        Parameters
+        ----------
+        other : PSF or np.ndarray
+            Target PSF that ``self`` should be convolved into.
+        fom : str, optional
+            Figure-of-merit preset.  The default ``"c2"`` is an alias for
+            ``"growth_core_cancel"`` and scores
+            ``growth MSE + core MSE + 1e-3 * C(K)^2``.  Other choices are
+            ``"growth_core_only"``, ``"growth_core_hf"``, and
+            ``"growth_core_hf_cancel"``.
+        alpha_grid, beta_grid, grid_oversample, core_radius, growth_weight,
+        core_weight, l2_weight, reg_lambda, kernel_high_frequency_radius,
+        recenter : optional
+            Passed through to :meth:`optimize_matching_kernel_window`.
+        diagnostic_path : str or Path, optional
+            If provided, write a PNG diagnostic with the score grid, radial
+            profile, growth curve, kernel, matched PSF, and residual panels.
+        source_label, target_label, diagnostic_title, aperture_radius : optional
+            Labels used only in the diagnostic figure.
+        return_result : bool, optional
+            If ``True``, return ``(window, result)`` where ``result`` is the
+            full :class:`MatchingKernelWindowFit`.
+
+        Returns
+        -------
+        SplitCosineBellWindow or tuple
+            Optimized window, optionally paired with the full fit result.
+        """
+        fom_name, weights = _resolve_kernel_window_fom(fom)
+        psf_hi = np.asarray(self.array, dtype=float)
+        psf_lo = other.array if isinstance(other, PSF) else np.asarray(other, dtype=float)
+        psf_hi_prepared, psf_lo_prepared = _prepare_psf_pair(psf_hi, psf_lo)
+        if core_radius is None:
+            core_radius = min(psf_hi_prepared.shape) / 4.0
+
+        result = self.optimize_matching_kernel_window(
+            psf_lo_prepared,
+            alpha_grid=alpha_grid,
+            beta_grid=beta_grid,
+            grid_oversample=grid_oversample,
+            core_radius=core_radius,
+            growth_weight=growth_weight,
+            core_weight=core_weight,
+            l2_weight=l2_weight,
+            kernel_regularization_weight=reg_lambda,
+            kernel_high_frequency_radius=kernel_high_frequency_radius,
+            kernel_high_frequency_weight=weights["kernel_high_frequency_weight"],
+            kernel_cancellation_weight=weights["kernel_cancellation_weight"],
+            recenter=recenter,
+        )
+        window = SplitCosineBellWindow(alpha=result.alpha, beta=result.beta)
+
+        if diagnostic_path is not None:
+            _save_matching_kernel_window_diagnostic(
+                diagnostic_path,
+                result,
+                psf_hi_prepared,
+                psf_lo_prepared,
+                fom_name=fom_name,
+                core_radius=core_radius,
+                source_label=source_label,
+                target_label=target_label,
+                reg_lambda=reg_lambda,
+                title=diagnostic_title,
+                aperture_radius=aperture_radius,
+            )
+
+        if return_result:
+            return window, result
+        return window
 
     def matching_kernel_basis(
         self,
@@ -327,8 +1508,6 @@ class PSF:
 
         psf_hi = self.array
         psf_lo = other.array if isinstance(other, PSF) else np.asarray(other, dtype=float)
-        if psf_lo.sum() != 0:
-            psf_lo = psf_lo / psf_lo.sum()
 
         if psf_hi.shape != psf_lo.shape:
             ny = max(psf_hi.shape[0], psf_lo.shape[0])
@@ -495,7 +1674,6 @@ def psf_matching_kernel_basis(
     return kernel
 
 
-from pathlib import Path
 import re
 
 
@@ -503,10 +1681,80 @@ import re
 # Minimal EffectivePSF implementation (JWST STDPSF)
 # ---------------------------------------------------------------------
 # @@@ change this to an overloaded astropy PSF gridded model
+# Note: STDPSF headers record slightly different knot positions across
+# datasets (e.g. NIRCam LW GRID25 has been seen as both [1, 513, 1025, 1536,
+# 2048] and [0, 512, 1024, 1536, 2048]). Likely cause: 1-indexed FITS pixel
+# convention in the format spec vs 0-indexed convention some writers use
+# (astropy-derived pipelines, etc.) — same physical tile positions, different
+# integer offset. Always prefer IPSFX/JPSFY from the header; uniform knots
+# are a last-resort fallback when those keywords are missing entirely.
+def _read_stdpsf_grid(hdr) -> tuple[list[int], list[int]]:
+    """Extract the spatial knot positions (1-indexed detector pixels) from a
+    STDPSF header. Returns ``(xk, yk)`` with ``len(xk) == NXPSFS`` and
+    ``len(yk) == NYPSFS``. Falls back to uniform knots if IPSFX*/JPSFY* are
+    missing — covers GRID1/GRID9/GRID25 and any NXPSFS×NYPSFS layout.
+    """
+    nxps = int(hdr.get("NXPSFS", 1))
+    nyps = int(hdr.get("NYPSFS", 1))
+    try:
+        xk = [int(hdr[f"IPSFX{i:02d}"]) for i in range(1, nxps + 1)]
+    except KeyError:
+        xk = list(np.linspace(1, 2048, max(nxps, 1)).astype(int))
+    try:
+        yk = [int(hdr[f"JPSFY{i:02d}"]) for i in range(1, nyps + 1)]
+    except KeyError:
+        yk = list(np.linspace(1, 2048, max(nyps, 1)).astype(int))
+    return xk, yk
+
+
+def _stdpsf_oversampling(hdr) -> int:
+    """Return the STDPSF oversampling factor, falling back to detector pixels."""
+    for key in ("OVERSAMP", "OVERSAMPX"):
+        value = hdr.get(key)
+        if value is not None:
+            try:
+                return max(1, int(round(float(value))))
+            except (TypeError, ValueError):
+                pass
+    return 1
+
+
+def _edge_taper_window(shape: tuple[int, int], width: float) -> np.ndarray:
+    """Return a cosine taper that is zero on the finite ePSF grid edge."""
+    if width <= 0:
+        return np.ones(shape, dtype=np.float32)
+
+    y, x = np.indices(shape, dtype=float)
+    distance = np.minimum.reduce([x, y, shape[1] - 1 - x, shape[0] - 1 - y])
+    window = np.ones(shape, dtype=np.float32)
+    edge = distance < width
+    window[edge] = 0.5 * (1.0 - np.cos(np.pi * distance[edge] / width))
+    window[distance <= 0] = 0.0
+    return window
+
+
+def _taper_stdpsf_cube(data: np.ndarray, hdr, edge_taper_pixels: float | None) -> np.ndarray:
+    """Apply an edge taper to a loaded STDPSF cube in its oversampled pixels.
+
+    ``edge_taper_pixels`` is specified in native detector pixels.  The taper
+    removes finite-grid edge flux; the loaded ePSF planes are not renormalized.
+    """
+    if edge_taper_pixels is None or edge_taper_pixels <= 0:
+        return data
+
+    oversampling = _stdpsf_oversampling(hdr)
+    width = float(edge_taper_pixels) * oversampling
+    window = _edge_taper_window(data.shape[:2], width)
+    tapered = np.asarray(data, dtype=np.float32).copy()
+    tapered *= window[:, :, None]
+    return tapered
+
+
 class EffectivePSF:
 
     def __init__(self, **kwargs):
         self.epsf = OrderedDict()
+        self.epsf_meta: dict = {}   # per-key dict: {'nxps','nyps','xk','yk'}
         self.extended_epsf = {}
         self.extended_N = None
 
@@ -524,19 +1772,38 @@ class EffectivePSF:
         clip_negative=False,
         local_dir=None,
         filter_pattern=None,
+        edge_taper_pixels: float | None = 4.0,
         use_astropy_cache=True,
         verbose=False,
     ):
-        """Download JWST STDPSF models."""
+        """Download JWST STDPSF models.
+
+        Parameters
+        ----------
+        edge_taper_pixels : float or None, optional
+            Width of the cosine taper applied once to each loaded ePSF plane,
+            in native detector pixels.  The loader converts this to the
+            oversampled STDPSF grid using the ``OVERSAMP`` header keyword.
+            Set to ``None`` or ``0`` to leave the loaded grids unchanged.
+        """
 
         # If local_dir is specified, use it to find files
         if local_dir is not None and filter_pattern is not None:
             self.filter_pattern = filter_pattern
             p = Path(local_dir)
+            if not p.is_dir():
+                raise FileNotFoundError(
+                    f"local_dir does not exist: {p!s}"
+                )
             files_dir = list(p.rglob("*.fits"))
-            # rx = re.compile(filter_pattern)
             rx = re.compile(f"{filter_pattern}(?!_EXTENDED)")
             files = [f for f in files_dir if rx.search(os.path.basename(f))]
+            if not files:
+                logger.warning(
+                    "load_jwst_stdpsf: no files matched pattern %r in %s "
+                    "(found %d .fits files total). Loaded keys will be empty.",
+                    filter_pattern, p, len(files_dir),
+                )
             for f in files:
                 with fits.open(f) as im:
                     h = im[0].header
@@ -552,8 +1819,19 @@ class EffectivePSF:
                     data = np.array([d.T for d in im[0].data]).T
                     if clip_negative:
                         data[data < 0] = 0
+                    data = _taper_stdpsf_cube(data, h, edge_taper_pixels)
                     key = os.path.basename(f).split(".fits")[0]
                     self.epsf[key] = data
+                    xk, yk = _read_stdpsf_grid(h)
+                    mjd_hdr = float(h.get("MJD-AVG", 0.0))
+                    self.epsf_meta[key] = {
+                        "nxps": len(xk),
+                        "nyps": len(yk),
+                        "xk": xk,
+                        "yk": yk,
+                        "oversample": int(h.get("OVERSAMP", 4)),
+                        "mjd": mjd_hdr if mjd_hdr > 0 else None,
+                    }
             return
 
         if miri_filters is None:
@@ -598,11 +1876,21 @@ class EffectivePSF:
             try:
                 file_obj = download_file(url, cache=use_astropy_cache)
                 with fits.open(file_obj) as im:
+                    h = im[0].header
                     data = np.array([d.T for d in im[0].data]).T
                     if clip_negative:
                         data[data < 0] = 0
+                    data = _taper_stdpsf_cube(data, h, edge_taper_pixels)
                     key = os.path.basename(url.split(".fits")[0])
                     self.epsf[key] = data
+                    xk, yk = _read_stdpsf_grid(h)
+                    self.epsf_meta[key] = {
+                        "nxps": len(xk),
+                        "nyps": len(yk),
+                        "xk": xk,
+                        "yk": yk,
+                        "oversample": int(h.get("OVERSAMP", 4)),
+                    }
             except Exception as e:
                 print(f"Failed to download {url}: {e}")
 
@@ -613,11 +1901,21 @@ class EffectivePSF:
                 try:
                     file_obj = download_file(url, cache=use_astropy_cache)
                     with fits.open(file_obj) as im:
+                        h = im[0].header
                         data = np.array([d.T for d in im[0].data]).T
                         if clip_negative:
                             data[data < 0] = 0
+                        data = _taper_stdpsf_cube(data, h, edge_taper_pixels)
                         key = os.path.basename(url.split(".fits")[0])
                         self.epsf[key] = data
+                        xk, yk = _read_stdpsf_grid(h)
+                        self.epsf_meta[key] = {
+                            "nxps": len(xk),
+                            "nyps": len(yk),
+                            "xk": xk,
+                            "yk": yk,
+                            "oversample": int(h.get("OVERSAMP", 4)),
+                        }
                 except Exception as e:
                     print(f"Failed to download {url}: {e}")
 
@@ -628,89 +1926,80 @@ class EffectivePSF:
                 try:
                     file_obj = download_file(url, cache=use_astropy_cache)
                     with fits.open(file_obj) as im:
+                        h = im[0].header
                         data = np.array([d.T for d in im[0].data]).T
                         if clip_negative:
                             data[data < 0] = 0
+                        data = _taper_stdpsf_cube(data, h, edge_taper_pixels)
                         key = os.path.basename(url.split(".fits")[0])
                         key = key.replace(f"{det}_", f"{det}ONG_")
                         self.epsf[key] = data
+                        xk, yk = _read_stdpsf_grid(h)
+                        self.epsf_meta[key] = {
+                            "nxps": len(xk),
+                            "nyps": len(yk),
+                            "xk": xk,
+                            "yk": yk,
+                            "oversample": int(h.get("OVERSAMP", 4)),
+                        }
                 except Exception as e:
                     print(f"Failed to download {url}: {e}")
 
     # do this with PSFgriddedmodel.eval
     # and change hardcoded depenendence on grid size and detector oversampling
     # --- PSF evaluation -------------------------------------------------
+    # Bilinear interp on the NXPSFS × NYPSFS spatial tile grid stored in the
+    # STDPSF header. Uses self.epsf_meta[key] = {'nxps','nyps','xk','yk'} if
+    # available (populated by load_jwst_stdpsf); else falls back to uniformly
+    # spaced knots across [1, 2048]. Works for GRID1 (1 tile), GRID9 (3×3),
+    # GRID25 (5×5), or any NXPSFS × NYPSFS layout.
+    def _interp_grid(self, cube: np.ndarray, key: str,
+                      x: float, y: float) -> np.ndarray:
+        ntiles = cube.shape[2]
+        meta = self.epsf_meta.get(key)
+        if meta is not None:
+            nxps = meta["nxps"]; nyps = meta["nyps"]
+            xk = np.asarray(meta["xk"], float); yk = np.asarray(meta["yk"], float)
+        else:
+            nxps = nyps = int(np.sqrt(ntiles))
+            xk = np.linspace(1, 2048, max(nxps, 1))
+            yk = np.linspace(1, 2048, max(nyps, 1))
+        if ntiles == 1 or nxps == 1 and nyps == 1:
+            return cube[:, :, 0]
+        rx = float(np.interp(x, xk, np.arange(nxps)))
+        ry = float(np.interp(y, yk, np.arange(nyps)))
+        ix0 = int(np.clip(np.floor(rx), 0, nxps - 2))
+        iy0 = int(np.clip(np.floor(ry), 0, nyps - 2))
+        ix1 = ix0 + 1; iy1 = iy0 + 1
+        fx = rx - ix0; fy = ry - iy0
+        return (
+            (1 - fx) * (1 - fy) * cube[:, :, ix0 + iy0 * nxps]
+            + fx * (1 - fy) * cube[:, :, ix1 + iy0 * nxps]
+            + (1 - fx) * fy * cube[:, :, ix0 + iy1 * nxps]
+            + fx * fy * cube[:, :, ix1 + iy1 * nxps]
+        )
+
     def get_at_position(self, x, y, filter, rot90=0):
         """Interpolate the ePSF grid to a detector position."""
+        if filter not in self.epsf:
+            raise KeyError(
+                f"no stpsf grid loaded for filter key {filter!r}. "
+                f"Loaded keys: {sorted(self.epsf)}. "
+                f"Call load_jwst_stdpsf(..., filter_pattern=...) for this filter."
+            )
         epsf = self.epsf[filter]
+        meta = self.epsf_meta.get(filter, {})
+        self.eval_psf_oversample = int(meta.get("oversample", 4))
 
         self.eval_psf_type = "HST/Optical"
 
         if "MIRI" in filter:
             self.eval_psf_type = "MIRI"
-            ndet = int(np.sqrt(epsf.shape[2]))
-            rx = np.interp(x, [1, 358, 1032], [1, 2, 3]) - 1
-            ry = np.interp(y, [1, 512, 1024], [1, 2, 3]) - 1
-            nx = np.clip(int(rx), 0, 2)
-            ny = np.clip(int(ry), 0, 2)
-            fx = rx - nx
-            fy = ry - ny
-            if ndet == 1:
-                psf_xy = epsf[:, :, 0]
-            else:
-                psf_xy = (1 - fx) * (1 - fy) * epsf[:, :, nx + ny * ndet]
-                psf_xy += fx * (1 - fy) * epsf[:, :, nx + 1 + ny * ndet]
-                psf_xy += (1 - fx) * fy * epsf[:, :, nx + (ny + 1) * ndet]
-                psf_xy += fx * fy * epsf[:, :, nx + 1 + (ny + 1) * ndet]
-            psf_xy = psf_xy.T
+            psf_xy = self._interp_grid(epsf, filter, x, y).T
 
         elif "NRC" in filter:
             self.eval_psf_type = "NRC"
-            # ndet = int(np.sqrt(epsf.shape[2]))
-            # rx = np.interp(x, [0, 512, 1024, 1536, 2048], [1, 2, 3, 4, 5]) - 1
-            # ry = np.interp(y, [0, 512, 1024, 1536, 2048], [1, 2, 3, 4, 5]) - 1
-            # nx = np.clip(int(rx), 0, 4)
-            # ny = np.clip(int(ry), 0, 4)
-            # fx = rx - nx
-            # fy = ry - ny
-            # if ndet == 1:
-            #     psf_xy = epsf[:, :, 0]
-            # else:
-            #     print(filter, ndet, nx, ny)
-            #     print(filter rx, ry, fx, fy, nx + (ny + 1) * ndet)
-            #     psf_xy = (1 - fx) * (1 - fy) * epsf[:, :, nx + ny * ndet]
-            #     psf_xy += fx * (1 - fy) * epsf[:, :, nx + 1 + ny * ndet]
-            #     psf_xy += (1 - fx) * fy * epsf[:, :, nx + (ny + 1) * ndet]
-            #     psf_xy += fx * fy * epsf[:, :, nx + 1 + (ny + 1) * ndet]
-            # psf_xy = psf_xy.T
-            # # Use grid-agnostic robust interpolation
-            xk = [0, 512, 1024, 1536, 2048]
-            yk = [0, 512, 1024, 1536, 2048]
-            nxps, nyps = len(xk), len(yk)
-            ndet = nxps  # for square grid
-
-            # Fractional grid indices
-            rx = np.interp(x, xk, np.arange(nxps))
-            ry = np.interp(y, yk, np.arange(nyps))
-            ix = int(np.floor(rx))
-            iy = int(np.floor(ry))
-            fx = rx - ix
-            fy = ry - iy
-
-            # Robustly clip indices so ix+1, iy+1 are in bounds
-            ix0 = np.clip(ix, 0, nxps - 2)
-            iy0 = np.clip(iy, 0, nyps - 2)
-            ix1 = ix0 + 1
-            iy1 = iy0 + 1
-
-            # Index into the cube
-            psf_xy = (
-                (1 - fx) * (1 - fy) * epsf[:, :, ix0 + iy0 * ndet]
-                + fx * (1 - fy) * epsf[:, :, ix1 + iy0 * ndet]
-                + (1 - fx) * fy * epsf[:, :, ix0 + iy1 * ndet]
-                + fx * fy * epsf[:, :, ix1 + iy1 * ndet]
-            )
-            psf_xy = psf_xy.T
+            psf_xy = self._interp_grid(epsf, filter, x, y).T
         else:
             psf_xy = epsf[:, :, 0]
 
@@ -728,11 +2017,13 @@ class EffectivePSF:
             coords = np.array([50 + 4 * dx[ok], 50 + 4 * dy[ok]])
         else:
             sh = psf_xy.shape
-            size = (sh[0] - 1) // 4
-            x0 = size * 2
-            cen = (x0 - 1) // 2
-            ok = (np.abs(dx) <= cen) & (np.abs(dy) <= cen)
-            coords = np.array([x0 + 4 * dx[ok], x0 + 4 * dy[ok]])
+            oversample = int(getattr(self, "eval_psf_oversample", 4))
+            y0 = 0.5 * (sh[0] - 1)
+            x0 = 0.5 * (sh[1] - 1)
+            max_y = min(y0, sh[0] - 1 - y0) / oversample
+            max_x = min(x0, sh[1] - 1 - x0) / oversample
+            ok = (np.abs(dx) <= max_x) & (np.abs(dy) <= max_y)
+            coords = np.array([y0 + oversample * dx[ok], x0 + oversample * dy[ok]])
 
         interp_map = map_coordinates(psf_xy, coords, order=3)
         out = np.zeros_like(dx, dtype=np.float32)
@@ -848,20 +2139,127 @@ class DrizzlePSF:
         self.driz_wcs.pscale = self.driz_pscale
         self.driz_footprint = Polygon(self.driz_wcs.calc_footprint())
 
-        self._next_odd_int = lambda x: int(round(x)) | 1
+    def load_jwst_stdpsf(self, *args, edge_taper_pixels: float | None = 4.0, **kwargs):
+        """Load JWST STDPSF grids through the DrizzlePSF interface.
+
+        Parameters
+        ----------
+        edge_taper_pixels : float or None, optional
+            Native-detector-pixel width of the ePSF edge taper applied once at
+            load time. Defaults to 4 native pixels. Set to ``None`` or ``0`` to
+            preserve the finite ePSF grid exactly.
+        """
+        return self.epsf_obj.load_jwst_stdpsf(
+            *args,
+            edge_taper_pixels=edge_taper_pixels,
+            **kwargs,
+        )
+
+    # ------------------------------------------------------------------
+    # ePSF key resolution
+    # ------------------------------------------------------------------
+    def _resolve_epsf_key(
+        self,
+        pattern: str,
+        flt_file: str,
+        frame_mjd: float | None,
+    ) -> str:
+        """Map a user filter *pattern* to a loaded ePSF key.
+
+        Steps:
+
+        1. **Detector substitution.** ``NRC..`` in *pattern* is replaced with
+           the actual NIRCam SCA decoded from *flt_file* (e.g. ``NRCA5``).
+        2. **Regex match** against ``self.epsf_obj.epsf`` keys. *pattern*
+           is treated as a regex (anchored), so wildcards like
+           ``MJD.....`` or no MJD token at all both work.
+        3. **MJD-nearest selection.** If multiple keys match and the loaded
+           grids carry an ``MJD-AVG`` value, the key whose stored MJD is
+           closest to *frame_mjd* wins. If *frame_mjd* is ``None`` or none
+           of the matches have an MJD, the first match (sorted) is used.
+
+        Returns
+        -------
+        str
+            The resolved ePSF key. If no key matches, the substituted
+            pattern itself is returned, preserving the prior behaviour that
+            triggers a ``KeyError`` from ``get_at_position`` with a clear
+            message.
+        """
+        # 1. Detector substitution. Regex-search the filename for a
+        # NIRCam SCA token so long grizli rate-file names (e.g.
+        # ``jw01234_03101_..._nrcalong_..._cal.fits``) decode correctly.
+        if "NRC.." in pattern:
+            m = re.search(r"nrc(?:a[1-5]|b[1-5]|along|blong)",
+                          Path(flt_file).stem, flags=re.IGNORECASE)
+            if m is None:
+                raise ValueError(
+                    f"Cannot decode NIRCam detector from {flt_file!r}"
+                )
+            det = m.group(0).upper().replace("ALONG", "A5").replace("BLONG", "B5")
+            pattern = pattern.replace("NRC..", det)
+
+        # 2. Regex-match against loaded keys
+        if pattern in self.epsf_obj.epsf:
+            return pattern  # exact literal match, no work needed
+
+        try:
+            rx = re.compile(f"^{pattern}$")
+        except re.error:
+            return pattern  # not a valid regex; let caller fail clearly
+        matches = sorted(k for k in self.epsf_obj.epsf if rx.match(k))
+        if not matches:
+            return pattern
+        if len(matches) == 1:
+            return matches[0]
+
+        # 3. MJD-nearest among matches
+        if frame_mjd is None:
+            return matches[0]
+        scored = [
+            (abs(self.epsf_obj.epsf_meta.get(k, {}).get("mjd") - frame_mjd), k)
+            for k in matches
+            if self.epsf_obj.epsf_meta.get(k, {}).get("mjd") is not None
+        ]
+        if not scored:
+            return matches[0]
+        scored.sort()
+        return scored[0][1]
 
     # ---------------------------------------------------------------
     # ---------------------------------------------------------------------
     # WCS information from CSV
     # ---------------------------------------------------------------------
     @staticmethod
-    def read_wcs_csv(drz_file: str, csv_file=None):
-        """Read exposure WCS info from a CSV table."""
+    def read_wcs_csv(drz_file: str, csv_file=None, auto_reconstruct: bool = True):
+        """Read exposure WCS info from a CSV table.
+
+        Parameters
+        ----------
+        drz_file
+            Path to the drizzled mosaic FITS.
+        csv_file
+            Optional explicit ``_wcs.csv`` path. Default: derived from
+            *drz_file* by stripping the ``_drz_sci/_drc_sci/_sci``
+            suffix.
+        auto_reconstruct
+            If True (default) and the CSV is missing, regenerate it via
+            :func:`mophongo.wcs_recon.reconstruct_wcs` (fetches public
+            MAST cal-file header ranges).
+        """
         if csv_file is None:
             csv_file = (
-                drz_file.split("_drz_sci")[0].split("_drc_sci")[0].split("_sci")[0] + "_wcs.csv"
+                drz_file.split("_drz_sci")[0]
+                .split("_drc_sci")[0]
+                .split("_sci")[0]
+                + "_wcs.csv"
             )
-            if not os.path.exists(csv_file):
+        if not os.path.exists(csv_file):
+            if auto_reconstruct:
+                from .utils import reconstruct_wcs
+
+                reconstruct_wcs(drz_file, out_csv=csv_file)
+            else:
                 raise FileNotFoundError(f"CSV file {csv_file} not found")
 
         tab = Table.read(csv_file, format="csv")
@@ -905,7 +2303,6 @@ class DrizzlePSF:
         outctx = np.zeros(sh, dtype=np.int32)
         return outsci, outwht, outctx
 
-    # always return odd size
     def get_driz_cutout(
         self,
         ra,
@@ -924,7 +2321,12 @@ class DrizzlePSF:
         if size is None:
             if size_native is None:  # get from the first filter
                 first_key, first_value = next(iter(self.epsf_obj.epsf.items()))
-                size_native = first_value.shape[0] / 4  # 4x oversampling
+                # NOTE: hard-coded 4× oversampling. DET-sampled grids are upsampled
+                # to OS4 in examples/make_stpsfs.ipynb to fit this assumption — see
+                # the "Oversample DETECTOR-sampled PSFs to OS4" caveat there: that
+                # upsample is spline interpolation, not a true optical OS4, so
+                # drizzling via this path does not fully preserve sub-pixel phase.
+                size_native = first_value.shape[0] / 4
                 if verbose:
                     print(
                         f"Using native size {size_native} from {first_key} assuming 4x oversampling."
@@ -932,7 +2334,7 @@ class DrizzlePSF:
 
             size = size_native * self.wcs[self.flt_keys[0]].pscale / self.driz_pscale
 
-        size_odd = self._next_odd_int(size)
+        size_pix = int(round(size))
 
         xc, yc = self.driz_wcs.world_to_pixel_values(ra, dec)
 
@@ -947,11 +2349,31 @@ class DrizzlePSF:
             if data.ndim == 2:
                 data = [data]
 
-        # get accurate centroid from first image
+        # Centroid on a LOCAL crop — photutils 1.12 centroid_quadratic
+        # (core.py line 245) builds its design matrix in absolute pixel coords,
+        # so x² terms of order 10⁸ blow the conditioning and return NaN on
+        # large mosaics. Cropping first keeps indices small; add the offset back.
         if recenter:
-            xc, yc = centroid_quadratic(
-                data[0], xpeak=xc, ypeak=yc, fit_boxsize=fit_boxsize, search_boxsize=search_boxsize
+            xc0, yc0 = xc, yc
+            ny_img, nx_img = data[0].shape
+            half = max(search_boxsize, fit_boxsize) + 2
+            xi, yi = int(np.round(float(xc))), int(np.round(float(yc)))
+            x0, x1 = max(0, xi - half), min(nx_img, xi + half + 1)
+            y0, y1 = max(0, yi - half), min(ny_img, yi + half + 1)
+            local = data[0][y0:y1, x0:x1]
+            xc_l, yc_l = centroid_quadratic(
+                local, xpeak=xc - x0, ypeak=yc - y0,
+                fit_boxsize=fit_boxsize, search_boxsize=search_boxsize,
             )
+            if np.isfinite(xc_l) and np.isfinite(yc_l):
+                xc, yc = xc_l + x0, yc_l + y0
+            else:
+                logger.warning(
+                    "centroid_quadratic returned NaN at (ra,dec)=(%.6f,%.6f); "
+                    "falling back to WCS position (%.2f,%.2f)",
+                    ra, dec, xc0, yc0,
+                )
+                xc, yc = xc0, yc0
 
         # get cutouts for all images
         cutout_list = []
@@ -959,7 +2381,7 @@ class DrizzlePSF:
             cutout = Cutout2D(
                 data_i,
                 (xc, yc),
-                (size_odd, size_odd),
+                (size_pix, size_pix),
                 wcs=self.driz_wcs,
                 mode="partial",
                 fill_value=0.0,
@@ -983,13 +2405,19 @@ class DrizzlePSF:
         get_weight=False,
         ds9=None,
         npix=None,
-        renormalize=True,
         xphase=0,
         yphase=0,
-        taper_alpha=0.05,  # radial percent of tapering
+        taper_alpha=None,
         return_hdul=False,
     ):
-        """Drizzle a PSF model at ``ra``, ``dec`` onto ``wcs_slice``."""
+        """Drizzle a finite-integral PSF model at ``ra``, ``dec`` onto ``wcs_slice``.
+
+        The returned stamp is the flux that falls on the requested output WCS
+        footprint. It is not normalized to unit sum or rescaled after drizzle.
+        Pipeline fitting code should convert this native stamp to a unit-sum
+        shape when using it for template extension or matching kernels, and
+        keep this stamp sum separately as the finite-support throughput.
+        """
         if wcs_slice is None:
             wcs_slice = self.driz_wcs.copy()
 
@@ -999,12 +2427,13 @@ class DrizzlePSF:
 
         outsci, outwht, outctx = self._get_empty_driz(wcs_slice)
 
-        tukey_taper = TukeyWindow(alpha=0.05)(outsci.shape)
-
         if npix is None:
-            # Calculate npix based on the WCS pixel scale
-            N = outsci.shape[0] // 2
-            npix = int(np.ceil((N * self.driz_pscale / self.wcs[self.flt_keys[0]].pscale)))
+            # Include every input pixel whose drizzle drop can overlap the
+            # requested output footprint. The half-pixfrac margin is in input
+            # pixels; without it, small cutouts miss edge-drop flux.
+            half_out = 0.5 * max(outsci.shape)
+            input_pscale = min(get_wcs_pscale(self.wcs[key]) for key in self.flt_keys)
+            npix = int(np.ceil(half_out * self.driz_pscale / input_pscale + 0.5 * pixfrac))
 
         pix = np.arange(-npix, npix + 1)
         for key in self.flt_keys:
@@ -1018,19 +2447,15 @@ class DrizzlePSF:
                 dy = xy[1] - int(xy[1]) + yphase
                 chip_offset = 2051 if ext == 2 else 0
 
-                # here get the riġht inst, dector, and MJD
-                # for NIRCam select detector from flt file name if the filter is a regexp
-                # do this with a more robust lookup. Parse the file name into a instrument / detector
-                # @@ then pull the PSF from the ePSF object
-                if "NRC.." in filter:
-                    det = Path(file).stem.split("_")[-2][0:5].upper()
-                    det = det.replace("L", "5")
-                    flt_filter = filter.replace("NRC..", det)
-                else:
-                    flt_filter = filter
+                frame_mjd = float(self.hdrs[key].get("mjd-avg",
+                              self.hdrs[key].get("MJD-AVG", 0.0)) or 0.0) or None
+                flt_filter = self._resolve_epsf_key(filter, file, frame_mjd)
 
                 if verbose:
-                    print(f"Position: {xy}, Filter: {flt_filter}, in frame: {file}[SCI,{ext}]")
+                    print(
+                        f"Position: {xy}, Filter: {flt_filter}, "
+                        f"in frame: {file}[SCI,{ext}] mjd={frame_mjd}"
+                    )
 
                 psf_xy = self.epsf_obj.get_at_position(
                     xy[0], xy[1] + chip_offset, filter=flt_filter
@@ -1053,25 +2478,26 @@ class DrizzlePSF:
                 psf_wcs = get_slice_wcs(self.wcs[key], slx, sly)
                 psf_wcs.pscale = get_wcs_pscale(self.wcs[key])
 
-                adrizzle.do_driz(
-                    psf,
-                    psf_wcs,
-                    (psf * 0 + flt_weight).astype(outwht.dtype),
-                    wcs_slice,
-                    outsci,
-                    outwht,
-                    outctx,
-                    1.0,
-                    "cps",
-                    1,
-                    wcslin_pscale=1.0,
-                    uniqid=1,
-                    pixfrac=pixfrac,
-                    kernel=kernel,
-                    fillval=0,
-                    stepsize=10,
-                    wcsmap=None,
-                )
+                with _quiet_drizzle():
+                    adrizzle.do_driz(
+                        psf,
+                        psf_wcs,
+                        (psf * 0 + flt_weight).astype(outwht.dtype),
+                        wcs_slice,
+                        outsci,
+                        outwht,
+                        outctx,
+                        1.0,
+                        "cps",
+                        1,
+                        wcslin_pscale=psf_wcs.pscale,
+                        uniqid=1,
+                        pixfrac=pixfrac,
+                        kernel=kernel,
+                        fillval=0,
+                        stepsize=10,
+                        wcsmap=None,
+                    )
 
         # taper PSF to avoid discontinuities at the edges and ringing
         if taper_alpha is not None and taper_alpha > 0:
@@ -1086,26 +2512,26 @@ class DrizzlePSF:
             logger.warning(
                 f"No PSF found, position possibly outside footprint for {ra}, {dec} in filter {filter}. Returning empty output."
             )
-            scale = 1.0
-        else:
-            scale = psf.sum() / outsci.sum() if renormalize else 1.0
 
         if return_hdul is True:
             return fits.HDUList(
                 [
                     fits.PrimaryHDU(),
-                    fits.ImageHDU(data=outsci * scale, header=to_header(wcs_slice)),
+                    fits.ImageHDU(data=outsci, header=to_header(wcs_slice)),
                 ]
             )
         else:
-            return outsci * scale
+            return outsci
 
     def get_psf_radec(
         self,
         positions: list[tuple[float, float]],
         *,
         filter: str | None = None,
-        size: float | int = 51,
+        size: float | int | None = None,
+        ee_fraction: float | None = 0.95,
+        size_quantum_arcsec: float = 0.160,
+        parity: str = "even",
         verbose: bool = False,
         kernel: str = "square",
         pixfrac: float = 0.75,
@@ -1116,31 +2542,75 @@ class DrizzlePSF:
         ----------
         positions : list of tuple(float, float)
             World coordinate pairs ``(ra, dec)`` in degrees.
-        filter : str
+        filter : str, optional
             Filter key or regular expression selecting the PSF model.
-        size : int
-            Cutout size in drizzle pixels for each PSF model.
+        size : float or int, optional
+            Cutout size. ``float`` → arcsec, ``int`` → drizzle pixels. If
+            ``None`` (default), the size is derived from ``ee_fraction`` when
+            provided, otherwise the native DrizzlePSF/ePSF stamp size is used.
+        ee_fraction : float, optional
+            Target encircled-energy fraction on the loaded stpsf growth curve.
+            The resulting arcsec size is rounded UP to the nearest multiple of
+            ``size_quantum_arcsec`` so that paired filters at nested pscales
+            share an integer pixel ratio (clean block-binning for kernel
+            matching). The final arcsec size is cached on ``self.psf_size`` so
+            another ``DrizzlePSF`` on a different pscale can reuse it via
+            ``size=dpsf_other.psf_size``. Ignored when ``size`` is given. If
+            ``None`` and ``size`` is also ``None``, use the native DrizzlePSF
+            stamp size.
+        size_quantum_arcsec : float, optional
+            Grid quantum for the size rounding (default 0.160″ = 2 × 80 mas,
+            so the 20 / 40 / 80 mas ladder always block-bins cleanly).
+        parity : {"even", "odd", "any"}, optional
+            Parity of the output ``size_pix``. Default ``"even"``: an
+            odd-pixel size is bumped up by 1 so block-replicating by an
+            even factor preserves the cutout shape parity (no half-pixel
+            shift on resampling). ``"odd"`` bumps even sizes up by 1 — the
+            old default; convenient when the cutout is used as a paste
+            stamp because the centre pixel coincides with the requested
+            ``(RA, Dec)``. ``"any"`` keeps the requested size as-is.
         verbose : bool, optional
             Emit progress information if ``True``.
-
         Returns
         -------
         np.ndarray
-            Array of shape ``(Npos, size, size)`` containing the drizzled PSFs.
+            Array of shape ``(Npos, size, size)`` containing finite-integral
+            drizzled PSFs on the requested output footprint.
         """
-        # ------------------------------------------------------------
-        # 1.  Detect if *size* was passed in arc-seconds
-        #     – any real / floating-point value → arcsec
-        #     – an integer                      → pixels      (status-quo)
-        # ------------------------------------------------------------
-        if not isinstance(size, (int, np.integer)):
-            # user gave a physical size (arcsec) → convert to pixels
+        if size is None:
+            if ee_fraction is None:
+                size_pix = None
+                self.psf_size = None
+                if verbose:
+                    logger.info("using native DrizzlePSF stamp size")
+            else:
+                size_arcsec = self._ee_fraction_to_arcsec(
+                    ee_fraction, filter=filter, quantum=size_quantum_arcsec,
+                )
+                size_pix = int(round(size_arcsec / self.driz_pscale))
+                self.psf_size = size_arcsec
+                if verbose:
+                    logger.info(
+                        "ee_fraction=%.3f -> psf_size=%.3f\" (%d pix at p_out=%.3f\")",
+                        ee_fraction, size_arcsec, size_pix, self.driz_pscale,
+                    )
+        elif not isinstance(size, (int, np.integer)):
             size_pix = int(round(size / self.driz_pscale))
+            self.psf_size = size_pix * self.driz_pscale
         else:
-            # already an integer → treat as pixels
             size_pix = int(size)
+            self.psf_size = size_pix * self.driz_pscale
 
-        size_pix = np.maximum(9, size_pix)  # enforce minimum size
+        if size_pix is not None:
+            size_pix = int(np.maximum(9, size_pix))
+            if parity == "even" and size_pix % 2 == 1:
+                size_pix += 1
+            elif parity == "odd" and size_pix % 2 == 0:
+                size_pix += 1
+            elif parity not in ("even", "odd", "any"):
+                raise ValueError(
+                    f"parity must be 'even', 'odd', or 'any'; got {parity!r}")
+            self.psf_size = size_pix * self.driz_pscale
 
         psf_cube: list[np.ndarray] = []
         for ra, dec in tqdm(positions, desc="Drizzling PSFs"):
@@ -1152,6 +2622,8 @@ class DrizzlePSF:
                 recenter=False,
                 search_boxsize=11,
             )
+            if size_pix is None:
+                self.psf_size = cutout.data.shape[0] * self.driz_pscale
 
             psf = self.get_psf(
                 ra=ra,
@@ -1166,6 +2638,62 @@ class DrizzlePSF:
             psf_cube.append(psf)
 
         return np.asarray(psf_cube)
+
+    def _ee_fraction_to_arcsec(self,
+                               ee_fraction: float,
+                               filter: str | None = None,
+                               quantum: float = 0.160) -> float:
+        """Growth-curve diameter [arcsec] enclosing ``ee_fraction``, quantized UP.
+
+        Uses the first loaded stpsf grid (center-of-detector model). For
+        ``ee_fraction >= 1``, use the finite ePSF side length rather than the
+        corner radius, so full-stamp requests do not add a sqrt(2) diagonal
+        buffer. The size is rounded up to the nearest multiple of ``quantum``
+        so the 20/40/80 mas ladder always block-bins cleanly.
+        """
+        ep = self.epsf_obj.epsf
+        if not ep:
+            raise RuntimeError(
+                "no stpsf grids loaded; call load_jwst_stdpsf(...) first"
+            )
+        # Pick a grid matching ``filter`` if given, else the first one.
+        key = None
+        if filter is not None:
+            for k in ep:
+                if re.search(filter, k):
+                    key = k
+                    break
+        if key is None:
+            key = next(iter(ep))
+        arr = np.asarray(ep[key])          # (Ny, Nx, Npsf_in_grid)
+        psf = arr[..., arr.shape[-1] // 2] if arr.ndim == 3 else arr
+
+        # Oversampled pixel scale: stpsf OS4 ⇒ p_native / 4. Look up the native
+        # detector pscale from the driz WCS's corresponding filter entry. We
+        # fall back to assuming OS4 against the input detector pscale of the
+        # first flt if nothing else is known.
+        p_native = self.wcs[self.flt_keys[0]].pscale
+        oversample = 4   # hard-coded alongside get_driz_cutout; see make_stpsfs.ipynb caveat
+        p_os = p_native / oversample
+
+        ny, nx = psf.shape
+        if ee_fraction >= 1.0:
+            diam_arcsec = max(ny, nx) * p_os
+            n_quanta = int(np.ceil(diam_arcsec / quantum))
+            return float(n_quanta * quantum)
+
+        cy, cx = (ny - 1) / 2.0, (nx - 1) / 2.0
+        yy, xx = np.mgrid[:ny, :nx]
+        r = np.hypot(xx - cx, yy - cy)
+        order = np.argsort(r.ravel())
+        cum = np.cumsum(psf.ravel()[order])
+        cum /= cum[-1]
+        idx = int(np.searchsorted(cum, ee_fraction))
+        idx = min(idx, len(cum) - 1)
+        diam_arcsec = 2.0 * r.ravel()[order][idx] * p_os
+
+        n_quanta = int(np.ceil(diam_arcsec / quantum))
+        return float(n_quanta * quantum)
 
     def register(
         self,
@@ -1249,7 +2777,6 @@ class DrizzlePSF:
 
         ri, di = cutout.wcs.pixel_to_world_values(xi, yi)
         return (ri, di), cutout.data, psf
-
 
 # ------------------------------------------------------------------
 # EffectivePSF  —  now grid-agnostic (MIRI & NIRCam)

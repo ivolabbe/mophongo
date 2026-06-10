@@ -83,15 +83,15 @@ class PSFRegionMap:
     # ───────────── private derived constants ──────────────
     def __post_init__(self) -> None:
         self._area_min = self.area_factor * self.buffer_tol
+        self._rebuild_spatial_index()
 
-        # 1. build the STRtree from raw geometries
+    def _rebuild_spatial_index(self) -> None:
+        """Rebuild geometry lookup caches after replacing ``regions``."""
         self._geoms     = list(self.regions.geometry)          # keep a plain list for STRtree
         self.tree       = STRtree(self._geoms)
 
-        # 2. compile “prepared” versions for fast contains
         self._prepared  = [prepared.prep(g) for g in self._geoms]
 
-        # 3. map idx → key once so we avoid pandas look-ups
         self._keys      = self.regions["psf_key"].to_numpy()
 
     # ----------------------------------------------------------------
@@ -114,8 +114,7 @@ class PSFRegionMap:
         """
         self.__dict__.update(state)
         if self.tree is None and hasattr(self, "regions"):
-            # Rebuild STRtree on demand
-            self.tree = STRtree(self.regions.geometry.to_list())
+            self._rebuild_spatial_index()
 
 
     # =================================================================
@@ -228,7 +227,7 @@ class PSFRegionMap:
         key_mapping = {old_key: new_key for new_key, old_key in enumerate(unique_keys)}
         self.regions['psf_key'] = self.regions['psf_key'].map(key_mapping)
 
-        self.tree = STRtree(self.regions.geometry.to_list())
+        self._rebuild_spatial_index()
         return self
 
     @classmethod
@@ -247,6 +246,7 @@ class PSFRegionMap:
         regions_gdf = gpd.read_file(geojson_path)
 
         # load PSFs if available
+        psfs = None
         psfs_file = geojson_path.replace('.geojson', '.fits')
         if os.path.exists(psfs_file):
             psfs = fits.getdata(psfs_file)
@@ -367,7 +367,7 @@ class PSFRegionMap:
             footprints=self.footprints,
             name = (self.name or '') + ' by PA'
         )
-        new_map.tree = STRtree(new_map.regions.geometry.to_list()) if not final.empty else STRtree([])
+        new_map._rebuild_spatial_index()
         return new_map
 
     # =================================================================
@@ -420,7 +420,7 @@ class PSFRegionMap:
             footprints=None,
             name = f"{self.name}" + (f" overlay with {other.name}" if isinstance(other, PSFRegionMap) else "")
         )
-        new_map.tree = STRtree(new_map.regions.geometry.to_list())
+        new_map._rebuild_spatial_index()
         return new_map
 
     # =================================================================

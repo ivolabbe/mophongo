@@ -8,17 +8,18 @@ Noise model (count-rate drizzle convention)::
 
     σ_nominal(x,y) = K / (p_out · √t_exp(x,y))       [K: BUNIT · arcsec · √s]
     σ_pix(x,y)     = R(pixfrac, p_in, p_out) · σ_nominal(x,y)
-    wht(x,y)       = p_out² · t_exp(x,y) / K²        ∝ p_out² · t_exp
+    wht(x,y)       = 1 / σ_pix(x,y)²
 
 ``K`` is telescope+filter+background intrinsic (:data:`DEFAULT_NOISE_K`) and
 ``R`` is the Fruchter 2011 square-kernel correlation factor
-(:func:`drizzle_correlation_factor`). The mock emits ``wht = 1/σ_nominal²``
-directly, so ``σ_pix = R / √wht``. For real reductions whose wht uses a
-different convention, :data:`DEFAULT_WHT_CALIB` gives the per-filter scalar
-such that ``wht_real · wht_calib = 1/σ_nominal²`` — i.e. multiply the real
-wht image by ``wht_calib`` to turn it into a mock-convention inverse-variance
-map. See ``examples/MOCK_MOSAIC.md`` and ``examples/mock_test.ipynb`` for the
-UDS v2.2 / v2.3 calibration.
+(:func:`drizzle_correlation_factor`). The mock emits actual per-pixel inverse
+variance, including the output-pixel area scaling, exposure-count scaling, and
+drizzle noise correction, so ``1/√wht`` is the RMS of the injected pixel noise.
+For real reductions whose wht uses a different convention,
+:data:`DEFAULT_WHT_CALIB` gives the empirically calibrated per-filter scalar
+that converts those real mosaics to this same actual inverse-variance
+convention. See ``examples/MOCK_MOSAIC.md`` and ``examples/mock_test.ipynb``
+for the UDS v2.2 / v2.3 calibration.
 """
 
 from __future__ import annotations
@@ -79,9 +80,11 @@ DEFAULT_NOISE_K: dict[str, float] = {
 }
 
 # Per-filter wht calibration: multiply a real-data wht image by this scalar
-# to convert it to the mock's pure-inverse-variance convention
-# (``wht_real · wht_calib = 1/σ_nominal²``, so ``σ_pix = R/√(wht · wht_calib)``).
-# = 1 when the real wht is already pure inverse variance (UDS F444W).
+# to convert it to the mock's actual per-pixel inverse-variance convention
+# (``wht_real · wht_calib = 1/σ_pix²``). These scalars are empirical
+# calibrations from the corresponding real mosaics and include output-pixel
+# area, exposure-depth, and drizzle-noise corrections for those reductions.
+# = 1 when the real wht is already actual pixel inverse variance.
 # UDS MIRI wht values are ~10⁶, giving wht_calib ~ 10⁻⁷–10⁻⁸.
 DEFAULT_WHT_CALIB: dict[str, float] = {
     "f444w":  1.0,
@@ -139,7 +142,7 @@ _APERTURE_GROUPS: dict[str, tuple[str, str, list[tuple[str, str, dict]]]] = {
 #   r = pixfrac · p_in / p_out
 #   R = 1 - r/3                   for r ≤ 1
 #   R = (1/r) · (1 - 1/(3r))      for r ≥ 1
-# R = σ_pix / (1/√wht) under pure inverse-variance wht.
+# R = σ_pix / σ_nominal for square-kernel drizzling.
 def drizzle_correlation_factor(pixfrac: float,
                                 input_pscale: float,
                                 output_pscale: float) -> float:
@@ -168,9 +171,15 @@ def _cd_matrix(ap, xref: float, yref: float,
 
 def _pointing_footprints(group: str, pointings: list["Pointing"],
                           siaf_cache: dict[str, "pysiaf.Siaf"] | None = None,
+                          detector_keys: tuple[str, ...] | None = None,
                           ) -> list[Polygon]:
     """Sky polygons for every detector of every pointing in ``group``."""
     inst_name, tie_name, dets = _APERTURE_GROUPS[group]
+    if detector_keys is not None:
+        wanted = set(detector_keys)
+        dets = [item for item in dets if item[1] in wanted]
+        if not dets:
+            raise ValueError(f"no detectors {detector_keys!r} in aperture group {group!r}")
     if siaf_cache is None:
         siaf = pysiaf.Siaf(inst_name)
     else:
@@ -194,9 +203,15 @@ def _pointing_footprints(group: str, pointings: list["Pointing"],
 def _pointing_to_rows(group: str, ra: float, dec: float, pa_v3: float,
                       frame_id: int, mjd_avg: float, exptime: float,
                       siaf_cache: dict[str, "pysiaf.Siaf"] | None = None,
+                      detector_keys: tuple[str, ...] | None = None,
                       ) -> list[dict]:
     """Emit one row per detector for a single pointing."""
     inst_name, tie_name, dets = _APERTURE_GROUPS[group]
+    if detector_keys is not None:
+        wanted = set(detector_keys)
+        dets = [item for item in dets if item[1] in wanted]
+        if not dets:
+            raise ValueError(f"no detectors {detector_keys!r} in aperture group {group!r}")
     if siaf_cache is None:
         siaf = pysiaf.Siaf(inst_name)
     else:
@@ -304,6 +319,14 @@ def _write_mosaic_stub(path: Path, wcs: WCS, shape: tuple[int, int],
     fits.PrimaryHDU(data=data, header=hdr).writeto(str(path), overwrite=True)
 
 
+def _dpsf_valid_coverage(dpsf):
+    """Sky coverage where a drizzled PSF can be evaluated and painted."""
+    coverage = unary_union(list(dpsf.footprint.values()))
+    if hasattr(dpsf, "driz_footprint"):
+        coverage = coverage.intersection(dpsf.driz_footprint)
+    return coverage
+
+
 def _as_tuple(v):
     """Coerce a list/tuple (or ``None``) to tuple; passes non-sequences through."""
     if v is None or isinstance(v, tuple):
@@ -368,11 +391,36 @@ class MockMosaic:
     stpsf_dir: Path | None = None
     # Overrides :meth:`default_stpsf_pattern`.
     stpsf_patterns: dict[str, str] = field(default_factory=dict)
+    # Optional detector-key restriction keyed by filter or aperture family,
+    # e.g. {"f444w": ("NRCA5",)} for a literal single-detector frame.
+    detectors: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     # Source-injection defaults.
     snr_range: tuple[float, float] = (5.0, 5000.0)
     apertures_arcsec: tuple[float, ...] = (0.32, 0.7)
     psf_size_arcsec: float | dict[str, float] = 2.0
+    # Intrinsic circular Gaussian source sigma, in pixels on
+    # ``source_sigma_pscale``. 0/None keeps point-source injection. A two-value
+    # tuple draws log-uniform sizes between the bounds.
+    source_sigma_pix: float | tuple[float, float] | None = None
+    source_sigma_pscale: float = 0.040
+    # Fraction of injected sources forced to be pure point sources when
+    # ``source_sigma_pix`` requests extended profiles.
+    point_source_fraction: float = 0.0
+    # ``native`` preserves the PSF/source-model integral returned by DrizzlePSF.
+    # ``unit`` is available as an explicit legacy convention.
+    source_psf_normalization: str = "native"
+    # Optional extra Gaussian PSF broadening for each filter. The default
+    # defines the mock F770W PSF as the drizzled/STPSF response convolved with
+    # a 0.08" FWHM Gaussian. On the 40 mas grid this is 2 pixels; on the native
+    # 80 mas F770W grid it is 1 pixel, so the blur is applied on an oversampled
+    # grid and then returned to the requested PSF grid.
+    psf_gaussian_fwhm_arcsec: float | dict[str, float] | None = field(
+        default_factory=lambda: {"f770w": 0.08}
+    )
+    # Legacy override in output pixels of the filter. Prefer
+    # ``psf_gaussian_fwhm_arcsec`` for new mocks.
+    psf_gaussian_fwhm_pix: float | dict[str, float] | None = None
     bunit: str = "10.0*nanoJansky"
 
     def __post_init__(self) -> None:
@@ -383,14 +431,32 @@ class MockMosaic:
         self._dpsfs: dict = {}
         self._patterns: dict[str, str] = {}
         self._truth = None
+        self._source_model_cutouts: dict[str, list[dict]] = {}
 
         # Coerce JSON-loaded lists back to the declared tuple types.
         self.out_dir = Path(self.out_dir)
         if self.stpsf_dir is not None:
             self.stpsf_dir = Path(self.stpsf_dir)
         for key in ("center_radec", "mosaic_crval", "mosaic_crpix",
-                    "mosaic_npix", "snr_range", "apertures_arcsec"):
+                    "mosaic_npix", "snr_range", "apertures_arcsec",
+                    "source_sigma_pix"):
             setattr(self, key, _as_tuple(getattr(self, key)))
+        for attr in ("psf_gaussian_fwhm_arcsec", "psf_gaussian_fwhm_pix"):
+            value = getattr(self, attr)
+            if isinstance(value, dict):
+                setattr(self, attr, {str(k): float(v) for k, v in value.items()})
+            elif value is not None:
+                setattr(self, attr, float(value))
+        self.point_source_fraction = float(self.point_source_fraction)
+        if not (0.0 <= self.point_source_fraction <= 1.0):
+            raise ValueError("point_source_fraction must be between 0 and 1")
+        self.source_psf_normalization = str(self.source_psf_normalization).lower()
+        if self.source_psf_normalization not in {"unit", "native"}:
+            raise ValueError("source_psf_normalization must be 'unit' or 'native'")
+        self.detectors = {
+            str(k): tuple(v) if isinstance(v, (list, tuple)) else (str(v),)
+            for k, v in self.detectors.items()
+        }
         for bucket in (self.nircam_sw_frames, self.nircam_lw_frames,
                        self.miri_frames):
             for filt, frames in list(bucket.items()):
@@ -419,7 +485,7 @@ class MockMosaic:
                 return [_enc(x) for x in o]
             return o
         d = {k: _enc(v) for k, v in _dc.asdict(self).items()}
-        for k in ("noise_K", "stpsf_patterns"):
+        for k in ("noise_K", "stpsf_patterns", "detectors"):
             if d.get(k) == {}:
                 d.pop(k)
         return d
@@ -457,6 +523,126 @@ class MockMosaic:
         return self.stpsf_patterns.get(filter_name,
                                          self.default_stpsf_pattern(filter_name))
 
+    def _detectors_for(self, filter_name: str, family: str) -> tuple[str, ...] | None:
+        return self.detectors.get(filter_name, self.detectors.get(family))
+
+    def _psf_gaussian_fwhm_for(self, filter_name: str) -> float:
+        """Return the extra PSF Gaussian FWHM in that filter's output pixels."""
+        return self._psf_gaussian_fwhm_arcsec_for(filter_name) / DEFAULT_OUTPUT_PSCALE[
+            _family_of(filter_name)
+        ]
+
+    def _psf_gaussian_fwhm_arcsec_for(self, filter_name: str) -> float:
+        """Return the extra PSF Gaussian FWHM in arcsec."""
+        value = self.psf_gaussian_fwhm_pix
+        if value is not None:
+            if isinstance(value, dict):
+                fwhm_pix = float(value.get(filter_name, 0.0))
+            else:
+                fwhm_pix = float(value)
+            return fwhm_pix * DEFAULT_OUTPUT_PSCALE[_family_of(filter_name)]
+
+        value_arcsec = self.psf_gaussian_fwhm_arcsec
+        if value_arcsec is not None:
+            if isinstance(value_arcsec, dict):
+                return float(value_arcsec.get(filter_name, 0.0))
+            return float(value_arcsec)
+        return 0.0
+
+    def blur_filter_psf(
+        self,
+        filter_name: str,
+        psf: np.ndarray,
+        *,
+        pscale: float | None = None,
+    ) -> np.ndarray:
+        """Apply the configured extra Gaussian PSF blur for ``filter_name``.
+
+        The FWHM is specified in arcsec.  If the requested PSF lives on a
+        coarser grid than the mock reference grid, it is temporarily
+        oversampled before applying the Gaussian. This keeps the 0.08" F770W
+        target blur sampled on the 40 mas grid rather than directly as a
+        one-pixel FWHM filter on the native 80 mas F770W grid.
+
+        The PSF is returned with the flux produced by the convolution itself;
+        no post-hoc normalization is applied.
+        """
+        fwhm_arcsec = self._psf_gaussian_fwhm_arcsec_for(filter_name)
+        if fwhm_arcsec <= 0:
+            return psf
+        from scipy.ndimage import gaussian_filter
+
+        arr = np.asarray(psf, dtype=float)
+        if arr.ndim not in {2, 3}:
+            raise ValueError("PSF blur expects a 2-D PSF or 3-D PSF cube")
+        filter_pscale = (
+            float(pscale)
+            if pscale is not None
+            else DEFAULT_OUTPUT_PSCALE[_family_of(filter_name)]
+        )
+        reference_pscale = DEFAULT_OUTPUT_PSCALE[self.mosaic_pscale]
+        target_pscale = min(filter_pscale, reference_pscale)
+        factor = max(1, int(round(filter_pscale / target_pscale)))
+        work_pscale = filter_pscale / factor
+        sigma_pix = float(fwhm_arcsec) / work_pscale / 2.355
+
+        if factor == 1:
+            sigma = sigma_pix if arr.ndim == 2 else (0.0, sigma_pix, sigma_pix)
+            blurred = gaussian_filter(
+                arr,
+                sigma=sigma,
+                mode="constant",
+                cval=0.0,
+                truncate=6.0,
+            )
+            return blurred.astype(np.asarray(psf).dtype, copy=False)
+
+        def _blur_one(stamp: np.ndarray) -> np.ndarray:
+            up = np.repeat(np.repeat(stamp, factor, axis=0), factor, axis=1)
+            up = up / float(factor * factor)
+            blurred_up = gaussian_filter(
+                up,
+                sigma=sigma_pix,
+                mode="constant",
+                cval=0.0,
+                truncate=6.0,
+            )
+            ny, nx = stamp.shape
+            return blurred_up.reshape(ny, factor, nx, factor).sum(axis=(1, 3))
+
+        if arr.ndim == 2:
+            blurred = _blur_one(arr)
+        else:
+            blurred = np.stack([_blur_one(stamp) for stamp in arr], axis=0)
+        return blurred.astype(np.asarray(psf).dtype, copy=False)
+
+    def get_filter_psf_radec(
+        self,
+        filter_name: str,
+        dpsf: "DrizzlePSF",
+        positions: list[tuple[float, float]],
+        *,
+        filter_pattern: str | None = None,
+        size: float | None = None,
+        verbose: bool = False,
+    ) -> np.ndarray:
+        """Return configured per-filter PSFs at sky positions.
+
+        This is the MockMosaic PSF creation hook.  It delegates to
+        :class:`DrizzlePSF`, then applies any configured realistic per-filter
+        broadening, e.g. the default F770W Gaussian FWHM=0.08 arcsec
+        (2 pixels on the 40 mas reference grid, or 1 native F770W pixel).
+        """
+        pat = filter_pattern or self._patterns.get(filter_name) or self._stpsf_pattern_for(filter_name)
+        psf_size = size if size is not None else self._psf_size_for(filter_name)
+        cube = dpsf.get_psf_radec(
+            positions,
+            filter=pat,
+            size=psf_size,
+            verbose=verbose,
+        )
+        return self.blur_filter_psf(filter_name, cube)
+
     def _iter_filters(self):
         """Yield ``(filter_name, family, frames)`` for every configured filter."""
         for filt, frames in self.nircam_sw_frames.items():
@@ -477,9 +663,16 @@ class MockMosaic:
 
         all_polys: list[Polygon] = []
         cache: dict[str, "pysiaf.Siaf"] = {}
-        for _, fam, frames in self._iter_filters():
+        for filt, fam, frames in self._iter_filters():
             if frames:
-                all_polys.extend(_pointing_footprints(fam, frames, cache))
+                all_polys.extend(
+                    _pointing_footprints(
+                        fam,
+                        frames,
+                        cache,
+                        detector_keys=self._detectors_for(filt, fam),
+                    )
+                )
 
         bounds = None
         if self.mosaic_npix is None or self.mosaic_crpix is None:
@@ -563,6 +756,7 @@ class MockMosaic:
                 group, p.ra, p.dec, p.pa,
                 frame_id=i, mjd_avg=self.mjd_avg, exptime=exp,
                 siaf_cache=cache,
+                detector_keys=self._detectors_for(filt, group),
             ))
         csv_path = out / f"mock_{filt}_wcs.csv"
         _write_wcs_csv(csv_path, rows)
@@ -592,7 +786,8 @@ class MockMosaic:
         """Write ``<filter>_sci.fits`` (noise) + ``<filter>_wht.fits`` (1/var).
 
         ``t_exp(x,y) = Σ frame EXPTIMEs`` for frames whose footprint contains
-        the pixel, then σ_pix = R·K/(p_out·√t_exp). ``wht = 1/σ_nominal²``.
+        the pixel, then σ_pix = R·K/(p_out·√t_exp). The default written
+        ``wht`` map is the actual pixel inverse variance, ``1/σ_pix²``.
         """
         from mophongo.psf import DrizzlePSF  # heavy local import
         from skimage.draw import polygon as sk_polygon
@@ -645,7 +840,7 @@ class MockMosaic:
         noise[sigma_pix == 0] = 0.0
 
         with np.errstate(divide="ignore", invalid="ignore"):
-            wht = np.where(sigma_nom > 0, 1.0 / sigma_nom ** 2, 0.0).astype(np.float32)
+            wht = np.where(sigma_pix > 0, 1.0 / sigma_pix ** 2, 0.0).astype(np.float32)
 
         sci_path = Path(info["fits"])
         with fits.open(sci_path) as h:
@@ -660,6 +855,11 @@ class MockMosaic:
         wht_path = sci_path.with_name(sci_path.name.replace("_sci", "_wht"))
         hdr_w = hdr.copy()
         hdr_w["BUNIT"] = f"1/({_bunit})^2"
+        hdr_w["WHTTYPE"] = ("IVARPIX", "actual per-pixel inverse variance")
+        hdr_w["RNOISE"] = (float(R), "drizzle RMS factor applied to nominal noise")
+        hdr_w["NOISEK"] = (float(K), "noise calibration K")
+        hdr_w["INPSCALE"] = (float(p_in), "native input pixel scale [arcsec/pix]")
+        hdr_w["OUTPSCAL"] = (float(p_out), "mosaic output pixel scale [arcsec/pix]")
         fits.PrimaryHDU(data=wht, header=hdr_w).writeto(str(wht_path), overwrite=True)
 
         logger.info(
@@ -720,9 +920,11 @@ class MockMosaic:
 
     def sample_positions(self, n: int, dpsf: "DrizzlePSF",
                          seed: int | None = None,
-                         oversample: int = 4) -> tuple[np.ndarray, np.ndarray]:
-        """Rejection-sample ``n`` (ra, dec) inside the union of ``dpsf`` footprints."""
-        coverage = unary_union(list(dpsf.footprint.values()))
+                         oversample: int = 4,
+                         coverage=None) -> tuple[np.ndarray, np.ndarray]:
+        """Rejection-sample ``n`` (ra, dec) inside valid drizzled PSF coverage."""
+        if coverage is None:
+            coverage = _dpsf_valid_coverage(dpsf)
         ra_min, dec_min, ra_max, dec_max = coverage.bounds
         rng = np.random.default_rng(seed if seed is not None else self.noise_seed)
         kept_ra: list[np.ndarray] = []
@@ -748,13 +950,22 @@ class MockMosaic:
                              ref_filter: str = "f444w",
                              apertures_arcsec: tuple[float, ...] | None = None,
                              psf_size_arcsec: float | None = None,
+                             source_sigma_pix: float | tuple[float, float] | np.ndarray | None = None,
+                             source_sigma_pscale: float | None = None,
+                             point_source_fraction: float | None = None,
+                             source_psf_normalization: str | None = None,
+                             sample_filters: tuple[str, ...] | None = None,
+                             positions_radec: tuple[np.ndarray, np.ndarray] | None = None,
+                             filter_position_offsets_pix: dict[str, tuple[float, float]] | None = None,
                              seed: int | None = None,
                              ) -> "Table":
-        """Inject ``n`` point sources with log-uniform matched-filter SNR.
+        """Inject ``n`` sources with log-uniform matched-filter SNR.
 
         Positions are sampled inside the ``ref_filter`` coverage; per-source flux
         is set from the matched filter on the ``ref_filter`` wht map, and the
-        same true flux is painted in every filter.
+        same true flux is painted in every filter. When ``source_sigma_pix`` is
+        non-zero, each point-source PSF is convolved with a circular Gaussian of
+        that intrinsic size before SNR calibration and painting.
         """
         if ref_filter not in dpsfs:
             raise KeyError(f"ref_filter {ref_filter!r} not in dpsfs ({list(dpsfs)})")
@@ -762,105 +973,206 @@ class MockMosaic:
         _apr = apertures_arcsec if apertures_arcsec is not None else self.apertures_arcsec
         rng = np.random.default_rng(seed if seed is not None else self.noise_seed)
 
-        # 1) Positions inside the reference filter's coverage.
-        ra_src, dec_src = self.sample_positions(n, dpsfs[ref_filter],
-                                                 seed=int(rng.integers(1 << 30)))
-        pos_list = list(zip(ra_src, dec_src))
+        sigma_spec = source_sigma_pix
+        if sigma_spec is None:
+            sigma_spec = self.source_sigma_pix
+        sigma_pscale = (
+            float(source_sigma_pscale)
+            if source_sigma_pscale is not None
+            else float(self.source_sigma_pscale)
+        )
+        if sigma_spec is None:
+            source_sigma_refpix = np.zeros(n, dtype=float)
+        elif np.isscalar(sigma_spec):
+            source_sigma_refpix = np.full(n, float(sigma_spec), dtype=float)
+        else:
+            sigma_arr = np.asarray(sigma_spec, dtype=float)
+            if sigma_arr.shape == (2,):
+                lo, hi = float(sigma_arr[0]), float(sigma_arr[1])
+                if lo < 0 or hi < lo:
+                    raise ValueError("source_sigma_pix range must be non-negative and increasing")
+                if lo > 0:
+                    source_sigma_refpix = np.exp(rng.uniform(np.log(lo), np.log(hi), size=n))
+                else:
+                    source_sigma_refpix = rng.uniform(lo, hi, size=n)
+            elif sigma_arr.shape == (n,):
+                source_sigma_refpix = sigma_arr.astype(float, copy=True)
+            else:
+                raise ValueError("source_sigma_pix must be scalar, two-value range, or length n")
+        if np.any(source_sigma_refpix < 0):
+            raise ValueError("source_sigma_pix values must be non-negative")
+        ps_frac = (
+            float(point_source_fraction)
+            if point_source_fraction is not None
+            else float(self.point_source_fraction)
+        )
+        if not (0.0 <= ps_frac <= 1.0):
+            raise ValueError("point_source_fraction must be between 0 and 1")
+        if ps_frac > 0.0 and np.any(source_sigma_refpix > 0):
+            n_point = int(round(ps_frac * n))
+            if n_point > 0:
+                force_point = rng.choice(n, size=n_point, replace=False)
+                source_sigma_refpix[force_point] = 0.0
+        source_sigma_arcsec = source_sigma_refpix * sigma_pscale
+        is_point_source = source_sigma_refpix == 0.0
+        norm_mode = (
+            str(source_psf_normalization).lower()
+            if source_psf_normalization is not None
+            else str(self.source_psf_normalization).lower()
+        )
+        if norm_mode not in {"unit", "native"}:
+            raise ValueError("source_psf_normalization must be 'unit' or 'native'")
+
+        # 1) Positions inside the requested coverage. By default this is the
+        # reference filter. Recovery validations can request the common
+        # high/low-res footprint so all injected sources have templates.
+        if sample_filters is None:
+            sample_coverage = _dpsf_valid_coverage(dpsfs[ref_filter])
+        else:
+            sample_coverage = None
+            for filt in sample_filters:
+                if filt not in dpsfs:
+                    raise KeyError(f"sample_filter {filt!r} not in dpsfs ({list(dpsfs)})")
+                cov = _dpsf_valid_coverage(dpsfs[filt])
+                sample_coverage = cov if sample_coverage is None else sample_coverage.intersection(cov)
+        if positions_radec is None:
+            ra_src, dec_src = self.sample_positions(
+                n,
+                dpsfs[ref_filter],
+                seed=int(rng.integers(1 << 30)),
+                coverage=sample_coverage,
+            )
+        else:
+            ra_src = np.asarray(positions_radec[0], dtype=float)
+            dec_src = np.asarray(positions_radec[1], dtype=float)
+            if ra_src.shape != (n,) or dec_src.shape != (n,):
+                raise ValueError("positions_radec arrays must both have length n")
+        filter_offsets: dict[str, tuple[float, float]] = {}
+        if filter_position_offsets_pix is not None:
+            filter_offsets = {
+                str(filt).lower(): (float(offset[0]), float(offset[1]))
+                for filt, offset in filter_position_offsets_pix.items()
+            }
+
+        def _filter_xy(filt: str) -> tuple[np.ndarray, np.ndarray]:
+            """Return source positions on a filter mosaic, including mock offsets."""
+
+            xi, yi = paths[filt]["wcs"].wcs_world2pix(ra_src, dec_src, 0)
+            dx, dy = filter_offsets.get(str(filt).lower(), (0.0, 0.0))
+            if dx != 0.0 or dy != 0.0:
+                xi = np.asarray(xi, dtype=float) + dx
+                yi = np.asarray(yi, dtype=float) + dy
+            return xi, yi
+
+        def _filter_radec(filt: str) -> tuple[np.ndarray, np.ndarray]:
+            """Return per-filter source sky positions after mock offsets."""
+
+            xi, yi = _filter_xy(filt)
+            ra_f, dec_f = paths[filt]["wcs"].wcs_pix2world(xi, yi, 0)
+            return np.asarray(ra_f, dtype=float), np.asarray(dec_f, dtype=float)
 
         # 2) Per-filter PSF stamps + in-coverage flags.
         #
-        # Two corrections are applied here:
+        # The PSF cube returned by DrizzlePSF.get_psf_radec is already sampled
+        # on the requested sky-position cutout.  Do not centroid or sub-pixel
+        # shift those stamps here: the input (RA, Dec) and the cutout WCS define
+        # the source phase.  Additional interpolation would create a second,
+        # mock-only astrometric convention and can introduce dipole residuals.
         #
-        # (a) Sub-pixel re-centering. DrizzlePSF.get_psf has a per-filter
-        #     ePSF-grid phase offset that would leak into the ground truth as
-        #     a spurious inter-filter shift. Each stamp is rolled with
-        #     bicubic interpolation so its centroid sits exactly at the
-        #     requested sub-pixel offset from the integer paste pixel.
+        # Flux convention: historic mocks use unit-sum stamps. Realistic PSF
+        # validation can instead preserve the native DrizzlePSF finite-stamp
+        # integral. In native mode the image contains flux_true * psf_throughput
+        # within the modeled stamp; fitting code that uses unit-sum PSF shapes
+        # should divide the modeled amplitude by that throughput when comparing
+        # to total truth flux.
         #
-        # (b) Normalization at the full PSF extent. The stpsf ePSF models
-        #     plateau at sum ≈ 0.95–0.97 within a few arcsec; at the mock's
-        #     stamp size (``psf_size_arcsec``) the stamp sum already equals
-        #     that full-extent integral. We divide each stamp by that sum
-        #     once, so the stored stamp is unit-normalized **at full extent**
-        #     — identical to the convention in the rest of the codebase.
-        #     Note this is NOT a per-crop renormalization: if a downstream
-        #     consumer later crops the stamp tighter, the crop's sum is <1
-        #     by design (``ee_fraction`` tracks EE at the cropped radius),
-        #     and the template fit remains unbiased because flux is the
-        #     scalar applied to the crop.
-        #
-        # Requirement: ``psf_size_arcsec`` must be large enough that the
-        # stamp captures the full ePSF model footprint. 8″ satisfies this
-        # for NIRCam LW and MIRI stpsf grids.
-        from scipy.ndimage import shift as _ndi_shift
-        from photutils.centroids import centroid_com as _com
+        # Requirement: ``psf_size_arcsec`` must be large enough that the stamp
+        # captures the full ePSF model footprint. 8" satisfies this for NIRCam
+        # LW and MIRI stpsf grids.
+        from scipy.ndimage import gaussian_filter as _gaussian_filter
+
+        def _paste_origin(pos: np.ndarray, size: int) -> np.ndarray:
+            """Lower-left paste index matching the Cutout2D origin convention.
+
+            ``DrizzlePSF.get_psf_radec`` drizzles each stamp onto a
+            ``Cutout2D(..., mode="partial")`` WCS whose lower-left original
+            index is ``ceil(pos - size/2)`` (astropy ``overlap_slices``).
+            Pasting at any other origin shifts the painted source by an
+            integer pixel relative to its (RA, Dec); with even stamps the old
+            ``round(pos) - size//2`` origin was wrong by 1 pixel whenever the
+            sub-pixel phase was <= 0.5.
+            """
+            return np.ceil(np.asarray(pos, dtype=float) - size / 2.0).astype(int)
         psfs: dict[str, np.ndarray] = {}
         inside: dict[str, np.ndarray] = {}
         for filt, dp in dpsfs.items():
             pat = self._patterns.get(filt) or self._stpsf_pattern_for(filt)
             size_filt = (psf_size_arcsec if psf_size_arcsec is not None
                          else self._psf_size_for(filt))
-            cube = dp.get_psf_radec(pos_list, filter=pat, size=size_filt)
+            coverage_f = _dpsf_valid_coverage(dp)
+            ra_f, dec_f = _filter_radec(filt)
+            in_coverage = _shapely_contains(coverage_f, ra_f, dec_f)
+            idx_in = np.flatnonzero(in_coverage)
+            if idx_in.size == 0:
+                raise ValueError(f"no sampled sources fall inside {filt} coverage")
+            cube = self.get_filter_psf_radec(
+                filt,
+                dp,
+                [(float(ra_f[i]), float(dec_f[i])) for i in idx_in],
+                filter_pattern=pat,
+                size=size_filt,
+            )
             sz = cube.shape[1]
-            hs = sz // 2
-            mwcs_f = paths[filt]["wcs"]
-            xi_f, yi_f = mwcs_f.wcs_world2pix(ra_src, dec_src, 0)
-            xi_r = np.round(xi_f).astype(int)
-            yi_r = np.round(yi_f).astype(int)
-            dx_sub = xi_f - xi_r
-            dy_sub = yi_f - yi_r
-            out = np.zeros_like(cube)
-            in_filt = np.zeros(cube.shape[0], dtype=bool)
-            for i in range(cube.shape[0]):
-                s = cube[i].sum()
+            out = np.zeros((n, sz, sz), dtype=cube.dtype)
+            in_filt = np.zeros(n, dtype=bool)
+            for j, i in enumerate(idx_in):
+                s = cube[j].sum()
                 if not (s > 1e-6):
                     continue
-                py, px = np.unravel_index(np.argmax(cube[i]), cube[i].shape)
-                r = 5
-                sub = cube[i][max(0, py - r):py + r + 1,
-                              max(0, px - r):px + r + 1]
-                cx, cy = _com(sub)
-                if not (np.isfinite(cx) and np.isfinite(cy)):
-                    continue
-                cx += max(0, px - r)
-                cy += max(0, py - r)
-                tgt_x = hs + dx_sub[i]
-                tgt_y = hs + dy_sub[i]
-                stamp = _ndi_shift(
-                    cube[i], (tgt_y - cy, tgt_x - cx),
-                    order=3, mode="constant", cval=0.0, prefilter=True,
-                )
-                # normalize at full PSF extent (stamp covers the whole stpsf
-                # model; s is the full-extent integral)
-                out[i] = stamp / s
+                stamp = np.array(cube[j], copy=True)
+                if norm_mode == "unit":
+                    stamp = stamp / s
+                sigma_filt_pix = source_sigma_arcsec[i] / paths[filt]["pscale"]
+                if sigma_filt_pix > 0:
+                    stamp = _gaussian_filter(
+                        stamp,
+                        sigma=float(sigma_filt_pix),
+                        mode="constant",
+                        cval=0.0,
+                        truncate=6.0,
+                    )
+                    if norm_mode == "unit":
+                        stamp_sum = float(stamp.sum())
+                        if stamp_sum <= 1e-6:
+                            continue
+                        stamp = stamp / stamp_sum
+                out[i] = stamp
                 in_filt[i] = True
             psfs[filt] = out
             inside[filt] = in_filt
 
-        # 3) Reference-filter flux from target SNR via wht (= 1/σ_nominal²).
+        # 3) Reference-filter flux from target SNR via wht (= actual
+        # per-pixel inverse variance, including drizzle and pixel-scale
+        # corrections).
         ref_info = paths[ref_filter]
         wht_ref = fits.getdata(ref_info["fits"].with_name(
             ref_info["fits"].name.replace("_sci", "_wht")))
-        mwcs_ref = ref_info["wcs"]
         ny, nx = wht_ref.shape
-        xr, yr = mwcs_ref.wcs_world2pix(ra_src, dec_src, 0)
-        xr_i = np.round(xr).astype(int)
-        yr_i = np.round(yr).astype(int)
+        xr, yr = _filter_xy(ref_filter)
 
         target_snr = np.exp(rng.uniform(np.log(_snr[0]), np.log(_snr[1]), size=n))
         fluxes = np.zeros(n, dtype=np.float32)
         valid_ref = np.zeros(n, dtype=bool)
         sz_ref = psfs[ref_filter].shape[1]
-        # hs is the stamp index that holds the source centroid (set by the
-        # _ndi_shift above). Slice [yi_i - hs : yi_i - hs + sz] places it at
-        # image y = yi_i + dy_sub, which matches the WCS prediction for both
-        # odd and even sz.
-        hs_ref = sz_ref // 2
+        # The stamp WCS was built for the requested sky position; paste it at
+        # the Cutout2D origin without recentering.
+        xr0 = _paste_origin(xr, sz_ref)
+        yr0 = _paste_origin(yr, sz_ref)
         for i in range(n):
             if not inside[ref_filter][i]:
                 continue
-            y0, y1 = yr_i[i] - hs_ref, yr_i[i] - hs_ref + sz_ref
-            x0, x1 = xr_i[i] - hs_ref, xr_i[i] - hs_ref + sz_ref
+            y0, y1 = yr0[i], yr0[i] + sz_ref
+            x0, x1 = xr0[i], xr0[i] + sz_ref
             if y0 < 0 or x0 < 0 or y1 > ny or x1 > nx:
                 continue
             w_local = wht_ref[y0:y1, x0:x1]
@@ -874,33 +1186,57 @@ class MockMosaic:
         # 4) Paint into every filter; reuse flux, track per-filter validity.
         valid = {filt: valid_ref & inside[filt] for filt in dpsfs}
         per_filter_xy: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self._source_model_cutouts = {}
         for filt, dp in dpsfs.items():
-            mwcs = paths[filt]["wcs"]
-            xi, yi = mwcs.wcs_world2pix(ra_src, dec_src, 0)
-            xi_i = np.round(xi).astype(int)
-            yi_i = np.round(yi).astype(int)
+            xi, yi = _filter_xy(filt)
             per_filter_xy[filt] = (xi, yi)
             sci = fits.getdata(paths[filt]["fits"]).astype(np.float32)
+            truth_img = np.zeros_like(sci, dtype=np.float32)
             sz = psfs[filt].shape[1]
-            hs = sz // 2  # stamp index of the centroid (works for any parity)
+            xi0 = _paste_origin(xi, sz)
+            yi0 = _paste_origin(yi, sz)
             ny_f, nx_f = sci.shape
+            model_records: list[dict] = []
             for i in range(n):
                 if not valid[filt][i]:
                     continue
-                y0, y1 = yi_i[i] - hs, yi_i[i] - hs + sz
-                x0, x1 = xi_i[i] - hs, xi_i[i] - hs + sz
+                y0, y1 = yi0[i], yi0[i] + sz
+                x0, x1 = xi0[i], xi0[i] + sz
                 if y0 < 0 or x0 < 0 or y1 > ny_f or x1 > nx_f:
                     continue
-                sci[y0:y1, x0:x1] += fluxes[i] * psfs[filt][i]
+                unit_model = psfs[filt][i]
+                source_img = fluxes[i] * unit_model
+                sci[y0:y1, x0:x1] += source_img
+                truth_img[y0:y1, x0:x1] += source_img
+                model_records.append(
+                    {
+                        "id": int(i + 1),
+                        "x": float(xi[i]),
+                        "y": float(yi[i]),
+                        "bbox": (int(y0), int(y1), int(x0), int(x1)),
+                        "data": unit_model.astype(np.float32, copy=True),
+                    }
+                )
+            self._source_model_cutouts[filt] = model_records
             with fits.open(paths[filt]["fits"]) as h:
+                header = h[0].header.copy()
                 h[0].data = sci
                 h.writeto(paths[filt]["fits"], overwrite=True)
+            truth_path = paths[filt]["fits"].with_name(
+                paths[filt]["fits"].name.replace("_sci", "_truth")
+            )
+            fits.writeto(truth_path, truth_img, header, overwrite=True)
+            paths[filt]["truth_fits"] = truth_path
 
         # 5) Truth catalog with total + aperture fluxes per filter.
         truth = Table()
         truth["id"] = np.arange(1, n + 1, dtype=np.int32)
         truth["ra"] = ra_src
         truth["dec"] = dec_src
+        truth["source_sigma_pix"] = source_sigma_refpix.astype(np.float32)
+        truth["source_sigma_arcsec"] = source_sigma_arcsec.astype(np.float32)
+        truth["is_point_source"] = is_point_source
+        truth["source_psf_normalization"] = np.full(n, norm_mode)
         truth[f"snr_{ref_filter}"] = target_snr.astype(np.float32)
         for filt in dpsfs:
             xi, yi = per_filter_xy[filt]
@@ -915,21 +1251,73 @@ class MockMosaic:
                 col = f"flux_aper_D{int(D * 100):03d}_{filt}"
                 truth[col] = (flux_filt * fracs[k]).astype(np.float32)
                 truth[col].unit = self.bunit
+            truth[f"psf_gaussian_fwhm_pix_{filt}"] = np.full(
+                n,
+                self._psf_gaussian_fwhm_for(filt),
+                dtype=np.float32,
+            )
+            truth[f"psf_gaussian_fwhm_arcsec_{filt}"] = np.full(
+                n,
+                self._psf_gaussian_fwhm_arcsec_for(filt),
+                dtype=np.float32,
+            )
             truth[f"valid_{filt}"] = valid[filt]
         self._truth = truth
         return truth
+
+    def source_model_templates(
+        self,
+        filter_name: str,
+        *,
+        paths: dict | None = None,
+        ids: set[int] | None = None,
+        normalize: bool = False,
+    ):
+        """Return exact unit-flux source models as a :class:`Templates` object.
+
+        The returned templates use the same cutouts painted into the mock image,
+        before multiplication by each source's scalar true flux. This is useful
+        for separating template-extraction errors from the linear flux solve.
+        """
+        from .templates import Templates
+
+        records = self._source_model_cutouts.get(filter_name)
+        if records is None:
+            raise KeyError(
+                f"no source model cutouts stored for {filter_name!r}; run inject_point_sources first"
+            )
+        if paths is None:
+            paths = self._paths
+        if filter_name not in paths:
+            raise KeyError(f"filter {filter_name!r} not available in paths")
+        shape = fits.getdata(paths[filter_name]["fits"]).shape
+        wcs = paths[filter_name].get("wcs")
+        selected = [
+            rec for rec in records
+            if ids is None or int(rec["id"]) in ids
+        ]
+        return Templates.from_cutout_models(
+            [rec["data"] for rec in selected],
+            [(rec["x"], rec["y"]) for rec in selected],
+            [rec["id"] for rec in selected],
+            original_shape=shape,
+            wcs=wcs,
+            normalize=normalize,
+        )
 
     # ---- one-shot pipeline + reporting -----------------------------------
 
     def build(self, n_sources: int = 200,
               psf_dir: Path | str | None = None,
-              ref_filter: str = "f444w") -> tuple[dict, dict, dict, "Table"]:
+              ref_filter: str = "f444w",
+              sample_filters: tuple[str, ...] | None = None) -> tuple[dict, dict, dict, "Table"]:
         """write → inject_noise_all → load_drizzle_psfs → inject_point_sources."""
         paths = self.write()
         noise_info = self.inject_noise_all(paths)
         dpsfs = self.load_drizzle_psfs(paths, psf_dir=psf_dir)
         truth = self.inject_point_sources(paths, dpsfs, n=n_sources,
-                                           ref_filter=ref_filter)
+                                           ref_filter=ref_filter,
+                                           sample_filters=sample_filters)
         truth.write(Path(self.out_dir) / "mock_truth.ecsv",
                     format="ascii.ecsv", overwrite=True)
         return paths, noise_info, dpsfs, truth

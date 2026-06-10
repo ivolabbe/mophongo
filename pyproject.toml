@@ -31,6 +31,8 @@ dependencies = [
     "fsspec[http] (>=2025.7.0,<2026.0.0)",
     "zarr (>=3.1.1,<4.0.0)",
     "numcodecs (>=0.16.2,<0.17.0)",
+    "opencv-python-headless (>=4.13.0.92,<5.0.0.0)",
+    "pywavelets (>=1.9.0,<2.0.0)",
 ]
 
 [tool.poetry]
@@ -41,6 +43,7 @@ packages = [{include = "mophongo", from = "src"}]
 pytest = "^8.4.1"
 matplotlib = "^3.10.3"
 ipykernel = "^6.29.5"
+ipywidgets = "^8.1.8"
 stpsf = "^2.1.0"
 webbpsf = "^2.0.0"
 photutils = "^2.2.0"

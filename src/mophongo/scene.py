@@ -480,6 +480,7 @@ def generate_scenes(
     snr_thresh_astrom: float = 7.0,
     minimum_bright: int | None = None,
     max_merge_radius: float = np.inf,
+    isolate_saturated: bool = True,
 ) -> tuple[List["Scene"], np.ndarray]:
     """
     Partition templates into independent Scenes using normal-equation couplings.
@@ -530,6 +531,20 @@ def generate_scenes(
         minimum_bright=minimum_bright,
         max_merge_radius=max_merge_radius,
     )
+
+    # 3b) Isolate saturated/repaired templates into their own scenes.
+    # Their PSF wings span far beyond their segment and would corrupt the
+    # flux solution of every neighbour caught in the same coupling graph.
+    if isolate_saturated:
+        sat_mask = np.asarray(
+            [bool(getattr(t, "is_saturated", False)) for t in templates],
+            dtype=bool,
+        )
+        if sat_mask.any():
+            next_label = int(labels.max()) + 1
+            for i in np.where(sat_mask)[0]:
+                labels[i] = next_label
+                next_label += 1
 
     # 4) Instantiate per-scene objects with sub-blocks of ATA/ATb and links to data
     scenes: List[Scene] = []
@@ -639,7 +654,7 @@ class Scene:
         self.is_bright = snr_proxy > float(cfg.snr_thresh_astrom)
 
         # flux-only path
-        if not cfg.fit_astrometry_joint:
+        if (not cfg.fit_astrometry_joint) or int(getattr(cfg, "fit_astrometry_niter", 0)) <= 0:
             sol = SceneFitter.solve(A, b, config=cfg, **kwargs)
         else:
             # first guess solution from diagonal-only solution
@@ -664,7 +679,7 @@ class Scene:
                 ab_from_bright_only=True,
             )
             # if no valid AB BB solve will fall back to flux-only
-            # @@@ scenefitter.solve should not take config but reg and cg_kwargs
+            # @@@ scenefitter.solve should not take config but regularization and cg_kwargs
             sol = SceneFitter.solve(A, b, AB=AB, BB=BB, bB=bB, config=cfg, **kwargs)
             self.shifts = sol.shifts
 
@@ -746,6 +761,28 @@ class Scene:
         return shifts[:, 0], shifts[:, 1]
 
     @staticmethod
+    def create_scene_graph(templates: List[Template]) -> np.ndarray:
+        """Return zero-based connected-component labels from template overlaps."""
+        n = len(templates)
+        labels = np.full(n, -1, dtype=int)
+        current = 0
+        for i in range(n):
+            if labels[i] >= 0:
+                continue
+            stack = [i]
+            labels[i] = current
+            while stack:
+                j = stack.pop()
+                for k in range(n):
+                    if labels[k] >= 0:
+                        continue
+                    if Scene._overlaps(templates[j].bbox, templates[k].bbox):
+                        labels[k] = current
+                        stack.append(k)
+            current += 1
+        return labels
+
+    @staticmethod
     def overlay_scene_graph(
         templates: List[Template], shape: Tuple[int, int]
     ) -> Tuple[np.ndarray, np.ndarray]:
@@ -769,6 +806,8 @@ class Scene:
         tmpl_image: np.ndarray,
         seg_image: np.ndarray,
         display_sig: float = 3.0,
+        display_sig_by_title: dict[str, float] | None = None,
+        residual_image: np.ndarray | None = None,
         ax=None,
         **imshow_kwargs,
     ) -> tuple["matplotlib.figure.Figure", np.ndarray]:
@@ -780,6 +819,13 @@ class Scene:
             High-resolution template image corresponding to ``self.image``.
         display_sig
             Sigma level used to scale grayscale panels. Defaults to ``3``.
+        residual_image
+            Optional full-frame residual on the fit grid with *all* scene
+            models subtracted. If given, the residual panel shows this global
+            residual over the scene bbox. If ``None``, the panel falls back to
+            ``self.residual()``, which subtracts only this scene's model and
+            therefore still contains the (masked) light of sources belonging
+            to other scenes.
         ax
             Optional array of matplotlib axes to draw on.
         **imshow_kwargs
@@ -818,7 +864,11 @@ class Scene:
         scene_cmap.colors[0] = (1.0, 1.0, 1.0, 0.0)
 
         model_cut = self.model_image()
-        res_cut = self.residual()
+        if residual_image is not None:
+            res_cut = np.asarray(residual_image)[sl].copy()
+            res_cut[(self.weights[sl] <= 0) | np.isnan(self.weights[sl])] = 0.0
+        else:
+            res_cut = self.residual()
 
         b = tmpl_cut / np.nanstd(tmpl_cut) if np.nanstd(tmpl_cut) != 0 else tmpl_cut
         r = img_cut / np.nanstd(img_cut) if np.nanstd(img_cut) != 0 else img_cut
@@ -842,18 +892,23 @@ class Scene:
         for template_id in template_ids:
             scene_segmap[seg_cut == template_id] = 1
 
-        # Mask residual to only show pixels belonging to this scene
-        res_cut_masked = res_cut.copy()
-        # Set residual to zero where segmap shows sources NOT in this scene
-        # (i.e., where seg_cut > 0 but scene_segmap == 0)
-        other_sources_mask = (seg_cut > 0) & (scene_segmap == 0)
-        res_cut_masked[other_sources_mask] = 0.0
+        if residual_image is not None:
+            # global residual already has every scene's model subtracted
+            res_cut_masked = res_cut
+        else:
+            # Mask residual to only show pixels belonging to this scene
+            res_cut_masked = res_cut.copy()
+            # Set residual to zero where segmap shows sources NOT in this scene
+            # (i.e., where seg_cut > 0 but scene_segmap == 0)
+            other_sources_mask = (seg_cut > 0) & (scene_segmap == 0)
+            res_cut_masked[other_sources_mask] = 0.0
 
         # Plot panels - use the masked residual
         images = [tmpl_cut, img_cut, model_cut, seg_cut, res_cut_masked, col_cut]
         titles = ["Template", "Image", "Model", "Segmap", "Residual", "Color"]
 
         for i, (img, title) in enumerate(zip(images, titles)):
+            sig = (display_sig_by_title or {}).get(title, display_sig)
             if "Segmap" in title:
                 ax[i].imshow(img, origin="lower", cmap=segmap_cmap, interpolation="nearest")
             elif "Residual" in title:  # residual
@@ -862,10 +917,19 @@ class Scene:
                     img,
                     origin="lower",
                     cmap="gray",
-                    vmin=-display_sig * std,
-                    vmax=display_sig * std,
+                    vmin=-sig * std,
+                    vmax=sig * std,
                     **imshow_kwargs,
                 )
+                outside_fit = np.abs(model_cut) <= 0.0
+                if np.any(outside_fit):
+                    masked_outside = np.ma.masked_where(~outside_fit, np.ones_like(model_cut))
+                    ax[i].imshow(
+                        masked_outside,
+                        origin="lower",
+                        cmap=ListedColormap([(1.0, 1.0, 1.0, 0.28)]),
+                        interpolation="nearest",
+                    )
             elif "Color" in title:  # color
                 ax[i].imshow(img, origin="lower", **imshow_kwargs)
             else:
@@ -874,8 +938,8 @@ class Scene:
                     img,
                     origin="lower",
                     cmap="gray",
-                    vmin=-display_sig * std,
-                    vmax=display_sig * std,
+                    vmin=-sig * std,
+                    vmax=sig * std,
                     **imshow_kwargs,
                 )
 
@@ -992,7 +1056,9 @@ class Scene:
 
             # Add shift scale indicator
             if max_shift > 0:
-                shift_text = f"Max shift: {max_shift:.2f} pix"
+                med_dx = float(np.median(dx_grid))
+                med_dy = float(np.median(dy_grid))
+                shift_text = f"shift dx={med_dx:+.2f}, dy={med_dy:+.2f} pix"
                 model_ax.text(
                     0.02,
                     0.98,

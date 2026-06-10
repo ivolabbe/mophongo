@@ -253,19 +253,27 @@ def fit_psf_donut(
     min_pix: int = 10,
     fit_pedestal: bool = False,
 ) -> dict[str, Any]:
-    """Fit ``data ≈ A·psf`` (or ``A·psf + C``) on the ring ``r_in ≤ r ≤ r_out``.
+    """Fit ``data ≈ A·psf [+ C]`` on ring ``r_in ≤ r ≤ r_out``.
 
     Pixels with ``wht <= 0``, ``bad_mask == True``, or ``psf == 0`` are
-    excluded from the ring. With ``fit_pedestal=True`` the fit becomes a
-    2-column LSQ that also solves for an additive constant ``C`` — used
-    when a point source sits inside an extended host whose smooth flux
-    would otherwise bias the amplitude. The pedestal is **never** part
-    of the model that gets subtracted/replaced; it is reported but the
-    caller subtracts only ``A·psf``.
+    excluded from the ring. With ``fit_pedestal=True`` an additive
+    constant ``C`` is added.
+
+    The pedestal and halo are **never** part of the model that gets
+    subtracted/replaced; only ``A·psf`` is. They are reported so the
+    caller can audit fit quality.
+
+    Also computes the PSF-weighted residual–model cross-correlation
+    ``ρ_psf = ⟨resid·ψ·w⟩ / √(⟨resid²·w⟩·⟨ψ²·w⟩)`` over the ring —
+    a dimensionless, amplitude-invariant quality metric. ``ρ_psf ≈ 0``
+    means the residual is orthogonal to the PSF (good fit); ``> 0`` =
+    model under-fits flux co-located with PSF (e.g. missing halo);
+    ``< 0`` = over-fits.
 
     Returns
     -------
-    dict with keys: ``amplitude, amp_err, chi2_red, pedestal, n_pix, ring_mask``.
+    dict with keys: ``amplitude, amp_err, chi2_red, pedestal,
+    rho_psf, n_pix, ring_mask``.
     """
     yy, xx = np.indices(sci.shape)
     rr = np.hypot(yy - center[0], xx - center[1])
@@ -279,6 +287,7 @@ def fit_psf_donut(
         "amp_err": float("nan"),
         "chi2_red": float("nan"),
         "pedestal": 0.0,
+        "rho_psf": float("nan"),
         "n_pix": n_pix,
         "ring_mask": ring,
     }
@@ -289,6 +298,45 @@ def fit_psf_donut(
     d = sci[ring].astype(np.float64)
     p = psf[ring].astype(np.float64)
 
+    def _pearson(d_arr: np.ndarray, p_arr: np.ndarray) -> float:
+        """Weighted Pearson correlation between data and PSF on the ring.
+        Amplitude-invariant, sensitive only to *shape* mismatch.
+        ρ = 1 → perfect shape match; < 1 → mismatch (halo, kernel, pedestal).
+        Restrict to PSF footprint (p > 1e-6 × peak) for robustness."""
+        peak = float(p_arr.max()) if p_arr.size else 0.0
+        if peak <= 0:
+            return float("nan")
+        m = p_arr > 1e-6 * peak
+        if m.sum() < 5:
+            return float("nan")
+        wm = w[m]
+        sw = float(wm.sum())
+        if sw <= 0:
+            return float("nan")
+        d_m = d_arr[m]
+        p_m = p_arr[m]
+        d_bar = float(np.sum(wm * d_m) / sw)
+        p_bar = float(np.sum(wm * p_m) / sw)
+        dd = d_m - d_bar
+        pp = p_m - p_bar
+        cov = float(np.sum(wm * dd * pp))
+        var_d = float(np.sum(wm * dd * dd))
+        var_p = float(np.sum(wm * pp * pp))
+        if var_d <= 0 or var_p <= 0:
+            return float("nan")
+        return cov / float(np.sqrt(var_d * var_p))
+
+    def _solve(G: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+        M = (G * w[:, None]).T @ G
+        rhs = (G * w[:, None]).T @ d
+        try:
+            c = np.linalg.solve(M, rhs)
+            Minv = np.linalg.inv(M)
+            return c, Minv
+        except np.linalg.LinAlgError:
+            return None
+
+    # ── basis columns: PSF + optional pedestal ──
     if not fit_pedestal:
         den = float(np.sum(w * p * p))
         if den <= 0 or not np.isfinite(den):
@@ -299,30 +347,25 @@ def fit_psf_donut(
         out["amplitude"] = A
         out["amp_err"] = float(1.0 / np.sqrt(den))
         out["chi2_red"] = chi2 / max(n_pix - 1, 1)
+        out["rho_psf"] = _pearson(d, p)
         return out
 
-    # Joint amplitude + pedestal: data ≈ A·p + C.
     G = np.column_stack([p, np.ones_like(p)])
-    M = (G * w[:, None]).T @ G
-    rhs = (G * w[:, None]).T @ d
-    try:
-        c = np.linalg.solve(M, rhs)
-    except np.linalg.LinAlgError:
+    sol = _solve(G)
+    if sol is None:
         return out
-    A, C = float(c[0]), float(c[1])
+    c, Minv = sol
+    A = float(c[0])
     if not np.isfinite(A):
         return out
-    resid = d - (A * p + C)
+    model = G @ c
+    resid = d - model
     chi2 = float(np.sum(w * resid * resid))
-    try:
-        Minv = np.linalg.inv(M)
-        amp_err = float(np.sqrt(max(Minv[0, 0], 0.0)))
-    except np.linalg.LinAlgError:
-        amp_err = float("nan")
     out["amplitude"] = A
-    out["pedestal"] = C
-    out["amp_err"] = amp_err
+    out["amp_err"] = float(np.sqrt(max(Minv[0, 0], 0.0)))
     out["chi2_red"] = chi2 / max(n_pix - 2, 1)
+    out["rho_psf"] = _pearson(d, p)
+    out["pedestal"] = float(c[1])
     return out
 
 
@@ -467,6 +510,7 @@ class RepairDiagnostic:
     ring_snr: float = float("nan")
     buffer_snr: float = float("nan")
     pedestal: float = 0.0
+    rho_psf: float = float("nan")
     fit_mode: str = "donut"
     data_to_model: float = float("nan")
     action_mode: str = "repair"   # or "subtract"
@@ -910,6 +954,7 @@ def repair_saturated_holes(
                 A = A_buf
                 pedestal = float(buf["pedestal"])
                 fit_mode = "donut+pedestal"
+                final = buf
 
         cumshift_mag = float(np.hypot(*shift_total))
 
@@ -1000,6 +1045,8 @@ def repair_saturated_holes(
 
         if mode == "subtract":
             # Subtract A·ψ over the entire cutout footprint.
+            # Pedestal is reported but NOT removed (matches existing
+            # convention: pedestal absorbs host flux but the host stays).
             sub = sci_view.astype(np.float64) - A * psf_cut
             sci_view[:, :] = sub.astype(sci_view.dtype)
             # Blank wht=0 saturation cores AND the bad-residual
@@ -1061,6 +1108,7 @@ def repair_saturated_holes(
                 ring_snr=float(ring_snr),
                 buffer_snr=float(buffer_snr),
                 pedestal=float(pedestal),
+                rho_psf=float(final.get("rho_psf", float("nan"))),
                 fit_mode=fit_mode,
                 data_to_model=float(data_to_model),
                 action_mode=mode,
@@ -1231,7 +1279,11 @@ def plot_repair_diagnostic(
         A = med if med > 0 else 1.0
     A_ns = diag.amplitude_noshift if np.isfinite(diag.amplitude_noshift) else 0.0
 
-    log_kw = dict(vmin=-5.3, vmax=-1.5, cmap="bone_r", origin="lower")
+    # 2-dex log stretch chosen so sky (offset=2e-5 → log≈-4.7) lands at
+    # the same 25 % gray level that 0 lands on in the residual panels —
+    # consistent zero tone across panels. Tight range = high contrast on
+    # wings/halo/spike structure.
+    log_kw = dict(vmin=-5.2, vmax=-3.2, cmap="bone_r", origin="lower")
     fig, ax = plt.subplots(2, 5, figsize=(21, 8))
 
     # Row 0
@@ -1241,10 +1293,10 @@ def plot_repair_diagnostic(
     ax[0, 1].imshow(np.log10(np.maximum(psf_scl / A, 0) + offset), **log_kw)
     ax[0, 1].set_title("A·ψ shifted")
 
-    # Symmetric residual colour range = ±3 × MAD over ALL valid pixels
-    # of the residual image — i.e., everywhere except the wht=0 hole
-    # (and the blanked pixels in subtract mode). Not restricted to the
-    # fit ring, so the colour scale reflects the full image's noise.
+    # Residual colour range scaled by mad_std over ALL valid pixels —
+    # i.e., everywhere except the wht=0 hole (and blanked pixels in
+    # subtract mode). Not restricted to the fit ring, so the colour
+    # scale reflects the full image's noise.
     resid = (sci - psf_scl) / A
     valid = ~hole_mask & np.isfinite(resid)
     bad = getattr(diag, "bad_resid_mask", None)
@@ -1254,15 +1306,17 @@ def plot_repair_diagnostic(
     if finite.size > 10:
         med = float(np.median(finite))
         mad = 1.4826 * float(np.median(np.abs(finite - med)))
-        rng = max(3.0 * mad, 1e-4)
+        rng = max(0.7 * mad, 1e-4)
     else:
+        mad = 0.05 / 5.0
         rng = 0.05
     # Linear residual stretch for grayscale: asymmetric so the noise
     # floor (residual ≈ 0) lands near the WHITE end of the colormap
     # (≈0.2 in colour-space), matching the look of the log panels.
     # Negative residuals down to −1×MAD still resolved; positives
     # visible out to +3×MAD.
-    grey_kw = dict(vmin=-rng / 3.0, vmax=rng, cmap="bone_r", origin="lower")
+    grey_kw = dict(vmin=-2.0 * mad, vmax=5.0 * mad, cmap="bone_r",
+                   origin="lower")
     resid_show = np.where(hole_mask, np.nan, resid)
     ax[0, 2].imshow(resid_show, **grey_kw)
     ax[0, 2].contour(ring_mask.astype(float), levels=[0.5],
@@ -1280,116 +1334,121 @@ def plot_repair_diagnostic(
     ped_repair = (f"  pedestal={diag.pedestal:.3g}"
                   if abs(diag.pedestal) > 0 else "")
 
-    # (0, 3): SNR map of shifted residual.
+    # (0, 3): SNR map with per-radial-bin calibrated noise.
     #
-    #   sigma_ivar  = 1/sqrt(wht)                       [data units]
-    #   gmag        = |grad(A·ψ)|                       [data units / pix]
-    #   sigma_psf²  = (s_g · gmag)²                      shift err  (optional)
-    #               + (s_f · A·ψ)²                       fractional flux err
-    #               + (s_0 · A_max)²                     hard floor (fitted)
-    #   sigma_tot   = sqrt(sigma_ivar² + sigma_psf²)
-    #   SNR         = (sci − A·ψ) / sigma_tot
+    # Algorithm:
+    #   resid          = sci − A·ψ                      [data units]
+    #   σ_ivar         = 1 / √wht                       [data units]
+    #   w_az(r,θ)      = max(A·ψ(r,θ), ε)                azimuthal weight = local model
     #
-    # Joint NNLS fit on per-pixel excess variance:
-    #   e² = max(resid² − sigma_ivar², 0)   ≈ Σ aᵢ · basisᵢ
-    # over qualifying pixels (psf_scl > 1e-6 × peak, ~hole, wht > 0, gmag > 0).
-    # One pass of robust clipping (drop pixels with e²/pred > 25) refits.
-    # Active basis terms: gmag², (A·ψ)², constant — toggled by include_*.
-    from scipy.optimize import nnls
+    # For each radial annulus r ± dr (excluding hole + wht=0):
+    #   var_resid(r) = mad_std_w(resid)²      — robust w_az-weighted scatter
+    #   var_ivar(r)  = mad_std_w(σ_ivar)²     — robust w_az-weighted ivar
+    #   var_psf(r)   = max(var_resid(r) − var_ivar(r), 0)
+    #                                    — PSF residual variance, bg subtracted
+    #                                      in quadrature (positive definite)
+    # Weighted mad_std uses cumulative-weight weighted median + weighted MAD.
+    # Robust to neighbor source contamination; pure rms is not.
+    #
+    # Per-pixel PSF noise distributes the bin variance proportional to the
+    # local azimuthal weight (concentrates noise where model is bright):
+    #   σ_psf²(r,θ) = var_psf(r) · w_az(r,θ) / <w_az>(r)
+    #
+    # Total noise + SNR:
+    #   σ_tot = √(σ_ivar² + σ_psf²)
+    #   SNR   = resid / σ_tot
+    #
+    # By construction the rms of (resid / σ_tot) within each bin ≈ 1, so
+    # outliers (real astrophysical sources / bad PSF mismatch peaks) pop
+    # out as |SNR| ≫ 1 against a uniform calibrated background.
     wht_cut = diag.wht_cut
     sigma_ivar = np.where(wht_cut > 0, 1.0 / np.sqrt(np.maximum(wht_cut, 1e-30)),
                           np.nan)
     sigma_ivar_safe = np.where(np.isfinite(sigma_ivar), sigma_ivar, 0.0)
-    gy, gx = np.gradient(psf_scl)
-    gmag = np.hypot(gx, gy)
     resid_d = sci - psf_scl
     psf_peak = float(np.nanmax(psf_scl)) if np.isfinite(psf_scl).any() else 0.0
-    if psf_peak > 0:
-        cal_mask = ((psf_scl > 1e-6 * psf_peak) & (~hole_mask)
-                    & np.isfinite(resid_d) & (gmag > 0) & (wht_cut > 0))
-    else:
-        cal_mask = np.zeros_like(hole_mask, dtype=bool)
-    s_g = 0.0
-    s_f = 0.0
-    floor_var = 0.0
-    psf_floor_frac = 0.0
-    if cal_mask.sum() > 20:
-        e2 = np.maximum(resid_d[cal_mask]**2 - sigma_ivar_safe[cal_mask]**2, 0.0)
-        cols = []
-        names = []
-        if include_gradient:
-            cols.append((gmag**2)[cal_mask]); names.append("g")
-        if include_flux:
-            cols.append((psf_scl**2)[cal_mask]); names.append("f")
-        if include_floor:
-            cols.append(np.ones(cal_mask.sum())); names.append("0")
-        if cols:
-            Amat = np.column_stack(cols)
-            try:
-                coef, _ = nnls(Amat, e2)
-                pred = Amat @ coef
-                ok2 = (pred > 0) & (e2 / np.maximum(pred, 1e-30) < 25.0)
-                if ok2.sum() > 20:
-                    coef, _ = nnls(Amat[ok2], e2[ok2])
-                for nm, c in zip(names, coef):
-                    if nm == "g":
-                        s_g = float(np.sqrt(max(c, 0.0)))
-                    elif nm == "f":
-                        s_f = float(np.sqrt(max(c, 0.0)))
-                    elif nm == "0":
-                        floor_var = float(max(c, 0.0))
-            except Exception:
-                pass
-        if psf_peak > 0:
-            psf_floor_frac = float(np.sqrt(floor_var) / psf_peak)
-    # Floor applies only inside PSF footprint (psf_scl > 1e-6 × peak),
-    # same threshold as the calibration mask. Outside footprint there is
-    # no PSF model → no PSF model error → ivar-only noise.
-    if psf_peak > 0:
-        footprint = psf_scl > 1e-6 * psf_peak
-    else:
-        footprint = np.zeros_like(psf_scl, dtype=bool)
-    sigma_psf2 = ((s_g * gmag)**2 + (s_f * psf_scl)**2
-                  + np.where(footprint, floor_var, 0.0))
+    eps = 1e-12 * (psf_peak if psf_peak > 0 else 1.0)
+    w_az = np.maximum(psf_scl, eps)
+    yy_n, xx_n = np.indices(sci.shape)
+    cy_n, cx_n = diag.center
+    rr_n = np.hypot(yy_n - cy_n, xx_n - cx_n)
+    valid = (~hole_mask) & np.isfinite(resid_d) & (wht_cut > 0)
+    rmax_n = float(rr_n[valid].max()) if valid.any() else float(rr_n.max())
+    n_bins_snr = 24
+    bin_edges = np.linspace(0.0, rmax_n, n_bins_snr + 1)
+    sigma_psf2 = np.zeros_like(resid_d, dtype=np.float64)
+    def _wmad_std(values: np.ndarray, weights: np.ndarray,
+                  clip_sigma: float = 3.0, n_iter: int = 2) -> float:
+        """Weighted mad_std with iterative σ-clip rejection.
+
+        Iterative rejection makes the statistic robust to compact bright
+        contaminants (e.g. neighbour sources falling in the radial bin):
+        pass 1 = unclipped weighted mad_std → pass 2+ = drop pixels with
+        |x − wmedian| > clip_sigma · prev_mad_std and recompute.
+        """
+        if values.size == 0:
+            return float("nan")
+        v = values
+        w = weights
+        prev = float("nan")
+        for _ in range(max(1, n_iter)):
+            idx = np.argsort(v)
+            cw = np.cumsum(w[idx])
+            if cw[-1] <= 0:
+                return float("nan")
+            med = float(v[idx][int(np.searchsorted(cw, cw[-1] * 0.5))])
+            ad = np.abs(v - med)
+            idx2 = np.argsort(ad)
+            cw2 = np.cumsum(w[idx2])
+            if cw2[-1] <= 0:
+                return float("nan")
+            mad_std = 1.4826 * float(ad[idx2][int(np.searchsorted(cw2, cw2[-1] * 0.5))])
+            if not np.isfinite(prev):
+                prev = mad_std
+                # Reject and continue with another pass.
+                keep = ad <= clip_sigma * mad_std if mad_std > 0 else np.ones_like(v, bool)
+                if keep.sum() < 5 or keep.sum() == v.size:
+                    return mad_std
+                v = v[keep]
+                w = w[keep]
+                continue
+            return mad_std
+        return prev
+
+    for k in range(n_bins_snr):
+        rlo, rhi = bin_edges[k], bin_edges[k + 1]
+        in_bin = (rr_n >= rlo) & (rr_n < rhi) & valid
+        if in_bin.sum() < 5:
+            continue
+        w_b = w_az[in_bin].astype(np.float64)
+        sw = float(w_b.sum())
+        if sw <= 0:
+            continue
+        sd_resid = _wmad_std(resid_d[in_bin].astype(np.float64), w_b)
+        sd_ivar = _wmad_std(sigma_ivar_safe[in_bin].astype(np.float64), w_b)
+        if not (np.isfinite(sd_resid) and np.isfinite(sd_ivar)):
+            continue
+        var_psf_bin = max(sd_resid**2 - sd_ivar**2, 0.0)
+        if var_psf_bin <= 0:
+            continue
+        mean_w = sw / float(in_bin.sum())
+        sigma_psf2[in_bin] = var_psf_bin * (w_b / mean_w)
     sigma_tot = np.sqrt(sigma_ivar_safe**2 + sigma_psf2)
     with np.errstate(divide="ignore", invalid="ignore"):
         snr_map = np.where(sigma_tot > 0, resid_d / sigma_tot, np.nan)
     snr_show = np.where(hole_mask, np.nan, snr_map)
-    if cal_mask.sum() > 20:
-        rr_pix = resid_d[cal_mask]
-        med_r = float(np.median(rr_pix))
-        mad_total = 1.4826 * float(np.median(np.abs(rr_pix - med_r)))
-        ivar_typ = float(np.median(sigma_ivar_safe[cal_mask]))
-    else:
-        mad_total = float("nan")
-        ivar_typ = float("nan")
-    # Asymmetric stretch: 0 lands at the same gray tone as the residual
-    # panel (vmin = -vmax/3) — easier to compare side-by-side.
+    rms_check = (float(np.sqrt(np.nanmean(snr_show[valid]**2)))
+                 if valid.any() else float("nan"))
     snr_kw = dict(vmin=-1.5, vmax=4.5, cmap="bone_r", origin="lower")
     ax[0, 3].imshow(snr_show, **snr_kw)
     ax[0, 3].contour(ring_mask.astype(float), levels=[0.5],
                      colors="black", linewidths=0.5)
     ax[0, 3].contour(hole_mask.astype(float), levels=[0.5],
                      colors="red", linewidths=0.5)
-    title_terms = []
-    if include_gradient:
-        title_terms.append("(s_g·|∇|)²")
-    if include_flux:
-        title_terms.append("(s_f·A·ψ)²")
-    if include_floor:
-        title_terms.append("(s_0·A_max)²")
-    title_form = " + ".join(["σ_ivar²"] + title_terms)
-    info = []
-    if include_gradient:
-        info.append(f"s_g={s_g:.2g}")
-    if include_flux:
-        info.append(f"s_f={s_f:.2g}")
-    if include_floor:
-        info.append(f"floor={psf_floor_frac:.2e}")
-    info.append(f"MAD_r={mad_total:.2g}")
-    info.append(f"σ_iv={ivar_typ:.2g}")
     ax[0, 3].set_title(
-        f"SNR   resid / √({title_form})\n" + "  ".join(info)
+        f"SNR   per-radial-bin calibrated  (bins={n_bins_snr})\n"
+        f"σ_psf²(r,θ) = max(<r²>−<σ_iv²>,0)·w_az/<w_az>   "
+        f"⟨SNR²⟩^½={rms_check:.2f}"
     )
 
     # (0, 4): residual NO-SHIFT (grayscale, same ±3×MAD stretch).
@@ -1425,6 +1484,79 @@ def plot_repair_diagnostic(
 
     from matplotlib.patches import Circle
 
+    # ── PSF-rank running-mad_std significance mask ────────────────────
+    # Sort valid pixels by PSF brightness (descending). At each rank k,
+    # compute a sliding window of √N residual pixels and the parallel
+    # window of predicted ivar σ. Use NON-robust RMS (not MAD) so that
+    # spike-pixel outliers actually inflate the statistic — MAD is
+    # robust and silently absorbed them.
+    #
+    #   rms(resid_w) / √N_w  <  σ_pred_w / √N_w
+    #
+    # √N_w cancels (algebraically equivalent to rms < σ_pred) but
+    # framing as standard-error-of-mean comparison makes the intent
+    # explicit: residual mean consistent with zero at the noise level.
+    # Pixels beyond that rank are noise-dominated → masked.
+    psf_pix = psf_scl.ravel()
+    resid_pix = resid_d.ravel()
+    sigma_ivar_pix = sigma_ivar_safe.ravel()
+    valid_flat = (~hole_mask).ravel() & np.isfinite(resid_pix) & (psf_pix > 0)
+    mask_keep_2d = np.zeros_like(psf_scl, dtype=bool)
+    if valid_flat.sum() > 16:
+        idx_valid = np.where(valid_flat)[0]
+        order_in_valid = np.argsort(-psf_pix[idx_valid])
+        order_idx = idx_valid[order_in_valid]
+        n_valid = order_idx.size
+        window = max(int(np.sqrt(n_valid)), 8)
+        res_sorted = resid_pix[order_idx]
+        ivar_sorted = sigma_ivar_pix[order_idx]
+        running_se_resid = np.empty(n_valid)
+        running_se_sigma = np.empty(n_valid)
+        half_w = window // 2
+        for k in range(n_valid):
+            lo = max(0, k - half_w)
+            hi = min(n_valid, lo + window)
+            win_r = res_sorted[lo:hi]
+            win_s = ivar_sorted[lo:hi]
+            n_w = float(win_r.size)
+            # NON-robust RMS — preserves outliers (spikes) instead of
+            # absorbing them like the median-based MAD would.
+            rms_w = float(np.sqrt(np.mean(win_r * win_r)))
+            running_se_resid[k] = rms_w / np.sqrt(n_w)
+            ss = win_s[win_s > 0]
+            sig_w = (float(np.sqrt(np.mean(ss * ss)))
+                     if ss.size else 0.0)
+            running_se_sigma[k] = sig_w / np.sqrt(n_w)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(running_se_sigma > 0,
+                             running_se_resid / running_se_sigma, np.inf)
+        # Walk descending PSF rank. Stop at the FIRST rank where
+        # ratio ≤ 1.5 (1.5 σ floor) — descent halted. Mask all pixels
+        # with rank strictly above the cutoff (i.e., brighter PSF
+        # pixels with residual ≥ 1.5 σ_pred). Spike pixels at later
+        # ranks are NOT included (descent already stopped).
+        below = ratio <= 1.5
+        if below.any():
+            k_cut = int(np.argmax(below))
+            n_keep = k_cut
+        else:
+            n_keep = n_valid
+        if n_keep > 0:
+            mask_flat = mask_keep_2d.ravel()
+            mask_flat[order_idx[:n_keep]] = True
+            mask_keep_2d = mask_flat.reshape(psf_scl.shape)
+        logger.info(
+            "[mask] id=%d n_valid=%d window=%d  keep=%d (%.1f%%)  "
+            "ratio[min/med/max]=%.2f/%.2f/%.2f",
+            diag.id, n_valid, window,
+            n_keep, 100.0 * n_keep / n_valid,
+            float(np.nanmin(ratio)),
+            float(np.nanmedian(ratio[np.isfinite(ratio)])),
+            float(np.nanmax(ratio[np.isfinite(ratio)])),
+        )
+    else:
+        mask_keep_2d = np.ones_like(psf_scl, dtype=bool)
+
     # (1, 1) / (1, 2): subtracted residual or repaired sci/A.
     # In subtract mode the panel shows a RESIDUAL → linear grayscale
     # ±3 × MAD (same MAD used by the top-row residual panels).
@@ -1432,7 +1564,15 @@ def plot_repair_diagnostic(
     # (same as the data/model panels).
     if diag.action_mode == "subtract":
         sub_kw = grey_kw       # same asymmetric stretch as the residual panels
-        ax[1, 1].imshow(sci_rep / A, **sub_kw)
+        # sci_rep already has both A·ψ and the halo subtracted in
+        # subtract mode, so we display sci_rep/A directly. INVERT the
+        # PSF-rank significance mask: hide pixels where the PSF
+        # dominated (residual > 2 σ_bg), keep the surrounding "rest
+        # of the image" so neighbours / background structure pop out
+        # free of PSF-residual contamination.
+        sub_view = sci_rep / A
+        sub_view = np.where(~mask_keep_2d, sub_view, 0.0)
+        ax[1, 1].imshow(sub_view, **sub_kw)
     else:
         ax[1, 1].imshow(np.log10(np.maximum(sci_rep / A, 0) + offset),
                         **log_kw)
@@ -1462,7 +1602,9 @@ def plot_repair_diagnostic(
     sly_z = slice(max(0, cy_src - half), min(H_full, cy_src + half + 1))
     slx_z = slice(max(0, cx_src - half), min(W_full, cx_src + half + 1))
     if diag.action_mode == "subtract":
-        ax[1, 2].imshow(sci_rep[sly_z, slx_z] / A, **sub_kw)
+        zoom_view = sci_rep[sly_z, slx_z] / A
+        zoom_view = np.where(~mask_keep_2d[sly_z, slx_z], zoom_view, 0.0)
+        ax[1, 2].imshow(zoom_view, **sub_kw)
     else:
         ax[1, 2].imshow(
             np.log10(np.maximum(sci_rep[sly_z, slx_z] / A, 0) + offset),
@@ -1580,11 +1722,10 @@ def plot_repair_diagnostic(
     snr_polar = np.where(hole_pol > 0.5, np.nan, snr_polar)
     finite_pol = snr_polar[np.isfinite(snr_polar)]
     if finite_pol.size > 50:
-        v_hi = float(np.nanpercentile(finite_pol, 99.0))
-        v_hi = float(np.clip(v_hi, 5.0, 30.0))
+        v_lo, v_hi = (float(np.nanpercentile(finite_pol, 5.0)),
+                      float(np.nanpercentile(finite_pol, 95.0)))
     else:
-        v_hi = 15.0
-    v_lo = -v_hi / 3.0
+        v_lo, v_hi = -3.0, 9.0
     snr_polar_kw = dict(vmin=v_lo, vmax=v_hi, cmap="bone_r", origin="lower")
     ax[1, 4].imshow(snr_polar.T, extent=[rmin_pol, rmax_pol, 0.0, 360.0],
                     aspect="auto", **snr_polar_kw)
@@ -1605,13 +1746,17 @@ def plot_repair_diagnostic(
         f"Σdata/Σ(A·ψ)={diag.data_to_model:.2f}  →  "
         f"{'PSF + pedestal' if 'pedestal' in diag.fit_mode else 'PSF only'}"
     )
+    extras = []
+    if np.isfinite(diag.rho_psf):
+        extras.append(f"ρ_psf={diag.rho_psf:+.3f}")
+    extras_str = ("  |  " + "  ".join(extras)) if extras else ""
     head = (
         f"{diag.action_mode} id={diag.id}  ({diag.yc:.0f}, {diag.xc:.0f})  "
         f"A={diag.amplitude:.3g}  "
         f"r_eq={diag.r_equiv:.1f}  r_out={diag.r_out:.1f}  "
         f"buffer SNR={diag.buffer_snr:.1f}  "
         f"shift=({sx:+.2f},{sy:+.2f}) px  "
-        f"n_iter={diag.n_iter}  |  decision FOM: {fom}"
+        f"n_iter={diag.n_iter}  |  decision FOM: {fom}{extras_str}"
     )
     if not diag.ok:
         head = f"REJECTED — {diag.status}\n{head}"

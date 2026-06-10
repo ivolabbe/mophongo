@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 import copy
 import numpy as np
+import cv2
 import scipy
 from scipy.ndimage import shift
+from scipy.signal import fftconvolve as _scipy_fftconvolve
 from astropy.nddata import block_reduce
 
 from astropy.io import fits
@@ -353,17 +355,279 @@ def pad_to_shape(arr: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     return np.pad(arr, ((py, shape[0] - arr.shape[0] - py), (px, shape[1] - arr.shape[1] - px)))
 
 
-def convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
-    """Convolve ``image`` with ``kernel`` using direct sliding windows."""
-    ky, kx = kernel.shape
-    pad_y, pad_x = ky // 2, kx // 2
-    pad_before = (pad_y, pad_x)
-    pad_after = (ky - 1 - pad_y, kx - 1 - pad_x)
-    padded = np.pad(image, (pad_before, pad_after), mode="constant")
-    from numpy.lib.stride_tricks import sliding_window_view
+def fftconvolve(
+    image: np.ndarray,
+    kernel: np.ndarray,
+    *,
+    mode: str = "same",
+) -> np.ndarray:
+    """Convolve using Mophongo's centered-kernel convention.
 
-    windows = sliding_window_view(padded, kernel.shape)
-    return np.einsum("ijkl,kl->ij", windows, kernel)
+    For ``mode="same"``, this avoids ``scipy.signal.fftconvolve(...,
+    mode="same")`` because SciPy's generic central crop is offset by one pixel
+    for even-sized kernels relative to the centered-kernel convention used by
+    Mophongo's matching kernels.  Cropping the full convolution from
+    ``kernel.shape // 2`` keeps odd and even kernels on the same convention.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        Image or PSF to convolve.
+    kernel : np.ndarray
+        Centered convolution kernel.
+    mode : {"same", "full"}
+        Output shape. ``"same"`` returns an image-sized centered crop.
+        ``"full"`` returns the complete true convolution.
+
+    Returns
+    -------
+    np.ndarray
+        Convolved image.
+    """
+    image = np.asarray(image)
+    kernel = np.asarray(kernel)
+    full = _scipy_fftconvolve(image, kernel, mode="full")
+    if mode == "full":
+        return full
+    if mode != "same":
+        raise ValueError(f"mode must be 'same' or 'full', got {mode!r}")
+    y0 = kernel.shape[0] // 2
+    x0 = kernel.shape[1] // 2
+    return full[y0 : y0 + image.shape[0], x0 : x0 + image.shape[1]]
+
+
+def resize_flux_conserving_inter_cubic(image: np.ndarray, factor: float) -> np.ndarray:
+    """Resize an image with OpenCV cubic interpolation and conserve total flux.
+
+    This uses the same pixel-extent convention as Mophongo's nested block
+    grids.  Integer 80 -> 40 or 160 -> 40 upsampling therefore stays registered
+    with the block-sum convention while avoiding the centroid offsets from
+    SciPy's default zoom coordinates.
+    """
+    if factor <= 0:
+        raise ValueError(f"resize factor must be positive, got {factor!r}")
+    image = np.asarray(image, dtype=np.float32)
+    ny, nx = image.shape
+    out_ny = max(1, int(round(ny * factor)))
+    out_nx = max(1, int(round(nx * factor)))
+    resized = cv2.resize(
+        image,
+        dsize=(out_nx, out_ny),
+        fx=0.0,
+        fy=0.0,
+        interpolation=cv2.INTER_CUBIC,
+    )
+    return resized.astype(np.float64, copy=False) / float(factor * factor)
+
+
+def convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+    """Convolve and return an image-sized result using the shared convention."""
+    return fftconvolve(image, kernel, mode="same")
+
+
+def _create_matching_kernel_no_normalize(
+    source_psf: np.ndarray,
+    target_psf: np.ndarray,
+    *,
+    window: object | None = None,
+) -> np.ndarray:
+    """Create a Fourier-ratio PSF matching kernel without flux normalization."""
+    source_otf = np.fft.fftshift(np.fft.fft2(source_psf))
+    target_otf = np.fft.fftshift(np.fft.fft2(target_psf))
+    good = np.abs(source_otf) > (np.finfo(float).eps * np.nanmax(np.abs(source_otf)))
+    ratio = np.zeros_like(target_otf, dtype=complex)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio[good] = target_otf[good] / source_otf[good]
+    if window is not None:
+        ratio *= window(target_psf.shape)
+    return np.real(np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(ratio))))
+
+
+def _matching_kernel_tikhonov(
+    source_psf: np.ndarray,
+    target_psf: np.ndarray,
+    *,
+    reg: float = 1e-3,
+) -> np.ndarray:
+    """Tikhonov-regularized Fourier inversion ``K = conj(H_hi)*H_lo / (|H_hi|^2 + lambda)``.
+
+    ``reg`` is scaled by ``max(|H_hi|^2)`` so the parameter is dimensionless
+    and easily comparable across PSF pairs.
+    """
+    source_otf = np.fft.fftshift(np.fft.fft2(source_psf))
+    target_otf = np.fft.fftshift(np.fft.fft2(target_psf))
+    h2 = np.abs(source_otf) ** 2
+    lam = float(reg) * float(np.max(h2))
+    filt = np.conj(source_otf) * target_otf / (h2 + lam)
+    return np.real(np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(filt))))
+
+
+def _matching_kernel_wiener(
+    source_psf: np.ndarray,
+    target_psf: np.ndarray,
+    *,
+    reg: float = 1e-3,
+    signal_psd: np.ndarray | None = None,
+) -> np.ndarray:
+    """Wiener-regularized Fourier inversion.
+
+    ``K = conj(H_hi) P_xx H_lo / (|H_hi|^2 P_xx + lambda * max(|H_hi|^2 P_xx))``.
+
+    With the default flat ``signal_psd`` this is mathematically identical to
+    Tikhonov; the path is kept so callers can pass an explicit Wiener prior
+    (e.g. ``|H_lo|^2`` or a 1/f spectrum).
+    """
+    source_otf = np.fft.fftshift(np.fft.fft2(source_psf))
+    target_otf = np.fft.fftshift(np.fft.fft2(target_psf))
+    if signal_psd is None:
+        signal_psd = np.ones(source_otf.shape, dtype=float)
+    else:
+        signal_psd = np.asarray(signal_psd, dtype=float)
+    h2 = np.abs(source_otf) ** 2
+    num = np.conj(source_otf) * signal_psd * target_otf
+    den_base = h2 * signal_psd
+    lam = float(reg) * float(np.max(den_base))
+    filt = num / (den_base + lam)
+    return np.real(np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(filt))))
+
+
+def _pad_to_multiple(arr: np.ndarray, factor: int) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    """Zero-pad ``arr`` so each axis is a multiple of ``factor``.
+
+    Pad widths are chosen so the input's array center ``N // 2`` is preserved
+    at the padded array's center ``N_pad // 2``.  Without this constraint
+    asymmetric padding (e.g. 121 -> 128 with top=3, bot=4) introduces a
+    half-pixel shift relative to ``np.fft`` conventions that survives the
+    wavelet round-trip and appears as a dipole in residuals.
+    """
+    ny, nx = arr.shape
+    ny_pad = ((ny + factor - 1) // factor) * factor
+    nx_pad = ((nx + factor - 1) // factor) * factor
+    top = (ny_pad // 2) - (ny // 2)
+    bot = ny_pad - ny - top
+    left = (nx_pad // 2) - (nx // 2)
+    right = nx_pad - nx - left
+    padded = np.pad(arr, ((top, bot), (left, right)), mode="constant")
+    return padded, (top, bot, left, right)
+
+
+def _unpad(arr: np.ndarray, pads: tuple[int, int, int, int]) -> np.ndarray:
+    top, bot, left, right = pads
+    ny, nx = arr.shape
+    return arr[top : ny - bot if bot > 0 else ny, left : nx - right if right > 0 else nx]
+
+
+def _matching_kernel_forward(
+    source_psf: np.ndarray,
+    target_psf: np.ndarray,
+    *,
+    reg: float = 1e-3,
+    wavelet: str = "db4",
+    levels: int = 3,
+    threshold_factor: float = 3.0,
+    noise_sigma: float | None = None,
+    apply_wavelet_wiener: bool = True,
+) -> np.ndarray:
+    """ForWaRD (Fourier+wavelet regularized deconvolution) matching kernel.
+
+    Reference
+    ---------
+    Neelamani, Choi, Baraniuk, IEEE TSP 52, 418 (2004),
+    "ForWaRD: Fourier-Wavelet Regularized Deconvolution for Ill-Conditioned
+    Systems."  Adapted to PSF matching by recovering the kernel ``K`` from the
+    observation ``psf_lo = psf_hi * K`` (no measurement noise; the regularizer
+    represents model mismatch).
+
+    Steps
+    -----
+    1. Tikhonov-regularized Fourier inverse of ``psf_hi`` applied to ``psf_lo``
+       gives an initial kernel estimate ``K1``.
+    2. Redundant (stationary) wavelet decomposition of ``K1``.
+    3. Per-subband noise variance estimated from the wavelet decomposition of
+       the Tikhonov inverse impulse response (paper eq. for noise propagation).
+    4. Hard thresholding of detail coefficients with threshold
+       ``threshold_factor * sigma_subband`` gives a "reference" estimate
+       ``K_ref``.
+    5. Optional wavelet-domain Wiener step that filters ``K1`` using
+       ``K_ref^2 / (K_ref^2 + sigma_subband^2)`` as the empirical Wiener gain.
+    """
+    import pywt
+
+    factor = 1 << int(levels)
+    src_padded, pads = _pad_to_multiple(source_psf, factor)
+    tgt_padded, _ = _pad_to_multiple(target_psf, factor)
+
+    src_otf = np.fft.fftshift(np.fft.fft2(src_padded))
+    tgt_otf = np.fft.fftshift(np.fft.fft2(tgt_padded))
+    h2 = np.abs(src_otf) ** 2
+    lam = float(reg) * float(np.max(h2))
+    inv_filter = np.conj(src_otf) / (h2 + lam)
+
+    K1_otf = inv_filter * tgt_otf
+    K1 = np.real(np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(K1_otf))))
+    inv_imp = np.real(
+        np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(inv_filter)))
+    )
+
+    if noise_sigma is None:
+        coeffs0 = pywt.wavedec2(K1, wavelet, level=1)
+        _, (_, _, cD) = coeffs0[0], coeffs0[1]
+        noise_sigma = float(np.median(np.abs(cD)) / 0.6745)
+        if noise_sigma <= 0:
+            noise_sigma = float(np.std(K1)) * 1e-3
+
+    coeffs_K = pywt.swt2(K1, wavelet, level=levels, trim_approx=False, norm=False)
+    coeffs_inv = pywt.swt2(inv_imp, wavelet, level=levels, trim_approx=False, norm=False)
+
+    sigma_sub: list[tuple[float, float, float]] = []
+    thresh_levels: list[tuple[np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray]]] = []
+    for (aK, (h_K, v_K, d_K)), (_, (h_i, v_i, d_i)) in zip(coeffs_K, coeffs_inv):
+        s_h = noise_sigma * float(np.sqrt(np.mean(h_i ** 2)))
+        s_v = noise_sigma * float(np.sqrt(np.mean(v_i ** 2)))
+        s_d = noise_sigma * float(np.sqrt(np.mean(d_i ** 2)))
+        sigma_sub.append((s_h, s_v, s_d))
+        thr_h = threshold_factor * s_h
+        thr_v = threshold_factor * s_v
+        thr_d = threshold_factor * s_d
+        thresh_levels.append(
+            (
+                aK,
+                (
+                    pywt.threshold(h_K, thr_h, mode="hard"),
+                    pywt.threshold(v_K, thr_v, mode="hard"),
+                    pywt.threshold(d_K, thr_d, mode="hard"),
+                ),
+            )
+        )
+    K_ref = pywt.iswt2(thresh_levels, wavelet, norm=False)
+
+    if not apply_wavelet_wiener:
+        return _unpad(K_ref, pads)
+
+    coeffs_ref = pywt.swt2(K_ref, wavelet, level=levels, trim_approx=False, norm=False)
+    wiener_levels: list[tuple[np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray]]] = []
+    for (aK, (h_K, v_K, d_K)), (_, (h_R, v_R, d_R)), (s_h, s_v, s_d) in zip(
+        coeffs_K, coeffs_ref, sigma_sub
+    ):
+        def _gain(detail_K: np.ndarray, detail_ref: np.ndarray, sigma: float) -> np.ndarray:
+            sig2 = detail_ref ** 2
+            n_var = sigma ** 2
+            denom = sig2 + n_var
+            gain = np.where(denom > 0, sig2 / denom, 0.0)
+            return detail_K * gain
+
+        wiener_levels.append(
+            (
+                aK,
+                (
+                    _gain(h_K, h_R, s_h),
+                    _gain(v_K, v_R, s_v),
+                    _gain(d_K, d_R, s_d),
+                ),
+            )
+        )
+    K_final = pywt.iswt2(wiener_levels, wavelet, norm=False)
+    return _unpad(K_final, pads)
 
 
 def retile_blocked(arr, B=64):
@@ -387,21 +651,38 @@ def matching_kernel(
     window: object | None = None,
     recenter: bool = True,
     pixel_ratio: float = 1.0,
+    method: str = "window",
+    reg: float = 1e-3,
+    wavelet: str = "db4",
+    levels: int = 3,
+    threshold_factor: float = 3.0,
+    noise_sigma: float | None = None,
+    forward_wavelet_wiener: bool = True,
+    signal_psd: np.ndarray | None = None,
 ) -> np.ndarray:
     """Compute a convolution kernel matching ``psf_hi`` to ``psf_lo``.
 
     The kernel ``k`` is defined such that ``psf_hi * k \approx psf_lo`` when
-    convolved. ``photutils.psf.matching.create_matching_kernel`` is used under
-    the hood. If the two PSFs have different shapes they are zero padded to a
-    common grid before computing the kernel.
+    convolved.  The Fourier-ratio implementation intentionally does not
+    normalize the input PSFs or output kernel; if ``sum(psf_lo) / sum(psf_hi)``
+    is not one, that normalization propagates into ``sum(k)``.  If the two
+    PSFs have different shapes they are zero padded to a common grid before
+    computing the kernel.
+
+    Note
+    ----
+    This is a low-level routine. Pipeline-facing fitting code should normally
+    pass unit-sum PSF shapes and keep finite-stamp PSF sums as throughput
+    metadata for final flux corrections. Passing native-sum PSFs here is still
+    supported for explicit diagnostics or tests that need a throughput-carrying
+    kernel.
 
     Parameters
     ----------
     psf_hi, psf_lo:
-        High- and low-resolution PSF arrays normalized to unit sum. They may
-        have different shapes.
+        High- and low-resolution PSF arrays. They may have different shapes.
     window : optional
-        Window function passed to ``create_matching_kernel``. Defaults to SplitCosineBellWindow.
+        Fourier-domain window function. Defaults to SplitCosineBellWindow.
     recenter : bool, optional
         If ``True`` the resulting kernel is shifted to its centroid using
         bicubic interpolation. Defaults to ``True``.
@@ -411,29 +692,19 @@ def matching_kernel(
     kernel: ``np.ndarray``
         Convolution kernel with shape equal to the larger of the two input PSFs.
     """
-    # pixel_ratio > 0
-    # @@@ it is actually better for well sampled kernels to have even size throughout
-    # so we can easily bin up and down without resampling / shifting the center
+    # pixel_ratio > 0.  For non-unity ratios use OpenCV cubic resize, scaled by
+    # factor**2 to conserve integrated flux and preserve the nested block-grid
+    # centroid convention.
     if pixel_ratio == 1.0:
         psf_hi = psf_hi_in.copy()
         psf_lo = psf_lo_in.copy()
     else:
-        from scipy.ndimage import zoom
-
         if pixel_ratio > 1.0:
             psf_hi = psf_hi_in.copy()
-            nsize = psf_hi.shape[-1]
-            odd = nsize & 1
-            psf_lo = zoom(psf_lo_in, pixel_ratio, order=2, prefilter=True)[
-                odd : odd + nsize, odd : odd + nsize
-            ]
+            psf_lo = resize_flux_conserving_inter_cubic(psf_lo_in, pixel_ratio)
         else:
             psf_lo = psf_lo_in.copy()
-            nsize = psf_lo.shape[-1]
-            odd = nsize & 1
-            psf_hi = zoom(psf_hi_in, pixel_ratio, order=2, prefilter=True)[
-                odd : odd + nsize, odd : odd + nsize
-            ]
+            psf_hi = resize_flux_conserving_inter_cubic(psf_hi_in, pixel_ratio)
 
     if psf_hi.shape != psf_lo.shape:
         ny = max(psf_hi.shape[0], psf_lo.shape[0])
@@ -450,12 +721,31 @@ def matching_kernel(
         logger.warning("psf 2 contains non-finite values, setting elements to zero ")
         psf_lo[~np.isfinite(psf_lo)] = 0.0
 
-    if window is None:
-        # @@@@ need to find a better way to set the window.
-        window = matching.SplitCosineBellWindow(alpha=0.4, beta=0.1)
-    #        window = matching.TukeyWindow(alpha=0.4)
-
-    kernel = matching.create_matching_kernel(psf_hi, psf_lo, window=window)
+    method_key = method.strip().lower()
+    if method_key in ("window", "scb", "split_cosine_bell", "tukey"):
+        if window is None:
+            window = matching.SplitCosineBellWindow(alpha=0.4, beta=0.1)
+        kernel = _create_matching_kernel_no_normalize(psf_hi, psf_lo, window=window)
+    elif method_key in ("tikhonov", "ridge"):
+        kernel = _matching_kernel_tikhonov(psf_hi, psf_lo, reg=reg)
+    elif method_key == "wiener":
+        kernel = _matching_kernel_wiener(psf_hi, psf_lo, reg=reg, signal_psd=signal_psd)
+    elif method_key in ("forward", "forwardrd", "fourier_wavelet"):
+        kernel = _matching_kernel_forward(
+            psf_hi,
+            psf_lo,
+            reg=reg,
+            wavelet=wavelet,
+            levels=levels,
+            threshold_factor=threshold_factor,
+            noise_sigma=noise_sigma,
+            apply_wavelet_wiener=forward_wavelet_wiener,
+        )
+    else:
+        raise ValueError(
+            f"Unknown matching kernel method {method!r}. "
+            "Expected one of: window, tikhonov, wiener, forward."
+        )
     kernel = np.asarray(kernel)
 
     if not np.isfinite(kernel).all():
@@ -467,17 +757,15 @@ def matching_kernel(
         xcom, ycom = centroid_com(kernel)
         xcen, ycen = centroid_quadratic(kernel, xpeak=xcom, ypeak=ycom, fit_boxsize=7)
         if np.isnan(ycen) or np.isnan(xcen):
-            # fallback to centroid_com if quadratic fails
             xcen, ycen = xcom, ycom
 
         if not np.isnan(ycen) and not np.isnan(xcen):
-            # recenter kernel to the centroid of stamp
             cx = (kernel.shape[1] - 1) / 2
             cy = (kernel.shape[0] - 1) / 2
-            #            print('Re-centering kernel by (%.2f, %.2f)' %  (cy - ycen, cx - xcen))
-            kernel = shift(kernel, (cy - ycen, cx - xcen), order=3, mode="nearest")
-            # xcen, ycen = centroid_com(kernel)
-            # print('before centroid:', xcom, ycom,' after:', xcen, ycen, ' expected:', cx, cy)
+            # constant-pad so the shift is flux-conserving (mode="nearest"
+            # would replicate edge values and inject bias into kernel.sum).
+            kernel = shift(kernel, (cy - ycen, cx - xcen),
+                           order=3, mode="constant", cval=0.0)
         else:
             logger.warning("Centroiding failed, kernel not recentered.")
 
@@ -529,9 +817,10 @@ def fit_kernel_fourier(img_hi, img_lo, basis, method="lstsq"):
     else:
         raise ValueError(f"method must be 'lstsq' or 'nnls', got '{method}'")
 
-    # 3.  Back to real space – already centred, so **no fftshift here**
+    # 3.  Back to real space – already centred, so **no fftshift here**.
+    # Do not normalize the solved kernel: its DC term carries the native
+    # target/source flux ratio.
     kernel = np.tensordot(basis, coeffs, axes=([-1], [0]))
-    kernel /= kernel.sum()  # final normalisation
 
     return kernel, coeffs
 
@@ -601,9 +890,7 @@ def regularized_pixel_kernel_central(psf_hi, psf_lo, kernel_size=20, alpha=0.01,
     bounds = [(0, None) for _ in range(len(x0))]
     result = minimize(objective, x0, method="L-BFGS-B", bounds=bounds)
 
-    kernel = make_full_kernel(result.x)
-    kernel /= kernel.sum()
-    return kernel
+    return make_full_kernel(result.x)
 
 
 def regularized_lstsq_kernel_central(
@@ -669,9 +956,8 @@ def regularized_lstsq_kernel_central(
     central_kernel = central_flat.reshape((kernel_size, kernel_size))
     kernel[center - half_k : center + half_k, center - half_k : center + half_k] = central_kernel
 
-    # Ensure positivity and normalize
+    # Ensure positivity, preserving the fitted native kernel scale.
     kernel = np.maximum(kernel, 0)
-    kernel /= kernel.sum()
 
     return kernel
 
@@ -1683,7 +1969,10 @@ def compare_psf_to_star(
     ax1[1].imshow(np.log10(psf_data + offset), **kws)
     ax1[2].imshow(np.log10(cutout_data / scl - psf_data + offset), **kws)
     if kernel is not None:
-        ax1[3].imshow(np.log10(cutout_data / scl - conv + offset), **kws)
+        # `conv = psf*kernel` is fit to `cutout_data` in absolute units, while
+        # the other panels work in PSF-flux units (cutout_data/scl). Divide
+        # `conv` by `scl` to keep the residual in the same units.
+        ax1[3].imshow(np.log10((cutout_data - conv) / scl + offset), **kws)
         ax1[4].imshow(np.log10(pad_to_shape(kernel, conv.shape) + offset), **kws)
         ax1[3].set_title("data - psf x kernel")
         ax1[4].set_title("kernel")
@@ -2040,3 +2329,507 @@ def write_wcs_csv(mosaic_or_glob: Path | str, out_csv: str | None = None):
 
 # Offline: glob local CAL/RATE files; override output name
 # write_wcs_csv_from_mosaic("data/*/F770W/stage2/*cal.fits", out_csv="uds-v2.0_f770_wcs.csv")
+
+
+# ===========================================================================
+# Grizli _wcs.csv reconstruction from public MAST _cal.fits headers
+# ===========================================================================
+# Used by :class:`mophongo.psf.DrizzlePSF` (via ``read_wcs_csv``) when the
+# companion ``<stem>_wcs.csv`` is missing. Reads only the FITS primary
+# header byte range from S3/MAST per frame; no full-file downloads.
+
+import io as _io
+import time as _time
+import urllib.request as _urlreq
+from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _as_completed
+from typing import Any as _Any
+
+import pandas as _pd
+
+_RECON_STEM_RE = re.compile(r"(jw\d{11}_\d{5}_\d{5}_[a-z]+\d*)")
+_RECON_MOSAIC_SUFFIX_RE = re.compile(r"_dr[cz]_sci(_extrabkg)?\.fits$")
+
+RECON_COLS: tuple[str, ...] = (
+    "file,ext,exptime,wcsaxes,crpix1,crpix2,cd1_1,cd1_2,cd2_1,cd2_2,"
+    "cdelt1,cdelt2,cunit1,cunit2,ctype1,ctype2,crval1,crval2,lonpole,latpole,"
+    "wcsname,mjdref,date-beg,mjd-beg,date-avg,mjd-avg,date-end,mjd-end,"
+    "xposure,telapse,obsgeo-x,obsgeo-y,obsgeo-z,radesys,velosys,"
+    "a_order,a_0_2,a_0_3,a_0_4,a_0_5,a_1_1,a_1_2,a_1_3,a_1_4,"
+    "a_2_0,a_2_1,a_2_2,a_2_3,a_3_0,a_3_1,a_3_2,a_4_0,a_4_1,a_5_0,"
+    "b_order,b_0_2,b_0_3,b_0_4,b_0_5,b_1_1,b_1_2,b_1_3,b_1_4,"
+    "b_2_0,b_2_1,b_2_2,b_2_3,b_3_0,b_3_1,b_3_2,b_4_0,b_4_1,b_5_0,"
+    "naxis,naxis1,naxis2,sipcrpx1,sipcrpx2"
+).split(",")
+
+_RECON_PRIMARY_ALIASES = {
+    "exptime": "EFFEXPTM",
+    "mjd-beg": "EXPSTART",
+    "mjd-avg": "EXPMID",
+    "mjd-end": "EXPEND",
+}
+
+# NIRCam grizli convention: subtract one frame from start/mid (reset frame).
+# MIRI files use a different readout convention; do NOT shift.
+_NIRCAM_DETECTORS = {
+    f"nrc{ab}{n}" for ab in "ab" for n in ["1", "2", "3", "4", "long"]
+}
+
+
+def canonical_stem(file_name: str) -> str:
+    """Return canonical MAST stem (without ``_cal.fits``/``_rate.fits``).
+
+    Grizli stores intermediate names such as
+    ``jw{...}_mirimage_masked_sbkgsub_tweak_cal.fits``; this maps to
+    ``jw{...}_mirimage`` so it can be turned into a MAST URL.
+    """
+    m = _RECON_STEM_RE.search(file_name)
+    if not m:
+        raise ValueError(f"cannot parse canonical stem from {file_name!r}")
+    return m.group(1)
+
+
+def recon_detector(file_name: str) -> str:
+    """Return detector token (e.g. ``nrca5``, ``mirimage``)."""
+    return canonical_stem(file_name).rsplit("_", 1)[-1]
+
+
+def s3_url(file_name: str) -> str:
+    """Public MAST S3 cal-file URL for any grizli intermediate name."""
+    stem = canonical_stem(file_name)
+    full = stem.split("_", 1)[0]
+    prog = full[:7]
+    return (
+        f"https://stpubdata.s3.amazonaws.com/jwst/public/{prog}/{full}/"
+        f"{stem}_cal.fits"
+    )
+
+
+def mast_url(file_name: str) -> str:
+    """Public MAST download URL for any grizli intermediate name."""
+    stem = canonical_stem(file_name)
+    return (
+        "https://mast.stsci.edu/api/v0.1/Download/file"
+        f"?uri=mast:JWST/product/{stem}_cal.fits"
+    )
+
+
+def _recon_list_flt(mosaic: Path) -> list[str]:
+    h = fits.getheader(str(mosaic))
+    return [h[k] for k in h if k.startswith("FLT") and k[3:].isdigit()]
+
+
+def _recon_list_from_csv(csv_path: Path) -> list[str]:
+    return _pd.read_csv(csv_path, usecols=["file"])["file"].tolist()
+
+
+def _recon_list_from_comments(mosaic: Path) -> list[str]:
+    """Parse 'Files used to create mosaic:' COMMENT block (MIRI mosaics).
+
+    Filenames wrap across two COMMENT cards with no separator; cards are
+    concatenated and split on ``.fits`` to recover each path.
+    """
+    h = fits.getheader(str(mosaic))
+    if "COMMENT" not in h:
+        return []
+    lines = [str(c) for c in h["COMMENT"]]
+    start = None
+    for i, ln in enumerate(lines):
+        if "Files used to create mosaic" in ln:
+            start = i + 1
+            break
+    if start is None:
+        return []
+    joined = "".join(lines[start:])
+    parts = joined.split(".fits")
+    out: list[str] = []
+    for chunk in parts[:-1]:
+        path = chunk.strip().split()[-1] + ".fits"
+        out.append(Path(path).name)
+    return out
+
+
+def _recon_list_inputs(
+    mosaic: Path,
+    companion_csv: Path | None,
+    filelist: Path | None,
+) -> list[str]:
+    if filelist is not None:
+        return [
+            ln.strip() for ln in filelist.read_text().splitlines() if ln.strip()
+        ]
+    flt = _recon_list_flt(mosaic)
+    if flt:
+        logger.info(
+            "using FLT* keys from mosaic header (%d entries)", len(flt)
+        )
+        return flt
+    com = _recon_list_from_comments(mosaic)
+    if com:
+        logger.info(
+            "using 'Files used' COMMENT block (%d entries)", len(com)
+        )
+        return com
+    if companion_csv and companion_csv.exists():
+        names = _recon_list_from_csv(companion_csv)
+        logger.info(
+            "mosaic has no FLT* keys; using `file` column of %s (%d entries)",
+            companion_csv.name, len(names),
+        )
+        return names
+    raise RuntimeError(
+        f"no FLT* keys or 'Files used' COMMENT block in {mosaic.name} "
+        f"and no companion csv {companion_csv}; pass filelist= explicitly"
+    )
+
+
+def _recon_header_to_row(
+    orig_name: str, pri: fits.Header, sci: fits.Header
+) -> dict[str, _Any]:
+    row: dict[str, _Any] = dict.fromkeys(RECON_COLS)
+    row["file"] = orig_name
+    row["ext"] = 1
+    wcs = WCS(sci)
+    for key in RECON_COLS:
+        if key in ("file", "ext", "sipcrpx1", "sipcrpx2"):
+            continue
+        k = key.upper()
+        v = sci.get(k)
+        if v is None:
+            v = pri.get(k)
+        if v is not None:
+            row[key] = v
+    for csv_key, pri_key in _RECON_PRIMARY_ALIASES.items():
+        v = pri.get(pri_key)
+        if v is not None:
+            row[csv_key] = v
+    if all(row.get(k) is None for k in ("cd1_1", "cd1_2", "cd2_1", "cd2_2")):
+        cd = wcs.pixel_scale_matrix
+        row["cd1_1"] = cd[0, 0]
+        row["cd1_2"] = cd[0, 1]
+        row["cd2_1"] = cd[1, 0]
+        row["cd2_2"] = cd[1, 1]
+    if recon_detector(orig_name) in _NIRCAM_DETECTORS:
+        tframe = pri.get("TFRAME")
+        if tframe is not None:
+            dt = tframe / 86400.0
+            if row.get("mjd-beg") is not None:
+                row["mjd-beg"] = row["mjd-beg"] - dt
+            if row.get("mjd-avg") is not None:
+                row["mjd-avg"] = row["mjd-avg"] - dt / 2.0
+    row["sipcrpx1"] = sci.get("CRPIX1")
+    row["sipcrpx2"] = sci.get("CRPIX2")
+    return row
+
+
+def _recon_range(
+    orig_name: str, url: str, header_bytes: int = 300_000,
+) -> dict[str, _Any]:
+    req = _urlreq.Request(
+        url, headers={"Range": f"bytes=0-{header_bytes - 1}"}
+    )
+    with _urlreq.urlopen(req, timeout=120) as resp:
+        payload = resp.read()
+    with fits.open(
+        _io.BytesIO(payload), lazy_load_hdus=True, ignore_missing_end=True
+    ) as hdul:
+        return _recon_header_to_row(orig_name, hdul[0].header, hdul["SCI"].header)
+
+
+def reconstruct_row(orig_name: str, source: str = "s3") -> dict[str, _Any]:
+    """Reconstruct one CSV row from public ``_cal.fits`` header range.
+
+    Parameters
+    ----------
+    orig_name
+        Grizli intermediate filename (canonicalized internally).
+    source
+        ``"s3"`` (anonymous, fast) or ``"mast"`` (CDN URL).
+    """
+    url = s3_url(orig_name) if source == "s3" else mast_url(orig_name)
+    return _recon_range(orig_name, url)
+
+
+def _recon_many(
+    names: list[str], workers: int, source: str = "s3",
+) -> tuple[list[dict[str, _Any]], list[tuple[str, str]]]:
+    rows: dict[str, dict[str, _Any]] = {}
+    fails: list[tuple[str, str]] = []
+    with _TPE(max_workers=workers) as ex:
+        fut_map = {ex.submit(reconstruct_row, n, source): n for n in names}
+        done = 0
+        total = len(names)
+        for fut in _as_completed(fut_map):
+            n = fut_map[fut]
+            done += 1
+            try:
+                rows[n] = fut.result()
+            except Exception as e:
+                fails.append((n, str(e)))
+                logger.error("fail %s: %s", n, e)
+            if done % 25 == 0 or done == total:
+                logger.info("fetched %d/%d", done, total)
+    return [rows[n] for n in names if n in rows], fails
+
+
+def reconstruct_wcs_default_paths(mosaic: Path) -> tuple[Path, Path]:
+    """Return ``(<stem>_wcs.recon.csv, <stem>_wcs.csv)`` next to *mosaic*."""
+    stem = _RECON_MOSAIC_SUFFIX_RE.sub("", mosaic.name)
+    base = mosaic.parent
+    return base / f"{stem}_wcs.recon.csv", base / f"{stem}_wcs.csv"
+
+
+def reconstruct_wcs(
+    mosaic: str | Path,
+    *,
+    out_csv: str | Path | None = None,
+    source: str = "s3",
+    workers: int = 32,
+    filelist: str | Path | None = None,
+    limit: int = 0,
+    companion_csv: str | Path | None = None,
+) -> _pd.DataFrame:
+    """Reconstruct grizli ``_wcs.csv`` for *mosaic* and write it to disk.
+
+    Parameters
+    ----------
+    mosaic
+        Drizzled mosaic FITS path.
+    out_csv
+        Output CSV path. Default ``<stem>_wcs.recon.csv`` next to *mosaic*.
+    source
+        Header range source: ``"s3"`` (default) or ``"mast"``.
+    workers
+        Parallel header fetches.
+    filelist
+        Optional text file with one input filename per line.
+    limit
+        If >0, reconstruct only the first *limit* inputs (debugging).
+    companion_csv
+        Fallback file-list source if mosaic has no FLT*/COMMENT block.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Reconstructed CSV contents (also written to *out_csv*).
+    """
+    mosaic = Path(mosaic)
+    if not mosaic.exists():
+        raise FileNotFoundError(f"mosaic not found: {mosaic}")
+
+    default_out, default_actual = reconstruct_wcs_default_paths(mosaic)
+    out_csv = Path(out_csv) if out_csv else default_out
+    if companion_csv is not None:
+        fallback: Path | None = Path(companion_csv)
+    elif default_actual.exists():
+        fallback = default_actual
+    else:
+        fallback = None
+
+    names = _recon_list_inputs(
+        mosaic, fallback, Path(filelist) if filelist else None
+    )
+    if limit and limit > 0:
+        names = names[:limit]
+        logger.info("limited to first %d", len(names))
+
+    t0 = _time.time()
+    rows, fails = _recon_many(names, workers=workers, source=source)
+    logger.info(
+        "done in %.1f s  (rows=%d  fails=%d)",
+        _time.time() - t0, len(rows), len(fails),
+    )
+
+    df = _pd.DataFrame(rows, columns=list(RECON_COLS))
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_csv, index=False)
+    logger.info(
+        "wrote %s  (%d rows, %d cols)", out_csv, len(df), len(df.columns)
+    )
+    return df
+
+
+# ===========================================================================
+# PSF-matched inverse-variance coadd (LW detection image)
+# ===========================================================================
+def lw_detection_coadd(
+    bands: list[dict[str, _Any]],
+    target_psf: np.ndarray,
+    *,
+    target_index: int | None = None,
+    method: str = "wiener",
+    reg_grid: np.ndarray | None = None,
+    output_sci: str | Path | None = None,
+    output_wht: str | Path | None = None,
+    header: fits.Header | None = None,
+    diagnostic_dir: str | Path | None = None,
+    return_kernels: bool = False,
+) -> dict[str, _Any]:
+    """Inverse-variance coadd PSF-matched to *target_psf*.
+
+    For each input band (except *target_index*):
+
+    1. Find the optimal regularization parameter using
+       :meth:`mophongo.psf.PSF.optimize_matching_kernel_regularization`
+       with the requested *method* (default ``"wiener"``).
+    2. Convolve the science image with the resulting kernel.
+    3. Scale the per-pixel weight by ``1 / Σ(kernel ** 2)`` so the
+       coadded inverse variance accounts for the correlated noise that
+       convolution introduces.
+
+    The PSF-matched ``(sci, wht)`` arrays are then combined via standard
+    inverse-variance weighting:
+
+    .. math::
+
+        I_{\\rm coadd} = \\frac{\\sum_i w_i \\cdot I_i}{\\sum_i w_i},
+        \\quad W_{\\rm coadd} = \\sum_i w_i
+
+    Parameters
+    ----------
+    bands
+        List of dicts, one per band. Required keys:
+
+        - ``sci`` : ``np.ndarray`` or FITS path
+        - ``wht`` : ``np.ndarray`` or FITS path
+        - ``psf`` : ``np.ndarray`` — the band PSF (sum-normalized)
+        - ``name`` : ``str`` (optional, used in diagnostics)
+
+    target_psf
+        Reference PSF for matching (e.g. F444W).
+    target_index
+        Index of *bands* whose PSF already matches *target_psf*. Its
+        ``sci`` is left unconvolved and ``wht`` is used as-is. If
+        ``None`` (default), every band is matched.
+    method
+        Matching-kernel regularization method passed to
+        :func:`mophongo.utils.matching_kernel` /
+        :meth:`PSF.optimize_matching_kernel_regularization`.
+    reg_grid
+        Regularization-parameter grid for the optimizer. Default uses
+        the optimizer's own default.
+    output_sci, output_wht
+        Optional FITS paths to write the coadded science and weight
+        images. Uses *header* if supplied.
+    header
+        FITS header to attach to the written outputs (typically the
+        target band's science header).
+    diagnostic_dir
+        Optional directory for per-band PSF matching diagnostics
+        (one PNG per matched band).
+    return_kernels
+        If True, the per-band kernels are included in the returned dict.
+
+    Returns
+    -------
+    dict
+        ``{"sci": coadd_sci, "wht": coadd_wht,
+        "info": [{"name", "reg", "score", "sum_k2"}, ...]}``.
+        Adds ``"kernels": [...]`` when *return_kernels* is True.
+    """
+    from .psf import PSF  # local import to avoid circular dependency
+
+    if not bands:
+        raise ValueError("bands list is empty")
+
+    def _load_array(x: _Any) -> np.ndarray:
+        if isinstance(x, np.ndarray):
+            return x
+        return fits.getdata(str(x)).astype(np.float64)
+
+    target_psf = np.asarray(target_psf, dtype=float)
+    target_psf = target_psf / target_psf.sum()
+    target_psf_obj = PSF(target_psf)
+
+    diag_dir = Path(diagnostic_dir) if diagnostic_dir else None
+    if diag_dir is not None:
+        diag_dir.mkdir(parents=True, exist_ok=True)
+
+    sum_wI: np.ndarray | None = None
+    sum_w: np.ndarray | None = None
+    info: list[dict[str, _Any]] = []
+    kernels: list[np.ndarray] = []
+
+    for i, band in enumerate(bands):
+        name = str(band.get("name", f"band{i}"))
+        sci = _load_array(band["sci"])
+        wht = _load_array(band["wht"]).astype(np.float64)
+        psf = np.asarray(band["psf"], dtype=float)
+        psf = psf / psf.sum()
+
+        is_target = (target_index is not None and i == target_index)
+        if is_target:
+            kernel = None
+            sum_k2 = 1.0
+            reg = float("nan")
+            score = float("nan")
+            sci_match = sci.astype(np.float64, copy=False)
+            wht_match = wht
+        else:
+            psf_obj = PSF(psf)
+            diag_path = (
+                diag_dir / f"matched_{name}.png" if diag_dir is not None else None
+            )
+            result = psf_obj.optimize_matching_kernel_regularization(
+                target_psf_obj,
+                method=method,
+                reg_grid=reg_grid,
+                diagnostic_path=str(diag_path) if diag_path else None,
+                source_label=f"{name} PSF",
+                target_label="target PSF",
+            )
+            kernel = np.asarray(result.kernel, dtype=float)
+            sum_k2 = float(np.sum(kernel * kernel))
+            if not np.isfinite(sum_k2) or sum_k2 <= 0:
+                raise RuntimeError(
+                    f"non-positive sum(kernel**2) for band {name!r}"
+                )
+            reg = float(result.reg)
+            score = float(result.score)
+            sci_match = _scipy_fftconvolve(sci.astype(np.float64), kernel, mode="same")
+            wht_match = wht / sum_k2
+
+        if sum_wI is None:
+            sum_wI = wht_match * sci_match
+            sum_w = wht_match.copy()
+        else:
+            if sci_match.shape != sum_wI.shape:
+                raise ValueError(
+                    f"band {name!r} shape {sci_match.shape} != target "
+                    f"shape {sum_wI.shape}"
+                )
+            sum_wI += wht_match * sci_match
+            sum_w += wht_match
+
+        info.append({
+            "name": name, "reg": reg, "score": score, "sum_k2": sum_k2,
+        })
+        if return_kernels and kernel is not None:
+            kernels.append(kernel)
+        elif return_kernels:
+            kernels.append(np.array([[1.0]], dtype=float))
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        coadd_sci = np.where(sum_w > 0, sum_wI / sum_w, 0.0)
+    coadd_wht = sum_w
+
+    if output_sci is not None:
+        fits.writeto(
+            str(output_sci),
+            coadd_sci.astype(np.float32),
+            header=header,
+            overwrite=True,
+        )
+        logger.info("wrote coadd sci -> %s", output_sci)
+    if output_wht is not None:
+        fits.writeto(
+            str(output_wht),
+            coadd_wht.astype(np.float32),
+            header=header,
+            overwrite=True,
+        )
+        logger.info("wrote coadd wht -> %s", output_wht)
+
+    out = {"sci": coadd_sci, "wht": coadd_wht, "info": info}
+    if return_kernels:
+        out["kernels"] = kernels
+    return out

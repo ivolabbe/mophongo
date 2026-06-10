@@ -19,6 +19,7 @@ from collections import defaultdict
 from astropy.table import Table
 from astropy.wcs import WCS
 from astropy.nddata import Cutout2D, block_replicate, block_reduce
+from astropy.stats import mad_std
 from photutils.aperture import CircularAperture, aperture_photometry
 from astropy.wcs.utils import proj_plane_pixel_scales
 from astropy.wcs.utils import proj_plane_pixel_scales
@@ -40,6 +41,26 @@ if not logger.handlers:  # avoid duplicate handlers on reloads
     logger.addHandler(handler)
 
 memory = lambda: psutil.Process(os.getpid()).memory_info().rss / 1e9
+
+
+def _upsample_flux_conserving_image_and_ivar(
+    image: np.ndarray,
+    weight: np.ndarray | None,
+    factor: int,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Upsample a low-res image and inverse variance onto the reference grid.
+
+    Flux-conserving block replication divides each native pixel value across
+    ``factor**2`` subpixels. To preserve the native chi-square on that
+    replicated basis, per-subpixel inverse variance must be multiplied by
+    ``factor**2``. Do not use the flux-conserving default for weights.
+    """
+    k = int(factor)
+    image_hi = block_replicate(image, k, conserve_sum=True).astype(np.float32)
+    weight_hi = None
+    if weight is not None:
+        weight_hi = block_replicate(weight, k, conserve_sum=False).astype(np.float32) * k**2
+    return image_hi, weight_hi
 
 
 def _per_source_chi2(
@@ -96,8 +117,9 @@ def _extract_psf_at(tmpl: Template, psf: np.ndarray | PSFRegionMap) -> np.ndarra
     if isinstance(psf, PSFRegionMap):
         # Look up PSF at template position
         x, y = tmpl.input_position_original
-        if hasattr(tmpl, "wcs") and tmpl.wcs is not None:
-            ra, dec = tmpl.wcs.wcs_pix2world(x, y, 0)
+        w_lookup = tmpl.wcs_original if getattr(tmpl, "wcs_original", None) is not None else tmpl.wcs
+        if w_lookup is not None:
+            ra, dec = w_lookup.wcs_pix2world(x, y, 0)
         else:
             ra, dec = x, y
         psf_array = psf.get_psf(ra, dec)
@@ -129,6 +151,32 @@ def _extract_psf_at(tmpl: Template, psf: np.ndarray | PSFRegionMap) -> np.ndarra
     return stamp
 
 
+def _filter_psf_throughput(
+    psf: np.ndarray | PSFRegionMap | None,
+    explicit_throughput: float | None = None,
+) -> float:
+    """Return one finite-support PSF throughput correction for a fitted filter.
+
+    The PSF core may vary spatially, but the missing far-wing flux correction is
+    treated as a single filter-level scalar.  Pipeline-facing callers that pass
+    unit-sum PSF shapes should provide ``explicit_throughput`` when the native
+    finite PSF support sum is not one.
+    """
+    if explicit_throughput is not None and np.isfinite(explicit_throughput) and explicit_throughput > 0.0:
+        return float(explicit_throughput)
+    if psf is None:
+        return 1.0
+    arr = psf.psfs if isinstance(psf, PSFRegionMap) else psf
+    if arr is None:
+        return 1.0
+    sums = np.nansum(np.where(np.isfinite(arr), arr, 0.0), axis=(-2, -1))
+    sums = np.asarray(sums, dtype=float)
+    valid = np.isfinite(sums) & (sums > 0.0)
+    if np.any(valid):
+        return float(np.nanmean(sums[valid]))
+    return 1.0
+
+
 class Pipeline:
     """Photometry pipeline orchestrator.
 
@@ -145,10 +193,13 @@ class Pipeline:
         catalog: Table | None = None,
         psfs: Sequence[np.ndarray] | None = None,
         weights: Sequence[np.ndarray] | None = None,
+        wht_images: Sequence[np.ndarray] | None = None,
         kernels: Sequence[np.ndarray | PSFRegionMap] | None = None,
+        psf_throughputs: Sequence[float] | None = None,
         wcs: Sequence[WCS] | None = None,
         window: Window | None = None,
         extend_templates: str | None = None,
+        templates: Templates | Sequence[Template] | None = None,
         config: FitConfig | None = None,
     ) -> None:
         if psfs is not None and len(images) != len(psfs):
@@ -157,6 +208,8 @@ class Pipeline:
             weights = wht_images
         if weights is not None and len(weights) != len(images):
             raise ValueError("Number of weight images must match number of images")
+        if psf_throughputs is not None and len(psf_throughputs) != len(images):
+            raise ValueError("Number of PSF throughputs must match number of images")
 
         if config is None:
             config = _FitConfig()
@@ -167,9 +220,11 @@ class Pipeline:
         self.psfs = psfs
         self.weights = weights
         self.kernels = kernels
+        self.psf_throughputs = psf_throughputs
         self.wcs = wcs
         self.window = window
         self.extend_templates = extend_templates
+        self.input_templates = templates
         self.config = config
 
         if kernels is None:
@@ -182,7 +237,10 @@ class Pipeline:
         self.astro: list[np.ndarray] = []
         #        self.templates: list[np.ndarray] = []
         self.infos: list[dict] = []
-        self.tmpls: Templates()
+        self.tmpls: Templates | None = None
+        self.templates_extracted: Templates | None = None
+        self.templates_extended: Templates | None = None
+        self.model_images: list[np.ndarray] = []
 
         print(f"Pipeline (init) memory: {memory():.1f} GB")
 
@@ -261,6 +319,7 @@ class Pipeline:
         fluxes: np.ndarray,
         errs: np.ndarray,
         err_pred: np.ndarray,
+        throughput: float,
         idx: int,
     ) -> None:
         """Insert measured fluxes into the output catalog.
@@ -272,7 +331,11 @@ class Pipeline:
         templates
             Templates associated with the fitted sources.
         fluxes, errs, err_pred
-            Flux measurements and their uncertainties.
+            Model-template flux measurements and their uncertainties.
+        throughput
+            Filter-level finite-support PSF sum.  Total-flux columns divide
+            model fluxes/errors by this value.  A value of 1 applies no
+            missing-PSF-support correction.
         idx
             Index of the current image (used for column naming).
         """
@@ -285,16 +348,34 @@ class Pipeline:
         cat[f"flux_{idx}"] = self.config.bad_value
         cat[f"err_{idx}"] = self.config.bad_value
         cat[f"err_pred_{idx}"] = self.config.bad_value
+        cat[f"throughput_{idx}"] = self.config.bad_value
+        cat[f"flux_{idx}_total"] = self.config.bad_value
+        cat[f"err_{idx}_total"] = self.config.bad_value
+        cat[f"err_pred_{idx}_total"] = self.config.bad_value
+
+        if not np.isfinite(throughput) or throughput <= 0.0:
+            throughput = 1.0
+        throughput = float(throughput)
 
         flux_sum: defaultdict[int, float] = defaultdict(float)
         err_sum: defaultdict[int, float] = defaultdict(float)
         err_pred_sum: defaultdict[int, float] = defaultdict(float)
+        flux_total_sum: defaultdict[int, float] = defaultdict(float)
+        err_total_sum: defaultdict[int, float] = defaultdict(float)
+        err_pred_total_sum: defaultdict[int, float] = defaultdict(float)
         for pid, fl, er, ep in zip(parent_ids, fluxes, errs, err_pred):
             if pid is None:
                 continue
             flux_sum[pid] += fl
             err_sum[pid] = float(np.sqrt(err_sum[pid] ** 2 + er**2))
             err_pred_sum[pid] = float(np.sqrt(err_pred_sum[pid] ** 2 + ep**2))
+            flux_total_sum[pid] += fl / throughput
+            err_total_sum[pid] = float(
+                np.sqrt(err_total_sum[pid] ** 2 + (er / throughput) ** 2)
+            )
+            err_pred_total_sum[pid] = float(
+                np.sqrt(err_pred_total_sum[pid] ** 2 + (ep / throughput) ** 2)
+            )
 
         for pid, fl in flux_sum.items():
             ci = id_to_index.get(pid)
@@ -303,6 +384,10 @@ class Pipeline:
             cat[f"flux_{idx}"][ci] = fl
             cat[f"err_{idx}"][ci] = err_sum[pid]
             cat[f"err_pred_{idx}"][ci] = err_pred_sum[pid]
+            cat[f"flux_{idx}_total"][ci] = flux_total_sum[pid]
+            cat[f"err_{idx}_total"][ci] = err_total_sum[pid]
+            cat[f"err_pred_{idx}_total"][ci] = err_pred_total_sum[pid]
+            cat[f"throughput_{idx}"][ci] = throughput
 
     def _pixel_scale_arcsec(self, w: WCS | None) -> float | None:
         try:
@@ -538,8 +623,11 @@ class Pipeline:
         psfs = self.psfs
         weights = self.weights
         kernels = self.kernels
+        psf_throughputs = self.psf_throughputs
         if kernels is None:
             kernels = [None] * len(images)
+        if psfs is None:
+            psfs = [None] * len(images)
         wcs = self.wcs
         if config is None:
             config = self.config
@@ -562,49 +650,138 @@ class Pipeline:
             raise NotImplementedError("Catalog generation not implemented yet")
         else:
             cat = catalog.copy()
-            cat = cat["id", "x", "y"]  # minimal set required
+            keep_cols = ["id", "x", "y"]
+            keep_cols.extend(
+                col
+                for col in ("is_deblended", "deblend_parent_label", "deblend_nchildren")
+                if col in catalog.colnames
+            )
+            sat_cols = [c for c in catalog.colnames if c.startswith("FLAG_SATURATED_")]
+            keep_cols.extend(sat_cols)
+            cat = cat[keep_cols]
             if config.aperture_catalog is not None:
                 cat[config.aperture_catalog] = catalog[config.aperture_catalog]
 
-        self.tmpls = Templates()
-        self.tmpls.extract_templates(
-            images[0],
-            segmap,
-            list(zip(cat["x"], cat["y"])),
-            wcs=wcs[0] if wcs is not None else None,
-        )
+        if self.input_templates is None:
+            self.tmpls = Templates()
+            self.tmpls.extract_templates(
+                images[0],
+                segmap,
+                list(zip(cat["x"], cat["y"])),
+                wcs=wcs[0] if wcs is not None else None,
+                dilate_segmap=config.template_dilate_segmap,
+            )
+            if "is_deblended" in cat.colnames:
+                is_deblended_by_id = {
+                    int(row["id"]): bool(row["is_deblended"])
+                    for row in cat
+                }
+                parent_by_id = {
+                    int(row["id"]): int(row["deblend_parent_label"])
+                    for row in cat
+                } if "deblend_parent_label" in cat.colnames else {}
+                nchildren_by_id = {
+                    int(row["id"]): int(row["deblend_nchildren"])
+                    for row in cat
+                } if "deblend_nchildren" in cat.colnames else {}
+                for tmpl in self.tmpls.templates:
+                    tmpl_id = int(tmpl.id)
+                    tmpl.is_deblended = is_deblended_by_id.get(tmpl_id, False)
+                    tmpl.deblend_parent_label = parent_by_id.get(tmpl_id)
+                    tmpl.deblend_nchildren = nchildren_by_id.get(tmpl_id, 1)
+            # FLAG_SATURATED_* (any filter): isolate these templates into
+            # their own scenes in :func:`mophongo.scene.generate_scenes`.
+            sat_cols = [c for c in cat.colnames if c.startswith("FLAG_SATURATED_")]
+            if sat_cols:
+                sat_by_id: dict[int, bool] = {}
+                for row in cat:
+                    flagged = any(int(row[c]) != 0 for c in sat_cols)
+                    sat_by_id[int(row["id"])] = flagged
+                for tmpl in self.tmpls.templates:
+                    tmpl.is_saturated = sat_by_id.get(int(tmpl.id), False)
+            self.templates_extracted = deepcopy(self.tmpls)
+            if self.extend_templates in {"psf", "psf_wings"}:
+                psf_hi = psfs[0] if psfs is not None and psfs[0] is not None else None
+                if psf_hi is None and psfs is not None and len(psfs) > 1:
+                    psf_hi = psfs[1]
+                if psf_hi is None:
+                    raise ValueError(
+                        f"extend_templates={self.extend_templates!r} requires a high-resolution PSF in psfs[0]"
+                    )
+                # Template extension is a shape operation. The extension code
+                # normalizes finite PSF stamps to unit-sum shapes and keeps
+                # native finite-support sums only as throughput metadata.
+                self.tmpls.extend_with_psf_wings(
+                    psf_hi,
+                    skip_deblended=bool(config.skip_template_extension_for_deblended),
+                    background_only=bool(config.extend_wings_background_only),
+                    inplace=True,
+                )
+            elif self.extend_templates == "psf_model":
+                psf_hi = psfs[0] if psfs is not None and psfs[0] is not None else None
+                if psf_hi is None and psfs is not None and len(psfs) > 1:
+                    psf_hi = psfs[1]
+                if psf_hi is None:
+                    raise ValueError(
+                        "extend_templates='psf_model' requires a high-resolution PSF in psfs[0]"
+                    )
+                # Keep the same shape-vs-throughput convention as psf_wings.
+                self.tmpls.extend_with_psf_model(
+                    psf_hi,
+                    mode="model",
+                    skip_deblended=bool(config.skip_template_extension_for_deblended),
+                    inplace=True,
+                )
+            elif self.extend_templates not in {None, "none"}:
+                raise ValueError(f"Unknown template extension mode {self.extend_templates!r}")
+            self.templates_extended = deepcopy(self.tmpls)
+        else:
+            if isinstance(self.input_templates, Templates):
+                self.tmpls = deepcopy(self.input_templates)
+            else:
+                self.tmpls = Templates()
+                self.tmpls._templates = [deepcopy(t) for t in self.input_templates]
+            if not getattr(self.tmpls, "original_shape", None):
+                self.tmpls.original_shape = images[0].shape
+            if not getattr(self.tmpls, "wcs", None):
+                self.tmpls.wcs = wcs[0] if wcs is not None else None
+            self.templates_extracted = deepcopy(self.tmpls)
+            self.templates_extended = deepcopy(self.tmpls)
         templates = self.tmpls.templates
         for t in templates:
             assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
 
         ndropped = len(cat) - len(templates)
         # @@@ this is because of reliance of x,y in catalog -> use segmap + weight?
-        print(f"Pipepline: {len(templates)} extracted templates, dropped {ndropped}.")
+        source = "prebuilt" if self.input_templates is not None else "extracted"
+        print(f"Pipepline: {len(templates)} {source} templates, dropped {ndropped}.")
         print(f"Pipeline (templates) memory: {memory():.1f} GB")
 
         astro = AstroCorrect(config)
         residuals: list[np.ndarray] = []
         self.all_templates: list[Template] = []
         self.all_scenes: list[Scene] = []
+        self.fit_bin_factors: list[int] = []
+        self.model_images = []
         for ifilt in range(1, len(images)):
             weights_i = weights[ifilt] if weights is not None else None
+            scenes = []
 
             kernel = kernels[ifilt]
-            if kernel is None:
-                kernel = np.array([[1.0]])  # @@@ this shouldnt be necessary?
-            elif isinstance(kernel, PSFRegionMap):
+            if isinstance(kernel, PSFRegionMap):
                 print(f"Using kernel lookup table {kernel.name}")
 
             k = bin_factor_from_wcs(wcs[0], wcs[ifilt]) if wcs is not None else 1
+            self.fit_bin_factors.append(int(k))
 
             if k > 1:
                 if config.multi_resolution_method == "upsample":
                     print(f"upsampling image {ifilt} by factor {k}")
-                    images[ifilt] = block_replicate(images[ifilt], k, conserve_sum=True).astype(
-                        np.float32
+                    images[ifilt], weights_i = _upsample_flux_conserving_image_and_ivar(
+                        images[ifilt],
+                        weights_i,
+                        k,
                     )
-                    if weights_i is not None:
-                        weights_i = block_replicate(weights[ifilt], k).astype(np.float32) * k**2
                     wcs[ifilt] = wcs[0]
                 else:
                     print(f"Downsampling templates and kernels by factor {k}")
@@ -627,6 +804,13 @@ class Pipeline:
                 tmpls_lo.prune_outside_weight(weights_i)
 
             templates = tmpls_lo.convolve_templates(kernel, inplace=False)
+            if k > 1 and config.multi_resolution_method == "upsample":
+                dummy_image = np.zeros(images[ifilt].shape, dtype=np.byte)
+                templates = [
+                    t.project_to_block_replicated_grid(k, parent_image=dummy_image)
+                    for t in templates
+                ]
+            self.templates = templates
             print(f"Pipeline (convolved) memory: {memory():.1f} GB")
 
             for t in templates:
@@ -681,11 +865,25 @@ class Pipeline:
                     logger.info(f"Scene {s.id}: {len(s.templates)} (bright: {s.is_bright.sum()})")
 
                 niter_scene = max(config.fit_astrometry_niter, 1)
+                shift_tol = float(getattr(config, "astrom_shift_tol", 0.02))
                 for j in range(niter_scene):
                     logger.info(f"[Scenes] Running iteration {j+1} of {niter_scene}")
+                    max_step = 0.0
                     for scn in scenes:
+                        prev = np.array([t.shifted[:2] for t in scn.templates], dtype=float)
                         scn.set_band(images[ifilt], weights_i, config=config)
                         scn.solve(config=config, apply_shifts=True)
+                        cur = np.array([t.shifted[:2] for t in scn.templates], dtype=float)
+                        if prev.size and cur.shape == prev.shape:
+                            max_step = max(max_step, float(np.max(np.abs(cur - prev))))
+                    logger.info(
+                        f"[Scenes] iteration {j+1}: max shift increment {max_step:.4f} pix"
+                    )
+                    if config.fit_astrometry_niter > 0 and max_step < shift_tol:
+                        logger.info(
+                            f"[Scenes] shifts converged (< {shift_tol} pix) after {j+1} passes"
+                        )
+                        break
 
                 # build model in res first, then subtract from image
                 res = np.zeros_like(images[ifilt])
@@ -757,6 +955,10 @@ class Pipeline:
             fluxes = [t.flux for t in templates]
             errs = [t.err for t in templates]
             err_pred = Templates.predicted_errors(templates, weights_i)
+            throughput = _filter_psf_throughput(
+                psfs[ifilt] if psfs is not None else None,
+                None if psf_throughputs is None else psf_throughputs[ifilt],
+            )
 
             # calculate a full image residual from the scenes and their slice
             #            res_scene
@@ -778,7 +980,15 @@ class Pipeline:
                 r_img_pix = self._resolve_image_ap_radius_pix(ifilt, config)
                 r_img_arcsec = r_img_pix * pscale
                 cat["aper_" + str(ifilt)] = 2 * r_img_arcsec
-            self._update_catalog_with_fluxes(cat, templates, fluxes, errs, err_pred, ifilt)
+            self._update_catalog_with_fluxes(
+                cat,
+                templates,
+                fluxes,
+                errs,
+                err_pred,
+                throughput,
+                ifilt,
+            )
             self._add_aperture_photometry(
                 cat,
                 templates,
@@ -789,6 +999,7 @@ class Pipeline:
             )
 
             self.residuals.append(res)
+            self.model_images.append(images[ifilt] - res)
             #            self.fit.append(fitter)
             self.all_templates.append(templates)
             self.all_scenes.append(scenes)
@@ -798,6 +1009,429 @@ class Pipeline:
         self.table = cat
 
         return self.table, self.residuals  # , self.all_templates, self.all_scenes
+
+    @staticmethod
+    def _template_for_source(templates: Sequence[Template], source_id: int) -> Template:
+        """Return the template with ``id == source_id``."""
+        for tmpl in templates:
+            if int(tmpl.id) == int(source_id):
+                return tmpl
+        raise KeyError(f"source id {source_id} not found in templates")
+
+    @staticmethod
+    def _stamp_slices_for_template(
+        tmpl: Template,
+        image_shape: tuple[int, int],
+        half_size: int | None = None,
+    ) -> tuple[slice, slice]:
+        """Return parent-image slices for a source diagnostic stamp."""
+        if half_size is None:
+            ysl, xsl = tmpl.slices_original
+            return ysl, xsl
+
+        cx, cy = tmpl.input_position_original
+        x0 = max(0, int(round(cx)) - int(half_size))
+        x1 = min(image_shape[1], int(round(cx)) + int(half_size) + 1)
+        y0 = max(0, int(round(cy)) - int(half_size))
+        y1 = min(image_shape[0], int(round(cy)) + int(half_size) + 1)
+        return slice(y0, y1), slice(x0, x1)
+
+    @staticmethod
+    def _template_on_stamp(tmpl: Template, stamp_slices: tuple[slice, slice]) -> np.ndarray:
+        """Place a template on a local parent-image stamp."""
+        ysl, xsl = stamp_slices
+        stamp = np.zeros((ysl.stop - ysl.start, xsl.stop - xsl.start), dtype=float)
+        tx0, ty0 = map(int, tmpl._origin_original_true)
+        tx1 = tx0 + tmpl.data.shape[1]
+        ty1 = ty0 + tmpl.data.shape[0]
+
+        x0 = max(xsl.start, tx0)
+        x1 = min(xsl.stop, tx1)
+        y0 = max(ysl.start, ty0)
+        y1 = min(ysl.stop, ty1)
+        if x1 <= x0 or y1 <= y0:
+            return stamp
+
+        stamp[y0 - ysl.start : y1 - ysl.start, x0 - xsl.start : x1 - xsl.start] = tmpl.data[
+            y0 - ty0 : y1 - ty0,
+            x0 - tx0 : x1 - tx0,
+        ]
+        return stamp
+
+    @staticmethod
+    def _stamp_slices_for_templates(
+        templates: Sequence[Template],
+        image_shape: tuple[int, int],
+    ) -> tuple[slice, slice]:
+        """Return parent-image slices covering all template footprints."""
+        x0s: list[int] = []
+        x1s: list[int] = []
+        y0s: list[int] = []
+        y1s: list[int] = []
+        for tmpl in templates:
+            tx0, ty0 = map(int, tmpl._origin_original_true)
+            tx1 = tx0 + tmpl.data.shape[1]
+            ty1 = ty0 + tmpl.data.shape[0]
+            x0s.append(tx0)
+            x1s.append(tx1)
+            y0s.append(ty0)
+            y1s.append(ty1)
+
+        x0 = max(0, min(x0s))
+        x1 = min(image_shape[1], max(x1s))
+        y0 = max(0, min(y0s))
+        y1 = min(image_shape[0], max(y1s))
+        if x1 <= x0 or y1 <= y0:
+            return templates[0].slices_original
+        return slice(y0, y1), slice(x0, x1)
+
+    @staticmethod
+    def _diagnostic_display_scale(arrays: Sequence[np.ndarray]) -> tuple[float, float]:
+        """Return a shared median/MAD display scale for comparable panels."""
+        values = []
+        for data in arrays:
+            arr = np.asarray(data, dtype=float)
+            finite = np.isfinite(arr)
+            if np.any(finite):
+                values.append(arr[finite])
+        if not values:
+            return 0.0, 1.0
+
+        merged = np.concatenate(values)
+        center = float(np.nanmedian(merged))
+        scale = float(mad_std(merged, ignore_nan=True))
+        if not np.isfinite(scale) or scale <= 0.0:
+            nonzero = merged[merged != 0.0]
+            if nonzero.size:
+                scale = float(mad_std(nonzero, ignore_nan=True))
+        if not np.isfinite(scale) or scale <= 0.0:
+            scale = float(np.nanpercentile(np.abs(merged - center), 95.0))
+        if not np.isfinite(scale) or scale <= 0.0:
+            scale = 1.0
+        return center, scale
+
+    @staticmethod
+    def _imshow_scaled(
+        ax,
+        data: np.ndarray,
+        *,
+        cmap: str = "gray_r",
+        symmetric: bool = False,
+        center: float | None = None,
+        scale: float | None = None,
+    ) -> None:
+        """Show a diagnostic stamp with inverted grayscale MAD scaling."""
+        arr = np.asarray(data, dtype=float)
+        finite = np.isfinite(arr)
+        if not np.any(finite):
+            ax.imshow(arr, cmap=cmap, origin="lower")
+            return
+        if center is None or scale is None:
+            auto_center, auto_scale = Pipeline._diagnostic_display_scale([arr])
+            if center is None:
+                center = auto_center
+            if scale is None:
+                scale = auto_scale
+        ax.imshow(arr - center, cmap=cmap, origin="lower", vmin=-5.0 * scale, vmax=5.0 * scale)
+
+    def _segmap_on_stamp(self, stamp_slices: tuple[slice, slice]) -> np.ndarray:
+        """Return the segmentation map on the same parent-image stamp grid."""
+        ysl, xsl = stamp_slices
+        return np.asarray(self.segmap)[ysl, xsl]
+
+    @staticmethod
+    def _snapshot_template(tmpl: Template) -> Template:
+        """Return a template metadata copy with detached pixel data."""
+        snap = deepcopy(tmpl)
+        snap.data = np.array(tmpl.data, copy=True)
+        return snap
+
+    def _source_position(self, source_id: int) -> tuple[float, float]:
+        """Return the catalog position for ``source_id``."""
+        if not hasattr(self, "table"):
+            raise RuntimeError("run the pipeline before source diagnostics")
+        ids = np.asarray(self.table["id"], dtype=int)
+        idx = np.flatnonzero(ids == int(source_id))
+        if idx.size == 0:
+            raise KeyError(f"source id {source_id} not found in fitted catalog")
+        row = int(idx[0])
+        return float(self.table["x"][row]), float(self.table["y"][row])
+
+    def _psf_for_template_extension(self):
+        """Return the high-resolution PSF object used by template extension."""
+        psfs = self.psfs if self.psfs is not None else []
+        psf_hi = psfs[0] if len(psfs) > 0 and psfs[0] is not None else None
+        if psf_hi is None and len(psfs) > 1:
+            psf_hi = psfs[1]
+        if psf_hi is None:
+            raise ValueError(
+                f"extend_templates={self.extend_templates!r} requires a high-resolution PSF"
+            )
+        return psf_hi
+
+    def _rebuild_source_stage_templates(
+        self,
+        source_id: int,
+        *,
+        ifilt: int,
+    ) -> tuple[Template, Template, Template]:
+        """Rebuild one source through extraction, extension, and convolution.
+
+        This intentionally does not read intermediate templates saved during
+        ``run``.  Template data are copied immediately after each operation so
+        later in-place mutations cannot change the diagnostic panels.
+        """
+        pos = self._source_position(source_id)
+        rebuilt = Templates()
+        rebuilt.extract_templates(
+            self.images[0],
+            self.segmap,
+            [pos],
+            wcs=self.wcs[0] if self.wcs is not None else None,
+            dilate_segmap=int(self.config.template_dilate_segmap),
+        )
+        if not rebuilt.templates:
+            raise KeyError(f"could not re-extract source id {source_id} for diagnostics")
+
+        tmpl = rebuilt.templates[0]
+        if self.catalog is not None:
+            matches = np.where(np.asarray(self.catalog["id"], dtype=int) == int(source_id))[0]
+            if matches.size:
+                row = self.catalog[int(matches[0])]
+                if "is_deblended" in self.catalog.colnames:
+                    tmpl.is_deblended = bool(row["is_deblended"])
+                if "deblend_parent_label" in self.catalog.colnames:
+                    tmpl.deblend_parent_label = int(row["deblend_parent_label"])
+                if "deblend_nchildren" in self.catalog.colnames:
+                    tmpl.deblend_nchildren = int(row["deblend_nchildren"])
+                sat_cols = [c for c in self.catalog.colnames if c.startswith("FLAG_SATURATED_")]
+                if sat_cols:
+                    tmpl.is_saturated = any(int(row[c]) != 0 for c in sat_cols)
+        before = self._snapshot_template(tmpl)
+
+        work = Templates()
+        work.original_shape = rebuilt.original_shape
+        work.wcs = getattr(rebuilt, "wcs", self.wcs[0] if self.wcs is not None else None)
+        work.segmap = rebuilt.segmap
+        work._templates = [tmpl]
+        if self.extend_templates in {"psf", "psf_wings"}:
+            work.extend_with_psf_wings(
+                self._psf_for_template_extension(),
+                skip_deblended=bool(self.config.skip_template_extension_for_deblended),
+                background_only=bool(self.config.extend_wings_background_only),
+                inplace=True,
+            )
+            tmpl_ext = work.templates[0]
+        elif self.extend_templates == "psf_model":
+            work.extend_with_psf_model(
+                self._psf_for_template_extension(),
+                mode="model",
+                skip_deblended=bool(self.config.skip_template_extension_for_deblended),
+                inplace=True,
+            )
+            tmpl_ext = work.templates[0]
+        elif self.extend_templates in {None, "none"}:
+            tmpl_ext = tmpl
+        else:
+            raise ValueError(f"Unknown template extension mode {self.extend_templates!r}")
+        after = self._snapshot_template(tmpl_ext)
+
+        kernels = self.kernels if self.kernels is not None else [None] * len(self.images)
+        kernel = kernels[ifilt]
+        work_conv = Templates()
+        work_conv.original_shape = getattr(work, "original_shape", self.images[0].shape)
+        work_conv.wcs = getattr(work, "wcs", self.wcs[0] if self.wcs is not None else None)
+        work_conv._templates = [tmpl_ext]
+        conv = work_conv.convolve_templates(kernel, inplace=False)[0]
+
+        k = 1
+        if hasattr(self, "fit_bin_factors") and len(self.fit_bin_factors) >= ifilt:
+            k = int(self.fit_bin_factors[ifilt - 1])
+        if k > 1 and self.config.multi_resolution_method == "upsample":
+            dummy_image = np.zeros(self.images[ifilt].shape, dtype=np.byte)
+            conv = conv.project_to_block_replicated_grid(k, parent_image=dummy_image)
+        final = self._snapshot_template(conv)
+        return before, after, final
+
+    def diagnose_sources(
+        self,
+        source_ids: Sequence[int],
+        *,
+        ifilt: int = 1,
+        half_size: int | None = None,
+        save: str | os.PathLike | None = None,
+    ):
+        """Plot template-construction and fit-residual stages for source IDs.
+
+        The columns are:
+
+        1. high-resolution image stamp on the extracted-template footprint
+        2. segmentation map over the same extracted-template footprint
+        3. actual extracted template before extension, placed on that same stamp
+        4. template after extension, placed on that same stamp
+        5. template after matching-kernel convolution/projection
+        6. low-resolution image stamp at the same fitting-grid location
+        7. final best-fit model image at the same location, including neighbors
+        8. final residual image
+        """
+        import matplotlib.pyplot as plt
+
+        if ifilt <= 0 or ifilt >= len(self.images):
+            raise ValueError("ifilt must be between 1 and len(images)-1")
+        if self.templates_extracted is None or self.templates_extended is None:
+            raise RuntimeError("run the pipeline before calling diagnose_sources")
+        if len(self.all_templates) < ifilt:
+            raise RuntimeError("run the pipeline before calling diagnose_sources")
+
+        final_templates = self.all_templates[ifilt - 1]
+        residual = self.residuals[ifilt - 1]
+        model = (
+            self.model_images[ifilt - 1]
+            if len(self.model_images) >= ifilt
+            else self.images[ifilt] - residual
+        )
+
+        source_ids = [int(sid) for sid in source_ids]
+        nsrc = len(source_ids)
+        if nsrc == 0:
+            raise ValueError("source_ids must not be empty")
+
+        fig, axes = plt.subplots(nsrc, 8, figsize=(24, 3.2 * nsrc), squeeze=False)
+        titles = [
+            "hires image (ref grid)",
+            "segmap",
+            "extracted template (ref grid)",
+            "after extension (ref grid)",
+            "after conv/proj (fit grid)",
+            "low-res image (fit grid)",
+            "best-fit model (fit grid)",
+            "residual (fit grid)",
+        ]
+        for ax, title in zip(axes[0], titles):
+            ax.set_title(title)
+
+        for row, source_id in enumerate(source_ids):
+            try:
+                before, after, final = self._rebuild_source_stage_templates(source_id, ifilt=ifilt)
+            except Exception:
+                if self.input_templates is None:
+                    raise
+                before = self._snapshot_template(
+                    self._template_for_source(self.templates_extracted.templates, source_id)
+                )
+                after = self._snapshot_template(
+                    self._template_for_source(self.templates_extended.templates, source_id)
+                )
+                final = self._snapshot_template(self._template_for_source(final_templates, source_id))
+            stamp_slices = self._stamp_slices_for_template(before, self.images[0].shape, half_size)
+            ysl, xsl = stamp_slices
+
+            image_stamp = self.images[0][ysl, xsl]
+            before_stamp = self._template_on_stamp(before, stamp_slices)
+            after_stamp = self._template_on_stamp(after, stamp_slices)
+            final_stamp = self._template_on_stamp(final, stamp_slices)
+            lowres_stamp = self.images[ifilt][ysl, xsl]
+            model_stamp = model[ysl, xsl]
+            residual_stamp = residual[ysl, xsl]
+            template_center, template_scale = self._diagnostic_display_scale(
+                [before_stamp, after_stamp]
+            )
+            panel_specs = [
+                (0, image_stamp, None, None),
+                (2, before_stamp, template_center, template_scale),
+                (3, after_stamp, template_center, template_scale),
+                (4, final_stamp, None, None),
+                (5, lowres_stamp, None, None),
+                (6, model_stamp, None, None),
+                (7, residual_stamp, None, None),
+            ]
+            for col, data, center, scale in panel_specs:
+                self._imshow_scaled(axes[row, col], data, cmap="gray_r", center=center, scale=scale)
+                axes[row, col].set_xticks([])
+                axes[row, col].set_yticks([])
+
+            seg = self._segmap_on_stamp(stamp_slices)
+            seg_rgba = np.zeros((*seg.shape, 4), dtype=float)
+            seg_rgba[..., 3] = 1.0
+            seg_rgba[seg == source_id] = (0.75, 0.75, 0.75, 1.0)
+            neighbor_ids = [sid for sid in np.unique(seg[seg > 0]) if int(sid) != int(source_id)]
+            neighbor_palette = np.array(
+                [
+                    (0.10, 0.85, 0.12, 1.0),
+                    (0.95, 0.05, 0.05, 1.0),
+                    (0.10, 0.20, 0.95, 1.0),
+                    (0.95, 0.10, 0.85, 1.0),
+                    (0.00, 0.80, 0.95, 1.0),
+                    (1.00, 0.60, 0.05, 1.0),
+                    (0.65, 0.15, 0.95, 1.0),
+                    (0.90, 0.95, 0.05, 1.0),
+                    (0.00, 0.65, 0.20, 1.0),
+                    (0.95, 0.35, 0.35, 1.0),
+                ],
+                dtype=float,
+            )
+            for color_idx, neighbor_id in enumerate(neighbor_ids):
+                seg_rgba[seg == neighbor_id] = neighbor_palette[color_idx % len(neighbor_palette)]
+            axes[row, 1].imshow(seg_rgba, origin="lower", interpolation="nearest")
+            axes[row, 1].set_xticks([])
+            axes[row, 1].set_yticks([])
+            for label_id in np.unique(seg[seg > 0]):
+                yy, xx = np.nonzero(seg == label_id)
+                if not yy.size:
+                    continue
+                is_target = int(label_id) == int(source_id)
+                axes[row, 1].text(
+                    float(np.mean(xx)),
+                    float(np.mean(yy)),
+                    str(int(label_id)),
+                    color="white",
+                    ha="center",
+                    va="center",
+                    fontsize=8 if is_target else 6,
+                    fontweight="bold" if is_target else "normal",
+                )
+            axes[row, 0].set_ylabel(f"id {source_id}")
+
+        fig.tight_layout()
+        if save is not None:
+            fig.savefig(save, dpi=180, bbox_inches="tight")
+        return fig, axes
+
+    def diagnose_bright_sources(
+        self,
+        *,
+        n: int = 5,
+        ifilt: int = 1,
+        flux_column: str | None = None,
+        half_size: int | None = None,
+        save: str | os.PathLike | None = None,
+    ):
+        """Diagnose the ``n`` brightest fitted sources in one image."""
+        if not hasattr(self, "table"):
+            raise RuntimeError("run the pipeline before calling diagnose_bright_sources")
+        if flux_column is None:
+            flux_column = f"flux_{ifilt}"
+        if flux_column not in self.table.colnames:
+            raise KeyError(f"{flux_column!r} not found in fitted catalog")
+        order = np.argsort(np.asarray(self.table[flux_column], dtype=float))[::-1]
+        source_ids = [int(self.table["id"][idx]) for idx in order[: int(n)]]
+        return self.diagnose_sources(source_ids, ifilt=ifilt, half_size=half_size, save=save)
+
+    def diagnose_source(
+        self,
+        source_id: int,
+        *,
+        ifilt: int = 1,
+        half_size: int | None = None,
+        save: str | os.PathLike | None = None,
+    ):
+        """Plot the template and residual construction stages for one source."""
+        return self.diagnose_sources(
+            [int(source_id)],
+            ifilt=ifilt,
+            half_size=half_size,
+            save=save,
+        )
 
     def plot_result(
         self,
@@ -969,11 +1603,13 @@ def run(
     weights: Sequence[np.ndarray] | None = None,
     wht_images: Sequence[np.ndarray] | None = None,
     kernels: Sequence[np.ndarray | PSFRegionMap] | None = None,
+    psf_throughputs: Sequence[float] | None = None,
     wcs: Sequence[WCS] | None = None,
     window: Window | None = None,
     extend_templates: str | None = None,
+    templates: Templates | Sequence[Template] | None = None,
     config: FitConfig | None = None,
-) -> tuple[Table, list[np.ndarray], SparseFitter]:
+) -> tuple[Table, list[np.ndarray], Pipeline]:
     """Backward compatible wrapper for :class:`Pipeline`"""
 
     pipeline = Pipeline(
@@ -984,12 +1620,15 @@ def run(
         weights=weights,
         wht_images=wht_images,
         kernels=kernels,
+        psf_throughputs=psf_throughputs,
         wcs=wcs,
         window=window,
         extend_templates=extend_templates,
+        templates=templates,
         config=config,
     )
-    return pipeline.run()
+    table, residuals = pipeline.run()
+    return table, residuals, pipeline
 
     # # EXTREMELY SLOW
     # # block into tiles for faster access

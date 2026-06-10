@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 import scipy.sparse as sp
-from scipy.sparse.linalg import cg
+from scipy.sparse.linalg import spsolve, splu
 from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
@@ -17,6 +17,26 @@ import scipy.sparse as sp
 
 # from scipy.sparse.csgraph import connected_components
 from .fit import FitConfig as FitConfig
+
+
+def _positive_diagonal_scale(matrix: sp.spmatrix) -> float:
+    """Return a finite positive diagonal scale for ridge regularization."""
+    diag = np.asarray(matrix.diagonal(), dtype=float)
+    positive = diag[np.isfinite(diag) & (diag > 0)]
+    if positive.size == 0:
+        return 1.0
+    return float(np.median(positive))
+
+
+def _finite_nonnegative(value: float, default: float = 0.0) -> float:
+    """Return a finite non-negative scalar, falling back for invalid input."""
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not np.isfinite(val) or val < 0:
+        return default
+    return val
 
 
 def _slice_intersection(
@@ -140,29 +160,29 @@ class SceneFitter:
             Flux normal matrix (unwhitened).
         b
             Right hand side.
-        reg
-            Diagonal regularisation strength.
+        config
+            Solver configuration. ``reg_flux`` regularizes the flux block,
+            and ``reg_astrom`` regularizes only the shift block.
         AB, BB, bB
             Optional blocks coupling the fluxes to shift parameters.
-        cg_kwargs
-            Extra keyword arguments passed to :func:`scipy.sparse.linalg.cg`.
 
         Returns
         -------
         alpha, err, beta, info
             Unwhitened fluxes, their 1σ errors, optional shift coefficients
-            and the CG exit flag.
+            and the solver exit flag (always 0 for the direct solver).
         """
-        # do regularization here
-        reg = getattr(config, "reg_astrom", 0)
-        if reg <= 0:
-            reg = 1e-6 * np.median(A.diagonal())
-        Areg = A + sp.eye(A.shape[0], format="csr") * reg
+        # Flux regularization must use only the photometric ridge.
+        # Astrometric regularization is applied only to the shift block below.
+        scale_A = _positive_diagonal_scale(A)
+        reg_flux = _finite_nonnegative(getattr(config, "reg_flux", 0.0))
+        lam_A = reg_flux if reg_flux > 0 else 1e-6 * scale_A
+        Areg = A + sp.eye(A.shape[0], format="csr") * lam_A
 
         if AB is not None and BB is not None and bB is not None:
-            diag_BB = BB.diagonal()
-            scale_BB = np.median(diag_BB[diag_BB > 0]) if np.any(diag_BB > 0) else 1.0
-            lam_b = getattr(config, "reg_astrom", 1e-4) * scale_BB
+            scale_BB = _positive_diagonal_scale(BB)
+            reg_astrom = _finite_nonnegative(getattr(config, "reg_astrom", 1e-4))
+            lam_b = reg_astrom * scale_BB
             BBreg = BB + sp.eye(BB.shape[0], format="csr") * lam_b
 
             flux, err, shifts, info = SceneFitter._solve_flux_and_shifts(
@@ -176,18 +196,19 @@ class SceneFitter:
 
     @staticmethod
     def solve_flux(
-        self, A: sp.spmatrix, b: np.ndarray, config: Optional[FitConfig] = None
+        A: sp.spmatrix, b: np.ndarray, config: Optional[FitConfig] = None
     ) -> tuple[np.ndarray, np.ndarray, dict]:
         """Solve ``A x = b`` for flux parameters using conjugate gradient."""
         cfg = config or FitConfig()
         A = A.tocsr()
 
         d = np.sqrt(np.maximum(A.diagonal(), 1e-12))
-        Dinv = diags(1.0 / d, 0, format="csr")
+        Dinv = sp.diags(1.0 / d, 0, format="csr")
         A_w = Dinv @ A @ Dinv
         b_w = Dinv @ b
 
-        x_w, info = cg(A_w, b_w, **cfg.cg_kwargs)
+        x_w = spsolve(A_w, b_w)
+        info = 0
         x = x_w / d
         err = SceneFitter._flux_errors(A_w) / d
 
@@ -229,13 +250,8 @@ class SceneFitter:
         # --- joint solve in whitened variables
         K = sp.bmat([[A_w, AB_w], [AB_w.T, BB_wI]], format="csr")
         rhs = np.concatenate([b_w, bB_w])
-        sol, info = cg(
-            K,
-            rhs,
-            atol=0.0,
-            rtol=cfg.cg_kwargs.get("rtol", 1e-6),
-            maxiter=cfg.cg_kwargs.get("maxiter", 2000),
-        )
+        sol = spsolve(K, rhs)
+        info = 0
 
         na = A.shape[0]
         xw = sol[:na]
@@ -245,13 +261,13 @@ class SceneFitter:
         x = xw / d
         beta = np.linalg.solve(L.T, betaw)
 
-        # errors: diagonal of Schur(A_w - AB_w AB_wᵀ) without mixing sparse/dense
-        if sp.isspmatrix(AB_w):
-            S_w_diag = (A_w - (AB_w @ AB_w.T)).diagonal()
+        # Marginalize over the shift block: Schur complement S_w = A_w − AB_w AB_wᵀ
+        # (BB_wI = I after whitening). Errors are sqrt(diag(S_w⁻¹)) / d.
+        if sp.issparse(AB_w):
+            S_w = (A_w - AB_w @ AB_w.T).toarray()
         else:
-            # AB_w is dense (nA x nB). diag(AB_w AB_wᵀ) = row-wise sum of squares
-            S_w_diag = A_w.diagonal() - np.einsum("ij,ij->i", AB_w, AB_w)
-        err = 1.0 / np.sqrt(np.maximum(S_w_diag, 1e-12)) / d
+            S_w = A_w.toarray() - AB_w @ AB_w.T
+        err = SceneFitter._flux_errors(S_w) / d
 
         if cfg.positivity:
             x = np.maximum(0.0, x)
@@ -259,6 +275,25 @@ class SceneFitter:
         return x, err, beta, {"cg_info": int(info)}
 
     @staticmethod
-    def _flux_errors(A: csr_matrix) -> np.ndarray:
-        """Approximate 1-σ uncertainties from whitened normal matrix."""
-        return 1.0 / np.sqrt(np.maximum(A.diagonal(), 1e-12))
+    def _flux_errors(A, dense_threshold: int = 500) -> np.ndarray:
+        """Return ``sqrt(diag(A^{-1}))`` — 1-σ errors with off-diagonal coupling.
+
+        ``A`` is expected SPD (a whitened normal matrix or its Schur
+        complement). For scene-scale problems (``n ≤ dense_threshold``)
+        a single dense inversion is fastest; above that we factor once
+        with sparse LU and back-solve unit columns one at a time.
+        """
+        n = A.shape[0]
+        if n <= dense_threshold:
+            M = A.toarray() if sp.issparse(A) else np.asarray(A)
+            diag = np.diag(np.linalg.inv(M))
+        else:
+            Acsc = A.tocsc() if sp.issparse(A) else sp.csc_matrix(A)
+            factor = splu(Acsc)
+            diag = np.empty(n)
+            e = np.zeros(n)
+            for i in range(n):
+                e[i] = 1.0
+                diag[i] = factor.solve(e)[i]
+                e[i] = 0.0
+        return np.sqrt(np.maximum(diag, 1e-12))

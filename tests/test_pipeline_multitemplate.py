@@ -11,7 +11,7 @@ def test_pipeline_multitemplate_pass():
     from scipy.ndimage import shift as nd_shift
     images[1] = nd_shift(images[1], (0.5, -0.3))
     kernel = [mutils.matching_kernel(psfs[0], p) for p in psfs]
-    kernel[0] = np.array([[1.0]])
+    kernel[0] = None
     config = FitConfig(multi_tmpl_chi2_thresh=-1e-6, fit_astrometry_niter=0)
     table, resid, fitter = pipeline.run(
         images,

@@ -1,198 +1,227 @@
-"""Utilities for extending JWST STDPSF grids with theoretical halos."""
+"""JWST PSF backend for :mod:`mophongo.psf_factory`.
+
+Thin, readable wrappers around ``stpsf``:
+
+* :func:`build_jwst_psf` -- build one PSF / PSF grid for an explicit
+  instrument / detector / filter / date.
+* :data:`jwst_backend` -- :class:`JWSTBackend` instance plugged into the
+  telescope-agnostic :class:`mophongo.psf_factory.PSFFactory`.
+
+Plus two PSF-shaping helpers retained from the original implementation:
+
+* :func:`blend_psf` -- blend an empirical PSF core with a theoretical halo.
+* :func:`make_extended_grid` -- apply :func:`blend_psf` to every position
+  of an empirical ``STDPSFGrid``.
+"""
 
 from __future__ import annotations
 
+import logging
 import os
-import math
+import re
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
+import stpsf
 from astropy.io import fits
 from astropy.nddata import NDData
-from photutils.psf import STDPSFGrid, GriddedPSFModel
-from datetime import datetime
+from astropy.time import Time
+from photutils.psf import GriddedPSFModel, STDPSFGrid
 
-import stpsf
+logger = logging.getLogger(__name__)
 
-__all__ = ["make_extended_grid", "blend_psf"]
+__all__ = [
+    "build_jwst_psf",
+    "JWSTBackend",
+    "jwst_backend",
+    "make_extended_grid",
+    "blend_psf",
+    "write_stdpsf",
+]
 
-#e WebbPSF in in-flight sim mode, I need a fits file with several header keywords (e.g., INSTRUME, FILTER, DATE-OBS, TIME-OBS, APERNAME…).
-#  In UDS F770W, I have found an i2d image file stored in the google drive (jw1837_miri_F770W_mosaic_v0p1_uds1_masked_sbkgsub_i2d.fits) 
-# has this information in its header so I have used this file to produce the in-flight WebbPSF of UDS F770W, 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Filename token decoders
+# ──────────────────────────────────────────────────────────────────────────
+# Detector token -> (instrument, canonical SCA). 'long' aliases listed first.
+_DETECTOR_PATTERNS: list[tuple[str, str, object]] = [
+    (r"nrcalong", "NIRCAM", "NRCA5"),
+    (r"nrcblong", "NIRCAM", "NRCB5"),
+    (r"nrca5", "NIRCAM", "NRCA5"),
+    (r"nrcb5", "NIRCAM", "NRCB5"),
+    (r"nrca[1-4]", "NIRCAM", lambda m: m.group(0).upper()),
+    (r"nrcb[1-4]", "NIRCAM", lambda m: m.group(0).upper()),
+    (r"nrs[12]", "NIRSPEC", lambda m: m.group(0).upper()),
+    (r"nis\b", "NIRISS", "NIS"),
+    (r"mirimage", "MIRI", "MIRI"),
+]
 
-# ──────────────────────────────────────────────────────────
-# 1.  detector token → (instrument, detector)
-# ──────────────────────────────────────────────────────────
-_PAT = {
-    r'nrca[1-4]' : ("NIRCAM", lambda m: m.group(0).upper()),
-    r'nrcb[1-4]' : ("NIRCAM", lambda m: m.group(0).upper()),
-    r'nrcalong'  : ("NIRCAM", "NRCA5"),     # long-wave detectors
-    r'nrcblong'  : ("NIRCAM", "NRCB5"),
-    r'nrca5'     : ("NIRCAM", "NRCA5"),
-    r'nrcb5'     : ("NIRCAM", "NRCB5"),
-    r'nrs[12]'   : ("NIRSPEC", lambda m: m.group(0).upper()),
-    r'nis'       : ("NIRISS",  "NIS"),
-    r'mirimage'  : ("MIRI",    "MIRI"),
+_FILTER_TOKEN = re.compile(r"[-_](f\d{3,4}[a-z]\d?)(?:[-_]|$)", re.IGNORECASE)
+
+# NIRCam channel partitioning. Anything not in LW is treated as SW.
+_NIRCAM_LW = {
+    "F250M", "F277W", "F300M", "F322W2", "F323N", "F335M", "F356W",
+    "F360M", "F405N", "F410M", "F430M", "F444W", "F460M", "F466N",
+    "F470N", "F480M",
 }
 
-def _decode(fname: str):
-    low = fname.lower()
-    for pat, (inst, det) in _PAT.items():
+
+def _decode_jwst_filename(name: str) -> tuple[str, str]:
+    """Decode ``(instrument, detector)`` from a JWST rate-file name."""
+    low = name.lower()
+    for pat, inst, det in _DETECTOR_PATTERNS:
         m = re.search(pat, low)
         if m:
             return inst, det(m) if callable(det) else det
-    raise ValueError(f"Cannot decode detector from '{fname}'")
+    raise ValueError(f"Cannot decode JWST detector from '{name}'")
 
-# ──────────────────────────────────────────────────────────
-# 2.  filter from CSV file name (- or _ delimiters both ok)
-# ──────────────────────────────────────────────────────────
-import re, pathlib
-_FILTER_TOKEN = re.compile(r'[-_]f\d{3,4}[a-z]\d?_?', re.IGNORECASE)
 
-def _filter_from_csv_path(csv_path: str | pathlib.Path) -> str:
-    m = _FILTER_TOKEN.search(str(csv_path).lower())
+def _filter_from_path(path: str | os.PathLike) -> str:
+    """Extract the ``Fxxx[xM|W|N]`` filter token from a filename/path."""
+    m = _FILTER_TOKEN.search(str(path).lower())
     if not m:
-        raise ValueError(f"Filter token not found in '{csv_path}'")
-    return m.group(0).lstrip('-_').rstrip('_').upper()   # → 'F444W', 'F115W2' …
-
-# ──────────────────────────────────────────────────────────
-# 3.  densest-window finder  (returns centre & mask)
-# ──────────────────────────────────────────────────────────
-import numpy as np
-def _modal_mjd(arr, span=3.0):
-    arr  = np.asarray(arr, float)
-    sort = np.sort(arr)
-    best_cnt, best_i = 0, 0
-    for i, v in enumerate(sort):
-        cnt = np.searchsorted(sort, v + span) - i
-        if cnt > best_cnt:
-            best_cnt, best_i = cnt, i
-    lo   = sort[best_i]
-    mask = (arr >= lo) & (arr <= lo + span)
-    centre = lo + span / 2
-    return centre, mask
+        raise ValueError(f"Filter token not found in '{path}'")
+    return m.group(1).upper()
 
 
-# ----------------------------------------------------------------------
-# accepted short-/long-wave NIRCam filters  (minimal examples – extend!)
-# ----------------------------------------------------------------------
-_NIRCAM_SW = {
-    'F070W','F090W','F115W','F150W','F140M','F182M','F200W','F250M',
-}
-_NIRCAM_LW = {
-    'F277W','F356W','F444W','F410M','F430M','F460M','F480M',
-}
+def _stpsf_instrument(instrument: str):
+    inst = instrument.upper()
+    if inst == "NIRCAM":
+        return stpsf.NIRCam()
+    if inst == "MIRI":
+        return stpsf.MIRI()
+    if inst == "NIRISS":
+        return stpsf.NIRISS()
+    if inst == "NIRSPEC":
+        return stpsf.NIRSpec()
+    raise ValueError(f"Unsupported JWST instrument: {instrument!r}")
 
-# ---------- public helper -------------------------------------------------
-def psf_grid_from_csv(
-    csv_path,
+
+# ──────────────────────────────────────────────────────────────────────────
+# Low-level PSF builder
+# ──────────────────────────────────────────────────────────────────────────
+def build_jwst_psf(
     *,
-    detector   = None,          # ← NEW
-    num_psfs   = 1,
-    oversample = 4,
-    fov_arcsec = None,
-    span       = 5.0,           # days around the modal MJD
-    save       = False,
-    outdir     = None,
-    use_detsampled_psf = False,
-    prefix     = 'STDPSF',
-    postfix    = '',
-    verbose    = False,
-    overwrite = False,
-):
-    """
-    Build one or several STPSF PSF grids for the dominant epoch in *csv_path*.
+    instrument: str,
+    filter: str,
+    detector: str | None = None,
+    date: float | str | Time | None = None,
+    num_psfs: int = 1,
+    oversample: int = 4,
+    fov_arcsec: float = 5.0,
+    use_detsampled_psf: bool = False,
+    parity: str = "odd",
+    opd_choice: str = "closest",
+    verbose: bool = False,
+) -> GriddedPSFModel:
+    """Build a single STPSF PSF / PSF grid.
 
     Parameters
     ----------
-    detector : str or None
-        • ``"NRCA1"``, ``"NRCB5"`` … → build only that detector  
-        • ``None`` **and instrument = NIRCam** → build all SW or LW SCAs
-          appropriate for the filter.
-    Other parameters are forwarded to ``Instrument.psf_grid``; the routine
-    always sets ``save=``, ``outdir=`` and an auto‐generated ``outfile`` for
-    each grid.
+    instrument
+        ``'NIRCAM'``, ``'MIRI'``, ``'NIRISS'``, or ``'NIRSPEC'``.
+    filter
+        Filter name e.g. ``'F444W'``.
+    detector
+        NIRCam SCA name (e.g. ``'NRCA5'``). Required for NIRCam; ignored
+        for single-detector instruments.
+    date
+        MJD (float), ISO date string, or :class:`astropy.time.Time`. When
+        given, the wavefront OPD nearest in time is loaded.
+    num_psfs
+        Total number of PSFs in the grid. Must be a perfect square
+        (1, 4, 9, 16, 25, ...); ``stpsf`` lays them out as
+        ``sqrt(num_psfs) x sqrt(num_psfs)`` across the detector.
+    oversample
+        Pixel-space oversampling factor used by ``stpsf``.
+    fov_arcsec
+        Field of view of each PSF in arcsec.
+    use_detsampled_psf
+        If True, return detector-sampled PSFs (``oversample`` is then the
+        internal calculation factor only).
+    parity
+        ``'odd'`` (default) or ``'even'`` -- forwarded to ``inst.options``.
+    opd_choice
+        ``load_wss_opd_by_date`` selection mode.
+    verbose
+        Passed through to ``inst.psf_grid``.
     """
-    import pandas as pd, re, pathlib, numpy as np
-    from astropy.time import Time
-    import stpsf
+    inst = _stpsf_instrument(instrument)
+    inst.filter = filter
+    if instrument.upper() == "NIRCAM":
+        if not detector:
+            raise ValueError("NIRCam requires an explicit detector (e.g. 'NRCA5')")
+        inst.detector = detector
+    inst.options["parity"] = parity
 
-    # --- CSV → dominant row ------------------------------------------------
-    tab = pd.read_csv(csv_path)
-    if 'mjd-avg' not in tab.columns:
-        raise ValueError("CSV must contain 'mjd-avg'")
-    centre, mask = _modal_mjd(tab['mjd-avg'], span)
-    row = tab[mask].iloc[0]
+    if date is not None:
+        if isinstance(date, Time):
+            date_obj = date
+        elif isinstance(date, (int, float)):
+            date_obj = Time(float(date), format="mjd")
+        else:
+            date_obj = Time(date)
+        inst.load_wss_opd_by_date(date_obj, choice=opd_choice)
+    else:
+        date_obj = None
 
-    inst_name, det_from_file = _decode(row['file'])
-    filt = _filter_from_csv_path(csv_path)
-
-    # --- decide list of detectors -----------------------------------------
-    if detector:                                   # user forces one SCA
-        det_list = [detector.upper()]
-    elif inst_name == 'NIRCAM':
-        if filt in _NIRCAM_LW:
-            det_list = ['NRCA5', 'NRCB5']
-        else:                                      # treat everything else as SW
-            det_list = ['NRCA1','NRCA2','NRCA3','NRCA4',
-                         'NRCB1','NRCB2','NRCB3','NRCB4']
-    else:                                          # non-NIRCam: single detector
-        det_list = [det_from_file]
-
-    grids = []                                     # collect returned HDULists
-    date_obs = Time(centre, format='mjd')
-
-    if verbose:
-        print(f"{inst_name}  filter={filt}  date={date_obs.isot[:10]}  "
-              f"detectors={','.join(det_list)}  "
-              f"({mask.sum()} files in ±{span/2:.1f} d)")
-
-    # --- loop over detectors ----------------------------------------------
-    for det in det_list:
-        outfile = pathlib.Path('_'.join(filter(None, (prefix, det, filt, postfix))) + '.fits')
-        print('OUTFILE:', outfile, )
-        if (outdir / outfile).exists() and not overwrite:
-            print(f"Skipping {outfile} (exists, overwrite={overwrite})")
-            continue
-
-        match inst_name:
-            case 'NIRCAM':
-                inst = stpsf.NIRCam();  inst.detector = det; inst.filter = filt
-            case 'MIRI':
-                inst = stpsf.MIRI(); inst.filter = filt
-            case 'NIRISS':
-                inst = stpsf.NIRISS();     inst.filter = filt
-            case 'NIRSPEC':
-                inst = stpsf.NIRSpec();    inst.filter = filt
-            case _:
-                raise RuntimeError(f"Unsupported instrument {inst_name}")
-
-        inst.load_wss_opd_by_date(date_obs, choice='closest')
-        inst.options['parity'] = 'odd'
-
-        if save:
-            os.makedirs(outdir, exist_ok=True)
-        
-        grid = inst.psf_grid(
-            num_psfs      = num_psfs,
-            oversample    = oversample,
-            fov_arcsec    = fov_arcsec,
-            all_detectors = False,
-            use_detsampled_psf = use_detsampled_psf,
-            verbose       = verbose,            
-        )
-
-        grid.meta['DATE-OBS'] = date_obs.isot
-        grid.meta['MJD-AVG'] = centre
-        grids.append(grid)
-
-        if save:
-            write_stdpsf(outdir / outfile, grid, overwrite=True, verbose=True)
-        
-    return grids
+    grid = inst.psf_grid(
+        num_psfs=num_psfs,
+        oversample=oversample,
+        fov_arcsec=fov_arcsec,
+        all_detectors=False,
+        use_detsampled_psf=use_detsampled_psf,
+        verbose=verbose,
+    )
+    if date_obj is not None:
+        grid.meta["DATE-OBS"] = date_obj.isot
+        grid.meta["MJD-AVG"] = float(date_obj.mjd)
+    return grid
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Backend adapter
+# ──────────────────────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class JWSTBackend:
+    """JWST telescope backend for :class:`PSFFactory`."""
 
+    name: str = "JWST"
+
+    @staticmethod
+    def detect(filename: str) -> bool:
+        low = filename.lower()
+        return any(re.search(p, low) for p, *_ in _DETECTOR_PATTERNS) or low.startswith("jw")
+
+    @staticmethod
+    def decode_filename(name: str) -> tuple[str, str]:
+        return _decode_jwst_filename(name)
+
+    @staticmethod
+    def filter_from_path(path: str | os.PathLike) -> str:
+        return _filter_from_path(path)
+
+    @staticmethod
+    def detectors_for_filter(instrument: str, filt: str) -> list[str]:
+        if instrument.upper() != "NIRCAM":
+            return []  # caller falls back to detector decoded from the CSV
+        if filt.upper() in _NIRCAM_LW:
+            return ["NRCA5", "NRCB5"]
+        return [f"NRC{ab}{i}" for ab in "AB" for i in range(1, 5)]
+
+    @staticmethod
+    def build(**kwargs) -> GriddedPSFModel:
+        return build_jwst_psf(**kwargs)
+
+
+jwst_backend = JWSTBackend()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Empirical-core / theoretical-halo blending
+# ──────────────────────────────────────────────────────────────────────────
 def blend_psf(
     core_psf: np.ndarray,
     ext_psf: np.ndarray,
@@ -201,82 +230,58 @@ def blend_psf(
     Rnorm_px: float = 30,
     buf_px: int = 4,
     subtract_bg: bool = True,
-    bg_pct: float = 15.0,      # Percentile for background subtraction        
+    bg_pct: float = 15.0,
     *,
     test: bool = False,
 ) -> np.ndarray:
-    """
-    Blend empirical and theoretical PSFs with smooth transition and core normalization.
-    Uses a linear taper inward from R_inner.
+    """Blend empirical core with theoretical halo.
 
-    Returns
-    -------
-    ndarray
-        Normalised blended PSF.
+    Inserts ``core_psf`` into the centre of ``ext_psf`` with a linear taper
+    of width ``Rtaper_px`` inward from ``Rcore_px``. The halo is rescaled so
+    its enclosed flux inside ``Rnorm_px`` matches that of the core. When
+    ``subtract_bg``, a DC offset estimated in an outer annulus (pixels below
+    the ``bg_pct`` percentile, excluding a ``buf_px`` edge) is removed from
+    the core before blending.
     """
     from astropy.nddata import Cutout2D
 
     core_shape = core_psf.shape
-    core_psf_out = core_psf
-    
-    core_psf_out = core_psf
-    
     pos = np.asarray(ext_psf.shape) // 2
     ext_cutout = Cutout2D(ext_psf, position=pos, size=core_shape)
     ext_cutout_data = ext_cutout.data
 
-    N = core_psf.shape[0]//2
-    r = np.hypot(*np.indices(core_psf.shape) - N)  
+    N = core_psf.shape[0] // 2
+    r = np.hypot(*np.indices(core_psf.shape) - N)
 
-    
-    # Scaling for normalization in the blend region
     mask_norm = r <= min(Rnorm_px, N)
-    scl_ext = core_psf_out[mask_norm].sum() / ext_cutout_data[mask_norm].sum()
+    scl_ext = core_psf[mask_norm].sum() / ext_cutout_data[mask_norm].sum()
 
-    
-    # Scaling for normalization in the blend region
-    mask_norm = r <= min(Rnorm_px, N)
-    scl_ext = core_psf_out[mask_norm].sum() / ext_cutout_data[mask_norm].sum()
-
+    core_psf_out = core_psf
     if subtract_bg:
-        bgmask = ~(core_psf > np.nanpercentile(core_psf[core_psf > 0.0],bg_pct) ) & (r < N - buf_px)
-        bgmask = ~(core_psf > np.nanpercentile(core_psf[core_psf > 0.0],bg_pct) ) & (r < N - buf_px)
+        bgmask = ~(core_psf > np.nanpercentile(core_psf[core_psf > 0.0], bg_pct)) & (r < N - buf_px)
         if np.any(bgmask):
-            core_psf_out = core_psf - np.nanmedian((core_psf - ext_cutout_data)[bgmask])  
-            print('percentile background core:', np.nanmedian((core_psf)[bgmask]))  
-            print('percentile background extended:', np.nanmedian((ext_cutout_data)[bgmask]))  
-            print('subtracting background -(core - extended):', np.nanmedian((core_psf - ext_cutout_data)[bgmask]))  
-            core_psf_out = core_psf - np.nanmedian((core_psf - ext_cutout_data)[bgmask])  
-            print('percentile background core:', np.nanmedian((core_psf)[bgmask]))  
-            print('percentile background extended:', np.nanmedian((ext_cutout_data)[bgmask]))  
-            print('subtracting background -(core - extended):', np.nanmedian((core_psf - ext_cutout_data)[bgmask]))  
-   
+            offset = np.nanmedian((core_psf - ext_cutout_data)[bgmask])
+            core_psf_out = core_psf - offset
+            logger.debug("blend_psf: bg offset (core-ext) = %.3g", offset)
+
     buf_px = int(buf_px)
     R_inner = min(Rcore_px, core_psf_out.shape[0] // 2 - buf_px)
-    Rtaper_px = max(int(Rtaper_px), 1)  # ensure at least 1 pixel
+    Rtaper_px = max(int(Rtaper_px), 1)
 
-    # Linear taper inward from R_inner
     w = np.ones_like(ext_cutout_data)
     annulus = (r > R_inner - Rtaper_px) & (r <= R_inner)
     w[annulus] = 1 - (r[annulus] - (R_inner - Rtaper_px)) / Rtaper_px
     w[r > R_inner] = 0.0
-    print(f"R_inner: {R_inner}, Rtaper_px: {Rtaper_px}, R_norm: {Rnorm_px}, #pix in annulus: {np.sum(annulus)}")
 
-
-    # Insert blended core into full halo (no extra scaling of full halo)
     blended = ext_psf.copy() * scl_ext
-    
-    # Blend only the ext_cutout region
     blend_core = w * core_psf_out + (1 - w) * ext_cutout_data * scl_ext
     blended[ext_cutout.slices_original] = np.maximum(blend_core, 0)
 
-    # Normalize total sum to 1
-#    blend_psf /= blend_psf.sum()
     if test:
         return blended, w, blend_core, ext_cutout_data, ext_cutout.slices_original
-    return blended 
+    return blended
 
- 
+
 def make_extended_grid(
     emp: str | STDPSFGrid,
     Rmax: float,
@@ -284,39 +289,34 @@ def make_extended_grid(
     Rtaper: float = 0.2,
     Rnorm: float = 0.5,
     verbose: bool = False,
-    subtract_bg=True,       # subtract dc offset from ePSF
-    bg_pct: float = 15.0,    # Percentile for dc offset 
+    subtract_bg: bool = True,
+    bg_pct: float = 15.0,
     return_stpsf: bool = True,
     test: bool = False,
 ) -> GriddedPSFModel:
-    """Create an extended JWST PSF grid.
+    """Extend an empirical PSF grid with theoretical wings from ``stpsf``.
 
     Parameters
     ----------
-    emp : str or STDPSFGrid
-        Path to an STDPSF FITS file or an ``STDPSFGrid`` instance.
-    Rmax : float
+    emp
+        Path to an STDPSF FITS file or an :class:`STDPSFGrid` instance.
+    Rmax
         Outer radius of the final PSF in arcsec.
-    Rtaper : float, optional
-        Width of the blending region in arcsec. Default is 0.2.
-    pixscale : float, optional
-        Detector pixel scale in arcsec/px. Defaults to ``0.063`` for
-        the NIRCam long wavelength channel.
-
-    Returns
-    -------
-    GriddedPSFModel
-        New grid containing blended empirical cores and theoretical halos.
+    Rtaper, Rnorm
+        Blend taper width and normalisation radius in arcsec.
+    subtract_bg, bg_pct
+        Background subtraction control (see :func:`blend_psf`).
+    return_stpsf
+        If True (default), also return the bare theoretical halo grid.
     """
     if isinstance(emp, (str, bytes, os.PathLike)):
-        emp_grid = STDPSFGrid(emp)  # type: ignore[arg-type]
+        emp_grid = STDPSFGrid(emp)
     else:
         emp_grid = emp
 
-    # Ensure the detector name is compatible with stpsf
-    if emp_grid.meta['detector'][-1] == 'L': 
-        emp_grid.meta['detector'] = emp_grid.meta['detector'][:-1] + '5'
-   
+    if emp_grid.meta["detector"][-1] == "L":  # 'NRCALONG' -> 'NRCA5'
+        emp_grid.meta["detector"] = emp_grid.meta["detector"][:-1] + "5"
+
     oversamp = emp_grid.oversampling[0]
     grid_xy = emp_grid.grid_xypos
     det_name = emp_grid.meta.get("detector", "NRC")
@@ -327,8 +327,8 @@ def make_extended_grid(
     nrc = stpsf.NIRCam()
     nrc.filter = filt_name
     nrc.detector = det_name
-    nrc.options['parity'] = 'odd'
-    
+    nrc.options["parity"] = "odd"
+
     if test:
         grid_xy = np.array([[0, 0]])
         Nemp = 1
@@ -346,12 +346,11 @@ def make_extended_grid(
 
     n_outpix = st_grid.data[0].shape[0]
     out_arr = np.empty((Nemp, n_outpix, n_outpix), dtype=float)
-    print(out_arr.shape, emp_grid.data.shape, st_grid.data.shape)
     for i in range(Nemp):
         out_arr[i] = blend_psf(
-            emp_grid.data[i], st_grid.data[i], 
-            Rcore_px, Rtaper_px = Rtaper_px, Rnorm_px = Rnorm_px, 
-            subtract_bg=subtract_bg, bg_pct=bg_pct
+            emp_grid.data[i], st_grid.data[i],
+            Rcore_px, Rtaper_px=Rtaper_px, Rnorm_px=Rnorm_px,
+            subtract_bg=subtract_bg, bg_pct=bg_pct,
         )
 
     meta = {
@@ -369,29 +368,24 @@ def make_extended_grid(
         "note": "empirical STDPSF core + stpsf halo",
         "pixscale": nrc.pixelscale,
     }
- 
-    gpm = GriddedPSFModel( NDData(out_arr, meta=meta))
+
+    gpm = GriddedPSFModel(NDData(out_arr, meta=meta))
     if return_stpsf:
-        return gpm, GriddedPSFModel( NDData(st_grid.data, meta=meta))
-    else:
-        return gpm
+        return gpm, GriddedPSFModel(NDData(st_grid.data, meta=meta))
+    return gpm
 
-import numpy as np
-from datetime import datetime
-from pathlib import Path
-from astropy.io import fits
 
-import re
+# ──────────────────────────────────────────────────────────────────────────
+# STDPSF-format FITS writer
+# ──────────────────────────────────────────────────────────────────────────
 def _fits_key(name: str) -> str:
-    key = re.sub(r'[^A-Z0-9-]', '', name.upper())[:8]
-    return key if key and key[0].isalpha() else 'METAKEY'
+    key = re.sub(r"[^A-Z0-9-]", "", name.upper())[:8]
+    return key if key and key[0].isalpha() else "METAKEY"
 
-# ─────────────────────────────────────────────────────────────────────
-# Main writer
-# ─────────────────────────────────────────────────────────────────────
+
 def write_stdpsf(
     filename: str | Path,
-    psf_grid=None,                     # NEW name; raw cube still accepted
+    psf_grid=None,
     xgrid: np.ndarray | None = None,
     ygrid: np.ndarray | None = None,
     *,
@@ -401,110 +395,82 @@ def write_stdpsf(
     history: str | None = None,
     verbose: bool = False,
 ):
-    """
-    Write a JWST “STDPSF” file.
-    Write a JWST “STDPSF” file.
+    """Write a JWST STDPSF-format FITS file.
 
     Parameters
     ----------
-    filename  :  str or Path
+    filename
         Destination path.
-    psf_grid  :  STDPSFGrid object **or** (N, Y, X) float32 array.
-    xgrid/ygrid
-        1-D arrays of detector-pixel centres for the PSF grid.
-        *Ignored* when a STDPSFGrid is passed (taken from its meta).
-    filename  :  str or Path
-        Destination path.
-    psf_grid  :  STDPSFGrid object **or** (N, Y, X) float32 array.
-    xgrid/ygrid
-        1-D arrays of detector-pixel centres for the PSF grid.
-        *Ignored* when a STDPSFGrid is passed (taken from its meta).
+    psf_grid
+        :class:`STDPSFGrid` / :class:`GriddedPSFModel` instance **or** raw
+        ``(N, Y, X)`` float array.
+    xgrid, ygrid
+        1-D arrays of detector-pixel centres for the PSF grid. Ignored when
+        a grid object is passed (taken from its ``grid_xypos``).
+    detector, filt
+        Override values written to ``DETECTOR`` / ``FILTER`` keywords. If
+        omitted they are taken from ``psf_grid.meta``.
     """
-
-    # ───────────────────── accept either STDPSFGrid or raw cube ──────────
     if hasattr(psf_grid, "data") and hasattr(psf_grid, "meta"):
-        grid_obj = psf_grid
-        cube     = np.asarray(grid_obj.data,  dtype='float32')
-        xgrid    = np.unique(grid_obj.grid_xypos[:, 0]).astype(int)
-        ygrid    = np.unique(grid_obj.grid_xypos[:, 1]).astype(int)
-        detector = detector or grid_obj.meta.get("detector")
-        filt     = filt     or grid_obj.meta.get("filter")
-        meta     = dict(grid_obj.meta)          # copy – we'll pop below
+        cube = np.asarray(psf_grid.data, dtype="float32")
+        xgrid = np.unique(psf_grid.grid_xypos[:, 0]).astype(int)
+        ygrid = np.unique(psf_grid.grid_xypos[:, 1]).astype(int)
+        detector = detector or psf_grid.meta.get("detector")
+        filt = filt or psf_grid.meta.get("filter")
+        meta = dict(psf_grid.meta)
     else:
-        cube  = np.asarray(psf_grid, dtype='float32')
-        meta  = {}                              # nothing extra to copy
+        cube = np.asarray(psf_grid, dtype="float32")
+        meta = {}
 
     if cube.ndim != 3:
         raise ValueError("psf_grid/cube must be a 3-D array (N, Y, X)")
-
     npsf, ny, nx = cube.shape
-
     if npsf != len(xgrid) * len(ygrid):
         raise ValueError(
-            f"psf_grid.shape[0] ({npsf}) ≠ len(xgrid)*len(ygrid) "
-            f"({len(xgrid)*len(ygrid)})")
+            f"psf_grid.shape[0] ({npsf}) != len(xgrid)*len(ygrid) "
+            f"({len(xgrid) * len(ygrid)})"
+        )
 
-    # ───────────────────── primary HDU and required keywords ─────────────
-    hdu  = fits.PrimaryHDU(cube)
-    hdr  = hdu.header
-    hdr['NAXIS1'] = nx
-    hdr['NAXIS2'] = ny
-    hdr['NAXIS3'] = npsf
-    hdr['NXPSFs'] = len(xgrid)
-    hdr['NYPSFs'] = len(ygrid)
-
-    # detector grid positions – store pixel numbers 1-indexed
+    hdu = fits.PrimaryHDU(cube)
+    hdr = hdu.header
+    hdr["NAXIS1"] = nx
+    hdr["NAXIS2"] = ny
+    hdr["NAXIS3"] = npsf
+    hdr["NXPSFs"] = len(xgrid)
+    hdr["NYPSFs"] = len(ygrid)
     for i, xv in enumerate(xgrid, 1):
-        hdr[f'IPSFX{i:02d}'] = int(xv + 1)
-        hdr[f'IPSFX{i:02d}'] = int(xv + 1)
+        hdr[f"IPSFX{i:02d}"] = int(xv + 1)
     for i, yv in enumerate(ygrid, 1):
-        hdr[f'JPSFY{i:02d}'] = int(yv + 1)
-        hdr[f'JPSFY{i:02d}'] = int(yv + 1)
-
-    # convenience keywords
+        hdr[f"JPSFY{i:02d}"] = int(yv + 1)
     if detector:
-        hdr['DETECTOR'] = detector
+        hdr["DETECTOR"] = detector
     if filt:
-        hdr['FILTER']   = filt
+        hdr["FILTER"] = filt
 
-    # ───────────────── copy every meta entry into the header ──────────────
     for key, raw in meta.items():
-
-        # skip if explicitly handled above
-        if key.lower() in {'detector', 'filter'}:
+        if key.lower() in {"detector", "filter"}:
             continue
-
-        # unpack "(value, comment)" or fall back to plain value
         if isinstance(raw, tuple) and len(raw) >= 1:
-            val     = raw[0]
-            comment = raw[1] if len(raw) > 1 else ''
+            val = raw[0]
+            comment = raw[1] if len(raw) > 1 else ""
         else:
-            val     = raw
-            comment = f'From meta: {key}'
-
-        # FITS keyword (≤8 chars, alnum only)
+            val, comment = raw, f"From meta: {key}"
         kw = _fits_key(key)
-
-        # truncate very long strings so they fit (FITS allows 68 chars)
         if isinstance(val, str):
             val = val[:68]
-
         try:
             hdr[kw] = (val, comment)
         except Exception:
-            # fall back to string representation if value type not supported
             hdr[kw] = (str(val)[:68], comment)
 
-    # ───────────────────── date / time / history ────────────────────────
-    now = datetime.utcnow()
-    hdr['DATE'] = now.strftime('%Y-%m-%d')
-    hdr['TIME'] = now.strftime('%H:%M:%S')
-    hdr.add_history('File written by write_stdpsf')
+    now = datetime.now(timezone.utc)
+    hdr["DATE"] = now.strftime("%Y-%m-%d")
+    hdr["TIME"] = now.strftime("%H:%M:%S")
+    hdr.add_history("File written by write_stdpsf")
     if history:
         for line in history.splitlines():
             hdr.add_history(line.strip())
 
-    # ───────────────────── write file ────────────────────────────────────
     hdu.writeto(filename, overwrite=overwrite)
     if verbose:
-        print(f"Wrote {npsf} PSFs ➜ {filename}")
+        logger.info("Wrote %d PSFs -> %s", npsf, filename)

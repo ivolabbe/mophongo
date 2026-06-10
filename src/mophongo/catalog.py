@@ -68,11 +68,12 @@ from scipy.ndimage import binary_dilation
 import numpy as np
 
 import numpy as np
-from scipy.signal import fftconvolve
 from scipy.ndimage import binary_dilation, gaussian_filter, zoom
 from astropy.stats import mad_std
 from photutils.segmentation import detect_sources
 from skimage.morphology import disk
+
+from .utils import fftconvolve
 
 # --- helpers ---------------------------------------------------------------
 
@@ -582,6 +583,43 @@ DEFAULT_COLUMNS = [
 ]
 
 
+def _deblend_label_info(
+    final_segmap: np.ndarray | SegmentationImage,
+    parent_segmap: np.ndarray | SegmentationImage | None,
+) -> dict[int, tuple[int, int, bool]]:
+    """Map final segmentation labels to their pre-deblend parent labels.
+
+    A final label is marked deblended when its pre-deblend parent label split
+    into more than one final child label. This records the catalog/deblender
+    provenance, not whether multiple truth sources overlap a label.
+    """
+    final_data = np.asarray(final_segmap.data if isinstance(final_segmap, SegmentationImage) else final_segmap)
+    labels = np.unique(final_data)
+    labels = labels[labels > 0]
+    if parent_segmap is None:
+        return {int(label): (int(label), 1, False) for label in labels}
+
+    parent_data = np.asarray(parent_segmap.data if isinstance(parent_segmap, SegmentationImage) else parent_segmap)
+    parent_by_label: dict[int, int] = {}
+    for label in labels:
+        parents = parent_data[final_data == label]
+        parents = parents[parents > 0]
+        if parents.size == 0:
+            parent_by_label[int(label)] = int(label)
+            continue
+        vals, counts = np.unique(parents, return_counts=True)
+        parent_by_label[int(label)] = int(vals[np.argmax(counts)])
+
+    child_counts: dict[int, int] = {}
+    for parent in parent_by_label.values():
+        child_counts[parent] = child_counts.get(parent, 0) + 1
+
+    return {
+        label: (parent, child_counts[parent], child_counts[parent] > 1)
+        for label, parent in parent_by_label.items()
+    }
+
+
 @dataclass
 class CatConfig:
     """Configuration options for :class:`SparseFitter`."""
@@ -604,6 +642,7 @@ class Catalog:
     background: float = 0.0
     ivar: np.ndarray | None = None
     segmap: SegmentationImage | None = None
+    parent_segmap: SegmentationImage | None = None
     catalog: SourceCatalog | None = None
     table: Table | None = None
     det_img: np.ndarray | None = None
@@ -683,6 +722,7 @@ class Catalog:
         if self.params["dilate_segmap"] > 0:
             print(f"Dilating segmentation map with size {self.params['dilate_segmap']}")
             segmap.data = safe_dilate_segmentation(segmap, disk(self.params["dilate_segmap"]))
+        self.parent_segmap = SegmentationImage(np.array(segmap.data, copy=True))
         if self.params["deblend_mode"] is not None:
             segmap = deblend_sources(
                 self.det_img,
@@ -737,6 +777,19 @@ class Catalog:
         ).value
         self.table["snr"] = self.table["segment_flux"] / self.table["segment_fluxerr"]
         self.table.rename_columns(["label", "xcentroid", "ycentroid"], ["id", "x", "y"])
+        deblend_info = _deblend_label_info(self.segmap, self.parent_segmap)
+        self.table["deblend_parent_label"] = np.array(
+            [deblend_info.get(int(label), (int(label), 1, False))[0] for label in self.table["id"]],
+            dtype=np.int32,
+        )
+        self.table["deblend_nchildren"] = np.array(
+            [deblend_info.get(int(label), (int(label), 1, False))[1] for label in self.table["id"]],
+            dtype=np.int32,
+        )
+        self.table["is_deblended"] = np.array(
+            [deblend_info.get(int(label), (int(label), 1, False))[2] for label in self.table["id"]],
+            dtype=bool,
+        )
         if "sky_centroid" in self.table.colnames:
             self.table["ra"] = [
                 sc.ra.deg if sc is not None else np.nan for sc in self.table["sky_centroid"]
@@ -984,3 +1037,366 @@ class Catalog:
             a.set_axis_off()
         fig.tight_layout()
         return fig, ax
+
+
+# --------------------------------------------------------------------------
+# Saturation ↔ segmentation interop
+# --------------------------------------------------------------------------
+# These helpers consume the per-source table produced by
+# :func:`mophongo.saturate.repair_saturated_holes` (columns ``xc, yc,
+# r_equiv``, optionally ``r_out``) and act on a segmentation map. They
+# live here, NOT in ``saturate.py``: the saturation algorithm does not
+# need to know about catalogs, and segmap manipulation is the catalog
+# module's responsibility.
+
+
+def merge_segments_at_holes(
+    seg: np.ndarray,
+    holes: "Table",
+    *,
+    dilate_factor: float = 8.0,
+    dilate_min: float = 5.0,
+) -> dict[int, list[int]]:
+    """For each repaired hole, list segmentation labels within a radius.
+
+    Parameters
+    ----------
+    seg
+        2D integer segmentation map.
+    holes
+        Astropy ``Table`` with columns ``id, yc, xc, r_equiv``. Typically
+        the ``fits`` table returned by
+        :func:`mophongo.saturate.repair_saturated_holes` (or the holes
+        catalog from :func:`mophongo.saturate.find_wht_holes`).
+    dilate_factor, dilate_min
+        Search radius around each hole is
+        ``max(r_equiv * dilate_factor, dilate_min)`` pixels. The factor
+        captures spike halos: brighter (larger-hole) stars have wider
+        diffraction spikes that fragment the segmap.
+
+    Returns
+    -------
+    dict
+        ``{hole_id: sorted list of segmentation label ids inside r_merge}``.
+
+    Notes
+    -----
+    Pure read-only inspection — does not modify ``seg``. Callers can use
+    the returned mapping to relabel a segmap (e.g. by collapsing all
+    matched labels of one hole into a single ID), but that policy choice
+    is left to the caller.
+    """
+    H, W = seg.shape
+    out: dict[int, list[int]] = {}
+    for row in holes:
+        yc = float(row["yc"])
+        xc = float(row["xc"])
+        r_eq = float(row["r_equiv"])
+        r_merge = max(r_eq * dilate_factor, float(dilate_min))
+        y0 = max(0, int(np.floor(yc - r_merge)))
+        y1 = min(H, int(np.ceil(yc + r_merge)) + 1)
+        x0 = max(0, int(np.floor(xc - r_merge)))
+        x1 = min(W, int(np.ceil(xc + r_merge)) + 1)
+        sub = seg[y0:y1, x0:x1]
+        if sub.size == 0 or not np.any(sub > 0):
+            out[int(row["id"])] = []
+            continue
+        ys_local, xs_local = np.where(sub > 0)
+        ys = ys_local + y0
+        xs = xs_local + x0
+        d2 = (ys - yc) ** 2 + (xs - xc) ** 2
+        within = d2 <= r_merge * r_merge
+        if not within.any():
+            out[int(row["id"])] = []
+            continue
+        ids = np.unique(sub[ys_local[within], xs_local[within]])
+        out[int(row["id"])] = sorted(int(v) for v in ids)
+    return out
+
+
+def repair_saturated_catalog(
+    catalog: Table,
+    segmap: np.ndarray,
+    fit_table: Table,
+    *,
+    fwhm_pix: float,
+    filter_name: str,
+    n_fwhm: float = 5.0,
+    id_col: str = "id",
+    x_col: str = "x",
+    y_col: str = "y",
+    pad: int | None = None,
+    sci: np.ndarray | None = None,
+    psf_stamp: np.ndarray | None = None,
+    amplitude_col: str = "amplitude",
+    flux_frac_thresh: float = 0.5,
+) -> Tuple[Table, np.ndarray, Table]:
+    """Merge oversplit saturated-star segments + catalog rows.
+
+    For each successfully fit star in ``fit_table`` (rows with
+    ``ok=True``):
+
+    1. Collect all segmentation labels intersecting a circle of radius
+       ``n_fwhm * fwhm_pix`` pixels around ``(xc, yc)``.
+    2. Allocate a new parent label
+       (``max(segmap) + 1``, incrementing).
+    3. Close interior holes in the union of those child labels via
+       ``scipy.ndimage.binary_fill_holes`` (the saturated core, which is
+       background in the input segmap, becomes part of the parent).
+       Newly-filled pixels are restricted to the merge circle.
+    4. Drop the child rows from ``catalog`` and add a single parent row
+       inherited from the brightest child (largest segmap area) with
+       updated ``id``, ``x``, ``y`` from the PSF fit, and
+       ``FLAG_SATURATED_<FILTER>`` set to 1.
+    5. Bulk-remap all child labels to the parent label via a LUT pass.
+
+    The weight map (segmap input here) is **not** grown to a PSF
+    isophote — the saturated hole in ``wht`` is left untouched. Only
+    the segmap is closed so the merged segment has no interior gap.
+
+    Parameters
+    ----------
+    catalog
+        Source catalog. Must contain ``id_col`` matching segmap labels.
+    segmap
+        2D integer segmentation map. Modified copy returned, not in
+        place.
+    fit_table
+        Table from
+        :func:`mophongo.saturate.repair_saturated_holes`. Required
+        columns: ``xc, yc``. Optional: ``ok`` (only rows with
+        ``ok=True`` are processed).
+    fwhm_pix
+        PSF FWHM in segmap pixels.
+    filter_name
+        Filter (e.g. ``"F444W"``). Used to name the new flag column
+        ``FLAG_SATURATED_<filter_name.upper()>``.
+    n_fwhm
+        Merge radius in units of FWHM. Default 5.
+    id_col, x_col, y_col
+        Catalog column names.
+    pad
+        Extra padding (pixels) around each merge bbox when computing the
+        local member mask. Default ``max(8, ceil(r_merge * 0.5))``.
+
+    sci, psf_stamp, amplitude_col, flux_frac_thresh
+        Optional PSF-flux filter on candidate child segments. When
+        ``sci`` and ``psf_stamp`` are both provided, each segment label
+        inside the merge circle is kept only if the PSF model flux
+        within the segment is ``>= flux_frac_thresh`` of the science
+        flux in those same pixels. Independent neighbour sources whose
+        own flux dominates over the saturated star's PSF wings are
+        therefore preserved instead of being merged. ``psf_stamp``
+        must be sum-normalised and at the same pixel scale as
+        ``segmap``; ``fit_table[amplitude_col]`` provides the per-star
+        scaling.
+
+    Notes
+    -----
+    Parent IDs are allocated as the next free integer
+    ``max(segmap.max(), catalog[id_col].max()) + 1``, incrementing per
+    star. The ``FLAG_SATURATED_<FILTER>`` column is the canonical signal
+    that a row is a repaired parent.
+
+    Returns
+    -------
+    new_catalog : Table
+        Catalog with child rows removed, parent rows appended, and the
+        ``FLAG_SATURATED_<FILTER>`` column added/updated.
+    new_segmap : np.ndarray
+        Repaired segmentation map.
+    merge_log : Table
+        One row per merged star with columns
+        ``parent_id, fit_id, xc, yc, n_children, children`` (the
+        latter a comma-separated string of child label IDs).
+    """
+    if fwhm_pix <= 0:
+        raise ValueError("fwhm_pix must be positive")
+    if id_col not in catalog.colnames:
+        raise ValueError(f"catalog missing id column {id_col!r}")
+    for col in (x_col, y_col):
+        if col not in catalog.colnames:
+            raise ValueError(f"catalog missing column {col!r}")
+    for col in ("xc", "yc"):
+        if col not in fit_table.colnames:
+            raise ValueError(f"fit_table missing column {col!r}")
+
+    catalog = catalog.copy()
+    segmap = np.array(segmap, copy=True)
+    H, W = segmap.shape
+
+    flag_col = f"FLAG_SATURATED_{filter_name.upper()}"
+    if flag_col not in catalog.colnames:
+        catalog[flag_col] = np.zeros(len(catalog), dtype=np.int8)
+    else:
+        catalog[flag_col] = np.asarray(catalog[flag_col]).astype(np.int8)
+
+    if "ok" in fit_table.colnames:
+        ok_mask = np.asarray(fit_table["ok"], dtype=bool)
+    else:
+        ok_mask = np.ones(len(fit_table), dtype=bool)
+
+    r_merge = float(n_fwhm) * float(fwhm_pix)
+    r2 = r_merge * r_merge
+    if pad is None:
+        pad = max(8, int(np.ceil(r_merge * 0.5)))
+
+    id_to_index: dict[int, int] = {
+        int(rid): i for i, rid in enumerate(catalog[id_col])
+    }
+
+    remap: dict[int, int] = {}
+    drop_ids: set[int] = set()
+    parents_tbl = catalog[:0].copy()
+    log_rows: list[tuple] = []
+    cat_id_max = int(np.asarray(catalog[id_col]).max()) if len(catalog) else 0
+    next_id = max(int(segmap.max()), cat_id_max) + 1
+
+    for row in fit_table[ok_mask]:
+        xc = float(row["xc"])
+        yc = float(row["yc"])
+
+        y0 = max(0, int(np.floor(yc - r_merge)))
+        y1 = min(H, int(np.ceil(yc + r_merge)) + 1)
+        x0 = max(0, int(np.floor(xc - r_merge)))
+        x1 = min(W, int(np.ceil(xc + r_merge)) + 1)
+        if y1 <= y0 or x1 <= x0:
+            continue
+
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        circle = (yy - yc) ** 2 + (xx - xc) ** 2 <= r2
+        sub = segmap[y0:y1, x0:x1]
+        labels_in = np.unique(sub[circle])
+        labels_in = labels_in[labels_in > 0]
+        if labels_in.size == 0:
+            continue
+
+        # Local bbox enlarged with pad for closure.
+        yy0 = max(0, y0 - pad)
+        yy1 = min(H, y1 + pad)
+        xx0 = max(0, x0 - pad)
+        xx1 = min(W, x1 + pad)
+        local_seg = segmap[yy0:yy1, xx0:xx1]
+
+        # PSF-flux filter: keep only segments whose PSF-model flux is
+        # ``>= flux_frac_thresh * sci flux``. Independent neighbour
+        # sources whose own flux dominates the saturated star's wings
+        # are preserved.
+        if sci is not None and psf_stamp is not None:
+            amp = float(row[amplitude_col]) if amplitude_col in row.colnames else 1.0
+            ph, pw = psf_stamp.shape
+            psf_cy = (ph - 1) // 2
+            psf_cx = (pw - 1) // 2
+            yi = int(round(yc))
+            xi = int(round(xc))
+            # Destination window in global coords
+            dy0 = yi - psf_cy; dy1 = dy0 + ph
+            dx0 = xi - psf_cx; dx1 = dx0 + pw
+            # Clip vs local bbox
+            ay0 = max(yy0, dy0); ay1 = min(yy1, dy1)
+            ax0 = max(xx0, dx0); ax1 = min(xx1, dx1)
+            psf_model = np.zeros_like(local_seg, dtype=float)
+            if ay1 > ay0 and ax1 > ax0:
+                psf_model[
+                    ay0 - yy0: ay1 - yy0, ax0 - xx0: ax1 - xx0
+                ] = amp * psf_stamp[
+                    ay0 - dy0: ay1 - dy0, ax0 - dx0: ax1 - dx0
+                ]
+            sci_local = sci[yy0:yy1, xx0:xx1]
+            kept: list[int] = []
+            for lbl in labels_in.tolist():
+                m = (local_seg == int(lbl))
+                if not m.any():
+                    continue
+                data_flux = float(sci_local[m].sum())
+                psf_flux = float(psf_model[m].sum())
+                if data_flux <= 0:
+                    continue
+                if psf_flux / data_flux >= flux_frac_thresh:
+                    kept.append(int(lbl))
+            if not kept:
+                continue
+            labels_in = np.array(kept, dtype=labels_in.dtype)
+
+        local_member = np.isin(local_seg, labels_in)
+
+        # Pick template row by largest child area (within local bbox).
+        children_present = [
+            int(lbl) for lbl in labels_in.tolist() if int(lbl) in id_to_index
+        ]
+        template_lbl: int | None = None
+        if children_present:
+            areas = {
+                lbl: int(np.sum(local_seg == lbl)) for lbl in children_present
+            }
+            template_lbl = max(areas, key=areas.get)
+
+        parent_id = next_id
+        next_id += 1
+
+        # Close ONLY the saturated core (originally background, seg==0).
+        # Non-merging child segments that happen to sit inside the
+        # binary-fill-holes hull must be preserved — they are unrelated
+        # sources whose segments survive the repair untouched.
+        local_filled = ndi.binary_fill_holes(local_member)
+        new_pix = local_filled & ~local_member & (local_seg == 0)
+        if new_pix.any():
+            ys_n, xs_n = np.where(new_pix)
+            yg = ys_n + yy0
+            xg = xs_n + xx0
+            inside = (yg - yc) ** 2 + (xg - xc) ** 2 <= r2
+            yg = yg[inside]
+            xg = xg[inside]
+            if yg.size:
+                segmap[yg, xg] = parent_id
+
+        for lbl in labels_in.tolist():
+            remap[int(lbl)] = parent_id
+
+        # Add parent row to catalog. Inherit from brightest child (largest
+        # segmap area). If no child has a catalog row, skip the catalog
+        # update for this star; segmap is still merged.
+        if template_lbl is not None:
+            template_row = catalog[id_to_index[template_lbl]]
+            parents_tbl.add_row(list(template_row))
+            parents_tbl[id_col][-1] = parent_id
+            parents_tbl[x_col][-1] = xc
+            parents_tbl[y_col][-1] = yc
+            parents_tbl[flag_col][-1] = 1
+            drop_ids.update(
+                int(lbl) for lbl in labels_in.tolist()
+                if int(lbl) in id_to_index
+            )
+        log_rows.append((
+            parent_id,
+            int(row["id"]) if "id" in row.colnames else -1,
+            xc, yc,
+            int(labels_in.size),
+            ",".join(str(int(lbl)) for lbl in labels_in.tolist()),
+        ))
+
+    # Bulk LUT remap of old child labels → parent ids.
+    if remap:
+        max_label = int(segmap.max())
+        lut = np.arange(max_label + 1, dtype=segmap.dtype)
+        for old, new in remap.items():
+            if 0 <= old <= max_label:
+                lut[old] = new
+        segmap = lut[segmap]
+
+    # Drop child rows, append parents.
+    if drop_ids:
+        ids_arr = np.asarray(catalog[id_col])
+        keep = ~np.isin(ids_arr, np.array(sorted(drop_ids)))
+        catalog = catalog[keep]
+    if len(parents_tbl):
+        from astropy.table import vstack as _vstack
+
+        catalog = _vstack([catalog, parents_tbl], join_type="exact")
+
+    merge_log = Table(
+        rows=log_rows or None,
+        names=["parent_id", "fit_id", "xc", "yc", "n_children", "children"],
+        dtype=[int, int, float, float, int, str],
+    )
+    return catalog, segmap, merge_log

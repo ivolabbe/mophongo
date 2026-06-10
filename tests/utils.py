@@ -1,4 +1,5 @@
 import numpy as np
+from textwrap import fill
 from astropy.table import Table
 from astropy.visualization import AsinhStretch, ImageNormalize
 
@@ -168,6 +169,10 @@ def save_diagnostic_image(
     segmap: np.ndarray = None,
     catalog: Table = None,
     fitter=None,
+    caption: str | None = None,
+    stamp_grid: np.ndarray | None = None,
+    stamp_grid_title: str = "bright-source residual pulls",
+    stamp_grid_labels: list[tuple[float, float, str, str]] | None = None,
 ) -> None:
     # Compute covariance matrix if fitter is provided
     if fitter is not None:
@@ -224,6 +229,41 @@ def save_diagnostic_image(
         ax.set_xticks([])
         ax.set_yticks([])
 
+    ax_stamp = axes[0, 3]
+    if stamp_grid is not None:
+        im_stamp = ax_stamp.imshow(
+            stamp_grid,
+            cmap="RdBu_r",
+            origin="lower",
+            vmin=-5,
+            vmax=5,
+        )
+        ax_stamp.set_title(stamp_grid_title)
+        ax_stamp.set_xticks([])
+        ax_stamp.set_yticks([])
+        if stamp_grid_labels is not None:
+            for x, y, text, color in stamp_grid_labels:
+                ax_stamp.text(
+                    x,
+                    y,
+                    text,
+                    color=color,
+                    fontsize=7,
+                    ha="left",
+                    va="top",
+                    weight="bold",
+                    bbox={
+                        "facecolor": "black",
+                        "edgecolor": "none",
+                        "alpha": 0.45,
+                        "pad": 1.0,
+                    },
+                )
+        cbar_stamp = fig.colorbar(im_stamp, ax=ax_stamp, fraction=0.046, pad=0.04)
+        cbar_stamp.set_label("Residual / noise", rotation=270, labelpad=15)
+    else:
+        ax_stamp.axis("off")
+
     # Covariance panel with proper scaling
     ax_cov = axes[1, 3]
     # Use symmetric colormap for covariance (can have positive and negative values)
@@ -241,8 +281,12 @@ def save_diagnostic_image(
     cbar = fig.colorbar(im, ax=ax_cov, fraction=0.046, pad=0.04)
     cbar.set_label("Covariance", rotation=270, labelpad=15)
 
-    plt.tight_layout()
-    fig.savefig(filename, dpi=150)
+    if caption:
+        fig.text(0.01, 0.012, fill(caption, width=150), fontsize=8, ha="left", va="bottom")
+        plt.tight_layout(rect=(0, 0.055, 1, 1))
+    else:
+        plt.tight_layout()
+    fig.savefig(filename, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -386,6 +430,12 @@ def save_flux_vs_truth_plot(
     label: str = "Recovered Flux",
     xlabel: str = "True Flux",
     ylabel: str = "Recovered Flux",
+    residual_hist_groups: list[tuple[str, np.ndarray, str]] | None = None,
+    highlight_groups: list[tuple[str, np.ndarray, str]] | None = None,
+    open_circle_groups: list[tuple[str, np.ndarray, str]] | None = None,
+    error_label: str = "Error",
+    systematic_error_fraction: float = 0.0,
+    caption: str | None = None,
 ) -> None:
     """Plot recovered flux vs truth and recovered/true vs truth, save to file."""
     import matplotlib.pyplot as plt
@@ -393,22 +443,85 @@ def save_flux_vs_truth_plot(
     from scipy.optimize import curve_fit
     from astropy.stats import mad_std
 
+    truth = np.asarray(truth)
+    recovered = np.asarray(recovered)
+    error = None if error is None else np.asarray(error)
+    if error is not None and systematic_error_fraction > 0.0:
+        error = np.hypot(error, systematic_error_fraction * np.abs(truth))
+    open_circle_groups = open_circle_groups or []
+    open_mask = np.zeros_like(truth, dtype=bool)
+    for _, group_mask, _ in open_circle_groups:
+        open_mask |= np.asarray(group_mask, dtype=bool)
+
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
     #    print('TRUTH min max', truth.min(), truth.max())
     # Panel 1 (top-left): Recovered vs True
-    axes[0, 0].scatter(truth, recovered, s=20, alpha=0.4)
+    base_mask = ~open_mask
+    if np.any(base_mask):
+        axes[0, 0].scatter(truth[base_mask], recovered[base_mask], s=20, alpha=0.4)
+    if highlight_groups:
+        for group_label, group_mask, group_color in highlight_groups:
+            group_mask = np.asarray(group_mask, dtype=bool) & ~open_mask
+            if np.any(group_mask):
+                axes[0, 0].scatter(
+                    truth[group_mask],
+                    recovered[group_mask],
+                    s=26,
+                    alpha=0.8,
+                    color=group_color,
+                    label=group_label,
+                )
+    for group_label, group_mask, group_color in open_circle_groups:
+        group_mask = np.asarray(group_mask, dtype=bool)
+        if np.any(group_mask):
+            axes[0, 0].scatter(
+                truth[group_mask],
+                recovered[group_mask],
+                s=52,
+                alpha=0.95,
+                facecolors="none",
+                edgecolors=group_color,
+                linewidths=1.4,
+                label=group_label,
+            )
     minval = min(truth.min(), recovered.min())
     maxval = max(truth.max(), recovered.max())
     axes[0, 0].plot([minval, maxval], [minval, maxval], "k--", label="y=x")
     axes[0, 0].set_xlabel(xlabel)
     axes[0, 0].set_ylabel(ylabel)
-    axes[0, 0].set_title(label)
+    axes[0, 0].set_title(fill(label, width=52), fontsize=11)
     axes[0, 0].legend()
 
     # Panel 2 (top-right): Ratio vs True with fitted error envelope
     ratio = np.array(recovered) / np.array(truth)
-    axes[0, 1].scatter(truth, ratio, s=20, alpha=0.4, label="Data")
+    if np.any(base_mask):
+        axes[0, 1].scatter(truth[base_mask], ratio[base_mask], s=20, alpha=0.4, label="Data")
+    if highlight_groups:
+        for group_label, group_mask, group_color in highlight_groups:
+            group_mask = np.asarray(group_mask, dtype=bool) & ~open_mask
+            if np.any(group_mask):
+                axes[0, 1].scatter(
+                    truth[group_mask],
+                    ratio[group_mask],
+                    s=26,
+                    alpha=0.8,
+                    color=group_color,
+                    label=group_label,
+                )
+    for group_label, group_mask, group_color in open_circle_groups:
+        group_mask = np.asarray(group_mask, dtype=bool)
+        if np.any(group_mask):
+            axes[0, 1].scatter(
+                truth[group_mask],
+                ratio[group_mask],
+                s=52,
+                alpha=0.95,
+                facecolors="none",
+                edgecolors=group_color,
+                linewidths=1.4,
+                label=group_label,
+            )
     axes[0, 1].axhline(1.0, color="k", linestyle="--", label="ratio=1")
 
     # Fit flux vs error relationship if errors provided
@@ -452,14 +565,17 @@ def save_flux_vs_truth_plot(
                     upper_envelope,
                     "orange",
                     linewidth=2,
-                    label=f"Fitted ±1σ envelope\nσ = {a_fit:.2e}×F^{b_fit:.2f}+{c_fit:.2e}",
+                    label=(
+                        f"{error_label} ±1σ envelope\n"
+                        f"σ = {a_fit:.2e}×F^{b_fit:.2f}+{c_fit:.2e}"
+                    ),
                 )
                 axes[0, 1].plot(truth_sorted, lower_envelope, "orange", linewidth=2)
 
             except Exception as e:
                 print(f"Error fitting flux-error relationship: {e}")
                 # Fallback to simple error envelope
-                e_tot = np.array(error) / np.array(recovered)
+                e_tot = np.array(error) / np.array(truth)
                 axes[0, 1].scatter(
                     truth, 1 + e_tot, s=5, alpha=0.4, color="orange", label="+/- 1σ"
                 )
@@ -467,7 +583,7 @@ def save_flux_vs_truth_plot(
                 error_fit = error  # Use original errors for SNR calculation
         else:
             # Fallback to simple error envelope
-            e_tot = np.array(error) / np.array(recovered)
+            e_tot = np.array(error) / np.array(truth)
             axes[0, 1].scatter(truth, 1 + e_tot, s=5, alpha=0.4, color="orange", label="+/- 1σ")
             axes[0, 1].scatter(truth, 1 - e_tot, s=5, alpha=0.4, color="orange")
             error_fit = error
@@ -559,7 +675,7 @@ def save_flux_vs_truth_plot(
             ax2.set_xlim([np.sqrt(xlim[0]), np.sqrt(xlim[1])])
             ax2.set_xticks(flux_tick_pos_sqrt)
             ax2.set_xticklabels([f"{snr:.0f}" for snr in snr_tick_labels])
-            ax2.set_xlabel("SNR (True Flux / Fitted Error)")
+            ax2.set_xlabel(f"SNR (True Flux / {error_label})")
 
     # Panel 3 (bottom-left): Histogram of Residuals / Error with Gaussian fit
     if error is not None:
@@ -567,15 +683,43 @@ def save_flux_vs_truth_plot(
 
         # Create histogram
         bins = np.linspace(-5, 5, 31)
-        counts, bin_edges, _ = axes[1, 0].hist(
-            residuals_over_error,
-            bins=bins,
-            alpha=0.5,
-            density=True,
-            color="lightblue",
-            edgecolor="black",
-            linewidth=0.5,
-        )
+        if residual_hist_groups:
+            counts, bin_edges = np.histogram(residuals_over_error, bins=bins, density=True)
+            axes[1, 0].hist(
+                residuals_over_error,
+                bins=bins,
+                alpha=0.18,
+                density=True,
+                color="0.75",
+                edgecolor="none",
+                label="All",
+            )
+            for group_label, group_mask, group_color in residual_hist_groups:
+                group_mask = np.asarray(group_mask, dtype=bool)
+                group_values = residuals_over_error[group_mask]
+                if len(group_values) == 0:
+                    continue
+                axes[1, 0].hist(
+                    group_values,
+                    bins=bins,
+                    alpha=0.42,
+                    density=True,
+                    histtype="stepfilled",
+                    color=group_color,
+                    edgecolor=group_color,
+                    linewidth=1.2,
+                    label=group_label,
+                )
+        else:
+            counts, bin_edges, _ = axes[1, 0].hist(
+                residuals_over_error,
+                bins=bins,
+                alpha=0.5,
+                density=True,
+                color="lightblue",
+                edgecolor="black",
+                linewidth=0.5,
+            )
 
         # Add zero residual line
         axes[1, 0].axvline(
@@ -586,26 +730,64 @@ def save_flux_vs_truth_plot(
         def gaussian(x, amp, mu, sigma):
             return amp * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
 
-        # Initial guess
-        x_centers = 0.5 * (bin_edges[1:] + bin_edges[:-1])
-        p0 = [counts.max(), np.mean(residuals_over_error), np.std(residuals_over_error)]
-
-        try:
-            popt, _ = curve_fit(gaussian, x_centers, counts, p0=p0)
-            amp_fit, mu_fit, sigma_fit = popt
-
-            # Plot fitted Gaussian
-            x_fit = np.linspace(-10, 10, 100)
-            y_fit = gaussian(x_fit, amp_fit, mu_fit, sigma_fit)
+        def fit_hist_gaussian(values, color, fit_label):
+            values = np.asarray(values, dtype=float)
+            values = values[np.isfinite(values)]
+            if values.size < 8:
+                return None
+            counts_fit, edges_fit = np.histogram(values, bins=bins, density=True)
+            x_centers = 0.5 * (edges_fit[1:] + edges_fit[:-1])
+            valid = np.isfinite(counts_fit) & (counts_fit > 0)
+            if np.sum(valid) < 3:
+                return None
+            sigma0 = float(mad_std(values))
+            if not np.isfinite(sigma0) or sigma0 <= 0:
+                sigma0 = float(np.std(values))
+            if not np.isfinite(sigma0) or sigma0 <= 0:
+                sigma0 = 1.0
+            p0 = [float(np.nanmax(counts_fit[valid])), float(np.median(values)), sigma0]
+            try:
+                popt, _ = curve_fit(
+                    gaussian,
+                    x_centers[valid],
+                    counts_fit[valid],
+                    p0=p0,
+                    bounds=([0.0, -10.0, 0.05], [np.inf, 10.0, 20.0]),
+                    maxfev=5000,
+                )
+                amp_fit, mu_fit, sigma_fit = popt
+            except Exception:
+                amp_fit = p0[0]
+                mu_fit = float(np.mean(values))
+                sigma_fit = sigma0
+            sigma_fit = abs(float(sigma_fit))
+            x_fit = np.linspace(-10, 10, 300)
             axes[1, 0].plot(
                 x_fit,
-                y_fit,
-                "g-",
+                gaussian(x_fit, amp_fit, mu_fit, sigma_fit),
+                color=color,
                 linewidth=2,
-                label=f"Fitted Gaussian\nμ={mu_fit:.3f}, σ={sigma_fit:.3f}",
+                label=f"{fit_label} fit\nmu={mu_fit:.3f}, sigma={sigma_fit:.3f}",
             )
-        except:
-            mu_fit, sigma_fit = np.mean(residuals_over_error), np.std(residuals_over_error)
+            return float(mu_fit), float(sigma_fit)
+
+        fit_summaries = []
+        if residual_hist_groups:
+            for group_label, group_mask, group_color in residual_hist_groups:
+                group_mask = np.asarray(group_mask, dtype=bool)
+                fit = fit_hist_gaussian(
+                    residuals_over_error[group_mask],
+                    group_color,
+                    group_label,
+                )
+                if fit is not None:
+                    fit_summaries.append((group_label, *fit))
+        else:
+            fit = fit_hist_gaussian(residuals_over_error, "green", "Gaussian")
+            if fit is not None:
+                fit_summaries.append(("All", *fit))
+        if fit_summaries:
+            mu_fit, sigma_fit = fit_summaries[0][1], fit_summaries[0][2]
 
         # Add vertical lines for ±1, ±3 sigma
         for sigma in [1, 3]:
@@ -620,8 +802,8 @@ def save_flux_vs_truth_plot(
 
         # Add statistics text
         stats_text = f"Mean: {mean_resid:.3f}\nMedian: {median_resid:.3f}\nStd: {std_resid:.3f}\nMAD: {mad_resid:.3f}"
-        if "mu_fit" in locals():
-            stats_text += f"\nFit μ: {mu_fit:.3f}\nFit σ: {sigma_fit:.3f}"
+        for fit_label, fit_mu, fit_sigma in fit_summaries:
+            stats_text += f"\n{fit_label} fit mu: {fit_mu:.3f}\n{fit_label} fit sigma: {fit_sigma:.3f}"
 
         axes[1, 0].text(
             0.05,
@@ -632,14 +814,45 @@ def save_flux_vs_truth_plot(
             bbox=dict(boxstyle="round", facecolor="white", alpha=0.5),
         )
 
-        axes[1, 0].set_xlabel("(Recovered - True) / Error")
+        axes[1, 0].set_xlabel(f"(Recovered - True) / {error_label}")
         axes[1, 0].set_ylabel("Density")
-        axes[1, 0].set_title("Residuals / Error Distribution")
+        axes[1, 0].set_title(f"Residuals / {error_label} Distribution")
         axes[1, 0].set_xlim(-10, 10)
         axes[1, 0].legend()
 
         # Panel 4 (bottom-right): (Recovered - True) / Error vs Recovered
-        axes[1, 1].scatter(recovered, residuals_over_error, s=20, alpha=0.4)
+        if np.any(base_mask):
+            axes[1, 1].scatter(
+                recovered[base_mask],
+                residuals_over_error[base_mask],
+                s=20,
+                alpha=0.4,
+            )
+        if highlight_groups:
+            for group_label, group_mask, group_color in highlight_groups:
+                group_mask = np.asarray(group_mask, dtype=bool) & ~open_mask
+                if np.any(group_mask):
+                    axes[1, 1].scatter(
+                        recovered[group_mask],
+                        residuals_over_error[group_mask],
+                        s=26,
+                        alpha=0.8,
+                        color=group_color,
+                        label=group_label,
+                    )
+        for group_label, group_mask, group_color in open_circle_groups:
+            group_mask = np.asarray(group_mask, dtype=bool)
+            if np.any(group_mask):
+                axes[1, 1].scatter(
+                    recovered[group_mask],
+                    residuals_over_error[group_mask],
+                    s=52,
+                    alpha=0.95,
+                    facecolors="none",
+                    edgecolors=group_color,
+                    linewidths=1.4,
+                    label=group_label,
+                )
         axes[1, 1].axhline(0, color="k", linestyle="--", label="zero residual")
 
         # Add ±1, ±3 sigma lines
@@ -648,7 +861,7 @@ def save_flux_vs_truth_plot(
             axes[1, 1].axhline(-sigma, color="gray", linestyle="--", alpha=0.5, label=f"±{sigma}σ")
 
         axes[1, 1].set_xlabel("Recovered Flux")
-        axes[1, 1].set_ylabel("(Recovered - True) / Error")
+        axes[1, 1].set_ylabel(f"(Recovered - True) / {error_label}")
         axes[1, 1].set_title("Residuals vs Recovered Flux")
         axes[1, 1].set_ylim(-10, 10)
         axes[1, 1].set_xscale(
@@ -657,8 +870,12 @@ def save_flux_vs_truth_plot(
         axes[1, 1].set_xlim(truth.min(), truth.max())
         axes[1, 1].legend()
 
-    plt.tight_layout()
-    plt.savefig(filename, dpi=150)
+    if caption:
+        fig.text(0.01, 0.012, fill(caption, width=140), fontsize=8, ha="left", va="bottom")
+        plt.tight_layout(rect=(0, 0.055, 1, 1))
+    else:
+        plt.tight_layout()
+    plt.savefig(filename, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 

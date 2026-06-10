@@ -136,8 +136,8 @@ class GlobalAstroFitter(SparseFitter):
         b = self._atb_comp.copy()
 
         # apply regularization by introducting a small diagonal term
-        if cfg.reg:
-            A = A + cfg.reg * eye(A.shape[0])
+        if cfg.reg_flux:
+            A = A + cfg.reg_flux * eye(A.shape[0])
 
         if cfg.reg_astrom:
             # Parameters live in the *compact* space; map them back to their original

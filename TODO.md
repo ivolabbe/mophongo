@@ -3,6 +3,36 @@
 This file tracks future desired features, checks, and investigations.
 
 - [ ] scan for bug fixes / robustness improvements
+- [ ] drizzled PSF stamps gain ~0.93% flux relative to the ePSF that went in.
+  UDS DR0 F770W: native `EE_stamp` = 0.9619 and the detector-sampled `eval_ePSF`
+  sum matches it to 0.9620 at both 0 and 0.5 pixel phase, but the drizzled sum
+  asymptotes to 0.9708 (7.2" -> 0.9662, 8.16" -> 0.9698, 12" -> 0.9708, 16" ->
+  0.9707), so it is a flux scale, not a stamp-boundary effect. 1.0092 in area is
+  0.46% in linear scale — suspect `wcslin_pscale=psf_wcs.pscale` (one global
+  `get_wcs_pscale`) against MIRI's real local pixel area, unproven.
+  Consequences: (a) if grizli drizzled the mosaic with the same convention the
+  bias cancels and `EEBOX<i>` is right, which is the assumption the pipeline now
+  runs on; (b) if not, `flux_<i>_total` is ~0.9% low. Settle it on
+  injected-truth mocks, not by arguing about drizzle internals.
+- [ ] `examples/run_mock.py:73` still asks for `ee_fraction=0.95`, which under the
+  absolute semantics now gives 7.200"/90 pix instead of the old 4.731"/60 pix.
+  Decide whether to pin `size=4.731` or accept the bigger stamp.
+- [ ] `_ee_fraction_to_arcsec` is non-monotonic near the ceiling: `ee_fraction=0.96`
+  gives 8.64" but `1.0` gives 8.16", because the `>=1.0` branch uses the ePSF side
+  length while the sub-1.0 branch uses `2*r`. Either clamp sub-1.0 sizes to the side
+  length or leave it and document.
+- [ ] MINERVA DR0.1 (COSMOS) follow-ups, now that
+  `examples/cosmos_770_dr0.1.json` runs end to end:
+  - [ ] run the saturated-star repair pass (`saturate.py`) on the COSMOS F444W
+    mosaic + LW segmap/catalog, so DR0.1 matches DR0's repaired template side
+  - [ ] full-field run (`r_trial` 0) once the trial patch is signed off
+  - [ ] the other DR0.1 MIRI bands are already unpacked (F1000W, F1280W,
+    F1500W, F1800W, F2100W) — configs are a copy of the F770W json with the
+    filter fields changed, but F1500W/F1800W stay gated on kernel-window
+    vetting per the audit plan, and F1000W/F2100W have no
+    `DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC` entry yet
+  - [ ] decide whether to also fit the chi-mean detection (the DR0.1 README
+    recommends it; the LW flavour was used here to match DR0)
 - [ ] rerun `examples/verify_pipeline.ipynb` to regenerate the stale
   `verify_pipeline_realistic_out` products with the fixed
   `inject_point_sources` (see `scratch/dipole_rootcause/README.md`)

@@ -179,7 +179,8 @@ class SceneFitter:
         lam_A = reg_flux if reg_flux > 0 else 1e-6 * scale_A
         Areg = A + sp.eye(A.shape[0], format="csr") * lam_A
 
-        if AB is not None and BB is not None and bB is not None:
+        # empty shift blocks (scene with <2 bright members) fall back to flux-only
+        if AB is not None and BB is not None and bB is not None and AB.shape[1] > 0:
             scale_BB = _positive_diagonal_scale(BB)
             reg_astrom = _finite_nonnegative(getattr(config, "reg_astrom", 1e-4))
             lam_b = reg_astrom * scale_BB

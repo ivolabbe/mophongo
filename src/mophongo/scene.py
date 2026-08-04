@@ -683,39 +683,45 @@ class Scene:
             sol = SceneFitter.solve(A, b, AB=AB, BB=BB, bB=bB, config=cfg, **kwargs)
             self.shifts = sol.shifts
 
-            # record per object shift in templates
-            predict = AstroCorrect.build_poly_predictor(self.shifts, x0, y0, order, Sx, Sy)
-            pts = np.array([t.position_original for t in self.templates], dtype=float)
-            dx, dy = predict(pts[:, 0], pts[:, 1])
-            for k, tmpl in enumerate(self.templates):
-                tmpl.to_shift = np.array([float(dx[k]), float(dy[k])], dtype=float)
+            if self.shifts is None or self.shifts.size == 0:
+                # <2 bright members: shift blocks were empty and the solver
+                # fell back to flux-only — leave templates unshifted
+                for tmpl in self.templates:
+                    tmpl.to_shift = np.zeros(2, dtype=float)
+            else:
+                # record per object shift in templates
+                predict = AstroCorrect.build_poly_predictor(self.shifts, x0, y0, order, Sx, Sy)
+                pts = np.array([t.position_original for t in self.templates], dtype=float)
+                dx, dy = predict(pts[:, 0], pts[:, 1])
+                for k, tmpl in enumerate(self.templates):
+                    tmpl.to_shift = np.array([float(dx[k]), float(dy[k])], dtype=float)
 
-            # optionally apply shifts to templates now and clear A/b
-            if apply_shifts:
-                Templates.apply_template_shifts(self.templates)
-                self.A, self.b = None, None
+                # optionally apply shifts to templates now and clear A/b
+                if apply_shifts:
+                    Templates.apply_template_shifts(self.templates)
+                    self.A, self.b = None, None
 
-            sid = getattr(self, "id", -1)
-            beta_scene = self.shifts
-            p = len(cheb_basis(0.0, 0.0, order))
-            bx = beta_scene[:p]
-            by = beta_scene[p : 2 * p]
-            phi0 = cheb_basis(0.0, 0.0, order)
-            mean_dx = float(phi0 @ bx)
-            mean_dy = float(phi0 @ by)
-            logger.info(
-                "[Scenes] Scene %s shift at x0,y0 ≈ (%.3f, %.3f) px", sid, mean_dx, mean_dy
-            )
+                sid = getattr(self, "id", -1)
+                beta_scene = self.shifts
+                p = len(cheb_basis(0.0, 0.0, order))
+                bx = beta_scene[:p]
+                by = beta_scene[p : 2 * p]
+                phi0 = cheb_basis(0.0, 0.0, order)
+                mean_dx = float(phi0 @ bx)
+                mean_dy = float(phi0 @ by)
+                logger.info(
+                    "[Scenes] Scene %s shift at x0,y0 ≈ (%.3f, %.3f) px", sid, mean_dx, mean_dy
+                )
 
-            logger.debug(
-                "[Scenes] center=(%.3f, %.3f) scale=(%.3f, %.3f) order=%d",
-                x0,
-                y0,
-                Sx,
-                Sy,
-                int(order),
-            )
-            logger.debug(f"[scenes] betas {self.id}:{self.shifts}")
+                logger.debug(
+                    "[Scenes] center=(%.3f, %.3f) scale=(%.3f, %.3f) order=%d",
+                    x0,
+                    y0,
+                    Sx,
+                    Sy,
+                    int(order),
+                )
+                logger.debug(f"[scenes] betas {self.id}:{self.shifts}")
 
         # store solution
         self.solution = sol

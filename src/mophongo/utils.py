@@ -649,7 +649,7 @@ def matching_kernel(
     psf_lo_in: np.ndarray,
     *,
     window: object | None = None,
-    recenter: bool = True,
+    recenter: bool = False,
     pixel_ratio: float = 1.0,
     method: str = "window",
     reg: float = 1e-3,

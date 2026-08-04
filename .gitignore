@@ -8,6 +8,8 @@ examples/*fits
 examples/stars/
 examples/*
 !examples/verify_pipeline.ipynb
+!examples/run_uds_770_dr0.1.py
+!examples/uds_770_dr0.1.json
 legacy/autopilot/*png
 legacy/autopilot/*pdf
 !data/*test*

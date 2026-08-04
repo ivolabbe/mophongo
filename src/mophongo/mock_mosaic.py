@@ -343,6 +343,52 @@ class Pointing:
     pa: float
 
 
+def gaussian_blur_fourier(arr: np.ndarray, sigma_pix: float) -> np.ndarray:
+    """Blur with an exact analytic Gaussian transfer function.
+
+    Multiplies the FFT (over the last two axes) by
+    ``exp(-2 pi^2 sigma^2 |k|^2)``, the continuous Gaussian transfer function
+    sampled at the grid frequencies. Exact for any ``sigma_pix`` including
+    sub-pixel values, flux-conserving, and free of resampling artifacts.
+    Assumes the signal is negligible at the array edges (circular FFT).
+    """
+    ky = np.fft.fftfreq(arr.shape[-2])
+    kx = np.fft.rfftfreq(arr.shape[-1])
+    transfer = np.exp(
+        -2.0 * np.pi**2 * float(sigma_pix) ** 2 * (ky[:, None] ** 2 + kx[None, :] ** 2)
+    )
+    return np.fft.irfft2(np.fft.rfft2(arr) * transfer, s=arr.shape[-2:])
+
+
+# Extra Gaussian broadening of the effective in-mosaic PSF over the drizzled
+# STPSF model, per filter (FWHM, arcsec). Single source of truth shared by the
+# realistic mocks and the real-data drivers (examples/run_*.py): the mock
+# injects this blur to be realistic, so any model-PSF chain fitting such data
+# (mock or real) must apply the same broadening before kernel construction.
+DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC: dict[str, float] = {"f770w": 0.08}
+
+# FWHM/sigma conversion used by every blur path (mock painting, verification
+# kernel maps, real-data drivers) so all apply the bit-identical operator.
+PSF_BLUR_FWHM_PER_SIGMA: float = 2.355
+
+
+def gaussian_blur_psf(
+    psf: np.ndarray, fwhm_arcsec: float, pscale: float
+) -> np.ndarray:
+    """Blur a PSF (2-D or cube) by a Gaussian of ``fwhm_arcsec`` on its own grid.
+
+    Shared operator for mock painting, verification PSF/kernel maps, and
+    real-data drivers: converts the angular FWHM to grid sigma with
+    ``PSF_BLUR_FWHM_PER_SIGMA`` and applies the exact analytic transfer
+    function via :func:`gaussian_blur_fourier` (flux-conserving).
+    """
+    arr = np.asarray(psf, dtype=float)
+    if arr.ndim not in {2, 3}:
+        raise ValueError("PSF blur expects a 2-D PSF or 3-D PSF cube")
+    sigma_pix = float(fwhm_arcsec) / float(pscale) / PSF_BLUR_FWHM_PER_SIGMA
+    return gaussian_blur_fourier(arr, sigma_pix)
+
+
 # F0xx/F1xx ≤ 212 → SW, ≤ 480 → LW, else MIRI.
 def _family_of(filter_name: str) -> str:
     """Map filter name (e.g. ``'f444w'``) to aperture-group key."""
@@ -416,7 +462,7 @@ class MockMosaic:
     # 80 mas F770W grid it is 1 pixel, so the blur is applied on an oversampled
     # grid and then returned to the requested PSF grid.
     psf_gaussian_fwhm_arcsec: float | dict[str, float] | None = field(
-        default_factory=lambda: {"f770w": 0.08}
+        default_factory=lambda: dict(DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC)
     )
     # Legacy override in output pixels of the filter. Prefer
     # ``psf_gaussian_fwhm_arcsec`` for new mocks.
@@ -558,11 +604,13 @@ class MockMosaic:
     ) -> np.ndarray:
         """Apply the configured extra Gaussian PSF blur for ``filter_name``.
 
-        The FWHM is specified in arcsec.  If the requested PSF lives on a
-        coarser grid than the mock reference grid, it is temporarily
-        oversampled before applying the Gaussian. This keeps the 0.08" F770W
-        target blur sampled on the 40 mas grid rather than directly as a
-        one-pixel FWHM filter on the native 80 mas F770W grid.
+        The FWHM is specified in arcsec and applied as an exact analytic
+        Gaussian transfer function in Fourier space on the PSF's own grid.
+        This is grid-independent: blurring on the native 80 mas F770W grid
+        and on the 40 mas reference grid apply the identical angular blur
+        (no resampling roundtrip), so painted mock sources and the PSF/kernel
+        maps built by the verification harness stay consistent. Sub-pixel
+        sigmas are exact, unlike a discretely sampled real-space kernel.
 
         The PSF is returned with the flux produced by the convolution itself;
         no post-hoc normalization is applied.
@@ -570,50 +618,12 @@ class MockMosaic:
         fwhm_arcsec = self._psf_gaussian_fwhm_arcsec_for(filter_name)
         if fwhm_arcsec <= 0:
             return psf
-        from scipy.ndimage import gaussian_filter
-
-        arr = np.asarray(psf, dtype=float)
-        if arr.ndim not in {2, 3}:
-            raise ValueError("PSF blur expects a 2-D PSF or 3-D PSF cube")
         filter_pscale = (
             float(pscale)
             if pscale is not None
             else DEFAULT_OUTPUT_PSCALE[_family_of(filter_name)]
         )
-        reference_pscale = DEFAULT_OUTPUT_PSCALE[self.mosaic_pscale]
-        target_pscale = min(filter_pscale, reference_pscale)
-        factor = max(1, int(round(filter_pscale / target_pscale)))
-        work_pscale = filter_pscale / factor
-        sigma_pix = float(fwhm_arcsec) / work_pscale / 2.355
-
-        if factor == 1:
-            sigma = sigma_pix if arr.ndim == 2 else (0.0, sigma_pix, sigma_pix)
-            blurred = gaussian_filter(
-                arr,
-                sigma=sigma,
-                mode="constant",
-                cval=0.0,
-                truncate=6.0,
-            )
-            return blurred.astype(np.asarray(psf).dtype, copy=False)
-
-        def _blur_one(stamp: np.ndarray) -> np.ndarray:
-            up = np.repeat(np.repeat(stamp, factor, axis=0), factor, axis=1)
-            up = up / float(factor * factor)
-            blurred_up = gaussian_filter(
-                up,
-                sigma=sigma_pix,
-                mode="constant",
-                cval=0.0,
-                truncate=6.0,
-            )
-            ny, nx = stamp.shape
-            return blurred_up.reshape(ny, factor, nx, factor).sum(axis=(1, 3))
-
-        if arr.ndim == 2:
-            blurred = _blur_one(arr)
-        else:
-            blurred = np.stack([_blur_one(stamp) for stamp in arr], axis=0)
+        blurred = gaussian_blur_psf(psf, fwhm_arcsec, filter_pscale)
         return blurred.astype(np.asarray(psf).dtype, copy=False)
 
     def get_filter_psf_radec(

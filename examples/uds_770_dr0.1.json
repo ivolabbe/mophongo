@@ -1,0 +1,60 @@
+# MINERVA-UDS n3.0/m3.1 F770W run config (mophongo.pipeline.RunConfig)
+#
+# This is the modern-pipeline reproduction of examples/run_uds_770_wren.py: same
+# input data (grizli v8.0 minerva-v3.0 40mas F444W, uds-sbkgsub-v3.0 80mas MIRI
+# F770W, n3.0_v1.2 ACS+WEBB segmap, n3.0_m3.1_v1.2.1 SUPER catalog with MIRI),
+# but driven through RunConfig instead of the hand-rolled script.
+#
+# Settings mirror cosmos_770_dr0.1.json so the UDS and COSMOS runs of the same
+# code generation are directly comparable.
+#
+# Differences from run_uds_770_wren.py worth knowing:
+#   - template is the raw F444W mosaic, not the aperpy "_sci_f444w-matched"
+#     image the wren script used (the modern path drizzles its own ePSFs, and
+#     the matched image is not shipped on S3/Drive).
+#   - PSFs come from MJD-tagged STPSF grids in ../data/PSF, not the older
+#     UDS_..._OS4_GRID25 static grids.
+#
+# Lines starting with '#' are comments. Paths relative to examples/.
+{
+  "name": "uds_770",
+  "out_dir": "uds_770_dr0.1",
+
+  # high-res template side: grizli v8.0 minerva-v3.0 40mas F444W mosaic +
+  # n3.0_v1.2 ACS+WEBB chi-mean segmap, n3.0_m3.1_v1.2.1 SUPER catalog (wMIRI).
+  # No saturated-star repair has been run on the v3.0 UDS mosaic yet, so this is
+  # the raw mosaic (the DR0 v2.3 run used repair_saturate_out/*_sci_repaired).
+  "sci_hi": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/n3.0/uds-grizli-v8.0-minerva-v3.0-40mas-f444w-clear_drc_sci.fits",
+  "segmap": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/n3.0_v1.2_SEC/MINERVA-UDS_n3.0_v1.2_ACS+WEBB_SEGMAP.fits",
+  "catalog": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/n3.0_m3.1_v1.2.1/MINERVA-UDS_n3.0_m3.1_v1.2.1_ACS+WEBB_Kf444w_SUPER_CATALOG_wMIRI.fits",
+  "csv_hi": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/n3.0/uds-grizli-v8.0-minerva-v3.0-40mas-f444w-clear_wcs.csv",
+
+  # low-res fit side: m3.0 MIRI F770W (extrabkg sci; shipped wcs csv, symlinked
+  # to the f770w spelling the filter parser expects)
+  "sci_lo": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/m3.0/uds-sbkgsub-v3.0-80mas-f770w_drz_sci_extrabkg.fits",
+  "wht_lo": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/m3.0/uds-sbkgsub-v3.0-80mas-f770w_drz_wht.fits",
+  "csv_lo": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/m3.0/uds-v3.0_f770w_wcs.csv",
+  "expect_frames": [297, 229],
+
+  # MJD-tagged ePSF grids; psf_size in arcsec (null = full native stamp);
+  # psf_blur_fwhm "default" = shared DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC[filter_lo]
+  "psf_dir": "../data/PSF",
+  "pattern_hi": "UDS_NRC.._F444W_MJD\\d+_GRID25_OS4",
+  "pattern_lo": "UDS_MIRI_F770W_MJD\\d+_GRID9_OS4",
+  "filter_lo": "f770w",
+  "psf_size": null,
+  "psf_blur_fwhm": "default",
+
+  # preprocessing: footprint cut + trial patch (set r_trial 0 for full run).
+  # trial_center = deepest fully F770W-covered 0.5' patch of the v3.0 mosaic
+  # (median wht 1.30e8, 2.0x the footprint median), found by scanning the
+  # weight map; close to the [34.4, -5.26] patch of the DR0 v2.4 UDS run.
+  "footprint_filter": true,
+  "r_trial": 0.5,
+  "trial_center": [34.34914, -5.27462],
+  "bg_filter_sigma": 64.0,
+
+  # FitConfig overrides
+  "fit": {"fit_astrometry_joint": true, "scene_minimum_bright": 10, "aperture_diam": 0.5},
+  "scene_plots": true
+}

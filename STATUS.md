@@ -3,6 +3,239 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] UDS F770W run on the wren-era inputs, as a config-driven run:
+  `examples/uds_770_dr0.1.json` + `examples/run_uds_770_dr0.1.py` reproduce
+  `examples/run_uds_770_wren.py` with the modern `RunConfig` path and the same input
+  data — grizli v8.0 `minerva-v3.0` 40 mas F444W, `uds-sbkgsub-v3.0` 80 mas MIRI F770W,
+  `n3.0_v1.2` ACS+WEBB chi-mean segmap, `n3.0_m3.1_v1.2.1` SUPER catalog (wMIRI).
+  Settings mirror `cosmos_770_dr0.1.json` so the two same-generation runs are
+  comparable (`psf_size` null, blur "default", `fit_astrometry_joint`,
+  `scene_minimum_bright` 10, `aperture_diam` 0.5, `r_trial` 0.5'); frame counts
+  297 (F444W) / 229 (F770W). Trial patch `[34.34914, -5.27462]`, the deepest fully
+  F770W-covered 0.5' patch of the v3.0 mosaic (median wht 1.30e8, 2.0x the footprint
+  median), near the DR0 patch `[34.4, -5.26]`.
+  Two deliberate departures from the wren script: the template is the raw
+  `_drc_sci` mosaic, not the aperpy `_sci_f444w-matched` image (not published on S3 or
+  Drive, and the modern path drizzles its own ePSFs); and PSFs come from the MJD-tagged
+  `UDS_..._MJD*_GRID25/9_OS4` grids rather than the static `OS4_GRID25` ones.
+  Data provenance: the wren inputs lived on `/Volumes/DarkPhoenix` and were re-fetched
+  from the master records — NIRCam from `s3://grizli-v2/MINERVA/mosaics/uds/40mas-v3.0/`
+  (the Drive `UDS/Images/NIRCam` folder is empty), MIRI/segmap/catalog from the MINERVA
+  Google Drive. Local data tree reorganised by field: `MINERVA/data/UDS/`
+  (`DR0/` = the old `data/DR0`, plus `n3.0/`, `m3.0/`, `n3.0_v1.2_SEC/`,
+  `n3.0_m3.1_v1.2.1/`, `v2/`, `n2.2_m2.0_v1.0/`) and `MINERVA/data/COSMOS/`
+  (the old `data/DR0.1`, whose name wrongly implied a UDS release). `MINERVA/data/00WHERE`
+  now lists the S3 and Drive master-record URLs; `UDS/README.md` and the updated
+  `COSMOS/README.md` document the layout. `examples/uds_770_dr0.json` and
+  `examples/cosmos_770_dr0.1.json` were repointed at the new paths.
+- [x] PSF encircled energy is now **measured, not requested**. `ee_fraction` in
+  `DrizzlePSF.get_psf_radec` was relative to the finite ePSF stamp sum
+  (`cum /= cum[-1]`), so it was filter-dependent and a hi/lo pair sized by the same
+  `ee_fraction` enclosed different absolute EE; it is now absolute against the
+  calibrated grid (`cum /= oversample**2`), the 0.95 default is gone (`None`), and a
+  request above the stamp's own `EE_stamp` raises with the achievable ceiling.
+  `_ee_fraction_to_arcsec` is documented as what it is — a *predictor*, forced to work
+  on the native oversampled grid because a size is needed before anything is drizzled,
+  and it answers with a circular diameter that then becomes a square side.
+  New `psf.stamp_encircled_energy(psf, pscale, ee_fraction=None)` measures the
+  delivered stamp instead: `ee_box` (full square sum), `ee_circ` (inscribed circle),
+  `r_circ`, `r_ee`; cubes reduce to per-stamp means, one stamp at a time so a
+  few-hundred-region map does not allocate the whole sorted cumulative. Every
+  `get_psf_radec` call now caches `psf_size` / `ee_box` / `ee_circ` / `r_circ` / `r_ee`
+  / `ee_fraction_request` from the cube it produced (`_record_realized_ee`), logs
+  requested-vs-realized, and warns when the drizzled stamp misses the request.
+  `Pipeline.run` writes the same numbers per fitted filter into `cat.meta` as
+  `EEBOX<i>` / `EECIRC<i>` / `RCIRC<i>` / `PSFSZ<i>` (<=8 chars, so they land in a FITS
+  header without HIERARCH, with the description as the card comment); `EEBOX<i>` is by
+  construction the `throughput_<i>` already used for `flux_<i>_total`.
+  Measured on UDS DR0 F770W (`MJD60154`, 80 mas): request 0.95 -> 7.200" (90 pix) ->
+  realized `ee_box` 0.9634, `ee_circ(3.600")` 0.9579. The gap to the request is
+  quantize-up (+0.3-0.9%), circle-to-square corner flux (+0.6-0.8%), and a **+0.93%
+  drizzle flux gain** (see TODO) — the last one is why the realized numbers, not the
+  native growth curve, are what the catalog carries.
+  Also added the missing `logger.warning` in `Template.downsample` for a cutout origin
+  that is not `k`-aligned: the trailing low-res row/column is zero-filled and up to ~4%
+  of template flux is silently dropped. Only reachable via
+  `multi_resolution_method="downsample"`; the default `"upsample"` path goes through
+  `project_to_block_replicated_grid` and is exact. `AlignedCutout.downsample` refuses
+  the same condition outright.
+- [x] MINERVA DR0.1 F770W run set up and validated against the DR0 run.
+  **The DR0.1 delivery is COSMOS, not UDS** — all 23 Google-Drive zips in
+  `MINERVA/data/DR0.1` are `MINERVA-COSMOS` (`n3.0` NIRCam/HST reduction, `m3.0` MIRI
+  mosaics, `v1.3` aperpy catalogs); a grep for `uds` across them returns nothing. DR0.1
+  is therefore a new field, not an updated UDS release, so the requested
+  `uds_770_dr0.1.json` cannot exist and no source-level DR0/DR0.1 comparison is
+  possible. New config is `examples/cosmos_770_dr0.1.json` + `run_770_dr0.1.py`,
+  mirroring the DR0 run in every setting that transfers (LW noise-equalised detection to
+  match DR0's `faper_f277w+f356w+f444w` catalog, `psf_size` null, blur "default",
+  `fit_astrometry_joint`, `scene_minimum_bright` 10, `aperture_diam` 0.5, `r_trial` 0.5').
+  Unpacking notes, the S3 provenance of the NIRCam mosaic, and the two local fixes are
+  documented in `MINERVA/data/DR0.1/README.md`.
+  Data prep: the delivery's `n3.0/` (NIRCam) directory is **empty**, so the F444W
+  template mosaic was pulled from `s3://grizli-v2/MINERVA/mosaics/cosmos/40mas-v3.0/`
+  and verified to sit on the segmap grid exactly (18944x32768, CRVAL 150.13/2.325,
+  CRPIX 9216.5/15872.5). The shipped MIRI csvs are named `cosmos-v3.0_f770_wcs.csv`
+  (no trailing `w`), which `jwst_psf._FILTER_TOKEN` cannot parse — added `f770w`-style
+  symlinks for all six MIRI filters rather than touching the parser.
+  PSFs: 60 new COSMOS ePSF grids in `data/PSF` via
+  `PSFFactory(prefix='COSMOS', date_mode='cluster', delta_day=2.0)` — 22 NIRCam F444W
+  cluster dates x NRCA5/NRCB5 (GRID25 OS4, fov 4") + 16 MIRI F770W dates (GRID9 OS4,
+  fov 8"), no failures. Frame counts 586 (F444W) / 518 (F770W) vs DR0's 297/228.
+  Also fixed `examples/uds_770_dr0.json`, which carried `"psf_size": None` and so failed
+  `json.loads` outright — now `null`.
+  Trial patch `[150.17963, 2.43257]`, chosen as the deepest fully F770W-covered 0.5'
+  patch (median wht 1.34e8, 2.0x the DR0 patch's 6.76e7); 507 LW sources vs DR0's 578,
+  so the two runs are comparable in size. DR0 was re-run with current code into
+  `uds_770_dr0_v3` as the baseline — `flux_1` bit-identical to the existing v2 outputs.
+  Comparison (`examples/compare_dr0_dr0.1.py` -> `examples/dr0_vs_dr0.1/`): error
+  calibration `err_1/err_pred_1` = 1.000 (16/84: 0.9997/1.001) in both; no negative
+  fluxes in either; patch residual/science nmad 0.9784 vs 0.9782 (the 80 mas patch is
+  noise-dominated, so this is a sanity check, not a discriminator); median aperture
+  residual at source positions -0.012 vs +0.002 of the patch noise, and +0.22 vs +0.16
+  for SNR>5 — the same mild under-subtraction of bright sources in both, slightly
+  smaller in DR0.1. Astrometry converged in both (5 passes for DR0.1, 3 for DR0) to a
+  bulk MIRI-vs-NIRCam offset of comparable size but different direction: DR0
+  (-0.87, +0.23) px vs DR0.1 (-0.24, -0.96) px, i.e. ~0.036" vs ~0.040" at 40 mas.
+  DR0.1 has higher SNR throughout (median SNR 1.95 vs 0.33, 23% vs 10% above SNR 5),
+  which the 2x weight only partly explains — the DR0 patch centre was a fixed choice
+  while the DR0.1 one was depth-optimised, so the two patches differ in source
+  brightness as well as depth. Not yet done for COSMOS: the saturated-star repair pass
+  DR0 used, so DR0.1 fits the raw F444W mosaic and the unrepaired LW segmap/catalog.
+- [x] Config-driven runs built INTO `Pipeline` (no new class): `RunConfig` dataclass
+  (JSON with `#` comments, unknown keys raise) + `Pipeline.from_config("run.json")` with
+  step methods `build_psfs()` / `build_kernels()` / `run()` (auto-loads data) /
+  `write_outputs()` / `run_all()`, geojson-cached in `out_dir`, all intermediates
+  (`dpsf_*`, `prm_hi/lo/kern`, `images`, `catalog`, `table`, `residuals`, `scenes`)
+  inspectable on the instance; CLI `python -m mophongo.pipeline config.json [steps]`.
+  Folds in all run_*.py preprocessing (frame asserts, footprint filter, trial patch,
+  bg/ivar, NaN guard, shared blur "default"). Fixes the legacy PSF-map misalignment
+  (audit B011 pattern): band maps now carry PSFs at their OWN region centroids
+  (lookup-safe); kernels are built from pairs drizzled at the hi/lo overlay centroids.
+  `examples/run_770.py` reduced to a ~15-line cell script over
+  `examples/uds_770_dr0.json`. Validated end-to-end on the DR0 trial patch: per-source
+  `flux_1` identical to the script-era run (median ratio 1.00000, 16/84 both 1.00000);
+  throughput 0.9170 vs 0.9181 reflects the corrected own-centroid lookup. Tests:
+  new `tests/test_pipeline_config.py` (7); full suite 83 passed + known B018 failure.
+  run_1280/1500/1800 migrate by copying the json config (change filter fields +
+  psf_size; F1500W/F1800W still gated on kernel-window vetting per the audit plan).
+- [x] Made the mock "extra" PSF blur a first-class shared setting: new
+  `mock_mosaic.DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC = {"f770w": 0.08}` is the single source
+  of truth; `MockMosaic.psf_gaussian_fwhm_arcsec` defaults from it;
+  `verification.build_realistic_two_detector_mock` gained a settable
+  `psf_gaussian_fwhm_arcsec` parameter (None -> MockMosaic default, 0/{} disables); and
+  `examples/run_770.py` now broadens the F770W model PSFs with the same constant via
+  `gaussian_blur_fourier` before kernel construction — previously the driver's kernel
+  chain omitted the broadening that the realistic mocks (and real MIRI mosaics) carry,
+  a model-too-narrow mismatch of the donut-residual type. Unified the operator end to
+  end: new module-level `mock_mosaic.gaussian_blur_psf` (FWHM/sigma = 2.355 via
+  `PSF_BLUR_FWHM_PER_SIGMA`) is now the single blur implementation — `blur_filter_psf`
+  delegates to it, run_770.py calls it directly, and a new regression test pins the mock
+  hook and the driver-style call bit-identical
+  (`test_gaussian_blur_psf_is_the_single_shared_operator`). `verify_pipeline.ipynb`
+  exposes `PSF_BLUR_FWHM_ARCSEC = None` (None -> shared default) and passes it through
+  `build_realistic_two_detector_mock(psf_gaussian_fwhm_arcsec=...)`.
+  DR0 trial A/B (psf_size=4, blur on vs off, 578 sources): blur is exactly
+  flux-conserving (throughput unchanged to 1e-9); fitted fluxes rise by median +0.9%
+  (16/84: -0.4%/+2.1%) for flux>10 sources — the broader model kernel recovers flux
+  previously left in residuals. POLICY (standing): the scheme is verified ONLY on
+  simulated data with injected truth (`verify_pipeline.ipynb` mock harness, <1-2% offset
+  at any SNR); comparison to real photometry happens elsewhere, outside this repo's
+  driver/verification outputs. Full suite after the changes: 76 passed + the known
+  pre-existing test_moffat_recovery psf_wing failure (audit B018, unrelated).
+- [x] Diagnosed the "donut" residuals in the 2026-06-10
+  `verify_pipeline_realistic_out/template_extension_psf_wings` run vs the cleaner-looking
+  May `mock_run_770`. Not a regression: stacked bright-source residuals show the old run's
+  fractional systematics were 5–15x larger (hidden by ~14x fainter sources and fit-grid
+  jailbar noise), while the new run's donuts are a ~0.3–1% of-peak systematic made visible
+  by peak-pixel SNR ~1300 mock sources. The donut (negative core, positive ring at
+  r≈0.2–0.4") is identical for `none` vs `psf_wings` template extension and for the
+  no-shift control run — so template wings, astrometric shifting, and repeat-convolution
+  are all excluded. Shape-normalized model/data stacks show the fitted model is ~2% too
+  peaked in the core and ~3–5% deficient exactly at the F770W Airy ring (0.3"), net ~1.4%
+  missing flux (`med_lo` 0.986): a painted-mock-PSF vs PSF-map/kernel chain mismatch in
+  the verification harness (kernel reproduces the map target PSF to 0.02%), not a fitter
+  bug. The residual.fits vs source-stage-diagnostic "contradiction" is display-only: both
+  read `pipe.residuals`; the fit-grid panels are dominated by the period-2 jailbar
+  sampling artifact, which cancels in the 2x2 native block-average that residual.fits gets.
+- [x] Proved the donut root cause (multi-agent verified, adversarially reviewed): the mock's
+  "realistic" F770W 0.08" Gaussian blur was applied through two different operators. Painting
+  (`MockMosaic.blur_filter_psf`) upsampled the native 80mas stamps by `np.repeat` x2, blurred
+  at 40mas, and 2x2 sum-binned back — mathematically an extra `tri(1,2,1)/4 x tri(1,2,1)/4`
+  kernel at 40mas spacing (machine-exact impulse-response measurement; +800 mas^2/axis
+  variance, sigma~28mas) on top of the intended Gaussian. The map/kernel path
+  (`verification.apply_mock_filter_blur_on_grid`) blurred the 40mas map PSF directly — no
+  sandwich. Replaying the exact painting operator reproduces the saved `mock_f770w_truth`
+  stamps to rms 5e-5 of peak; base pixelization (drizzle-to-80 vs bin2(drizzle-to-40)) is
+  symmetric to 6e-6; Wiener regularization, segmap truncation, drizzle-phase variation all
+  excluded. The blur feature only entered at 6ed937b (2026-06-10) — the May `mock_run_770`
+  predates it (no blur, data/model PSFs matched by construction), and `examples/run_770.py`
+  applies no blur at all (real-data driver; the 0.08" blur is a deliberate mock-only
+  data-vs-model mismatch).
+- [x] Fixed the blur asymmetry: new `mock_mosaic.gaussian_blur_fourier` applies the exact
+  analytic Gaussian transfer function in Fourier space on the PSF's own grid (grid-
+  independent, flux-conserving, exact for sub-pixel sigma); `blur_filter_psf` uses it
+  directly on the native grid (upsample/sum-bin sandwich deleted) and
+  `apply_mock_filter_blur_on_grid` now delegates to `blur_filter_psf` so both paths are one
+  operator. Replaced the two sandwich-characterization tests with a flux-conservation test
+  and a 40mas-vs-80mas blur/bin commutation test (the property whose violation caused the
+  donut). Mock regeneration required for any rerun of the verification harness.
+- [x] End-to-end fix validation (reduced 250-source, 50% point-source scenario, auto-size
+  mosaic): flux bias eliminated — `med_lo` 0.9990 (pre-fix 0.9865); the coherent donut
+  (pre-fix +2.4e-4/flux positive ring at 16-22σ) is gone; shape-normalized model/data
+  profile ratio flat within ±2% (pre-fix monotonic +2.6% core → −4.4% ring). A smaller,
+  sign-flipped residual remains: −1.4e-4/flux ring at r=2.5 native px (−5σ), model
+  marginally too broad. Tested and excluded blur-grid aliasing as its cause (blur-at-40mas
+  -then-bin vs bin-then-blur-at-80mas differ by ≤0.12% on the real F770W PSF). Open
+  candidates: F444W painting stamps are 4" while the map/kernel source PSF uses 8"
+  (`build_realistic_two_detector_mock` `psf_size_arcsec`), and nsrc=250 measurement
+  statistics — a same-nsrc pre/post A/B rerun would settle whether the remaining ±2%
+  structure is real. Validation outputs + `donut_comparison.png` in the session scratchpad
+  `fixcheck_out/`.
+- [x] Scene diagnostics PNGs now render at 2x pixel sampling
+  (`_diagnostic_pixel_sampling_dpi` gained an `oversample` parameter; scene plots use
+  `oversample=2.0`, min/max dpi 400/2400).
+- [x] Full code audit (2026-07): state analysis, verified bug hunt with repros, MIRI DR0
+  operational plan, staged cleanup/refactor plan — reports in `scratch/claude_audit/v1/`
+  (gitignored). Note: the historical "flux bug" was an earlier shift-block normalization
+  error (since fixed), not `SparseFitter._flux_errors`; `SceneFitter` is the only live
+  solver path, so fixes in obsolete paths are deprioritized.
+- [x] Fixed the scene-solver flux-only fallback (audit B004/B013/B014): `SceneFitter.solve`
+  now treats empty shift blocks (scene with <2 bright members, e.g. saturated-isolated
+  scenes) as flux-only, and `Scene.solve` leaves templates unshifted instead of crashing
+  with a size-0 matmul in the shift predictor. Verified with the audit repros; full suite
+  unchanged (75 passed).
+- [x] Changed the matching-kernel default to `recenter=False` in both
+  `utils.matching_kernel` and `PSF.matching_kernel` (audit B007/B010): the
+  quadratic-centroid recentring displaced even-parity kernels by 0.5 pix relative to the
+  `N//2` convolution convention, and its hard-coded `fit_boxsize=7` was the documented
+  F1500W failure mode — both moot with recentring off by default (opt-in remains).
+- [x] Made `examples/run_770.py` runnable: restored the `psf_size = 2.0` definition
+  (was commented out but still referenced), dropped `recenter=True` from kernel
+  construction, and sanitized non-finite pixels (zero image + zero ivar) before the
+  Pipeline call since the pipeline's finite check does not cover input images.
+- [x] Ported `examples/run_770.py` to MINERVA-UDS DR0: repaired catalog/segmap/F444W sci
+  from `examples/repair_saturate_out/`, DR0 v2.4 MIRI extrabkg mosaics with explicit
+  shipped `uds-v2.4_f770w_wcs.csv` (auto_reconstruct never triggered; frame counts
+  asserted 297/228), MJD-tagged ePSF patterns (`UDS_NRC.._F444W_MJD\d+_GRID25_OS4`,
+  `UDS_MIRI_F770W_MJD\d+_GRID9_OS4`), geojson caches written to the output dir (never
+  into read-only DR0), new preprocess step keeping only wht>0 footprint sources (~86k).
+  `flag_artifact` rows (DR0 hand-drawn star/spike regions, not mophongo's) are KEPT in
+  the fit — they carry real flux that must be modeled; filter downstream. Validated
+  end-to-end on the r<0.5' trial patch (578 sources, 2 scenes, astrometry converged in
+  3/5 passes, 17 GB peak).
+- [x] Added a nearest-frame fallback to `DrizzlePSF.get_psf`: positions outside every
+  exposure footprint (region-map sliver centroids sitting exactly on footprint
+  boundaries — the source of the 9 empty kernels in the first DR0 trial) now use the
+  closest frame instead of returning an empty stamp, with a logged warning including the
+  distance. Verified on a previously-empty F770W position (stamp sum 0.864); focused
+  tests (test_psf, test_psf_map, test_mock_mosaic, test_pipeline) 40 passed.
+- [x] run_770.py: `psf_size = 4.0` for F770W; `psf_size = None` now means the full native
+  ePSF stamp size as generated (passes `size=None, ee_fraction=None` to `get_psf_radec`).
+  flag_artifact rows are kept in the fit (see above); PSF/kernel caches regenerated.
+- [x] Audit bookkeeping convention: fixed findings are checkmarked in
+  `scratch/claude_audit/v1/02_bug_report.md` section "0. Fix log" (entries are never
+  removed, only marked). Currently marked fixed: B004/B007/B010/B013/B014/B016 + the
+  unnumbered empty-PSF caveat; B002 has a driver-level mitigation only.
 - [x] Consolidated agent-facing instructions into `AGENTS.md` and split
   `CHECKLIST.md` into `STATUS.md` and `TODO.md`.
 - [x] Consolidate reusable verification logic from

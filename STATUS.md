@@ -28,6 +28,18 @@ This file records completed implementations, validation runs, and the current wo
   now lists the S3 and Drive master-record URLs; `UDS/README.md` and the updated
   `COSMOS/README.md` document the layout. `examples/uds_770_dr0.json` and
   `examples/cosmos_770_dr0.1.json` were repointed at the new paths.
+  Trial run done (`examples/uds_770_dr0.1/`): 138641 sources inside the F770W footprint,
+  1549 in the 0.5' patch (vs COSMOS's 507 — the UDS run uses the ACS+WEBB chi-mean
+  detection, COSMOS the LW noise-equalised one, so the UDS patch reaches much fainter).
+  Astrometry converged in 4 passes to a bulk MIRI-vs-NIRCam shift of (0.63, 1.91) px at
+  40 mas; error calibration `err_1/err_pred_1` = 1.0003 (16/84: 1.0000/1.0136); no
+  negative fluxes; 70 sources above SNR 5, 111 above SNR 3; realized `EEBOX1` 0.9675
+  (`EECIRC1` 0.9649 at r 2.02", stamp 4.04"), so `flux_1_total/flux_1` = 1.034.
+  `alma.md` in the repo root is the standalone setup/run instruction for a collaborator:
+  branch checkout, S3 + Drive data fetch, `PSFFactory.from_csv` grid generation (the
+  MJD-tagged grids are too large to track), config editing, run, outputs.
+  Note: `.gitignore` had `examples/*`, so no run script or run config had ever been
+  committed; `!examples/run_*.py` and `!examples/*.json` now track them.
 - [x] PSF encircled energy is now **measured, not requested**. `ee_fraction` in
   `DrizzlePSF.get_psf_radec` was relative to the finite ePSF stamp sum
   (`cum /= cum[-1]`), so it was filter-dependent and a hi/lo pair sized by the same

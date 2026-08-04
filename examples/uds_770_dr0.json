@@ -1,0 +1,37 @@
+# MINERVA-UDS DR0 F770W run config (mophongo.driver.RunConfig)
+# Lines starting with '#' are comments. Paths relative to examples/.
+{
+  "name": "uds_770",
+  "out_dir": "uds_770_dr0_v2",
+
+  # high-res template side: saturated-star-repaired F444W + DR0 segmap/catalog
+  "sci_hi": "repair_saturate_out/uds-grizli-v8.0-minerva-v2.3-40mas-f444w-clear_sci_repaired.fits",
+  "segmap": "repair_saturate_out/MINERVA-UDSDR0_SEGMAP_REPAIRED.fits",
+  "catalog": "repair_saturate_out/MINERVA-UDSDR0_REPAIRED.fits",
+  "csv_hi": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/DR0/uds-grizli-v8.0-minerva-v2.3-40mas-f444w-clear_wcs.csv",
+
+  # low-res fit side: DR0 v2.4 MIRI F770W (extrabkg sci; shipped wcs csv)
+  "sci_lo": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/DR0/uds-sbkgsub-v2.4-80mas-f770w_drz_sci_extrabkg.fits",
+  "wht_lo": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/DR0/uds-sbkgsub-v2.4-80mas-f770w_drz_wht.fits",
+  "csv_lo": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/DR0/uds-v2.4_f770w_wcs.csv",
+  "expect_frames": [297, 228],
+
+  # MJD-tagged ePSF grids; psf_size in arcsec (null = full native stamp);
+  # psf_blur_fwhm "default" = shared DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC[filter_lo]
+  "psf_dir": "../data/PSF",
+  "pattern_hi": "UDS_NRC.._F444W_MJD\\d+_GRID25_OS4",
+  "pattern_lo": "UDS_MIRI_F770W_MJD\\d+_GRID9_OS4",
+  "filter_lo": "f770w",
+  "psf_size": null,
+  "psf_blur_fwhm": "default",
+
+  # preprocessing: footprint cut + trial patch (set r_trial 0 for full run)
+  "footprint_filter": true,
+  "r_trial": 0.5,
+  "trial_center": [34.4, -5.26],
+  "bg_filter_sigma": 64.0,
+
+  # FitConfig overrides
+  "fit": {"fit_astrometry_joint": true, "scene_minimum_bright": 10, "aperture_diam": 0.5},
+  "scene_plots": true
+}

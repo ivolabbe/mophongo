@@ -1,0 +1,51 @@
+# MINERVA DR0.1 F770W run config (mophongo.pipeline.RunConfig)
+#
+# NOTE ON FIELD: the DR0.1 delivery in MINERVA/data/DR0.1 is COSMOS
+# (n3.0 NIRCam/HST reduction + m3.0 MIRI mosaics + v1.3 catalogs).  It
+# contains no UDS data, so this is the DR0.1 analogue of uds_770_dr0.json,
+# not an updated UDS run.  Everything else (detection flavour, PSF grids,
+# blur, fit config, trial-patch radius) mirrors the DR0 UDS run.
+#
+# Lines starting with '#' are comments. Paths relative to examples/.
+{
+  "name": "cosmos_770",
+  "out_dir": "cosmos_770_dr0.1",
+
+  # high-res template side: grizli v8.0 minerva-v3.0 40mas F444W mosaic +
+  # DR0.1 LW (F277W+F356W+F444W noise-equalised) segmap/catalog.
+  # No saturated-star repair has been run for COSMOS yet, so this is the raw
+  # mosaic (DR0 used repair_saturate_out/*_sci_repaired.fits).
+  "sci_hi": "/Users/ivo/Astro/PROJECTS/MINERVA/data/COSMOS/n3.0/cosmos-grizli-v8.0-minerva-v3.0-40mas-f444w-clear_drc_sci.fits",
+  "segmap": "/Users/ivo/Astro/PROJECTS/MINERVA/data/COSMOS/n3.0_v1.3_SEC/LW Noise-Equalized Detection (F277W-F356W-F444W)/Ancillary/MINERVA-COSMOS_n3.0_v1.3_LW_SEGMAP.fits",
+  "catalog": "/Users/ivo/Astro/PROJECTS/MINERVA/data/COSMOS/n3.0_v1.3_SEC/LW Noise-Equalized Detection (F277W-F356W-F444W)/MINERVA-COSMOS_n3.0_v1.3_LW_Kf444w_SUPER_CATALOG.fits",
+  "csv_hi": "/Users/ivo/Astro/PROJECTS/MINERVA/data/COSMOS/n3.0/cosmos-grizli-v8.0-minerva-v3.0-40mas-f444w-clear_wcs.csv",
+
+  # low-res fit side: DR0.1 m3.0 MIRI F770W (extrabkg sci; shipped wcs csv,
+  # symlinked to the f770w spelling the filter parser expects)
+  "sci_lo": "/Users/ivo/Astro/PROJECTS/MINERVA/data/COSMOS/m3.0/cosmos-sbkgsub-v3.0-80mas-f770w_drz_sci_extrabkg.fits",
+  "wht_lo": "/Users/ivo/Astro/PROJECTS/MINERVA/data/COSMOS/m3.0/cosmos-sbkgsub-v3.0-80mas-f770w_drz_wht.fits",
+  "csv_lo": "/Users/ivo/Astro/PROJECTS/MINERVA/data/COSMOS/m3.0/cosmos-v3.0_f770w_wcs.csv",
+  "expect_frames": [586, 518],
+
+  # MJD-tagged ePSF grids; psf_size in arcsec (null = full native stamp);
+  # psf_blur_fwhm "default" = shared DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC[filter_lo]
+  "psf_dir": "../data/PSF",
+  "pattern_hi": "COSMOS_NRC.._F444W_MJD\\d+_GRID25_OS4",
+  "pattern_lo": "COSMOS_MIRI_F770W_MJD\\d+_GRID9_OS4",
+  "filter_lo": "f770w",
+  "psf_size": null,
+  "psf_blur_fwhm": "default",
+
+  # preprocessing: footprint cut + trial patch (set r_trial 0 for full run).
+  # trial_center = deepest fully F770W-covered 0.5' patch (median wht 1.34e8,
+  # 2.6x the footprint median); 507 LW sources, close to the 578 of the DR0
+  # UDS patch so the two trial runs are comparable in size.
+  "footprint_filter": true,
+  "r_trial": 0.5,
+  "trial_center": [150.17963, 2.43257],
+  "bg_filter_sigma": 64.0,
+
+  # FitConfig overrides
+  "fit": {"fit_astrometry_joint": true, "scene_minimum_bright": 10, "aperture_diam": 0.5},
+  "scene_plots": true
+}

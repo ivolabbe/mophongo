@@ -8,9 +8,12 @@ template extraction and sparse fitting are delegated to the ``templates`` and
 
 from __future__ import annotations
 
+import json
 import os
 import psutil
-from typing import Sequence
+from dataclasses import dataclass, field, fields
+from pathlib import Path
+from typing import Any, Sequence
 from copy import deepcopy
 import logging
 import numpy as np
@@ -41,6 +44,72 @@ if not logger.handlers:  # avoid duplicate handlers on reloads
     logger.addHandler(handler)
 
 memory = lambda: psutil.Process(os.getpid()).memory_info().rss / 1e9
+
+
+@dataclass
+class RunConfig:
+    """Config-file inputs for one filter fit (one hi-res + one lo-res band).
+
+    Loaded from JSON (``#``-comment lines allowed) via :meth:`from_json` and
+    consumed by :meth:`Pipeline.from_config`. Unknown keys raise, so typos
+    fail loudly.
+    """
+
+    # run label; prefixes every output file
+    name: str
+    # output directory: products + psf/kernel geojson caches (never inputs)
+    out_dir: str
+    # --- inputs -----------------------------------------------------------
+    sci_hi: str  # high-resolution template image (FITS)
+    segmap: str  # segmentation map on the hi-res grid (labels = catalog ids)
+    catalog: str  # source catalog with id, x, y (hi-res pixels), ra, dec
+    sci_lo: str  # low-resolution science mosaic to fit
+    wht_lo: str  # low-resolution weight map
+    csv_hi: str  # per-frame WCS csv of the hi-res mosaic
+    csv_lo: str  # per-frame WCS csv of the lo-res mosaic
+    # mosaic used for DrizzlePSF footprints/grid of the hi-res side
+    # (defaults to sci_hi; set when sci_hi is a derived template image)
+    driz_hi: str | None = None
+    # --- PSFs -------------------------------------------------------------
+    psf_dir: str = "data/PSF"
+    pattern_hi: str = ""  # STDPSF filename regex for the hi-res band
+    pattern_lo: str = ""  # STDPSF filename regex for the lo-res band
+    filter_lo: str = ""  # lo-res filter name, e.g. "f770w" (blur lookup)
+    # PSF stamp size in arcsec; None = full native ePSF stamp as generated
+    psf_size: float | None = 4.0
+    # extra Gaussian broadening of the lo-res model PSF (FWHM arcsec);
+    # "default" = mock_mosaic.DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC[filter_lo],
+    # a number = that value, None = no broadening
+    psf_blur_fwhm: float | str | None = "default"
+    # optional [n_frames_hi, n_frames_lo] sanity assert on the WCS csvs
+    expect_frames: list[int] | None = None
+    # --- preprocessing ----------------------------------------------------
+    bg_filter_sigma: float = 64.0  # get_bg_and_ivar background filter
+    footprint_filter: bool = True  # keep only sources with wht_lo > 0
+    r_trial: float = 0.0  # trial-patch radius in arcmin; 0 = full run
+    trial_center: list[float] | None = None  # [ra, dec] deg of the patch
+    # --- fitting ----------------------------------------------------------
+    fit: dict[str, Any] = field(default_factory=dict)  # FitConfig kwargs
+    scene_plots: bool = True  # write per-scene diagnostic PNGs
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> "RunConfig":
+        """Load a config from JSON; ``#``-comment lines are stripped."""
+        text = Path(path).read_text()
+        clean = "\n".join(
+            ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+        )
+        data = json.loads(clean)
+        known = {f.name for f in fields(cls)}
+        unknown = set(data) - known
+        if unknown:
+            raise ValueError(f"unknown config keys: {sorted(unknown)}")
+        return cls(**data)
+
+    def to_json(self, path: str | Path) -> None:
+        from dataclasses import asdict
+
+        Path(path).write_text(json.dumps(asdict(self), indent=2) + "\n")
 
 
 def _upsample_flux_conserving_image_and_ivar(
@@ -157,6 +226,12 @@ def _filter_psf_throughput(
 ) -> float:
     """Return one finite-support PSF throughput correction for a fitted filter.
 
+    For absolutely calibrated PSF stamps this mean stamp sum *is* the realized
+    encircled energy of the square stamp (``ee_box`` in
+    :func:`mophongo.psf.stamp_encircled_energy`), measured on the PSFs the
+    pipeline actually uses -- after drizzling and after any broadening -- so it
+    needs no correction for distortion or size quantization.
+
     The PSF core may vary spatially, but the missing far-wing flux correction is
     treated as a single filter-level scalar.  Pipeline-facing callers that pass
     unit-sum PSF shapes should provide ``explicit_throughput`` when the native
@@ -175,6 +250,52 @@ def _filter_psf_throughput(
     if np.any(valid):
         return float(np.nanmean(sums[valid]))
     return 1.0
+
+
+def _record_psf_ee(
+    cat: Table,
+    psf: np.ndarray | PSFRegionMap | None,
+    pscale: float | None,
+    idx: int,
+    throughput: float,
+) -> None:
+    """Record realized PSF encircled energy for filter ``idx`` in ``cat.meta``.
+
+    ``throughput`` is the square-stamp sum already applied to convert fitted
+    amplitudes into ``flux_<idx>_total``, so writing it alongside the circular
+    numbers keeps the aperture-correction reference with the catalog that used
+    it.  All values come from the final PSF stamps, i.e. post-drizzle and
+    post-broadening; nothing here is a request.
+
+    Keys are kept to eight characters so they survive a FITS header without
+    HIERARCH, and carry their description as the card comment.
+    """
+    from .psf import stamp_encircled_energy
+
+    cat.meta[f"EEBOX{idx}"] = (
+        float(throughput),
+        "realized PSF encircled energy, full stamp",
+    )
+    arr = psf.psfs if isinstance(psf, PSFRegionMap) else psf
+    if arr is None or not pscale or pscale <= 0.0:
+        return
+    arr = np.asarray(arr, dtype=float)
+    if arr.ndim < 2:
+        return
+
+    ee = stamp_encircled_energy(arr, float(pscale))
+    cat.meta[f"PSFSZ{idx}"] = (
+        float(arr.shape[-1]) * float(pscale),
+        "delivered PSF stamp side [arcsec]",
+    )
+    cat.meta[f"EECIRC{idx}"] = (
+        ee["ee_circ"],
+        f"realized PSF encircled energy within RCIRC{idx}",
+    )
+    cat.meta[f"RCIRC{idx}"] = (
+        ee["r_circ"],
+        "inscribed-circle radius of PSF stamp [arcsec]",
+    )
 
 
 class Pipeline:
@@ -242,7 +363,304 @@ class Pipeline:
         self.templates_extended: Templates | None = None
         self.model_images: list[np.ndarray] = []
 
+        if not hasattr(self, "run_config"):
+            self.run_config = None
+
         print(f"Pipeline (init) memory: {memory():.1f} GB")
+
+    # ------------------------------------------------------------------
+    # Config-driven runs: Pipeline.from_config("run.json") + step methods.
+    # Notebook-friendly: every step is one call, every intermediate stays
+    # on the instance, expensive products are geojson-cached in out_dir.
+    #
+    #   pipe = Pipeline.from_config("uds_770_dr0.json")
+    #   pipe.run_all()          # or: build_psfs / build_kernels / run /
+    #                           #     write_outputs individually
+    #
+    # Command line:  python -m mophongo.pipeline uds_770_dr0.json [steps]
+    #
+    # PSF/kernel alignment: each band map carries PSFs drizzled at its OWN
+    # region centroids (safe for position lookups), while matching kernels
+    # are built from PSF pairs drizzled at the hi/lo overlay centroids.
+    # ------------------------------------------------------------------
+    @classmethod
+    def from_config(cls, path: str | Path | RunConfig) -> "Pipeline":
+        """Create a deferred Pipeline from a JSON run config.
+
+        Data are loaded lazily: :meth:`run` (or :meth:`load_data`) reads the
+        images and finishes construction.
+        """
+        cfg = path if isinstance(path, RunConfig) else RunConfig.from_json(path)
+        obj = cls.__new__(cls)
+        obj.run_config = cfg
+        obj.out_dir = Path(cfg.out_dir)
+        obj.out_dir.mkdir(parents=True, exist_ok=True)
+        obj.images = None
+        obj.table = None
+        obj.dpsf_hi = None
+        obj.dpsf_lo = None
+        obj.prm_hi = None
+        obj.prm_lo = None
+        obj.prm_kern = None
+        obj._epsf_loaded = False
+        return obj
+
+    # -- cache paths -------------------------------------------------------
+    @property
+    def f_psf_hi(self) -> Path:
+        return self.out_dir / f"{self.run_config.name}_psf_hi.geojson"
+
+    @property
+    def f_psf_lo(self) -> Path:
+        return self.out_dir / f"{self.run_config.name}_psf_lo.geojson"
+
+    @property
+    def f_kernel(self) -> Path:
+        return self.out_dir / f"{self.run_config.name}_kernel.geojson"
+
+    @property
+    def scenes(self):
+        """Scenes of the (first) fitted band, once :meth:`run` has completed."""
+        return self.all_scenes[0] if getattr(self, "all_scenes", None) else None
+
+    # -- shared helpers ----------------------------------------------------
+    def _blur_fwhm(self) -> float | None:
+        blur = self.run_config.psf_blur_fwhm
+        if blur == "default":
+            from .mock_mosaic import DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC
+
+            return DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC.get(self.run_config.filter_lo)
+        return float(blur) if blur else None
+
+    def _size_kw(self) -> dict:
+        if self.run_config.psf_size is not None:
+            return dict(size=self.run_config.psf_size)
+        return dict(size=None, ee_fraction=None)
+
+    def _ensure_dpsfs(self, load_epsf: bool = False) -> None:
+        """Instantiate the DrizzlePSF pair (and optionally load the ePSFs)."""
+        from .psf import DrizzlePSF
+
+        cfg = self.run_config
+        if self.dpsf_hi is None:
+            self.dpsf_hi = DrizzlePSF(
+                driz_image=str(cfg.driz_hi or cfg.sci_hi), csv_file=str(cfg.csv_hi)
+            )
+            self.dpsf_lo = DrizzlePSF(
+                driz_image=str(cfg.sci_lo), csv_file=str(cfg.csv_lo)
+            )
+            if cfg.expect_frames:
+                n_hi, n_lo = cfg.expect_frames
+                got_hi = len(self.dpsf_hi.footprint)
+                got_lo = len(self.dpsf_lo.footprint)
+                if got_hi != n_hi or got_lo != n_lo:
+                    raise ValueError(
+                        f"frame-count mismatch: hi {got_hi} (expect {n_hi}), "
+                        f"lo {got_lo} (expect {n_lo})"
+                    )
+        if load_epsf and not self._epsf_loaded:
+            self.dpsf_hi.epsf_obj.load_jwst_stdpsf(
+                local_dir=str(cfg.psf_dir), filter_pattern=cfg.pattern_hi
+            )
+            self.dpsf_lo.epsf_obj.load_jwst_stdpsf(
+                local_dir=str(cfg.psf_dir), filter_pattern=cfg.pattern_lo
+            )
+            self._epsf_loaded = True
+
+    def _region_maps(self):
+        """Region maps for both bands (geometry only, deterministic)."""
+        prm_hi = PSFRegionMap.from_footprints(
+            self.dpsf_hi.footprint, name="hi"
+        ).overlay_with(self.dpsf_hi.driz_footprint)
+        prm_lo = PSFRegionMap.from_footprints(
+            self.dpsf_lo.footprint, name="lo"
+        ).overlay_with(self.dpsf_lo.driz_footprint)
+        return prm_hi, prm_lo
+
+    @staticmethod
+    def _centroids(prm) -> list[np.ndarray]:
+        # do NOT drop any region: the PSF cube must stay index-aligned
+        return [np.squeeze(p.xy) for p in prm.regions.geometry.centroid]
+
+    def _drizzle_lo_blurred(self, positions) -> np.ndarray:
+        """Lo-res PSF cube at ``positions`` with the configured broadening."""
+        cube = self.dpsf_lo.get_psf_radec(positions, **self._size_kw())
+        blur = self._blur_fwhm()
+        if blur:
+            from .mock_mosaic import gaussian_blur_psf
+
+            cube = gaussian_blur_psf(cube, blur, self.dpsf_lo.driz_pscale)
+        return cube
+
+    # -- step 1: per-band PSF region maps ---------------------------------
+    def build_psfs(self, overwrite: bool = False) -> "Pipeline":
+        """Build (or reload) per-band PSF maps with PSFs at their own centroids."""
+        self._ensure_dpsfs()
+        if self.f_psf_hi.exists() and self.f_psf_lo.exists() and not overwrite:
+            self.prm_hi = PSFRegionMap.from_geojson(str(self.f_psf_hi))
+            self.prm_lo = PSFRegionMap.from_geojson(str(self.f_psf_lo))
+            logger.info("loaded cached PSF maps from %s", self.out_dir)
+            return self
+
+        self._ensure_dpsfs(load_epsf=True)
+        prm_hi, prm_lo = self._region_maps()
+        prm_hi.psfs = self.dpsf_hi.get_psf_radec(
+            self._centroids(prm_hi), **self._size_kw()
+        )
+        prm_lo.psfs = self._drizzle_lo_blurred(self._centroids(prm_lo))
+        blur = self._blur_fwhm()
+        if blur:
+            logger.info('applied %.3f" FWHM Gaussian broadening to lo-res PSFs', blur)
+        prm_hi.to_file(self.f_psf_hi)
+        prm_lo.to_file(self.f_psf_lo)
+        self.prm_hi, self.prm_lo = prm_hi, prm_lo
+        return self
+
+    # -- step 2: matching-kernel map --------------------------------------
+    def build_kernels(self, overwrite: bool = False) -> "Pipeline":
+        """Build (or reload) the matching-kernel map on the hi/lo overlay."""
+        from . import utils
+
+        if self.f_kernel.exists() and not overwrite:
+            self.prm_kern = PSFRegionMap.from_geojson(str(self.f_kernel))
+            logger.info("loaded cached kernel map %s", self.f_kernel)
+            return self
+
+        self._ensure_dpsfs(load_epsf=True)
+        prm_hi_geom, prm_lo_geom = self._region_maps()
+        prm_kern = prm_hi_geom.overlay_with(prm_lo_geom)
+        pos = self._centroids(prm_kern)
+
+        psf_hi = self.dpsf_hi.get_psf_radec(pos, **self._size_kw())
+        psf_lo = self._drizzle_lo_blurred(pos)
+
+        pixel_ratio = round(self.dpsf_lo.driz_pscale / self.dpsf_hi.driz_pscale)
+        kernels = [
+            utils.matching_kernel(p_hi, p_lo, pixel_ratio=pixel_ratio)
+            for p_hi, p_lo in zip(psf_hi, psf_lo)
+        ]
+        prm_kern.psfs = np.asarray(kernels)
+        prm_kern.to_file(self.f_kernel)
+        self.prm_kern = prm_kern
+        return self
+
+    # -- step 3: data ------------------------------------------------------
+    def load_data(self) -> "Pipeline":
+        """Load images/segmap/catalog, preprocess, and finish construction."""
+        from astropy.io import fits
+        from .catalog import get_bg_and_ivar
+
+        cfg = self.run_config
+        wcs_hi = WCS(fits.getheader(cfg.sci_hi))
+        wcs_lo = WCS(fits.getheader(cfg.sci_lo))
+        tmpl_hi = fits.getdata(cfg.sci_hi)
+        sci_lo = fits.getdata(cfg.sci_lo)
+        wht_lo = fits.getdata(cfg.wht_lo)
+        segmap = fits.getdata(cfg.segmap)
+        cat = Table.read(cfg.catalog)
+
+        if cfg.footprint_filter:
+            scale_hi = proj_plane_pixel_scales(wcs_hi)[0]
+            scale_lo = proj_plane_pixel_scales(wcs_lo)[0]
+            k = round(float(scale_lo / scale_hi))
+            ix = np.clip((np.asarray(cat["x"]) / k).astype(int), 0, wht_lo.shape[1] - 1)
+            iy = np.clip((np.asarray(cat["y"]) / k).astype(int), 0, wht_lo.shape[0] - 1)
+            cat = cat[wht_lo[iy, ix] > 0]
+            logger.info("%d sources inside the lo-res footprint", len(cat))
+
+        if cfg.r_trial and cfg.r_trial > 0:
+            import astropy.units as u
+            from astropy.coordinates import SkyCoord
+
+            if not cfg.trial_center:
+                raise ValueError("r_trial > 0 requires trial_center=[ra, dec]")
+            coords = SkyCoord(
+                ra=np.asarray(cat["ra"], float) * u.deg,
+                dec=np.asarray(cat["dec"], float) * u.deg,
+            )
+            ref = SkyCoord(
+                ra=cfg.trial_center[0] * u.deg, dec=cfg.trial_center[1] * u.deg
+            )
+            cat = cat[coords.separation(ref) < cfg.r_trial * u.arcmin]
+            logger.info("r_trial=%.2f': %d sources", cfg.r_trial, len(cat))
+
+        bg, ivar = get_bg_and_ivar(sci_lo, wht_lo, bg_filter_sigma=cfg.bg_filter_sigma)
+        sci_fit = sci_lo - bg
+        # zero non-finite pixels in image AND weight so they carry no information
+        bad = ~np.isfinite(sci_fit)
+        sci_fit[bad] = 0.0
+        ivar[bad] = 0.0
+        ivar[~np.isfinite(ivar)] = 0.0
+        np.nan_to_num(tmpl_hi, copy=False)
+
+        if self.prm_lo is None and self.f_psf_lo.exists():
+            self.prm_lo = PSFRegionMap.from_geojson(str(self.f_psf_lo))
+        if self.prm_kern is None:
+            self.build_kernels()
+
+        # finish construction: regular __init__ on the loaded products
+        Pipeline.__init__(
+            self,
+            [tmpl_hi, sci_fit],
+            segmap,
+            weights=[None, ivar],
+            catalog=cat,
+            psfs=[None, self.prm_lo],
+            kernels=[None, self.prm_kern],
+            wcs=[wcs_hi, wcs_lo],
+            config=_FitConfig(**cfg.fit),
+        )
+        return self
+
+    # -- step 4: outputs ---------------------------------------------------
+    def write_outputs(self) -> "Pipeline":
+        """Write residual FITS, fit table, and scene diagnostics."""
+        from astropy.io import fits
+
+        if self.table is None:
+            raise RuntimeError("run() first")
+        cfg = self.run_config
+        stem = self.out_dir / cfg.name
+        # residual is on the hi-res reference grid (upsample path)
+        fits.writeto(
+            f"{stem}_residual.fits",
+            self.residuals[0],
+            fits.getheader(cfg.sci_hi),
+            overwrite=True,
+        )
+        self.table.write(f"{stem}_fit_table.fits", overwrite=True)
+
+        rows = []
+        for s in self.scenes:
+            xy = np.mean([t.position_original for t in s.templates], axis=0)
+            ra, dec = self.wcs[0].wcs_pix2world([xy], 0)[0]
+            rows.append((s.id, len(s.templates), int(s.is_bright.sum()), ra, dec))
+            if cfg.scene_plots:
+                import matplotlib.pyplot as plt
+
+                fig, _ = s.plot(self.images[0], self.segmap, display_sig=5)
+                fig.savefig(f"{stem}_scene_{s.id}.png", dpi=300)
+                plt.close(fig)
+        scene_table = Table(
+            rows=rows, names=["id", "n_templates", "is_bright", "ra", "dec"]
+        )
+        scene_table["minerva_link"] = [
+            f"https://minerva.colorado.edu/?ra={ra}&dec={dec}&zoom=7"
+            for ra, dec in zip(scene_table["ra"], scene_table["dec"])
+        ]
+        scene_table.write(
+            f"{stem}_scene_catalog.csv", format="ascii.csv", overwrite=True
+        )
+        logger.info("outputs written to %s", self.out_dir)
+        return self
+
+    def run_all(self) -> "Pipeline":
+        """All steps in order: psfs, kernels, fit, outputs."""
+        self.build_psfs()
+        self.build_kernels()
+        self.run()
+        self.write_outputs()
+        return self
 
     # ------------------------------------------------------------------
     # Helper methods
@@ -617,6 +1035,10 @@ class Pipeline:
         from . import utils
         import warnings
 
+        # config-driven construction: load data + maps on first run()
+        if getattr(self, "run_config", None) is not None and self.images is None:
+            self.load_data()
+
         images = self.images
         segmap = self.segmap
         catalog = self.catalog
@@ -958,6 +1380,15 @@ class Pipeline:
             throughput = _filter_psf_throughput(
                 psfs[ifilt] if psfs is not None else None,
                 None if psf_throughputs is None else psf_throughputs[ifilt],
+            )
+            _record_psf_ee(
+                cat,
+                psfs[ifilt] if psfs is not None else None,
+                self._pixel_scale_arcsec(
+                    self.wcs[ifilt] if self.wcs is not None else None
+                ),
+                ifilt,
+                throughput,
             )
 
             # calculate a full image residual from the scenes and their slice
@@ -1667,3 +2098,37 @@ def run(
     #         weights[i] = wht
 
     # # print(f"Pipeline (blocked storage) memory: {memory():.1f} GB")
+
+
+STEPS = {
+    "psfs": "build_psfs",
+    "kernels": "build_kernels",
+    "fit": "run",
+    "outputs": "write_outputs",
+    "all": "run_all",
+}
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Command-line entry point: python -m mophongo.pipeline config.json [steps]."""
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        description="Config-driven mophongo photometry run (see pipeline.RunConfig)"
+    )
+    ap.add_argument("config", help="JSON run config (see mophongo.pipeline.RunConfig)")
+    ap.add_argument(
+        "steps",
+        nargs="*",
+        choices=list(STEPS),
+        help="steps to run (default: all)",
+    )
+    args = ap.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    pipe = Pipeline.from_config(args.config)
+    for step in args.steps or ["all"]:
+        getattr(pipe, STEPS[step])()
+
+
+if __name__ == "__main__":
+    main()

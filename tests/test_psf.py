@@ -19,6 +19,7 @@ from mophongo.psf import (
     _growth_curve_ratio_plot_samples,
     _kernel_regularization,
     pad_to_shape,
+    stamp_encircled_energy,
 )
 from mophongo.templates import _convolve2d
 from mophongo.utils import (
@@ -391,3 +392,103 @@ def test_regularized_matching_kernel_default_lambda_range():
 
     np.testing.assert_allclose(result.reg_grid[0], 1e-6)
     np.testing.assert_allclose(result.reg_grid[-1], 1e-1)
+
+
+# ----------------------------------------------------------------------
+# realized encircled energy of drizzled stamps
+# ----------------------------------------------------------------------
+
+
+def test_stamp_encircled_energy_delta_stamp():
+    """A central delta encloses everything, inside the circle and the box."""
+    stamp = np.zeros((20, 20))
+    stamp[10, 10] = 0.9
+
+    ee = stamp_encircled_energy(stamp, 0.08)
+
+    np.testing.assert_allclose(ee["ee_box"], 0.9)
+    np.testing.assert_allclose(ee["ee_circ"], 0.9)
+    np.testing.assert_allclose(ee["r_circ"], 0.5 * 20 * 0.08)
+
+
+def test_stamp_encircled_energy_box_exceeds_circle():
+    """The square stamp circumscribes the circle, so it holds the corners too."""
+    stamp = PSF.gaussian(41, 20.0).array
+
+    ee = stamp_encircled_energy(stamp, 0.04)
+
+    assert ee["ee_box"] > ee["ee_circ"]
+    np.testing.assert_allclose(ee["ee_box"], stamp.sum(), rtol=1e-12)
+
+
+def test_stamp_encircled_energy_half_light_radius():
+    """r_ee reproduces the Gaussian half-light radius, 1.1774 sigma = fwhm / 2.
+
+    Tolerance covers the shell-quantization bias: r_ee is the radius of the
+    first sorted pixel whose cumulative sum reaches the fraction, so it lands
+    just outside the true radius.
+    """
+    fwhm, pscale = 8.0, 0.04
+    stamp = PSF.gaussian(81, fwhm).array
+
+    ee = stamp_encircled_energy(stamp, pscale, ee_fraction=0.5)
+
+    np.testing.assert_allclose(ee["r_ee"], 0.5 * fwhm * pscale, rtol=0.05)
+
+
+def test_stamp_encircled_energy_unreachable_fraction_is_nan():
+    stamp = PSF.gaussian(41, 6.0).array * 0.5
+
+    ee = stamp_encircled_energy(stamp, 0.04, ee_fraction=0.95)
+
+    assert np.isnan(ee["r_ee"])
+
+
+def test_stamp_encircled_energy_cube_averages_and_ignores_nans():
+    """Cubes reduce to mean per-stamp scalars; non-finite pixels count as zero."""
+    stamp = PSF.gaussian(31, 5.0).array
+    cube = np.stack([stamp, 0.5 * stamp])
+    cube[1, 0, 0] = np.nan
+
+    ee = stamp_encircled_energy(cube, 0.04)
+    single = stamp_encircled_energy(stamp, 0.04)
+
+    np.testing.assert_allclose(ee["ee_box"], 0.75 * single["ee_box"], rtol=1e-4)
+    np.testing.assert_allclose(ee["ee_circ"], 0.75 * single["ee_circ"], rtol=1e-4)
+
+
+def test_stamp_encircled_energy_rejects_bad_input():
+    import pytest
+
+    with pytest.raises(ValueError):
+        stamp_encircled_energy(np.zeros(5), 0.08)
+    with pytest.raises(ValueError):
+        stamp_encircled_energy(np.zeros((5, 5)), 0.0)
+
+
+def test_record_realized_ee_sets_delivered_metadata():
+    """get_psf_radec's bookkeeping reports the cube, not the request."""
+    dpsf = object.__new__(DrizzlePSF)
+    dpsf.driz_pscale = 0.08
+    cube = np.stack([PSF.gaussian(20, 10.0).array * 0.9] * 3)
+
+    dpsf._record_realized_ee(cube, 0.95)
+
+    np.testing.assert_allclose(dpsf.psf_size, 20 * 0.08)
+    np.testing.assert_allclose(dpsf.ee_box, cube[0].sum(), rtol=1e-6)
+    assert dpsf.ee_circ < dpsf.ee_box
+    assert dpsf.ee_fraction_request == 0.95
+    # 0.95 is unreachable inside a 0.9-sum stamp: recorded as unmet, not invented
+    assert np.isnan(dpsf.r_ee)
+
+
+def test_record_realized_ee_leaves_metadata_unset_for_ragged_cube():
+    dpsf = object.__new__(DrizzlePSF)
+    dpsf.driz_pscale = 0.08
+    dpsf.psf_size = dpsf.ee_box = dpsf.ee_circ = None
+
+    dpsf._record_realized_ee(np.zeros((0,)), None)
+
+    assert dpsf.psf_size is None
+    assert dpsf.ee_box is None
+    assert dpsf.ee_fraction_request is None

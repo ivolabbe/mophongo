@@ -316,12 +316,23 @@ def build_realistic_two_detector_mock(
     nircam_detectors: Sequence[str] = DEFAULT_NIRCAM_LW_DETECTORS,
     miri_detector: Sequence[str] = DEFAULT_MIRI_DETECTOR,
     f770w_position_shift_xy: tuple[float, float] | None = None,
+    psf_gaussian_fwhm_arcsec: float | dict[str, float] | None = None,
 ) -> tuple[Any, dict[str, dict[str, Any]], dict[str, Any], dict[str, Any], Table]:
     """Build the standard two-detector F444W/F770W realistic verification mock.
 
     The setup mirrors the realistic scratch validation: two NIRCam LW
     detectors, six NIRCam phase dithers, two MIRI macro pointings aligned to
     the LW detectors, and eight MIRI phase dithers at each macro position.
+
+    Parameters
+    ----------
+    psf_gaussian_fwhm_arcsec
+        Extra Gaussian broadening of the injected PSFs (FWHM, arcsec; float or
+        per-filter dict). ``None`` uses the ``MockMosaic`` default
+        (``mock_mosaic.DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC``, F770W 0.08");
+        pass ``0.0`` or ``{}`` to disable. Model-PSF chains fitting this mock
+        (and real-data drivers such as ``examples/run_770.py``) must apply the
+        same broadening before kernel construction.
     """
 
     from mophongo.mock_mosaic import MockMosaic
@@ -363,6 +374,11 @@ def build_realistic_two_detector_mock(
         source_psf_normalization="native",
         apertures_arcsec=(0.32, 0.7),
         noise_seed=seed,
+        **(
+            {}
+            if psf_gaussian_fwhm_arcsec is None
+            else {"psf_gaussian_fwhm_arcsec": psf_gaussian_fwhm_arcsec}
+        ),
         **mosaic_kwargs,
     )
     mock.to_json(out_dir / "mock_config.json")
@@ -397,25 +413,15 @@ def apply_mock_filter_blur_on_grid(
     *,
     grid_pscale: float,
 ) -> np.ndarray:
-    """Apply MockMosaic extra PSF blur in angular units on the given PSF grid."""
+    """Apply MockMosaic extra PSF blur in angular units on the given PSF grid.
 
-    fwhm_arcsec = mock._psf_gaussian_fwhm_arcsec_for(filter_name)
-    if fwhm_arcsec <= 0:
-        return psf
-    from scipy.ndimage import gaussian_filter
+    Delegates to ``MockMosaic.blur_filter_psf`` so the PSF/kernel maps receive
+    the exact same Fourier-domain Gaussian operator as the painted mock
+    sources; any operator difference between the two paths shows up as a
+    spurious data-vs-model PSF mismatch in the verification fits.
+    """
 
-    sigma_grid_pix = float(fwhm_arcsec) / float(grid_pscale) / 2.355
-    arr = np.asarray(psf, dtype=float)
-    if arr.ndim == 2:
-        sigma = sigma_grid_pix
-    elif arr.ndim == 3:
-        sigma = (0.0, sigma_grid_pix, sigma_grid_pix)
-    else:
-        raise ValueError("PSF blur expects a 2-D PSF or 3-D PSF cube")
-    return gaussian_filter(arr, sigma=sigma, mode="constant", cval=0.0, truncate=6.0).astype(
-        np.asarray(psf).dtype,
-        copy=False,
-    )
+    return mock.blur_filter_psf(filter_name, psf, pscale=float(grid_pscale))
 
 
 
@@ -1366,8 +1372,12 @@ def _diagnostic_pixel_sampling_dpi(
     ncols: int,
     min_dpi: int = 150,
     max_dpi: int = 1200,
+    oversample: float = 1.0,
 ) -> int:
-    """Return a DPI high enough that diagnostic panels sample image pixels."""
+    """Return a DPI high enough that diagnostic panels sample image pixels.
+
+    ``oversample`` requests that many output pixels per displayed image pixel.
+    """
 
     shapes = [np.asarray(panel).shape[:2] for panel in panels if panel is not None]
     if not shapes:
@@ -1377,10 +1387,10 @@ def _diagnostic_pixel_sampling_dpi(
     panel_width_in = float(figsize[0]) / float(ncols)
     panel_height_in = float(figsize[1]) / float(nrows)
     # Allow for titles, labels, colorbars, and tight-layout padding. The saved
-    # PNG should have at least one output pixel per displayed image pixel in
-    # the main panels, even for large full-diagnostic crops.
-    needed_x = int(np.ceil(1.25 * max_nx / max(panel_width_in, 1e-6)))
-    needed_y = int(np.ceil(1.25 * max_ny / max(panel_height_in, 1e-6)))
+    # PNG should have at least ``oversample`` output pixels per displayed image
+    # pixel in the main panels, even for large full-diagnostic crops.
+    needed_x = int(np.ceil(1.25 * oversample * max_nx / max(panel_width_in, 1e-6)))
+    needed_y = int(np.ceil(1.25 * oversample * max_ny / max(panel_height_in, 1e-6)))
     return int(np.clip(max(min_dpi, needed_x, needed_y), min_dpi, max_dpi))
 
 
@@ -1602,8 +1612,9 @@ def save_scene_diagnostics(
             figsize=(15, 10),
             nrows=2,
             ncols=3,
-            min_dpi=200,
-            max_dpi=1200,
+            min_dpi=400,
+            max_dpi=2400,
+            oversample=2.0,
         )
         fig.savefig(out_dir / f"scene_{int(scene.id)}.png", dpi=scene_dpi, bbox_inches="tight")
         plt.close(fig)

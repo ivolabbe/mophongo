@@ -1014,7 +1014,7 @@ class PSF:
         other: "PSF" | np.ndarray,
         window: object | None = None,
         *,
-        recenter: bool = True,
+        recenter: bool = False,
         method: str = "window",
         reg: float = 1e-3,
         wavelet: str = "db4",
@@ -2093,6 +2093,89 @@ def get_slice_wcs(wcs, slx, sly):
     return swcs
 
 
+def stamp_encircled_energy(
+    psf: np.ndarray,
+    pscale: float,
+    *,
+    ee_fraction: float | None = None,
+) -> dict[str, float]:
+    """Measure the *realized* encircled energy of drizzled PSF stamp(s).
+
+    Absolutely calibrated ePSFs drizzle onto an absolute flux scale, so a stamp
+    sum *is* an encircled energy.  Measuring it here rather than predicting it
+    from the native oversampled ePSF growth curve folds in everything that
+    happens on the way to the mosaic grid: the size quantization and parity
+    bump applied by :meth:`DrizzlePSF.get_psf_radec`, the drizzle kernel and
+    ``pixfrac``, geometric distortion (the local pixel area, not the mean
+    linear WCS scale), and the exposure stack actually covering the position.
+
+    Note that the square stamp circumscribes the circle of the same diameter,
+    so ``ee_box >= ee_circ`` always, by the corner flux.  ``ee_box`` is the
+    quantity that converts a fitted template amplitude into a total flux
+    (see :func:`mophongo.pipeline._filter_psf_throughput`); ``ee_circ`` is the
+    quantity to compare against tabulated encircled-energy curves.
+
+    Parameters
+    ----------
+    psf : np.ndarray
+        One stamp ``(ny, nx)`` or a cube ``(..., ny, nx)``.  Non-finite pixels
+        are treated as zero.  Cubes are reduced by averaging the per-stamp
+        scalars, so a spatially varying PSF map returns its mean behaviour.
+    pscale : float
+        Stamp pixel scale in arcsec.
+    ee_fraction : float, optional
+        If given, also return the radius enclosing this absolute fraction.
+
+    Returns
+    -------
+    dict
+        ``ee_box``  full-stamp sum;
+        ``ee_circ`` sum inside the inscribed circle ``r_circ``;
+        ``r_circ``  inscribed-circle radius [arcsec], ``0.5 * min(ny, nx)``
+        pixels from the stamp centre;
+        ``r_ee``    radius [arcsec] enclosing ``ee_fraction``, or ``nan`` when
+        ``ee_fraction`` is ``None`` or no stamp reaches it within ``r_circ``.
+        This is the radius of the first radius-sorted pixel whose cumulative
+        sum reaches the fraction -- the same convention as
+        :meth:`DrizzlePSF._ee_fraction_to_arcsec` -- so it sits up to one
+        pixel shell outside the continuous radius.
+    """
+    arr = np.asarray(psf, dtype=float)
+    if arr.ndim < 2:
+        raise ValueError(f"psf must be at least 2-D; got shape {arr.shape}")
+    if not np.isfinite(pscale) or pscale <= 0.0:
+        raise ValueError(f"pscale must be a positive scalar; got {pscale!r}")
+
+    ny, nx = arr.shape[-2:]
+    flat = np.where(np.isfinite(arr), arr, 0.0).reshape(-1, ny * nx)
+
+    radius = _radius_image((ny, nx)).ravel()
+    order = np.argsort(radius)
+    r_sorted = radius[order] * float(pscale)
+    r_circ = 0.5 * min(ny, nx) * float(pscale)
+    i_circ = max(int(np.searchsorted(r_sorted, r_circ, side="right")) - 1, 0)
+
+    # one stamp at a time: a region map can hold hundreds of large stamps, and
+    # the sorted cumulative sum of the whole cube at once is a big allocation
+    ee_box, ee_circ, radii = [], [], []
+    for stamp in flat:
+        cum = np.cumsum(stamp[order])
+        ee_box.append(cum[-1])
+        ee_circ.append(cum[i_circ])
+        if ee_fraction is not None and cum[i_circ] >= ee_fraction:
+            # tiny negative wing pixels can make the raw sum non-monotonic
+            idx = int(np.searchsorted(np.maximum.accumulate(cum), ee_fraction))
+            radii.append(r_sorted[min(idx, len(r_sorted) - 1)])
+
+    return {
+        "ee_box": float(np.mean(ee_box)),
+        "ee_circ": float(np.mean(ee_circ)),
+        "r_circ": r_circ,
+        # averaged over the stamps that reach ``ee_fraction`` at all
+        "r_ee": float(np.mean(radii)) if radii else float("nan"),
+    }
+
+
 # ---------------------------------------------------------------------
 # Drizzle PSF class
 # ---------------------------------------------------------------------
@@ -2138,6 +2221,15 @@ class DrizzlePSF:
         self.driz_pscale = get_wcs_pscale(self.driz_wcs)
         self.driz_wcs.pscale = self.driz_pscale
         self.driz_footprint = Polygon(self.driz_wcs.calc_footprint())
+
+        # Realized PSF-stamp metadata, filled by ``get_psf_radec`` from the
+        # cube it actually produced (see that method's Attributes section).
+        self.psf_size: float | None = None
+        self.ee_box: float | None = None
+        self.ee_circ: float | None = None
+        self.r_circ: float | None = None
+        self.r_ee: float | None = None
+        self.ee_fraction_request: float | None = None
 
     def load_jwst_stdpsf(self, *args, edge_taper_pixels: float | None = 4.0, **kwargs):
         """Load JWST STDPSF grids through the DrizzlePSF interface.
@@ -2436,68 +2528,81 @@ class DrizzlePSF:
             npix = int(np.ceil(half_out * self.driz_pscale / input_pscale + 0.5 * pixfrac))
 
         pix = np.arange(-npix, npix + 1)
-        for key in self.flt_keys:
-            if self.footprint[key].contains(Point(ra, dec)):
-                file, ext = key
+        keys = [key for key in self.flt_keys if self.footprint[key].contains(Point(ra, dec))]
+        if not keys and self.flt_keys:
+            # nearest-frame fallback: a position outside every exposure
+            # footprint (e.g. a region-map sliver centroid) gets the PSF of
+            # the closest frame instead of an empty stamp
+            nearest = min(
+                self.flt_keys, key=lambda k: self.footprint[k].distance(Point(ra, dec))
+            )
+            dist = self.footprint[nearest].distance(Point(ra, dec)) * 3600.0
+            logger.warning(
+                f"Position {ra:.6f}, {dec:.6f} outside all exposure footprints; "
+                f"using nearest frame {nearest[0]}[SCI,{nearest[1]}] ({dist:.1f} arcsec away)."
+            )
+            keys = [nearest]
+        for key in keys:
+            file, ext = key
 
-                xy = self.wcs[key].all_world2pix([[ra, dec]], 0)[0]
+            xy = self.wcs[key].all_world2pix([[ra, dec]], 0)[0]
 
-                xyp = np.asarray(xy, dtype=int)
-                dx = xy[0] - int(xy[0]) + xphase
-                dy = xy[1] - int(xy[1]) + yphase
-                chip_offset = 2051 if ext == 2 else 0
+            xyp = np.asarray(xy, dtype=int)
+            dx = xy[0] - int(xy[0]) + xphase
+            dy = xy[1] - int(xy[1]) + yphase
+            chip_offset = 2051 if ext == 2 else 0
 
-                frame_mjd = float(self.hdrs[key].get("mjd-avg",
-                              self.hdrs[key].get("MJD-AVG", 0.0)) or 0.0) or None
-                flt_filter = self._resolve_epsf_key(filter, file, frame_mjd)
+            frame_mjd = float(self.hdrs[key].get("mjd-avg",
+                          self.hdrs[key].get("MJD-AVG", 0.0)) or 0.0) or None
+            flt_filter = self._resolve_epsf_key(filter, file, frame_mjd)
 
-                if verbose:
-                    print(
-                        f"Position: {xy}, Filter: {flt_filter}, "
-                        f"in frame: {file}[SCI,{ext}] mjd={frame_mjd}"
-                    )
-
-                psf_xy = self.epsf_obj.get_at_position(
-                    xy[0], xy[1] + chip_offset, filter=flt_filter
+            if verbose:
+                print(
+                    f"Position: {xy}, Filter: {flt_filter}, "
+                    f"in frame: {file}[SCI,{ext}] mjd={frame_mjd}"
                 )
-                yp, xp = np.meshgrid(pix - dy, pix - dx, indexing="ij")
-                extended_data = (
-                    self.epsf_obj.extended_epsf.get(flt_filter) if get_extended else None
+
+            psf_xy = self.epsf_obj.get_at_position(
+                xy[0], xy[1] + chip_offset, filter=flt_filter
+            )
+            yp, xp = np.meshgrid(pix - dy, pix - dx, indexing="ij")
+            extended_data = (
+                self.epsf_obj.extended_epsf.get(flt_filter) if get_extended else None
+            )
+            psf = self.epsf_obj.eval_ePSF(psf_xy, xp, yp, extended_data=extended_data)
+
+            flt_weight = self.wcs[key].expweight
+            N = npix
+            slx = slice(xyp[0] - N, xyp[0] + N + 1)
+            sly = slice(xyp[1] - N, xyp[1] + N + 1)
+            if hasattr(flt_weight, "ndim") and flt_weight.ndim == 2:
+                wslx = slice(xyp[0] - N + 32, xyp[0] + N + 1 + 32)
+                wsly = slice(xyp[1] - N + 32, xyp[1] + N + 1 + 32)
+                flt_weight = self.wcs[key].expweight[wsly, wslx]
+
+            psf_wcs = get_slice_wcs(self.wcs[key], slx, sly)
+            psf_wcs.pscale = get_wcs_pscale(self.wcs[key])
+
+            with _quiet_drizzle():
+                adrizzle.do_driz(
+                    psf,
+                    psf_wcs,
+                    (psf * 0 + flt_weight).astype(outwht.dtype),
+                    wcs_slice,
+                    outsci,
+                    outwht,
+                    outctx,
+                    1.0,
+                    "cps",
+                    1,
+                    wcslin_pscale=psf_wcs.pscale,
+                    uniqid=1,
+                    pixfrac=pixfrac,
+                    kernel=kernel,
+                    fillval=0,
+                    stepsize=10,
+                    wcsmap=None,
                 )
-                psf = self.epsf_obj.eval_ePSF(psf_xy, xp, yp, extended_data=extended_data)
-
-                flt_weight = self.wcs[key].expweight
-                N = npix
-                slx = slice(xyp[0] - N, xyp[0] + N + 1)
-                sly = slice(xyp[1] - N, xyp[1] + N + 1)
-                if hasattr(flt_weight, "ndim") and flt_weight.ndim == 2:
-                    wslx = slice(xyp[0] - N + 32, xyp[0] + N + 1 + 32)
-                    wsly = slice(xyp[1] - N + 32, xyp[1] + N + 1 + 32)
-                    flt_weight = self.wcs[key].expweight[wsly, wslx]
-
-                psf_wcs = get_slice_wcs(self.wcs[key], slx, sly)
-                psf_wcs.pscale = get_wcs_pscale(self.wcs[key])
-
-                with _quiet_drizzle():
-                    adrizzle.do_driz(
-                        psf,
-                        psf_wcs,
-                        (psf * 0 + flt_weight).astype(outwht.dtype),
-                        wcs_slice,
-                        outsci,
-                        outwht,
-                        outctx,
-                        1.0,
-                        "cps",
-                        1,
-                        wcslin_pscale=psf_wcs.pscale,
-                        uniqid=1,
-                        pixfrac=pixfrac,
-                        kernel=kernel,
-                        fillval=0,
-                        stepsize=10,
-                        wcsmap=None,
-                    )
 
         # taper PSF to avoid discontinuities at the edges and ringing
         if taper_alpha is not None and taper_alpha > 0:
@@ -2529,7 +2634,7 @@ class DrizzlePSF:
         *,
         filter: str | None = None,
         size: float | int | None = None,
-        ee_fraction: float | None = 0.95,
+        ee_fraction: float | None = None,
         size_quantum_arcsec: float = 0.160,
         parity: str = "even",
         verbose: bool = False,
@@ -2549,15 +2654,23 @@ class DrizzlePSF:
             ``None`` (default), the size is derived from ``ee_fraction`` when
             provided, otherwise the native DrizzlePSF/ePSF stamp size is used.
         ee_fraction : float, optional
-            Target encircled-energy fraction on the loaded stpsf growth curve.
-            The resulting arcsec size is rounded UP to the nearest multiple of
-            ``size_quantum_arcsec`` so that paired filters at nested pscales
-            share an integer pixel ratio (clean block-binning for kernel
-            matching). The final arcsec size is cached on ``self.psf_size`` so
-            another ``DrizzlePSF`` on a different pscale can reuse it via
-            ``size=dpsf_other.psf_size``. Ignored when ``size`` is given. If
-            ``None`` and ``size`` is also ``None``, use the native DrizzlePSF
-            stamp size.
+            Target **absolute** encircled-energy fraction, i.e. a fraction of
+            the total flux of an infinitely sampled PSF. The loaded ePSFs are
+            absolutely calibrated, so their finite stamp already encloses only
+            ``EE_stamp < 1``; asking for more than that raises rather than
+            silently returning the stamp edge. Use ``ee_fraction >= 1.0`` for
+            the full stamp side length. The resulting arcsec size is rounded UP
+            to the nearest multiple of ``size_quantum_arcsec`` so that paired
+            filters at nested pscales share an integer pixel ratio (clean
+            block-binning for kernel matching). Note that this sizing runs on
+            the native oversampled ePSF growth curve, because it must produce a
+            size *before* anything is drizzled; it is a request, and the
+            delivered value is measured afterwards (see Attributes). The
+            delivered arcsec size is cached on ``self.psf_size`` so another
+            ``DrizzlePSF`` on a different pscale can reuse it via
+            ``size=dpsf_other.psf_size``. Ignored when ``size`` is given.
+            Defaults to ``None``: with ``size`` also ``None`` the native
+            DrizzlePSF stamp size is used.
         size_quantum_arcsec : float, optional
             Grid quantum for the size rounding (default 0.160″ = 2 × 80 mas,
             so the 20 / 40 / 80 mas ladder always block-bins cleanly).
@@ -2571,11 +2684,32 @@ class DrizzlePSF:
             ``(RA, Dec)``. ``"any"`` keeps the requested size as-is.
         verbose : bool, optional
             Emit progress information if ``True``.
+
         Returns
         -------
         np.ndarray
             Array of shape ``(Npos, size, size)`` containing finite-integral
             drizzled PSFs on the requested output footprint.
+
+        Attributes
+        ----------
+        Every call overwrites the following, measured on the cube it just
+        produced by :func:`stamp_encircled_energy` — realized, not requested,
+        so drizzle distortion and the size quantization are already folded in:
+
+        ``psf_size``
+            Delivered stamp side [arcsec].
+        ``ee_box``, ``ee_circ``, ``r_circ``, ``r_ee``
+            Absolute encircled energy in the full square stamp and in the
+            inscribed circle, that circle's radius, and the radius enclosing
+            ``ee_fraction`` (``nan`` if not requested or not reached).
+        ``ee_fraction_request``
+            The ``ee_fraction`` argument, kept for provenance.
+
+        These describe the cube **as returned**. A caller that modifies it
+        afterwards — e.g. the Gaussian broadening in
+        ``Pipeline._drizzle_lo_blurred``, which pushes flux out of the stamp —
+        must re-measure with :func:`stamp_encircled_energy` on the final cube.
         """
         if size is None:
             if ee_fraction is None:
@@ -2622,8 +2756,6 @@ class DrizzlePSF:
                 recenter=False,
                 search_boxsize=11,
             )
-            if size_pix is None:
-                self.psf_size = cutout.data.shape[0] * self.driz_pscale
 
             psf = self.get_psf(
                 ra=ra,
@@ -2637,7 +2769,47 @@ class DrizzlePSF:
             )
             psf_cube.append(psf)
 
-        return np.asarray(psf_cube)
+        cube = np.asarray(psf_cube)
+        self._record_realized_ee(cube, ee_fraction)
+        return cube
+
+    def _record_realized_ee(
+        self, cube: np.ndarray, ee_fraction: float | None
+    ) -> None:
+        """Store delivered stamp size and encircled energy from ``cube``.
+
+        Called by :meth:`get_psf_radec` on the cube it just drizzled, so the
+        cached values describe what came out rather than what was asked for.
+        """
+        self.ee_fraction_request = ee_fraction
+        if cube.ndim != 3 or cube.size == 0:
+            # empty positions, or ragged stamps from edge-clipped cutouts
+            logger.warning(
+                "PSF cube has shape %s; leaving realized PSF metadata unset",
+                cube.shape,
+            )
+            return
+
+        self.psf_size = float(cube.shape[-1]) * self.driz_pscale
+        ee = stamp_encircled_energy(
+            cube, self.driz_pscale, ee_fraction=ee_fraction
+        )
+        self.ee_box = ee["ee_box"]
+        self.ee_circ = ee["ee_circ"]
+        self.r_circ = ee["r_circ"]
+        self.r_ee = ee["r_ee"]
+
+        logger.info(
+            'psf_size=%.3f" (%d pix): realized ee_box=%.4f, ee_circ(%.3f")=%.4f',
+            self.psf_size, cube.shape[-1], self.ee_box, self.r_circ, self.ee_circ,
+        )
+        if ee_fraction is not None and self.ee_circ < ee_fraction:
+            logger.warning(
+                'requested ee_fraction=%.4f but the drizzled stamp encloses '
+                'only %.4f within r=%.3f"; the native ePSF growth curve '
+                "over-promised (drizzle kernel, pixfrac, or distortion)",
+                ee_fraction, self.ee_circ, self.r_circ,
+            )
 
     def _ee_fraction_to_arcsec(self,
                                ee_fraction: float,
@@ -2645,11 +2817,25 @@ class DrizzlePSF:
                                quantum: float = 0.160) -> float:
         """Growth-curve diameter [arcsec] enclosing ``ee_fraction``, quantized UP.
 
-        Uses the first loaded stpsf grid (center-of-detector model). For
-        ``ee_fraction >= 1``, use the finite ePSF side length rather than the
+        Uses the first loaded stpsf grid (center-of-detector model). The grids
+        are absolutely calibrated: the oversampled array sums to
+        ``oversample**2 * EE_stamp`` with ``EE_stamp < 1``, the flux missing to
+        infinity plus whatever the load-time edge taper removed. ``ee_fraction``
+        is therefore interpreted against that absolute scale, and a request
+        above ``EE_stamp`` raises instead of silently returning the stamp edge.
+
+        For ``ee_fraction >= 1``, use the finite ePSF side length rather than the
         corner radius, so full-stamp requests do not add a sqrt(2) diagonal
         buffer. The size is rounded up to the nearest multiple of ``quantum``
         so the 20/40/80 mas ladder always block-bins cleanly.
+
+        This is a *predictor*: it has to return a size before any stamp is
+        drizzled, so it can only work on the native oversampled grid, and it
+        answers with a circular diameter that then becomes a square side. The
+        delivered encircled energy differs — quantizing up grows the radius,
+        the square adds corner flux, and drizzling resamples through the real
+        distortion — and is measured after the fact by
+        :func:`stamp_encircled_energy`.
         """
         ep = self.epsf_obj.epsf
         if not ep:
@@ -2686,8 +2872,18 @@ class DrizzlePSF:
         yy, xx = np.mgrid[:ny, :nx]
         r = np.hypot(xx - cx, yy - cy)
         order = np.argsort(r.ravel())
-        cum = np.cumsum(psf.ravel()[order])
-        cum /= cum[-1]
+        # absolute encircled energy: the oversampled grid carries oversample**2
+        # per unit of detector-sampled flux, so divide it back out.
+        cum = np.cumsum(psf.ravel()[order]) / float(oversample**2)
+        ee_stamp = float(cum[-1])
+        if ee_fraction > ee_stamp:
+            raise ValueError(
+                f"ee_fraction={ee_fraction} exceeds the absolute encircled "
+                f"energy of the finite ePSF stamp ({key}: EE_stamp="
+                f"{ee_stamp:.4f} over {max(ny, nx) * p_os:.2f}\"). Request "
+                f"ee_fraction <= {ee_stamp:.4f}, or ee_fraction >= 1.0 for the "
+                f"full stamp side length."
+            )
         idx = int(np.searchsorted(cum, ee_fraction))
         idx = min(idx, len(cum) - 1)
         diam_arcsec = 2.0 * r.ravel()[order][idx] * p_os

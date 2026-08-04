@@ -707,6 +707,21 @@ class Template(Cutout2D):
         if hlo <= 0 or wlo <= 0:
             raise ValueError("Cutout too small to downsample with current k/phase.")
 
+        # A non-zero phase shortens the k-aligned block, so the trailing low-res
+        # row/column stays zero and that flux is dropped.  Exact only when the
+        # origin is k-aligned (see AlignedCutout.downsample, which refuses).
+        if (H - dy) // k < hlo or (W - dx) // k < wlo:
+            logger.warning(
+                "template %s: origin (%d, %d) is not aligned to k=%d; trailing "
+                "row/column of the downsampled cutout is zero-filled and its flux "
+                "is lost. Use multi_resolution_method='upsample' for exact "
+                "block alignment.",
+                self.id,
+                x0_hi,
+                y0_hi,
+                k,
+            )
+
         # Hi-res block aligned to k×k boundaries
         hi_aligned = self.data[dy : dy + hlo * k, dx : dx + wlo * k]
         # Flux-conserving reduction

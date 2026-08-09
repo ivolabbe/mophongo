@@ -71,6 +71,14 @@ class RunConfig:
     # mosaic used for DrizzlePSF footprints/grid of the hi-res side
     # (defaults to sci_hi; set when sci_hi is a derived template image)
     driz_hi: str | None = None
+    # High-resolution weight map, rescaled to a calibrated inverse variance the
+    # same way wht_lo is. Needed by the template build schemes that weight data
+    # against a PSF model by SNR ('wren' always, 'classic' for its low-SNR
+    # point-source branch); unused by 'default'/'psf'. None (the default)
+    # derives it from sci_hi by the standard '_sci' -> '_wht' naming; it is
+    # read only when the selected extend_mode needs it, since a full-field
+    # hi-res weight map costs as much memory as the mosaic itself.
+    wht_hi: str | None = None
     # --- PSFs -------------------------------------------------------------
     psf_dir: str = "data/PSF"
     pattern_hi: str = ""  # STDPSF filename regex for the hi-res band
@@ -610,6 +618,61 @@ class Pipeline:
         if self.prm_kern is None:
             self.build_kernels()
 
+    def _load_detection_ivar(self, sci_hi: np.ndarray) -> np.ndarray | None:
+        """Detection-band inverse variance, or None when the run does not need it.
+
+        Only the SNR-weighted build schemes read ``weights[0]``: ``'wren'``
+        weights data against its PSF model by SNR everywhere, and ``'classic'``
+        needs it for the low-SNR point-source branch. ``'default'`` and
+        ``'psf'`` never touch it, and a full-field hi-res weight map costs as
+        much memory as the mosaic itself, so it is read only when it is used.
+
+        Without it both schemes fall back to a single scalar sky sigma for the
+        whole mosaic, which a field with real depth variation biases by the
+        local/global depth ratio -- hence the default is to load it.
+        """
+        from astropy.io import fits
+        from .catalog import get_bg_and_ivar
+
+        cfg = self.run_config
+        mode = str(cfg.fit.get("extend_mode", "default") or "default").lower()
+        if mode not in ("wren", "classic"):
+            return None
+
+        path = cfg.wht_hi
+        if path is None:
+            # standard grizli naming: <root>_drc_sci.fits -> <root>_drc_wht.fits.
+            # driz_hi is the second candidate: when sci_hi is a derived template
+            # image (e.g. a saturated-star-repaired mosaic) the weight map still
+            # sits with the original.
+            for src in (cfg.sci_hi, cfg.driz_hi):
+                if src is None:
+                    continue
+                guess = Path(str(src).replace("_sci.fits", "_wht.fits"))
+                if guess != Path(src) and guess.exists():
+                    path = str(guess)
+                    break
+        if path is None:
+            logger.warning(
+                "extend_mode=%r weights data against a PSF model by SNR, but no "
+                "wht_hi is set and none was found next to sci_hi or driz_hi; "
+                "falling back to one scalar sky sigma for the whole mosaic", mode
+            )
+            return None
+
+        wht_hi = fits.getdata(path)
+        bg_hi, ivar_hi = get_bg_and_ivar(
+            sci_hi, wht_hi, bg_filter_sigma=cfg.bg_filter_sigma
+        )
+        # The detection background is measured but NOT subtracted: that would
+        # change 'default' templates too. It matters for the extended schemes,
+        # which blend raw data over a large halo, so report it (see TODO.md).
+        logger.info(
+            "detection ivar from %s (median background %.4g; not subtracted)",
+            Path(path).name, float(np.median(bg_hi)),
+        )
+        return ivar_hi
+
     # -- step 3: data ------------------------------------------------------
     def load_data(self, kernels: bool = True) -> "Pipeline":
         """Load images/segmap/catalog, preprocess, and finish construction.
@@ -663,7 +726,13 @@ class Pipeline:
         sci_fit[bad] = 0.0
         ivar[bad] = 0.0
         ivar[~np.isfinite(ivar)] = 0.0
+
+        ivar_hi = self._load_detection_ivar(tmpl_hi)
+        bad_hi = ~np.isfinite(tmpl_hi)
         np.nan_to_num(tmpl_hi, copy=False)
+        if ivar_hi is not None:
+            ivar_hi[bad_hi] = 0.0
+            ivar_hi[~np.isfinite(ivar_hi)] = 0.0
 
         if kernels:
             self._ensure_maps()
@@ -673,7 +742,7 @@ class Pipeline:
             self,
             [tmpl_hi, sci_fit],
             segmap,
-            weights=[None, ivar],
+            weights=[ivar_hi, ivar],
             catalog=cat,
             # psfs[0] is the detection-band map: template extension / the
             # 'wren' and 'classic' build schemes look up their detection PSF
@@ -715,7 +784,10 @@ class Pipeline:
         cfg = getattr(self, "run_config", None)
         if cfg is not None:
             lines.append(f"config: out_dir={self.out_dir}")
-            for key in ("sci_hi", "segmap", "catalog", "sci_lo", "wht_lo", "csv_hi", "csv_lo"):
+            keys = ["sci_hi", "segmap", "catalog", "sci_lo", "wht_lo", "csv_hi", "csv_lo"]
+            if cfg.wht_hi is not None:  # optional: auto-derived from sci_hi when unset
+                keys.insert(1, "wht_hi")
+            for key in keys:
                 path = Path(getattr(cfg, key))
                 if not path.exists():
                     lines.append(f"  {key:8s} MISSING  {path}")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -102,6 +103,44 @@ def test_load_data_without_kernels(tiny_config):
     assert "image[0]" in text
     assert "40 mas/pix" in text
     assert "catalog   1 rows" in text
+
+
+def test_detection_ivar_loaded_only_for_the_snr_weighted_schemes(tiny_config):
+    """weights[0] is read only by the build schemes that weight data against a
+    PSF model by SNR; a full-field hi-res weight map is as big as the mosaic."""
+    cfg = json.loads(tiny_config.read_text())
+    # standard grizli naming, so wht_hi resolves without being set
+    hi = Path(cfg["sci_hi"])
+    wht_hi = hi.with_name(hi.name.replace(".fits", "_sci.fits"))
+    fits.writeto(wht_hi, np.ones((64, 64), dtype=np.float32), _wcs_header(64, 0.04 / 3600.0))
+    fits.writeto(
+        str(wht_hi).replace("_sci.fits", "_wht.fits"),
+        np.full((64, 64), 1e6, dtype=np.float32),
+        _wcs_header(64, 0.04 / 3600.0),
+    )
+    cfg["sci_hi"] = str(wht_hi)
+
+    def _load(fit_kwargs):
+        cfg["fit"] = fit_kwargs
+        path = tiny_config.parent / "run_ivar.json"
+        path.write_text(json.dumps(cfg))
+        return Pipeline.from_config(path).load_data(kernels=False)
+
+    assert _load({}).weights[0] is None
+    assert _load({"extend_mode": "psf"}).weights[0] is None
+    assert _load({"extend_mode": "wren"}).weights[0] is not None
+    assert _load({"extend_mode": "classic"}).weights[0] is not None
+
+
+def test_detection_ivar_warns_when_no_hi_weight_exists(tiny_config, caplog):
+    cfg = json.loads(tiny_config.read_text())
+    cfg["fit"] = {"extend_mode": "wren"}  # sci_hi is "hi.fits": no _sci -> _wht sibling
+    path = tiny_config.parent / "run_nowht.json"
+    path.write_text(json.dumps(cfg))
+    with caplog.at_level("WARNING"):
+        pipe = Pipeline.from_config(path).load_data(kernels=False)
+    assert pipe.weights[0] is None
+    assert "scalar sky sigma" in caplog.text
 
 
 def test_load_data_default_ensures_maps(tiny_config, monkeypatch):

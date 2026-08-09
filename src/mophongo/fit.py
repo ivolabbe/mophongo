@@ -164,7 +164,7 @@ class FitConfig:
     # raising the coupling threshold locally (inside that component only);
     # the accepted local leakage is logged. None = no cap.
     scene_max_size: int | None = 500
-    scene_max_merge_radius: float = np.inf  # Max distance (px) to merge underfilled scenes (default: inf = no limit)
+    scene_max_merge_radius: float = 1000.0  # px; cap on how far an underfilled scene may reach to merge
     generate_scene_catalog: bool = False  # If True, generate scene catalog and exit
 
     def __post_init__(self):

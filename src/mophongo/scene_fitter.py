@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 import scipy.sparse as sp
-from scipy.sparse.linalg import spsolve, splu
+from scipy.sparse.linalg import cg, spsolve, splu
 from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
@@ -172,8 +172,9 @@ class SceneFitter:
             Unwhitened fluxes, their 1σ errors, optional shift coefficients
             and the solver exit flag (always 0 for the direct solver).
         """
-        # Flux regularization must use only the photometric ridge.
-        # Astrometric regularization is applied only to the shift block below.
+        # Flux regularization must use only the photometric ridge; reg_astrom
+        # is reserved for the shift block below. The ridge is adaptive,
+        # relative to the ATA scale, to avoid biasing fluxes.
         scale_A = _positive_diagonal_scale(A)
         reg_flux = _finite_nonnegative(getattr(config, "reg_flux", 0.0))
         lam_A = reg_flux if reg_flux > 0 else 1e-6 * scale_A

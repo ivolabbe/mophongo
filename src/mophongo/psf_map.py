@@ -528,21 +528,6 @@ class PSFRegionMap:
 
         return None
 
-    def lookup_key_slow(self, ra: float, dec: float, nearest: bool = True) -> int | None:
-        """Return the integer *psf_key* at (ra, dec) in deg.
-        If not inside any region, optionally return the nearest region's psf_key by boundary.
-        """
-        pt = Point(ra, dec)
-        for idx in self.tree.query(pt):
-            if self.regions.geometry.iloc[idx].contains(pt):
-                return int(self.regions.psf_key.iloc[idx])
-        if nearest and len(self.regions) > 0:
-            # Find the region with the closest boundary to the point
-            distances = self.regions.geometry.boundary.distance(pt)
-            nearest_idx = distances.idxmin()
-            return int(self.regions.psf_key.iloc[nearest_idx])
-        return None
-
     def get_psf(self, ra: float | None, dec: float | None) -> np.ndarray | None:
         if ra is None or dec is None or np.isnan(ra) or np.isnan(dec):
             key = 0

@@ -45,6 +45,30 @@ def _bbox_overlap(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) ->
     return not (a[1] <= b[0] or b[1] <= a[0] or a[3] <= b[2] or b[3] <= a[2])
 
 
+def _astrom_isolation_mask(A: sp.spmatrix, b: np.ndarray, thresh: float) -> np.ndarray:
+    """Return bool mask: True where source contributes >= thresh of its own local flux.
+
+    dominance[i] = (alpha0[i] * ATA[i,i]) /
+                   (alpha0[i] * ATA[i,i] + sum_j alpha0[j] * |ATA[i,j]|)
+
+    ATA[i,j] is the integral of T_i * T_j over the image, so alpha0[j] * ATA[i,j]
+    is exactly the neighbor flux falling within source i's template footprint.
+    """
+    n = A.shape[0]
+    diag = np.maximum(A.diagonal(), 1e-12)
+    alpha0 = np.abs(b) / diag
+    Au = sp.triu(A, k=1).tocoo()
+    if Au.nnz == 0:
+        return np.ones(n, dtype=bool)
+    i, j, aij = Au.row, Au.col, np.abs(Au.data)
+    neighbor_flux = np.zeros(n)
+    np.add.at(neighbor_flux, i, alpha0[j] * aij)
+    np.add.at(neighbor_flux, j, alpha0[i] * aij)
+    self_flux = alpha0 * diag
+    dominance = self_flux / np.maximum(self_flux + neighbor_flux, 1e-12)
+    return dominance >= thresh
+
+
 def build_scene_tree_from_normal(
     ATA: sp.spmatrix,
     ATb: np.ndarray,
@@ -593,7 +617,8 @@ def generate_scenes(
     snr_proxy = np.divide(
         ATb, np.sqrt(np.maximum(d, 1e-12)), out=np.zeros_like(ATb, dtype=float), where=d > 0
     )
-    bright_mask = np.asarray(snr_proxy > float(snr_thresh_astrom), dtype=bool)
+    not_star = ~np.array([t.is_star for t in templates], dtype=bool)
+    bright_mask = np.asarray(snr_proxy > float(snr_thresh_astrom), dtype=bool) & not_star
 
     labels, nscene = merge_small_scenes(
         labels0,
@@ -717,12 +742,14 @@ class Scene:
 
         A, b = self.A, self.b
 
-        # bright mask via SNR proxy against cfg.snr_thresh_astrom
+        # bright mask: SNR cut + exclude stars + isolation cut
         d = np.asarray(A.diagonal(), dtype=float)
         snr_proxy = np.divide(
             b, np.sqrt(np.maximum(d, 1e-12)), out=np.zeros_like(b, dtype=float), where=d > 0
         )
-        self.is_bright = snr_proxy > float(cfg.snr_thresh_astrom)
+        not_star = ~np.array([t.is_star for t in self.templates], dtype=bool)
+        isolated = _astrom_isolation_mask(A, b, float(cfg.astrom_isolation_thresh))
+        self.is_bright = (snr_proxy > float(cfg.snr_thresh_astrom)) & not_star & isolated
 
         # flux-only path
         if (not cfg.fit_astrometry_joint) or int(getattr(cfg, "fit_astrometry_niter", 0)) <= 0:
@@ -754,12 +781,7 @@ class Scene:
             sol = SceneFitter.solve(A, b, AB=AB, BB=BB, bB=bB, config=cfg, **kwargs)
             self.shifts = sol.shifts
 
-            if self.shifts is None or self.shifts.size == 0:
-                # <2 bright members: shift blocks were empty and the solver
-                # fell back to flux-only — leave templates unshifted
-                for tmpl in self.templates:
-                    tmpl.to_shift = np.zeros(2, dtype=float)
-            else:
+            if self.shifts is not None and len(self.shifts) > 0:
                 # record per object shift in templates
                 predict = AstroCorrect.build_poly_predictor(self.shifts, x0, y0, order, Sx, Sy)
                 pts = np.array([t.position_original for t in self.templates], dtype=float)
@@ -793,6 +815,20 @@ class Scene:
                     int(order),
                 )
                 logger.debug(f"[scenes] betas {self.id}:{self.shifts}")
+            else:
+                # <2 bright members: shift blocks were empty and the solver
+                # fell back to flux-only — leave templates unshifted.
+                # TODO: consider merging this scene with a neighbor rather than skipping,
+                # since isolation filtering (unlike star filtering) can't be applied at
+                # merge time. Currently the star mask is applied during merge so this
+                # should only be reached in pathological all-blended scenes.
+                for tmpl in self.templates:
+                    tmpl.to_shift = np.zeros(2, dtype=float)
+                logger.warning(
+                    "[Scenes] Scene %s: no bright non-star isolated sources after isolation filter; "
+                    "astrometry skipped for this scene.",
+                    getattr(self, "id", -1),
+                )
 
         # store solution
         self.solution = sol

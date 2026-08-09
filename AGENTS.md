@@ -36,7 +36,6 @@ one or both files before finishing.
   multi-step change.
 - Update `TODO.md` when future desired features, checks, or investigations are
   added, completed, or clarified.
-- `CHECKLIST.md` is deprecated and retained only as a compatibility pointer.
 
 ## Project Layout
 
@@ -47,9 +46,6 @@ one or both files before finishing.
 - `docs/` - longer-form documentation
 - `legacy/` - legacy IDL/Pro reference code
 - `scratch/` - exploratory scripts and one-off diagnostics
-
-Get a current structure map from:
-`https://uithub.com/ivolabbe/mophongo?accept=text%2Fplain&maxTokens=200`
 
 ## Implementation Workflow
 
@@ -90,6 +86,11 @@ Key components:
   segmentation helpers.
 - `Pipeline`: main entry point for image/template fitting.
 - `MockMosaic`: synthetic JWST-like mosaic generation.
+- `PSFFactory` (`psf_factory.py`): telescope-backend registry and MJD-aware
+  PSF generation.
+- `saturate.py`: saturated-pixel repair (see Module Boundaries).
+- `astrometry.py`, `jwst_psf.py`, `deblender.py`, `astro_fit.py`: astrometric
+  corrections, JWST PSF utilities, deblending, and astrometry-aware fitting.
 
 ## Module Boundaries
 
@@ -143,6 +144,8 @@ into B.
 - For PR preparation or large changes, run `poetry run pytest`.
 - When adding diagnostics, make outputs reproducible and write tests for the
   data products or helper behavior, not just the image file existence.
+- Long-form reports (`.tex`/`.md` compiled to PDF): plain academic prose, no
+  AI narrative tics; run a humanizer pass before finalizing/compiling.
 
 ## Pull Request Preparation
 

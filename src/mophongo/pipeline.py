@@ -1476,8 +1476,10 @@ class Pipeline:
                     coupling_thresh=float(config.scene_coupling_thresh),
                     max_size=config.scene_max_size,
                     snr_thresh_astrom=float(config.snr_thresh_astrom),
+                    isolation_thresh=float(config.astrom_isolation_thresh),
                     minimum_bright=int(config.scene_minimum_bright),
                     max_merge_radius=float(getattr(config, "scene_max_merge_radius", np.inf)),
+                    exclude_stars=bool(config.astrom_exclude_stars),
                 )
                 # Assume each scene has .ra and .dec attributes (center coordinates)
                 # Compute RA/Dec for each scene center using WCS

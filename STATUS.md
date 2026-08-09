@@ -3,6 +3,21 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Astrometric anchor selection unified (post-merge follow-up):
+  `astrom_isolation_thresh` default 0.5 -> 0.7 (wren value); new
+  `astrom_exclude_stars: bool = False` makes star exclusion opt-in at both
+  the solve-time bright mask and the merge-time mask (flips dev-wren's
+  unconditional `& not_star`; unsaturated stars are the best anchors and
+  saturated ones are already isolated into their own scenes). Isolation now
+  also applies at merge time: `generate_scenes(isolation_thresh=...)` folds
+  `_astrom_isolation_mask` into the bright mask counted by
+  `merge_small_scenes`, so `scene_minimum_bright` counts bright & isolated
+  (& star-policy) sources and merged scenes are guaranteed usable anchors —
+  the solve-time "astrometry skipped" branch becomes unreachable in
+  practice. The full-field normal matrix makes merge-time dominance
+  stricter than the per-scene solve-time one (out-of-scene neighbours still
+  count). Test: `test_isolation_thresh_counts_only_isolated_toward_floor`.
+  Suite: 119 passed + pre-existing moffat failure.
 - [x] IDL subphot diagnostic port: `Pipeline.plot_subphot(source_id)` renders
   the legacy `subphot.pro::mkdiag`/`fptv` 6-panel PNG (img/tmpl/seg/model/
   res/clean, 2x3 at 2x nearest-neighbour zoom) pixel-for-pixel for 1-1

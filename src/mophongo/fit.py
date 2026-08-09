@@ -117,6 +117,25 @@ class FitConfig:
     # their own segment pixels. Set False to fill every zero template pixel.
     extend_wings_background_only: bool = True
 
+    # --- template build scheme ---------------------------------------------
+    # One selector over the four schemes, for 1-1 comparison:
+    #   'default'   segment-masked detection data (mophongo, current)
+    #   'psf'       'default' + Templates.extend_with_psf (template * PSF fills
+    #               the zero pixels)
+    #   'psf_model' 'default' + Templates.extend_with_psf_model
+    #   'wren'      wren/dev-wren _extended_composite (ownership + SNR blend)
+    #   'classic'   IDL subphot.pro::build_cube (least-squares PSF wings)
+    # The 'wren'/'classic' ports live in mophongo.template_schemes; the knobs
+    # below are theirs and are ignored by the other modes.
+    extend_mode: str = "default"
+    wren_ee_fraction: float = 0.95  # EE fraction setting the support cap R95
+    wren_fit_snrlo_psf: float = 10.0  # core-weight onset is 1.5x this
+    wren_wings_snr_psf: float = 3.0  # per-annulus weight onset
+    wren_blend_p: float = 2.0  # blend-weight rolloff exponent
+    wren_blend_annulus: float = 0.15  # halo annulus width, arcsec
+    classic_tmpl_snrlo: float = 15.0  # below this in-segment SNR: pure point source
+    classic_rms: float | None = None  # None: robust_sigma of the detection image
+
     # Internal options: don't change unless you know what you're doing
     block_size: int = 64  # Block size for tiled processing
 

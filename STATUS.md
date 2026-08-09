@@ -3,6 +3,62 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Template build schemes selectable with one knob, `FitConfig.extend_mode`
+  (`'default'|'psf'|'psf_model'|'wren'|'classic'`), so the three codes of
+  `scratch/wren/template_comparison.pdf` can be compared 1-1 on identical
+  inputs. `Templates.extend_with_psf_wings` renamed `extend_with_psf` (it is a
+  convolution with the PSF, not a scaled-PSF paste); `extension_mode` on those
+  templates is now `"psf"`.
+  * `'wren'` and `'classic'` are **build-time** schemes: their composite
+    replaces the segment-masked data inside `Templates.extract_templates`,
+    before the unit-sum normalisation, so `template_norm` covers the extended
+    shape. `'psf'`/`'psf_model'` stay post-extraction passes (they reshape the
+    cutout), leaving `templates_extracted` / `templates_extended` meaningful.
+  * Ports live in the new `src/mophongo/template_schemes.py`, self-contained
+    and importing nothing from the fit/catalog/pipeline layers: pure numpy in,
+    `(composite, info)` out. Dispatch is one block in `extract_templates` plus
+    `Pipeline._extend_scheme_kwargs`, so either scheme can be adapted or
+    deleted as a unit.
+  * `classic` = IDL `subphot.pro::build_cube` (:294-330) from the canonical
+    source `~/Documents/Astro/PROG/idl/ifl/pro/fitphot/subphot.pro`:
+    `m = S.D + f_psf (1-S).P` with `f_psf = sum_S P D / sum_S P^2` floored at
+    0, the `f_psf<=0` bare-PSF branch, and the hard replacement by a point
+    source below `tmpl_snrlo=15` measured against `robust_sigma` (astrolib
+    biweight, ported). No dilation, no positivity clip, wings pasted over
+    neighbouring segments too. Cutout floored at the detection PSF stamp — the
+    resampled PSF is identically zero beyond it, so that footprint *is* the
+    support IDL's whole-tile paste produces. Records IDL's log columns
+    (`fpsf`, `flux_in_seg`, `added_flux`) in `Template.extend_info`. IDL's
+    step 7 (normalise the *convolved* plane, then `apermask` at
+    `ceil(ksz/2)`, `subphot.pro:324`) belongs to the convolution stage and is
+    deliberately not reproduced.
+  * `wren` = `dev-wren:templates.py::_extended_composite`: global
+    area-weighted `build_ownership` (disk contest, ROI-restricted), support
+    `own | (owned background within R95)`, one core weight
+    `w(S_seg; 1.5*fit_snrlo_psf)` and one weight per 0.15" halo annulus forced
+    monotone non-increasing outward and seeded at the core, blend
+    `H = W D + (1-W) A_src P`, positivity clip *before* `template_norm`, plus
+    `snr_seg`/`A_src`/`f_cut`/`flux_beyond_stamp`/`flux_beyond_aper`
+    bookkeeping and `FLAG_PSF_EXTENDED`/`FLAG_EXTEND_FAILED`. Sizing chain
+    (`r_fill = max(R95, r_aper + kernel_hw)`, `min_size = 2*ceil(r_fill)+2`)
+    reproduced in `Pipeline._extend_scheme_kwargs`.
+  * `Template.template_norm` is now recorded on **every** path (the one
+    behaviour change to `'default'`), so the detection-band flux a template
+    implies is reconstructable — `template_comparison.tex` Sec. 7 listed its
+    absence as an ivo defect.
+  * `Pipeline.load_data` now passes `psfs=[prm_hi, prm_lo]` instead of
+    `[None, prm_lo]`. Template extension previously fell back to `psfs[1]`,
+    i.e. the **low-res** PSF, and no `RunConfig` field reached the extension
+    branches at all; with `extend_mode` in the `fit` dict the whole family is
+    now reachable from a JSON run with the correct detection PSF. Only fitted
+    bands (`ifilt >= 1`) feed throughput/PSF-EE bookkeeping, so index 0 is
+    inert there.
+  * Verified on a synthetic faint source (fraction of a point source the
+    support can hold): `default` 0.40, `wren` 0.955 (R95 cap), `classic` 1.00,
+    `psf` 1.00; classic `added_flux` 2.49 and `f_psf` within 1% of the true
+    amplitude — matching `template_comparison.tex` Fig. 1.
+  * Tests: `tests/test_template_schemes.py` (29). Suite: 148 passed +
+    pre-existing `test_moffat_flux_recovery[psf_wing-3-psf]` failure.
 - [x] Astrometric anchor selection unified (post-merge follow-up):
   `astrom_isolation_thresh` default 0.5 -> 0.7 (wren value); new
   `astrom_exclude_stars: bool = False` makes star exclusion opt-in at both

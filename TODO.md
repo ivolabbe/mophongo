@@ -3,6 +3,36 @@
 This file tracks future desired features, checks, and investigations.
 
 - [ ] scan for bug fixes / robustness improvements
+- [ ] Run the four `extend_mode` schemes head to head on injected-truth mocks
+  (`verification.py`, not ad hoc comparisons) and pick a default. The synthesis
+  `template_comparison.tex` Sec. 8.3 recommends: wren's blended extension but
+  with the halo running to the full PSF support instead of stopping at R95, a
+  background subtraction before blending raw data over an ~855 px halo, and
+  IDL's least-squares halo amplitude in place of wren's flux-ratio anchor.
+  Each of those is a small edit inside `template_schemes.py`.
+- [ ] `extend_mode='classic'` does not reproduce IDL step 7 (`subphot.pro:324`:
+  normalise the *convolved* plane, then apply a circular `apermask` of radius
+  `ceil(ksz/2)` centred on the source, so the fitted template sums to slightly
+  less than 1 by a different amount per source). It sits in the convolution
+  stage, which is scheme-agnostic. Decide whether the 1-1 comparison needs it;
+  if so it wants a scheme hook in `convolve_templates`, not an inline branch.
+- [ ] `extend_mode='wren'` carries `flux_beyond_stamp`/`flux_beyond_aper` in
+  `Template.extend_info` but nothing consumes them. wren feeds them into its
+  aperture-correction chain (`trunc = norm / (norm + flux_beyond_stamp)`).
+  Wire them up, or drop them, once the scheme comparison settles.
+- [ ] `extend_mode='wren'` gets no detection-band inverse variance on the
+  config-driven path: `RunConfig` has no `wht_hi`, so `load_data` passes
+  `weights=[None, ivar]` and every wren SNR (core and per-annulus) falls back
+  to the clipped `sky_sigma` scalar. wren's own run supplied `weights[0]`, so
+  the JSON path is not yet a like-for-like comparison. Add `wht_hi` to
+  `RunConfig` (optional) and thread it through.
+- [ ] `extend_mode='wren'`'s `WrenParams.containment` (wren's
+  `PSFRegionMap.containment`, the detection-PSF stamp containment `c_det` in
+  `flux_beyond_stamp`) defaults to 1.0 because this tree has no equivalent.
+  `psf.stamp_encircled_energy` / `DrizzlePSF.ee_box` measure the same thing;
+  wire one in if the wren truncation bookkeeping is kept. Note
+  `template_comparison.tex` Sec. 8.1 flags wren's own `containment` as
+  normalised to the parent grid and therefore ~+2.9% (F444W) high.
 - [ ] `fit.py:1134` (`SparseFitter.solve` path) calls its local
   `build_scene_tree_from_normal` with `coupling_thresh=1e-4` hardcoded,
   ignoring `cfg.scene_coupling_thresh`. Scene partitions from that path

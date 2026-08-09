@@ -38,10 +38,10 @@ from scipy.ndimage import (
     binary_fill_holes,
     find_objects,
     label as nd_label,
-    uniform_filter,
 )
 
-from .psf import DrizzlePSF, get_slice_wcs
+from .psf import DrizzlePSF
+from .utils import get_slice_wcs
 from .utils import get_wcs_pscale
 
 logger = logging.getLogger(__name__)
@@ -63,7 +63,7 @@ __all__ = [
 def _slice_wcs(wcs: WCS, sly: slice, slx: slice) -> WCS:
     """Return a sub-WCS aligned with the cutout, with ``pscale`` set.
 
-    Uses :func:`mophongo.psf.get_slice_wcs` so SIP/distortion are
+    Uses :func:`mophongo.utils.get_slice_wcs` so SIP/distortion are
     propagated correctly, and sets the ``pscale`` attribute that
     :meth:`DrizzlePSF.get_psf` reads.
     """

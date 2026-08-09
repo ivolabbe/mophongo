@@ -186,10 +186,11 @@ on 2.x *main* today but with no stability guarantee across point releases):
 
 | file | line | import |
 |---|---|---|
-| `src/mophongo/photutils_deblend.py` | 13 | `photutils.segmentation.utils._make_binary_structure` |
-| `src/mophongo/photutils_deblend.py` | 14 | `photutils.utils._progress_bars.add_progress_bar` |
-| `src/mophongo/photutils_deblend.py` | 211 | `photutils.segmentation.detect._detect_sources` |
 | `src/mophongo/catalog.py` | 22 | `photutils.segmentation.catalog.DEFAULT_COLUMNS` |
+
+(The three private-API imports in `photutils_deblend.py` are gone: that module
+was deleted in the 2026-08 cleanup, leaving `DEFAULT_COLUMNS` as the only
+private photutils dependency.)
 
 Worth a smoke test right after upgrade; if any break, either vendor the
 private helper (copy it into `mophongo` with a note) or rewrite against the

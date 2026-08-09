@@ -359,9 +359,12 @@ def test_moffat_flux_recovery(tmp_path, scenario, ndilate, extend):
     fit_images = [images[0], images[0], images[1]]
     fit_wht = [wht[0], wht[0], wht[1]]
     fit_kernels = [dirac, dirac, kernel]
+    # psfs[0] is the high-resolution PSF template extension needs
+    fit_psfs = [psfs[0], psfs[0], psfs[1]]
     table, resid, _ = pipeline.run(
         fit_images, segmap,
         catalog=catalog, weights=fit_wht, kernels=fit_kernels,
+        psfs=fit_psfs,
         extend_templates=extend or "none",
         config=FitConfig(snr_thresh_astrom=0.0),
     )

@@ -32,7 +32,6 @@ from photutils.centroids import centroid_quadratic
 from tqdm import tqdm
 
 from .utils import (
-    measure_shape,
     get_wcs_pscale,
     get_slice_wcs,
     to_header,
@@ -69,62 +68,6 @@ def _quiet_drizzle():
     finally:
         for lg, level in zip(loggers, old_levels):
             lg.setLevel(level)
-
-
-@dataclass
-class GaussianFit:
-    """Parameters describing a fitted Gaussian profile."""
-
-    fwhm_x: float
-    fwhm_y: float
-    theta: float
-    xc: float
-    yc: float
-    flux: float
-    shape: tuple = None  # Store the original array shape
-
-    def model(self) -> np.ndarray:
-        """Generate the best fit Gaussian model."""
-        from .utils import gaussian
-
-        return gaussian(
-            self.shape,
-            self.fwhm_x,
-            self.fwhm_y,
-            self.theta,
-            x0=self.xc,
-            y0=self.yc,
-            flux=self.flux,
-        )
-
-
-@dataclass
-class MoffatFit:
-    """Parameters describing a fitted Moffat profile."""
-
-    fwhm_x: float
-    fwhm_y: float
-    beta: float
-    theta: float
-    xc: float
-    yc: float
-    flux: float
-    shape: tuple = None  # Store the original array shape
-
-    def model(self) -> np.ndarray:
-        """Generate the best fit Moffat model."""
-        from .utils import moffat
-
-        return moffat(
-            self.shape,
-            self.fwhm_x,
-            self.fwhm_y,
-            self.beta,
-            self.theta,
-            x0=self.xc,
-            y0=self.yc,
-            flux=self.flux,
-        )
 
 
 @dataclass
@@ -968,7 +911,6 @@ class PSF:
         from astropy.nddata import Cutout2D
         from photutils.centroids import centroid_quadratic
         from astropy.coordinates import SkyCoord
-        import astropy.units as u
 
         if position is None:
             # get center pixel of ndarray
@@ -1531,126 +1473,6 @@ class PSF:
                 kernel = shift(kernel, (cy - ycen, cx - xcen), order=3, mode="nearest")
         return kernel
 
-    def _fit_profile(
-        self, model_func, default_params, free_params, xc=None, yc=None, result_class=None
-    ):
-        """Shared fitting logic for both Gaussian and Moffat profiles."""
-        from scipy.optimize import least_squares
-
-        y, x = np.indices(self.array.shape)
-        cy = (self.array.shape[0] - 1) / 2 if yc is None else yc
-        cx = (self.array.shape[1] - 1) / 2 if xc is None else xc
-
-        _, _, sigma_x, sigma_y, theta0 = measure_shape(
-            self.array, np.ones_like(self.array, dtype=bool)
-        )
-        theta0 = ((theta0 + np.pi / 2) % np.pi) - np.pi / 2
-
-        params = default_params.copy()
-        params.update(
-            {
-                "fwhm_x": 2.355 * sigma_x,
-                "fwhm_y": 2.355 * sigma_y,
-                "theta": theta0,
-                "xc": cx,
-                "yc": cy,
-                "flux": self.array.sum(),  # Initial flux estimate
-            }
-        )
-
-        # Build optimization parameter list and mapping
-        free_list = [p.strip() for p in free_params.split(",")]
-        opt_params = []
-        param_map = {}
-        bounds_lower, bounds_upper = [], []
-
-        for param in free_list:
-            if param == "fwhm":  # Special case for symmetric fwhm
-                # Use fwhm_x as the initial value for symmetric fitting
-                opt_params.append(params["fwhm_x"])
-                param_map[param] = len(opt_params) - 1
-                bounds_lower.append(1e-3)
-                bounds_upper.append(np.inf)
-            elif param.startswith("fwhm") and param in params:
-                opt_params.append(params[param])
-                param_map[param] = len(opt_params) - 1
-                bounds_lower.append(1e-3)
-                bounds_upper.append(np.inf)
-            elif param in params:
-                opt_params.append(params[param])
-                param_map[param] = len(opt_params) - 1
-
-                # Set bounds based on parameter type
-                if param == "beta":
-                    bounds_lower.append(0.5)
-                    bounds_upper.append(20.0)
-                elif param == "theta":
-                    bounds_lower.append(-np.pi / 2)
-                    bounds_upper.append(np.pi / 2)
-                elif param in ["xc", "yc"]:
-                    max_val = self.array.shape[1 if param == "xc" else 0] - 1
-                    bounds_lower.append(0)
-                    bounds_upper.append(max_val)
-                elif param == "flux":
-                    bounds_lower.append(1e-10)
-                    bounds_upper.append(np.inf)
-
-        def residual(p):
-            # Map optimization parameters back to model parameters
-            current_params = params.copy()
-
-            for param_name, idx in param_map.items():
-                if param_name == "fwhm":  # Symmetric case
-                    current_params["fwhm_x"] = current_params["fwhm_y"] = p[idx]
-                else:
-                    current_params[param_name] = p[idx]
-
-            model = model_func(self.array.shape, **current_params)
-            return (model - self.array).ravel()
-
-        result = least_squares(residual, opt_params, bounds=(bounds_lower, bounds_upper))
-
-        # Update parameters with fitted values
-        for param_name, idx in param_map.items():
-            if param_name == "fwhm":  # Symmetric case
-                fwhm_val = float(result.x[idx])
-                params["fwhm_x"] = params["fwhm_y"] = fwhm_val
-            else:
-                params[param_name] = float(result.x[idx])
-
-        # Return result with appropriate parameter names
-        result_params = {}
-        for field_name in result_class.__annotations__:
-            if field_name != "shape":  # Skip the shape field
-                result_params[field_name] = params[field_name]
-
-        # Add the shape information
-        result_params["shape"] = self.array.shape
-
-        return result_class(**result_params)
-
-    def fit_moffat(
-        self,
-        free_params: str = "fwhm_x,fwhm_y,beta,theta,flux",
-        xc: float = None,
-        yc: float = None,
-    ) -> MoffatFit:
-        from .utils import moffat
-
-        def model_func(shape, fwhm_x, fwhm_y, beta, theta, xc, yc, flux, **kwargs):
-            return moffat(shape, fwhm_x, fwhm_y, beta, theta, x0=xc, y0=yc, flux=flux)
-
-        return self._fit_profile(model_func, {"beta": 2.5}, free_params, xc, yc, MoffatFit)
-
-    def fit_gaussian(
-        self, free_params: str = "fwhm_x,fwhm_y,theta,flux", xc: float = None, yc: float = None
-    ) -> GaussianFit:
-        from .utils import gaussian
-
-        def model_func(shape, fwhm_x, fwhm_y, theta, xc, yc, flux, **kwargs):
-            return gaussian(shape, fwhm_x, fwhm_y, theta, x0=xc, y0=yc, flux=flux)
-
-        return self._fit_profile(model_func, {}, free_params, xc, yc, GaussianFit)
 
 
 def psf_matching_kernel_basis(
@@ -2039,58 +1861,6 @@ class EffectivePSF:
         return out
 
 
-def to_header(wcs, add_naxis=True, relax=True, key=None):
-    """Convert WCS to a FITS header with a few extra keywords."""
-    hdr = wcs.to_header(relax=relax, key=key)
-    if add_naxis:
-        if hasattr(wcs, "pixel_shape") and wcs.pixel_shape is not None:
-            hdr["NAXIS"] = wcs.naxis
-            hdr["NAXIS1"] = wcs.pixel_shape[0]
-            hdr["NAXIS2"] = wcs.pixel_shape[1]
-        elif hasattr(wcs, "_naxis1"):
-            hdr["NAXIS"] = wcs.naxis
-            hdr["NAXIS1"] = wcs._naxis1
-            hdr["NAXIS2"] = wcs._naxis2
-
-    if hasattr(wcs.wcs, "cd"):
-        for i in [0, 1]:
-            for j in [0, 1]:
-                hdr[f"CD{i + 1}_{j + 1}"] = wcs.wcs.cd[i][j]
-
-    if hasattr(wcs, "sip") and wcs.sip is not None:
-        hdr["SIPCRPX1"], hdr["SIPCRPX2"] = wcs.sip.crpix
-    return hdr
-
-
-def get_slice_wcs(wcs, slx, sly):
-    """Slice a WCS while propagating SIP and distortion keywords."""
-    nx = slx.stop - slx.start
-    ny = sly.stop - sly.start
-    swcs = wcs.slice((sly, slx))
-
-    if hasattr(swcs, "_naxis1"):
-        swcs.naxis1 = swcs._naxis1 = nx
-        swcs.naxis2 = swcs._naxis2 = ny
-    else:
-        swcs._naxis = [nx, ny]
-        swcs._naxis1 = nx
-        swcs._naxis2 = ny
-
-    if hasattr(swcs, "sip") and swcs.sip is not None:
-        for c in [0, 1]:
-            swcs.sip.crpix[c] = swcs.wcs.crpix[c]
-
-    acs = [4096 / 2, 2048 / 2]
-    dx = swcs.wcs.crpix[0] - acs[0]
-    dy = swcs.wcs.crpix[1] - acs[1]
-    for ext in ["cpdis1", "cpdis2", "det2im1", "det2im2"]:
-        if hasattr(swcs, ext):
-            extw = getattr(swcs, ext)
-            if extw is not None:
-                extw.crval[0] += dx
-                extw.crval[1] += dy
-                setattr(swcs, ext, extw)
-    return swcs
 
 
 def stamp_encircled_energy(

@@ -122,10 +122,10 @@ def test_detection_ivar_read_only_for_the_snr_weighted_schemes(tiny_config):
         path.write_text(json.dumps(cfg))
         return Pipeline.from_config(path).load_data(kernels=False)
 
-    assert _load({}).weights[0] is not None          # 'default' is a wings scheme
+    assert _load({}).weights[0] is not None          # 'psf_wings' is the default
     assert _load({"extend_mode": "none"}).weights[0] is None
     assert _load({"extend_mode": "psf"}).weights[0] is None
-    assert _load({"extend_mode": "default"}).weights[0] is not None
+    assert _load({"extend_mode": "psf_wings"}).weights[0] is not None
     assert _load({"extend_mode": "wren"}).weights[0] is not None
     assert _load({"extend_mode": "classic"}).weights[0] is not None
 

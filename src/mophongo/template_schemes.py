@@ -726,9 +726,15 @@ def composite_psf_wings(
         # Degenerate least-squares fit: fall back to a bare point source.
         m, f_psf, w_core = P.copy(), 1.0, 0.0
     else:
+        # One weight for the WHOLE stamp, wren-style: blend the classic
+        # composite (segment data + least-squares PSF wings) towards the bare
+        # scaled PSF. Outside the segment the two terms coincide, so the blend
+        # is a no-op there and the wings keep full strength at every SNR; as
+        # w_core -> 0 the entire stamp, segment included, becomes f_psf * P.
         w_core = blend_weight(snr_seg, params.snrlo_psf, params.blend_p)
-        m = f_psf * P
-        m[own] = w_core * D[own] + (1.0 - w_core) * f_psf * P[own]
+        model = f_psf * P
+        m = np.where(own, D, model)                       # classic composite
+        m = w_core * m + (1.0 - w_core) * model
 
     # Normalise over the WHOLE stamp, so wing flux landing on a neighbour is
     # counted here and then dropped, rather than being redistributed.

@@ -66,6 +66,13 @@ class FitConfig:
     # solve only captures part of a large offset per pass, so set
     # fit_astrometry_niter to the maximum passes allowed and let this tol stop.
     astrom_shift_tol: float = 0.05
+    # Damping applied to each pass's shift increment before it is applied to
+    # the templates. The central-difference shift basis underestimates
+    # gradients of sharp structure, so the linearized step can overshoot by
+    # k/sin(k) per mode; damping keeps the iteration contracting even for
+    # scenes dominated by marginally sampled cores, at the cost of ~1 extra
+    # pass. 1.0 = undamped.
+    astrom_damping: float = 0.7
     fit_astrometry_joint: bool = True  # Use joint astrometry fitting, or separate step
     # --- astrometry options -------------------------------------------------
     reg_astrom: float = 1e-4
@@ -120,18 +127,18 @@ class FitConfig:
     # --- template build scheme ---------------------------------------------
     # One selector over the four schemes, for 1-1 comparison:
     #   'none'      segment-masked detection data only
-    #   'default'   least-squares PSF wings outside the segment, smooth faint
+    #   'psf_wings' least-squares PSF wings outside the segment, smooth faint
     #               limit, normalised before neighbour-owned pixels are zeroed
-    #               (alias: 'psf_wings')
-    #   'psf'       'none' + Templates.extend_with_psf (template * PSF fills
-    #               the zero pixels)
+    #               (alias: 'default')
+    #   'psf'       'none' + Templates.extend_with_psf (template convolved
+    #               with the PSF fills the zero pixels)
     #   'psf_model' 'none' + Templates.extend_with_psf_model
     #   'wren'      wren/dev-wren _extended_composite (ownership + SNR blend)
     #   'classic'   IDL subphot.pro::build_cube (hard switch below tmpl_snrlo)
     # The build-time schemes live in mophongo.template_schemes; the knobs below
     # are theirs and are ignored by the other modes.
-    extend_mode: str = "default"
-    # 'default' scheme: in-segment SNR at which the core is pure data. Below it
+    extend_mode: str = "psf_wings"
+    # 'psf_wings' scheme: in-segment SNR at which the template is pure data. Below it
     # the core rolls off to the scaled PSF, reaching a pure point source at 0.
     psf_wings_snrlo: float = 5.0
     psf_wings_blend_p: float = 2.0

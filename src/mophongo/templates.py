@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 #:
 #: ``default``    segment-masked detection data (current mophongo).
 #: ``none``       segment-masked detection data only, unit sum.
-#: ``default``    :func:`mophongo.template_schemes.composite_psf_wings`:
+#: ``psf_wings``  :func:`mophongo.template_schemes.composite_psf_wings`:
 #:                least-squares PSF wings outside the segment, smooth faint
 #:                limit, normalised before neighbour-owned pixels are zeroed.
 #: ``psf``        ``none`` + :meth:`Templates.extend_with_psf` post-pass.
@@ -37,15 +37,15 @@ logger = logging.getLogger(__name__)
 #:
 #: ``psf``/``psf_model`` reshape the cutout, so they run after extraction; the
 #: build-time modes replace the masked data before the unit-sum normalisation.
-EXTEND_MODES = ("none", "default", "psf", "psf_model", "wren", "classic")
-BUILD_TIME_MODES = ("default", "wren", "classic")
-#: Build-time modes whose composite is already normalised. ``default``
+EXTEND_MODES = ("none", "psf_wings", "psf", "psf_model", "wren", "classic")
+BUILD_TIME_MODES = ("psf_wings", "wren", "classic")
+#: Build-time modes whose composite is already normalised. ``psf_wings``
 #: normalises over the whole stamp and *then* zeroes neighbour-owned pixels, so
 #: its template deliberately sums to less than one; renormalising would undo
 #: exactly the double-counting protection that ordering buys.
-PRENORMALISED_MODES = ("default",)
+PRENORMALISED_MODES = ("psf_wings",)
 #: Accepted spellings that resolve onto :data:`EXTEND_MODES`.
-EXTEND_MODE_ALIASES = {"psf_wings": "default", "segment": "none"}
+EXTEND_MODE_ALIASES = {"default": "psf_wings", "segment": "none"}
 
 import numpy as np
 from copy import deepcopy
@@ -1644,7 +1644,7 @@ class Templates:
                 pscale = float(proj_plane_pixel_scales(wcs)[0]) * 3600.0
                 if pscale > 0:
                     annulus_pix = float(wren.blend_annulus) / pscale
-        elif build_mode in ("classic", "default"):
+        elif build_mode in ("classic", "psf_wings"):
             # Both paste the PSF over the whole stamp; the resampled PSF is
             # identically zero beyond its own stamp, so the stamp footprint is
             # the true support of the composite.
@@ -1746,7 +1746,7 @@ class Templates:
                 except ValueError:
                     psf_arr = None
 
-                if build_mode in ("classic", "default"):
+                if build_mode in ("classic", "psf_wings"):
                     if psf_arr is None:
                         raise ValueError(
                             f"extend_mode={mode!r}: no detection PSF for source {label}"

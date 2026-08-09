@@ -133,6 +133,9 @@ class FitConfig:
     wren_wings_snr_psf: float = 3.0  # per-annulus weight onset
     wren_blend_p: float = 2.0  # blend-weight rolloff exponent
     wren_blend_annulus: float = 0.15  # halo annulus width, arcsec
+    # Detection-image sky rms used when weights[0] is absent (the config-driven
+    # path has no detection weight map). None: measure it with sky_sigma.
+    wren_bg_rms: float | None = None
     classic_tmpl_snrlo: float = 15.0  # below this in-segment SNR: pure point source
     classic_rms: float | None = None  # None: robust_sigma of the detection image
 

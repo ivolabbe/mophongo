@@ -20,6 +20,15 @@ This file tracks future desired features, checks, and investigations.
   `Template.extend_info` but nothing consumes them. wren feeds them into its
   aperture-correction chain (`trunc = norm / (norm + flux_beyond_stamp)`).
   Wire them up, or drop them, once the scheme comparison settles.
+- [ ] Both `extend_mode` reference schemes use ONE global noise scalar
+  (`template_schemes.detection_rms` for classic's `tmpl_rms`,
+  `sky_sigma` for wren's `bg_rms` fallback). IDL and wren measure theirs on a
+  single fully-covered tile, so a mosaic with real depth variation biases
+  every per-source SNR by the local/global depth ratio — high in the deep
+  parts, low in the shallow ones. The zero-padding failure is fixed
+  (`covered_mask`), the depth-variation one is not. A per-scene or
+  block-median noise map would fix it for both schemes at once; wren already
+  avoids it entirely when a detection ivar map is supplied.
 - [ ] `extend_mode='wren'` gets no detection-band inverse variance on the
   config-driven path: `RunConfig` has no `wht_hi`, so `load_data` passes
   `weights=[None, ivar]` and every wren SNR (core and per-annulus) falls back

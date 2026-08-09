@@ -1642,11 +1642,15 @@ class Templates:
                 if classic.rms is not None
                 else schemes.detection_rms(hires_image)
             )
-            if not tmpl_rms > 0:
-                logger.warning(
-                    "extend_mode='classic': detection rms is %.3g; the low-SNR "
-                    "point-source replacement is disabled", tmpl_rms
+            if not tmpl_rms > 0 and classic.tmpl_snrlo > 0:
+                raise ValueError(
+                    f"extend_mode='classic': detection rms is {tmpl_rms!r}, so the "
+                    f"low-SNR point-source replacement (tmpl_snrlo="
+                    f"{classic.tmpl_snrlo}) cannot be evaluated. Set ClassicParams.rms, "
+                    "or tmpl_snrlo=0 to disable the branch as IDL's "
+                    "keyword_set(tmpl_snrlo) guard does."
                 )
+            logger.info("extend_mode='classic': detection rms %.4g", tmpl_rms)
 
         # Resolve every position to its segment and cutout size up front: the
         # ownership ROI and the extraction loop must size cutouts identically.
@@ -1682,7 +1686,21 @@ class Templates:
                 roi_step=roi_step,
             )
             if detection_weight is None:
-                bg_rms = schemes.sky_sigma(hires_image, self.segmap)
+                # Every wren weight comes from an SNR, so without a usable
+                # noise scalar w_core and every w_k collapse to 0 and every
+                # template becomes a bare point source. Fail loudly instead.
+                bg_rms = (
+                    float(wren.bg_rms)
+                    if wren.bg_rms is not None
+                    else schemes.sky_sigma(hires_image, self.segmap)
+                )
+                if not (bg_rms and bg_rms > 0):
+                    raise ValueError(
+                        "extend_mode='wren' needs a noise estimate: no detection_weight "
+                        "was given and the sky sigma of the detection image is "
+                        f"{bg_rms!r}. Pass detection_weight, or set WrenParams.bg_rms."
+                    )
+                logger.info("extend_mode='wren': sky rms fallback %.4g", bg_rms)
 
         for pos, label, height, width in tqdm(sized, desc="Extracting templates"):
             # Create template cutout

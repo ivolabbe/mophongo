@@ -440,6 +440,71 @@ def test_pipeline_legacy_extend_templates_still_selects_the_mode():
         pipeline.Pipeline([image, image], segmap, extend_templates="bogus", **kwargs)
 
 
+def test_noise_estimators_survive_a_zero_padded_mosaic():
+    """``Pipeline.load_data`` nan_to_num's the detection image, so no-coverage
+    pixels are exact zeros. A majority-zero sample collapses the MAD to 0,
+    which would zero every wren blend weight and disable IDL's low-SNR
+    branch."""
+    rng = np.random.default_rng(11)
+    image = np.zeros((400, 400))
+    image[:250, :250] = rng.normal(0.0, 0.05, (250, 250))  # 61% blank
+    segmap = np.zeros(image.shape, dtype=np.int32)
+
+    assert schemes.sky_sigma(image, segmap) == pytest.approx(0.05, rel=0.1)
+    assert schemes.detection_rms(image) == pytest.approx(0.05, rel=0.1)
+    # counting the blank margin as sky: the clipped MAD collapses to zero
+    # outright, and the biweight scale comes out badly biased low
+    all_px = np.ones(image.shape, dtype=bool)
+    assert schemes.sky_sigma(image, segmap, valid=all_px) is None
+    assert schemes.detection_rms(image, valid=all_px) < 0.5 * 0.05
+
+
+def test_wren_refuses_to_run_without_any_noise_estimate():
+    """Silently returning w=0 everywhere would make every template a bare
+    point source, with no error and extend_failed False."""
+    image = np.zeros((41, 41))
+    image[20, 20] = 1.0
+    segmap = np.zeros(image.shape, dtype=np.int32)
+    segmap[19:22, 19:22] = 1
+    psf = _psf(11, sigma=2.0)
+
+    tmpls = Templates()
+    with pytest.raises(ValueError, match="noise estimate"):
+        tmpls.extract_templates(
+            image, segmap, [(20.0, 20.0)], dilate_segmap=0,
+            extend_mode="wren", detection_psf=psf,
+        )
+    # an explicit rms unblocks it
+    tmpls.extract_templates(
+        image, segmap, [(20.0, 20.0)], dilate_segmap=0,
+        extend_mode="wren", detection_psf=psf,
+        wren=schemes.WrenParams(bg_rms=0.01),
+    )
+    assert tmpls.templates[0].extend_info["snr_seg"] > 0
+
+
+def test_classic_refuses_to_run_with_an_unusable_rms():
+    image = np.zeros((41, 41))
+    image[20, 20] = 1.0
+    segmap = np.zeros(image.shape, dtype=np.int32)
+    segmap[19:22, 19:22] = 1
+    psf = _psf(11, sigma=2.0)
+
+    tmpls = Templates()
+    with pytest.raises(ValueError, match="detection rms"):
+        tmpls.extract_templates(
+            image, segmap, [(20.0, 20.0)], dilate_segmap=0,
+            extend_mode="classic", detection_psf=psf,
+        )
+    # tmpl_snrlo=0 is IDL's keyword_set() guard: the branch is simply skipped
+    tmpls.extract_templates(
+        image, segmap, [(20.0, 20.0)], dilate_segmap=0,
+        extend_mode="classic", detection_psf=psf,
+        classic=schemes.ClassicParams(tmpl_snrlo=0.0),
+    )
+    assert tmpls.templates[0].extend_info["psf_replaced"] is False
+
+
 def test_wren_ownership_splits_a_blend_between_neighbours():
     """Two neighbours must not both claim the background between them."""
     image, segmap = _scene(

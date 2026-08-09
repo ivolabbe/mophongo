@@ -997,7 +997,7 @@ class Pipeline:
                 lines.append(f"  out {label:8s} {state}  {f.name}")
 
         if getattr(self, "images", None) is None:
-            lines.append("data: not loaded — load_data() reads images and catalog")
+            lines.append("data: not loaded (load_data() reads images and catalog)")
         else:
             lines.append("data:")
             for i, img in enumerate(self.images):
@@ -1060,7 +1060,7 @@ class Pipeline:
         from photutils.segmentation import SegmentationImage
 
         if getattr(self, "images", None) is None:
-            raise RuntimeError("no data loaded — call load_data() first")
+            raise RuntimeError("no data loaded; call load_data() first")
 
         img_hi = self.images[0]
         img_lo = self.images[-1]

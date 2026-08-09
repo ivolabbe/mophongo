@@ -3,14 +3,37 @@
 This file tracks future desired features, checks, and investigations.
 
 - [ ] scan for bug fixes / robustness improvements
-- [ ] `fit.py:1134` (`SparseFitter.solve` path) calls its local
-  `build_scene_tree_from_normal` with `coupling_thresh=1e-4` hardcoded,
-  ignoring `cfg.scene_coupling_thresh`. Scene partitions from that path
-  silently disagree with the config. Either route it through
-  `scene.generate_scenes` or pass the config through. Note `fit.py` carries
-  its own duplicate `merge_small_scenes` (`:389`) and
-  `build_scene_tree_from_normal` — the duplication is the underlying problem.
-  See `docs/SCENE_PARTITION.md`.
+- [ ] `tests/test_pipeline_multitemplate.py::test_pipeline_multitemplate_pass`
+  no longer exercises a multi-template pass: `_add_templates_for_bad_fits` and
+  the `multi_tmpl_*` config knobs were removed in the 2026-08 cleanup (the
+  only call site had been commented out long before). Either reinstate the
+  feature or rename the test to what it now covers, a plain pipeline run.
+- [ ] `SparseFitter` no longer solves: after the 2026-08 cleanup it builds the
+  normal matrix and returns model/residual images and covariance-free
+  estimators, while `SceneFitter` owns all flux solving. Decide whether the
+  remaining `SparseFitter` surface (`build_normal_tree`, `add_flux_priors`,
+  `quick_flux`, `predicted_errors`, `flux_and_rms`, `model_image`,
+  `residual`) should fold into `scene_fitter.py` or stay a separate class.
+- [ ] Public API exercised only from `scratch/` and notebooks has no test
+  coverage: `utils.compare_psf_to_star`, `utils.clean_stamp`,
+  `utils.write_wcs_csv`, `utils.retile_blocked`, `utils.gauss_hermite_basis`,
+  `verification.run_pipeline_extension_scenario`,
+  `verification.build_wiener_psf_maps`,
+  `verification.build_realistic_two_detector_mock`, `Catalog.show_stamp`,
+  `Catalog.plot_bg`, `Catalog.find_stars`, `catalog.find_saturated_stars`,
+  `DrizzlePSF.register`, `PSF.from_data`, `PSF.matching_kernel_basis`,
+  `psf.psf_matching_kernel_basis`, `MockMosaic.source_model_templates`,
+  `Scene.overlay_scene_graph`, `SparseFitter.add_flux_priors`,
+  `Pipeline.plot_result`. Either cover them or demote them to `scratch/`.
+- [ ] `saturate.py`, `psf_factory.py` and `jwst_psf.py` are driven only from
+  `scratch/` scripts and have no direct test of their own.
+- [ ] `AlignedCutout.as_block_reduced` / `.as_block_replicated` are kept as
+  public wrappers over `_block_reduce`/`_block_replicate` but have no caller.
+- [ ] Point-in-time reports under `docs/` (`FLUXBUG.md`, `LWBUG_ANALYSIS.md`,
+  `FORK_DIFF_WREN.md`, `FLUX_RECOVERY_DEBUG_SYNTHESIS_2026-05-03.md`,
+  `REALISTIC_PSF_FLUX_RECOVERY_REPORT.md`) reference modules deleted in the
+  2026-08 cleanup (`astro_fit.py`, `deblender.py`, `photutils_deblend.py`,
+  `sim_data.py`). They are kept as history; decide whether to archive them.
 - [ ] persist `id_scene` as a fit-table column in `Pipeline.write_outputs` —
   scene membership currently lives only on `Template.id_scene` during the run,
   so partition diagnostics (compactness, nesting, per-scene flux stats) cannot

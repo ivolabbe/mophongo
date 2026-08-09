@@ -1,7 +1,7 @@
 import numpy as np
 import scipy.sparse as sp
 
-from mophongo.fit import FitConfig, SparseFitter
+from mophongo.fit import FitConfig
 from mophongo.psf import PSF
 from mophongo.scene import Scene
 from mophongo.scene_fitter import SceneFitter, build_normal
@@ -44,7 +44,8 @@ def test_scene_fitter_with_shift_block():
     np.testing.assert_allclose(sol.shifts, dense[2:])
 
 
-def test_scene_solve_matches_legacy_solver():
+def test_scene_solve_matches_dense_normal_solution():
+    """Scene.solve on real templates reproduces a dense solve of the same system."""
     images, segmap, catalog, psfs, truth, wht = make_simple_data(
         nsrc=5, size=51, peak_snr=5, seed=1
     )
@@ -53,28 +54,14 @@ def test_scene_solve_matches_legacy_solver():
     image = images[1]
     weight = wht[1]
     A, b, _ = build_normal(tmpls.templates, image, weight)
-    d = np.sqrt(A.diagonal())
-    Dinv = sp.diags(1.0 / d)
-    cfg = FitConfig(
-        fit_astrometry_joint=True,
-        snr_thresh_astrom=0.0,
-        astrom_kwargs={"poly": {"order": 1}},
-    )
-    fitter = SparseFitter(tmpls.templates, image, weight, cfg)
-    alpha_legacy, *_ = fitter._solve_scenes_with_shifts(
-        Dinv @ A @ Dinv,
-        b / d,
-        d,
-        np.ones(len(tmpls.templates), dtype=int),
-        tmpls.templates,
-        np.ones(len(tmpls.templates), dtype=bool),
-        order=1,
-    )
 
+    cfg = FitConfig(reg_flux=1e-12, positivity=False, fit_astrometry_niter=0)
     scene = Scene(id=1, templates=list(tmpls.templates), fitter=SceneFitter())
     scene.A = A
     scene.b = b
     scene.image = image
     scene.weights = weight
     flux, *_ = scene.solve(config=cfg, apply_shifts=False)
-    np.testing.assert_allclose(flux, alpha_legacy, rtol=1e-3)
+
+    expected = np.linalg.solve(A.toarray() + np.eye(A.shape[0]) * cfg.reg_flux, b)
+    np.testing.assert_allclose(flux, expected, rtol=1e-3, atol=1e-6)

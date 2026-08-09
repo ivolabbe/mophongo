@@ -89,8 +89,9 @@ Key components:
 - `PSFFactory` (`psf_factory.py`): telescope-backend registry and MJD-aware
   PSF generation.
 - `saturate.py`: saturated-pixel repair (see Module Boundaries).
-- `astrometry.py`, `jwst_psf.py`, `deblender.py`, `astro_fit.py`: astrometric
-  corrections, JWST PSF utilities, deblending, and astrometry-aware fitting.
+- `astrometry.py`, `jwst_psf.py`: astrometric corrections and JWST PSF
+  utilities. Deblending uses `photutils.segmentation.deblend_sources`,
+  re-exported from `mophongo/__init__.py`.
 
 ## Module Boundaries
 

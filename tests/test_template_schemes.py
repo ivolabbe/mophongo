@@ -301,12 +301,12 @@ def test_build_schemes_require_a_detection_psf(mode):
         tmpls.extract_templates(image, segmap, [(40.0, 40.0)], extend_mode=mode)
 
 
-@pytest.mark.parametrize("mode", ["default", "psf", "wren", "classic"])
+@pytest.mark.parametrize("mode", ["none", "psf", "wren", "classic"])
 def test_every_mode_yields_a_unit_sum_template_with_a_stored_norm(mode):
     image, segmap = _scene(amps=(1000.0,))
     psf = _psf(41, sigma=2.0)
     tmpls = Templates()
-    kw = {} if mode in {"default", "psf"} else {"extend_mode": mode, "detection_psf": psf}
+    kw = {"extend_mode": "none"} if mode in {"none", "psf"} else {"extend_mode": mode, "detection_psf": psf}
     tmpls.extract_templates(image, segmap, [(40.0, 40.0)], dilate_segmap=0, **kw)
     if mode == "psf":
         tmpls.extend_with_psf(psf, inplace=True)
@@ -324,7 +324,7 @@ def test_build_schemes_hold_far_more_of_a_point_source_than_the_bare_segment(mod
     weight = np.full(image.shape, 1e4)
 
     plain = Templates()
-    plain.extract_templates(image, segmap, [(40.0, 40.0)], dilate_segmap=0)
+    plain.extract_templates(image, segmap, [(40.0, 40.0)], dilate_segmap=0, extend_mode="none")
     ee_plain = float((plain.templates[0].data > 0).sum())
 
     built = Templates()
@@ -386,7 +386,7 @@ def test_pipeline_extend_mode_selects_the_build_scheme():
     catalog = Table({"id": [1], "x": [40.0], "y": [40.0]})
 
     modes = {}
-    for mode in ("default", "psf", "wren", "classic"):
+    for mode in ("none", "default", "psf", "wren", "classic"):
         pipe = pipeline.Pipeline(
             [image, image],
             segmap,
@@ -399,22 +399,25 @@ def test_pipeline_extend_mode_selects_the_build_scheme():
                 template_dilate_segmap=0,
                 extend_mode=mode,
                 classic_tmpl_snrlo=0.0,
+                psf_wings_snrlo=0.0,
             ),
         )
         assert pipe.extend_mode == mode
         pipe.run()
         tmpl = pipe.templates_extended.templates[0]
         modes[mode] = tmpl
-        assert tmpl.data.sum() == pytest.approx(1.0, rel=1e-6)
+        # 'default' deliberately sums to < 1 (neighbour wings dropped)
+        assert tmpl.data.sum() == pytest.approx(1.0, rel=1e-6) or mode == "default"
 
-    assert modes["default"].extension_mode == "none"
+    assert modes["none"].extension_mode == "none"
+    assert modes["default"].extension_mode == "default"
     assert modes["psf"].extension_mode == "psf"
     assert modes["wren"].extension_mode == "wren"
     assert modes["classic"].extension_mode == "classic"
-    # every scheme but 'default' puts light outside the segment
-    n_default = int(np.count_nonzero(modes["default"].data))
-    for mode in ("psf", "wren", "classic"):
-        assert int(np.count_nonzero(modes[mode].data)) > n_default
+    # every extending scheme puts light outside the segment
+    n_none = int(np.count_nonzero(modes["none"].data))
+    for mode in ("default", "psf", "wren", "classic"):
+        assert int(np.count_nonzero(modes[mode].data)) > n_none
 
 
 def test_pipeline_legacy_extend_templates_still_selects_the_mode():
@@ -433,9 +436,9 @@ def test_pipeline_legacy_extend_templates_still_selects_the_mode():
         kernels=[None, None],
     )
 
-    assert pipeline.Pipeline([image, image], segmap, extend_templates="psf_wings", **kwargs).extend_mode == "psf"
-    assert pipeline.Pipeline([image, image], segmap, extend_templates="none", **kwargs).extend_mode == "default"
-    assert pipeline.Pipeline([image, image], segmap, **kwargs).extend_mode == "default"
+    assert pipeline.Pipeline([image, image], segmap, extend_templates="psf_wings", **kwargs).extend_mode == "default"
+    assert pipeline.Pipeline([image, image], segmap, extend_templates="none", **kwargs).extend_mode == "none"
+    assert pipeline.Pipeline([image, image], segmap, **kwargs).extend_mode == "default"  # config default
     with pytest.raises(ValueError, match="Unknown template extension mode"):
         pipeline.Pipeline([image, image], segmap, extend_templates="bogus", **kwargs)
 
@@ -554,7 +557,7 @@ def test_template_extension_refuses_a_lower_resolution_psf():
     image = image.astype(np.float32)
     catalog = Table({"id": [1], "x": [40.0], "y": [40.0]})
 
-    for mode in ("psf", "wren", "classic"):
+    for mode in ("default", "psf", "wren", "classic"):
         pipe = pipeline.Pipeline(
             [image, image],
             segmap,
@@ -573,7 +576,7 @@ def test_template_extension_refuses_a_lower_resolution_psf():
 def test_extract_templates_does_not_dilate_by_default():
     image, segmap = _scene(amps=(1000.0,), seg_radius=2.0)
     tmpls = Templates()
-    tmpls.extract_templates(image, segmap, [(40.0, 40.0)])
+    tmpls.extract_templates(image, segmap, [(40.0, 40.0)], extend_mode="none")
     tmpl = tmpls.templates[0]
     support = np.zeros(image.shape, bool)
     support[tmpl.slices_original] = tmpl.data[tmpl.slices_cutout] != 0

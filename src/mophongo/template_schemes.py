@@ -27,6 +27,12 @@ Dispatch lives in :meth:`mophongo.templates.Templates.extract_templates` via
     (:294-330): exact segment data plus a least-squares-scaled PSF over the
     whole stamp, with a hard replacement by a pure point source below
     ``tmpl_snrlo``.
+``psf_wings``
+    :func:`composite_psf_wings` -- ``classic`` modernised: the same
+    least-squares halo amplitude, but the faint limit is a smooth rolloff to a
+    pure PSF rather than a switch, and the composite is normalised over the
+    whole stamp *before* neighbour-owned pixels are zeroed, so wing flux is
+    never counted twice.
 
 References
 ----------
@@ -52,9 +58,11 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "WrenParams",
     "ClassicParams",
+    "PsfWingsParams",
     "blend_weight",
     "build_ownership",
     "composite_classic",
+    "composite_psf_wings",
     "composite_wren",
     "covered_mask",
     "cutout_roi",
@@ -122,6 +130,32 @@ class WrenParams:
     blend_annulus: float = 0.15
     containment: float = 1.0
     bg_rms: float | None = None
+
+
+@dataclass
+class PsfWingsParams:
+    """Knobs of the ``psf_wings`` scheme (modernised IDL wings).
+
+    Attributes
+    ----------
+    snrlo_psf
+        In-segment SNR at which the template is pure data. Below it the core
+        rolls off smoothly towards the scaled PSF, reaching a pure point source
+        as the SNR goes to 0. Replaces IDL's hard switch at ``tmpl_snrlo``.
+    blend_p
+        Rolloff exponent of that weight.
+    background_only
+        Null pixels owned by a *different* segment after normalisation, so a
+        neighbour's wings are not counted twice (its own template fits them).
+    rms
+        Fallback scalar detection noise for the SNR when no inverse-variance
+        map is supplied. ``None`` measures it with :func:`detection_rms`.
+    """
+
+    snrlo_psf: float = 5.0
+    blend_p: float = 2.0
+    background_only: bool = True
+    rms: float | None = None
 
 
 @dataclass
@@ -294,16 +328,21 @@ def psf_ee_radius_pix(psf: np.ndarray, ee_fraction: float = 0.95) -> float:
 
 
 def representative_psf(psf, ee_fraction: float = 0.95) -> np.ndarray:
-    """Return one PSF array standing in for a whole map.
+    """Return one 2-D PSF standing in for a whole map or cube.
 
-    A plain array passes through. A :class:`~mophongo.psf_map.PSFRegionMap`
-    (duck-typed on ``.psfs``) yields its *widest* region, so a single derived
-    template size is large enough everywhere -- wren's choice in
-    ``pipeline.py``.
+    A 2-D array passes through. A :class:`~mophongo.psf_map.PSFRegionMap`
+    (duck-typed on ``.psfs``) or a bare ``(n, ny, nx)`` cube yields its
+    *widest* member, so a single derived template size is large enough
+    everywhere -- wren's choice in ``pipeline.py``.
     """
     stack = getattr(psf, "psfs", None)
     if stack is None:
-        return np.asarray(psf, dtype=float)
+        arr = np.asarray(psf, dtype=float)
+        if arr.ndim == 2:
+            return arr
+        if arr.ndim != 3:
+            raise ValueError(f"PSF must be 2-D, a 3-D cube, or a PSFRegionMap; got {arr.ndim}-D")
+        stack = arr
     arrays = [np.asarray(p, dtype=float) for p in stack]
     if not arrays:
         raise ValueError("PSF map contains no PSFs")
@@ -605,6 +644,109 @@ def composite_classic(
         "psf_replaced": replaced,
     }
     return m, info
+
+
+# ---------------------------------------------------------------------------
+# scheme 'psf_wings': modernised IDL wings
+# ---------------------------------------------------------------------------
+
+
+def composite_psf_wings(
+    data: np.ndarray,
+    seg: np.ndarray,
+    label: int,
+    psf_stamp: np.ndarray,
+    *,
+    params: PsfWingsParams,
+    tmpl_rms: float = 0.0,
+    ivar: np.ndarray | None = None,
+) -> tuple[np.ndarray, dict[str, float]]:
+    """IDL's least-squares PSF wings, with a smooth faint limit and no double counting.
+
+    Same halo amplitude as :func:`composite_classic`, the ordinary least-squares
+    fit of the PSF to the data inside the exact segment,
+    :math:`f_{\\rm psf}=\\sum_S P D / \\sum_S P^2` floored at zero. Two changes:
+
+    **Smooth faint limit.** IDL switches to a pure point source below
+    ``tmpl_snrlo``. Here the in-segment data are blended towards the scaled PSF,
+
+    .. math::
+
+        m = W D + (1-W) f_{\\rm psf} P \\;\\text{on}\\; S, \\qquad
+        m = f_{\\rm psf} P \\;\\text{elsewhere},
+
+    with :math:`W=w(S_{\\rm seg};\\ \\code{snrlo\\_psf})`. As the segment SNR goes
+    to 0 the weight goes to 0 and the whole template becomes :math:`f_{\\rm psf}P`,
+    a pure PSF profile, with no discontinuity on the way.
+
+    **Normalise, then null neighbours.** The composite is built and normalised
+    over the *whole* stamp, so the wing flux that lands on a neighbouring
+    segment is counted in the normaliser. Only afterwards are those pixels
+    zeroed (``background_only``). The template therefore sums to less than one,
+    by an amount equal to the wing flux that fell on neighbours, and the
+    neighbour's own template fits that light instead of it being counted twice.
+    This reproduces the effect of IDL's normalise-then-mask ordering
+    (``subphot.pro:324``) while masking by segment ownership rather than by a
+    circular aperture.
+
+    Returns
+    -------
+    tuple
+        ``(composite, info)``. The composite is **already normalised**: callers
+        must not renormalise it. ``info`` carries ``fpsf``, ``snr_seg``,
+        ``w_core``, ``template_norm`` (the whole-stamp sum before
+        normalisation) and ``wing_frac_lost`` (the fraction zeroed as
+        neighbour-owned, i.e. ``1 - sum(composite)``).
+    """
+    seg = np.asarray(seg)
+    own = seg == label
+    P = np.asarray(psf_stamp, dtype=float)
+    D = np.where(np.isfinite(data), data, 0.0).astype(float)
+
+    # Halo amplitude: least-squares fit of the PSF to the segment data.
+    denom = float(np.dot(P[own], P[own])) if own.any() else 0.0
+    f_psf = max(float(np.dot(P[own], D[own])) / denom, 0.0) if denom > 0 else 0.0
+
+    # In-segment SNR, formal noise when an ivar map is available.
+    n_seg = int(own.sum())
+    snr_seg = np.nan
+    if n_seg:
+        noise = 0.0
+        if ivar is not None:
+            iv = np.asarray(ivar, dtype=float)[own]
+            good = iv > 0
+            if good.any():
+                noise = float(np.sqrt(np.sum(1.0 / iv[good])))
+        if noise <= 0 and tmpl_rms > 0:
+            noise = np.sqrt(n_seg) * float(tmpl_rms)
+        if noise > 0:
+            snr_seg = float(D[own].sum()) / noise
+
+    if f_psf <= 0.0:
+        # Degenerate least-squares fit: fall back to a bare point source.
+        m, f_psf, w_core = P.copy(), 1.0, 0.0
+    else:
+        w_core = blend_weight(snr_seg, params.snrlo_psf, params.blend_p)
+        m = f_psf * P
+        m[own] = w_core * D[own] + (1.0 - w_core) * f_psf * P[own]
+
+    # Normalise over the WHOLE stamp, so wing flux landing on a neighbour is
+    # counted here and then dropped, rather than being redistributed.
+    total = float(m.sum())
+    if total > 0:
+        m = m / total
+    if params.background_only:
+        m[(seg != 0) & ~own] = 0.0
+
+    kept = float(m.sum())
+    return m, {
+        "fpsf": float(f_psf),
+        "snr_seg": float(snr_seg),
+        "w_core": float(w_core),
+        "template_norm": total,
+        "wing_frac_lost": 1.0 - kept,
+        "psf_extended": bool(w_core < 1.0),
+    }
 
 
 # ---------------------------------------------------------------------------

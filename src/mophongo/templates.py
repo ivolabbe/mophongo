@@ -26,16 +26,26 @@ logger = logging.getLogger(__name__)
 #: Template build schemes selectable with ``extend_mode``.
 #:
 #: ``default``    segment-masked detection data (current mophongo).
-#: ``psf``        ``default`` + :meth:`Templates.extend_with_psf` post-pass.
-#: ``psf_model``  ``default`` + :meth:`Templates.extend_with_psf_model` post-pass.
+#: ``none``       segment-masked detection data only, unit sum.
+#: ``default``    :func:`mophongo.template_schemes.composite_psf_wings`:
+#:                least-squares PSF wings outside the segment, smooth faint
+#:                limit, normalised before neighbour-owned pixels are zeroed.
+#: ``psf``        ``none`` + :meth:`Templates.extend_with_psf` post-pass.
+#: ``psf_model``  ``none`` + :meth:`Templates.extend_with_psf_model` post-pass.
 #: ``wren``       :func:`mophongo.template_schemes.composite_wren`.
 #: ``classic``    :func:`mophongo.template_schemes.composite_classic` (IDL).
 #:
-#: ``psf``/``psf_model`` reshape the cutout, so they run after extraction;
-#: ``wren``/``classic`` replace the masked data at build time, before the
-#: unit-sum normalisation.
-EXTEND_MODES = ("default", "psf", "psf_model", "wren", "classic")
-BUILD_TIME_MODES = ("wren", "classic")
+#: ``psf``/``psf_model`` reshape the cutout, so they run after extraction; the
+#: build-time modes replace the masked data before the unit-sum normalisation.
+EXTEND_MODES = ("none", "default", "psf", "psf_model", "wren", "classic")
+BUILD_TIME_MODES = ("default", "wren", "classic")
+#: Build-time modes whose composite is already normalised. ``default``
+#: normalises over the whole stamp and *then* zeroes neighbour-owned pixels, so
+#: its template deliberately sums to less than one; renormalising would undo
+#: exactly the double-counting protection that ordering buys.
+PRENORMALISED_MODES = ("default",)
+#: Accepted spellings that resolve onto :data:`EXTEND_MODES`.
+EXTEND_MODE_ALIASES = {"psf_wings": "default", "segment": "none"}
 
 import numpy as np
 from copy import deepcopy
@@ -1539,11 +1549,12 @@ class Templates:
         wcs: WCS | None = None,
         dilate_segmap: int = 0,
         *,
-        extend_mode: str = "default",
+        extend_mode: str = "none",
         detection_psf: np.ndarray | PSFRegionMap | None = None,
         detection_weight: np.ndarray | None = None,
         wren: schemes.WrenParams | None = None,
         classic: schemes.ClassicParams | None = None,
+        psf_wings: schemes.PsfWingsParams | None = None,
     ) -> list[Template]:
         """Extract cutout templates around segmentation regions.
 
@@ -1575,10 +1586,11 @@ class Templates:
             Per-scheme parameters; defaults are used when omitted.
         """
 
-        mode = str(extend_mode or "default").lower()
+        mode = str(extend_mode or "none").lower()
+        mode = EXTEND_MODE_ALIASES.get(mode, mode)
         if mode not in EXTEND_MODES:
             raise ValueError(f"extend_mode must be one of {EXTEND_MODES}, got {extend_mode!r}")
-        build_mode = mode if mode in BUILD_TIME_MODES else "default"
+        build_mode = mode if mode in BUILD_TIME_MODES else "none"
 
         self.original_shape = hires_image.shape
         segm = SegmentationImage(segmap)
@@ -1603,11 +1615,12 @@ class Templates:
         r_fill = 0.0
         ee_reach = 0.0
         annulus_pix = 4.0
-        if build_mode != "default":
+        if build_mode != "none":
             if detection_psf is None:
                 raise ValueError(f"extend_mode={mode!r} requires a detection_psf")
             wren = wren or schemes.WrenParams()
             classic = classic or schemes.ClassicParams()
+            psf_wings = psf_wings or schemes.PsfWingsParams()
             psf_rep = schemes.representative_psf(detection_psf, wren.ee_fraction)
 
         if build_mode == "wren":
@@ -1631,8 +1644,8 @@ class Templates:
                 pscale = float(proj_plane_pixel_scales(wcs)[0]) * 3600.0
                 if pscale > 0:
                     annulus_pix = float(wren.blend_annulus) / pscale
-        elif build_mode == "classic":
-            # IDL pastes the PSF over the whole tile; the resampled PSF is
+        elif build_mode in ("classic", "default"):
+            # Both paste the PSF over the whole stamp; the resampled PSF is
             # identically zero beyond its own stamp, so the stamp footprint is
             # the true support of the composite.
             floor = int(max(psf_rep.shape))
@@ -1640,23 +1653,23 @@ class Templates:
             # IDL had no inverse-variance map, so its low-SNR test used one
             # scalar per tile. With calibrated weights the per-source formal
             # noise is used instead and no scalar is needed.
-            if detection_weight is None and classic.tmpl_snrlo > 0:
+            onset = classic.tmpl_snrlo if build_mode == "classic" else psf_wings.snrlo_psf
+            explicit = classic.rms if build_mode == "classic" else psf_wings.rms
+            if detection_weight is None and onset > 0:
                 tmpl_rms = (
-                    float(classic.rms)
-                    if classic.rms is not None
+                    float(explicit)
+                    if explicit is not None
                     else schemes.detection_rms(hires_image)
                 )
                 if not tmpl_rms > 0:
                     raise ValueError(
-                        f"extend_mode='classic': detection rms is {tmpl_rms!r}, so the "
-                        f"low-SNR point-source replacement (tmpl_snrlo="
-                        f"{classic.tmpl_snrlo}) cannot be evaluated. Pass "
-                        "detection_weight, set ClassicParams.rms, or tmpl_snrlo=0 to "
-                        "disable the branch as IDL's keyword_set(tmpl_snrlo) guard does."
+                        f"extend_mode={mode!r}: detection rms is {tmpl_rms!r}, so the "
+                        f"faint-source SNR (onset {onset}) cannot be evaluated. Pass "
+                        "detection_weight, set the scheme's rms, or set the onset to 0."
                     )
                 logger.info(
-                    "extend_mode='classic': no detection weights, using scalar "
-                    "detection rms %.4g", tmpl_rms
+                    "extend_mode=%r: no detection weights, using scalar detection "
+                    "rms %.4g", mode, tmpl_rms
                 )
 
         # Resolve every position to its segment and cutout size up front: the
@@ -1715,7 +1728,7 @@ class Templates:
             sl_o, sl_c = cut.slices_original, cut.slices_cutout
             seg_stamp = self.segmap[sl_o]
 
-            if build_mode == "default":
+            if build_mode == "none":
                 # zero out all non segment pixels
                 cut.data[sl_c] *= (seg_stamp == label).astype(cut.data.dtype)
             else:
@@ -1733,19 +1746,25 @@ class Templates:
                 except ValueError:
                     psf_arr = None
 
-                if build_mode == "classic":
+                if build_mode in ("classic", "default"):
                     if psf_arr is None:
                         raise ValueError(
-                            f"extend_mode='classic': no detection PSF for source {label}"
+                            f"extend_mode={mode!r}: no detection PSF for source {label}"
                         )
                     # IDL: interpolate(..., cubic=-0.5) -> cubic resampling.
                     psf_stamp = schemes.sample_psf_on_stamp(
                         psf_arr, seg_stamp.shape, (xs, ys), order=3
                     )
-                    comp, info = schemes.composite_classic(
-                        stamp, seg_stamp, label, psf_stamp,
-                        params=classic, tmpl_rms=tmpl_rms, ivar=ivar_stamp,
-                    )
+                    if build_mode == "classic":
+                        comp, info = schemes.composite_classic(
+                            stamp, seg_stamp, label, psf_stamp,
+                            params=classic, tmpl_rms=tmpl_rms, ivar=ivar_stamp,
+                        )
+                    else:
+                        comp, info = schemes.composite_psf_wings(
+                            stamp, seg_stamp, label, psf_stamp,
+                            params=psf_wings, tmpl_rms=tmpl_rms, ivar=ivar_stamp,
+                        )
                 else:
                     # wren: bilinear resampling, unit-sum before interpolation.
                     psf_stamp = (
@@ -1779,12 +1798,20 @@ class Templates:
             # there should also never be NaNs.
             # Normalize the template so its sum is 1 (if nonzero), keeping the
             # pre-normalisation sum so the implied detection flux stays known.
-            total = cut.data.sum()
-            cut.template_norm = float(total)
-            if total != 0:
-                cut.data /= total
+            # PRENORMALISED_MODES normalise inside the scheme and then drop
+            # neighbour-owned pixels on purpose: renormalising here would undo
+            # exactly the double-counting protection that buys.
+            if mode in PRENORMALISED_MODES:
+                cut.template_norm = float(cut.extend_info.get("template_norm", 0.0))
+                if not cut.data.any():
+                    cut.flag |= Template.FLAG_SUM_ZERO
             else:
-                cut.flag |= Template.FLAG_SUM_ZERO
+                total = cut.data.sum()
+                cut.template_norm = float(total)
+                if total != 0:
+                    cut.data /= total
+                else:
+                    cut.flag |= Template.FLAG_SUM_ZERO
 
             templates.append(cut)
 

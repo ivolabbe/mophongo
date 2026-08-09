@@ -1,4 +1,4 @@
-"""Tests for the IDL subphot-style diagnostic (Pipeline.plot_subphot)."""
+"""Tests for the IDL subphot-style diagnostic (Pipeline.diagnose_subphot)."""
 
 from __future__ import annotations
 
@@ -41,17 +41,19 @@ def fitted_pipeline():
     )
     kernel = mutils.matching_kernel(psfs[0], psfs[1])
     _table, _resid, pipe = pipeline.run(
-        images, segmap, catalog=catalog, weights=wht, kernels=[None, kernel]
+        images, segmap, catalog=catalog, weights=wht, kernels=[None, kernel],
+        # layout test: keep the plain segment templates these panels were built on
+        config=pipeline._FitConfig(extend_mode="none"),
     )
     return pipe
 
 
-def test_plot_subphot_layout_and_scalings(fitted_pipeline, tmp_path):
+def test_diagnose_subphot_layout_and_scalings(fitted_pipeline, tmp_path):
     pipe = fitted_pipeline
     sid = int(pipe.table["id"][0])
     size = 41
     out = tmp_path / f"subphot_{sid}.png"
-    img = pipe.plot_subphot(sid, size=size, save=out)
+    img = pipe.diagnose_subphot(sid, size=size, save=out)
 
     # 2x3 panels of size x size stamps at 2x zoom
     assert img.shape == (4 * size, 6 * size, 3)
@@ -70,13 +72,48 @@ def test_plot_subphot_layout_and_scalings(fitted_pipeline, tmp_path):
     assert img[t2 : t2 + 30, :60].max() >= 200  # "model"
 
 
-def test_plot_subphot_defaults_and_errors(fitted_pipeline):
+def test_diagnose_subphot_defaults_and_errors(fitted_pipeline):
     pipe = fitted_pipeline
     sid = int(pipe.table["id"][0])
     # default size: odd template-footprint side
-    img = pipe.plot_subphot(sid)
+    img = pipe.diagnose_subphot(sid)
     assert img.shape[0] % 4 == 0 and img.shape[0] // 4 % 2 == 1
     with pytest.raises(KeyError):
-        pipe.plot_subphot(999999)
+        pipe.diagnose_subphot(999999)
     with pytest.raises(ValueError):
-        pipe.plot_subphot(sid, ifilt=0)
+        pipe.diagnose_subphot(sid, ifilt=0)
+
+
+def test_template_fit_table_and_resumed_render(fitted_pipeline, tmp_path):
+    """Resumed-session diagnose_subphot (rebuilt template + saved flux/shift) must
+    reproduce the in-session render; panels not touched by the rebuild are
+    bit-identical."""
+    pipe = fitted_pipeline
+    tt = pipe._template_fit_table()
+    assert set(tt.colnames) == {
+        "id", "id_parent", "x", "y", "dx", "dy", "flux", "err", "id_scene"
+    }
+    assert len(tt) == len(pipe.all_templates[0])
+    assert np.all(np.asarray(tt["id_scene"]) > 0)  # scene membership recorded
+
+    sid = int(pipe.table["id"][0])
+    img_run = pipe.diagnose_subphot(sid, size=41)
+
+    saved = pipe.all_templates
+    try:
+        pipe.all_templates = []  # simulate a fresh session after load_fit()
+        pipe.template_table = tt
+        img_res = pipe.diagnose_subphot(sid, size=41)
+    finally:
+        pipe.all_templates = saved
+
+    assert img_res.shape == img_run.shape
+    t2 = 2 * 41
+    # img, tmpl, seg (top row) and model, res (bottom left/mid): identical
+    assert np.array_equal(img_res[:t2], img_run[:t2])
+    assert np.array_equal(img_res[t2:, :t2], img_run[t2:, :t2])
+    assert np.array_equal(img_res[t2:, t2 : 2 * t2], img_run[t2:, t2 : 2 * t2])
+    # clean panel uses the rebuilt own-source model: near-identical
+    clean_run = img_run[t2:, 2 * t2 :].astype(float)
+    clean_res = img_res[t2:, 2 * t2 :].astype(float)
+    assert np.mean(np.abs(clean_res - clean_run)) < 2.0

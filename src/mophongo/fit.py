@@ -119,15 +119,23 @@ class FitConfig:
 
     # --- template build scheme ---------------------------------------------
     # One selector over the four schemes, for 1-1 comparison:
-    #   'default'   segment-masked detection data (mophongo, current)
-    #   'psf'       'default' + Templates.extend_with_psf (template * PSF fills
+    #   'none'      segment-masked detection data only
+    #   'default'   least-squares PSF wings outside the segment, smooth faint
+    #               limit, normalised before neighbour-owned pixels are zeroed
+    #               (alias: 'psf_wings')
+    #   'psf'       'none' + Templates.extend_with_psf (template * PSF fills
     #               the zero pixels)
-    #   'psf_model' 'default' + Templates.extend_with_psf_model
+    #   'psf_model' 'none' + Templates.extend_with_psf_model
     #   'wren'      wren/dev-wren _extended_composite (ownership + SNR blend)
-    #   'classic'   IDL subphot.pro::build_cube (least-squares PSF wings)
-    # The 'wren'/'classic' ports live in mophongo.template_schemes; the knobs
-    # below are theirs and are ignored by the other modes.
+    #   'classic'   IDL subphot.pro::build_cube (hard switch below tmpl_snrlo)
+    # The build-time schemes live in mophongo.template_schemes; the knobs below
+    # are theirs and are ignored by the other modes.
     extend_mode: str = "default"
+    # 'default' scheme: in-segment SNR at which the core is pure data. Below it
+    # the core rolls off to the scaled PSF, reaching a pure point source at 0.
+    psf_wings_snrlo: float = 5.0
+    psf_wings_blend_p: float = 2.0
+    psf_wings_rms: float | None = None  # None: robust_sigma of the detection image
     wren_ee_fraction: float = 0.95  # EE fraction setting the support cap R95
     wren_fit_snrlo_psf: float = 10.0  # core-weight onset is 1.5x this
     wren_wings_snr_psf: float = 3.0  # per-annulus weight onset

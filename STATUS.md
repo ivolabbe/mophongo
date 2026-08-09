@@ -3,6 +3,46 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] `scratch/wren/template_comparison.tex` Figs. 2-10 rebuilt on the shipped
+  code. New `scratch/wren/tmplfig/shipped.py` holds the common inputs (cutout,
+  resampled PSFs, `utils.matching_kernel`, the Fig. 1 segmentation rendering)
+  and an `agrees()` guard; every panel intermediate is now rebuilt from the
+  numbers the schemes return and checked against the shipped composite before
+  it is drawn, so a divergence raises instead of being plotted. Fig. 5 was the
+  substantive change: it still showed the old segment-masked `'none'` build and
+  now dissects `composite_psf_wings`. Figs. 3, 4, 7, 8, 10 gained the
+  segmentation panel; Figs. 4 and 7 gained the double-counting and truncation
+  panels. The detection rms is measured once per source on a fixed 12" box, so
+  the same galaxy reports the same SNR (21.5 mid, 5.2 faint) in every figure.
+  Captions and the affected in-text numbers ($R_{95}$ 16.5 -> 20.6 px, panel
+  letters) were resynced; `template_comparison.pdf` rebuilt, 12 pages.
+- [x] UDS DR0.1 F770W rerun on the current code (`psf_wings` default scheme +
+  `astrom_damping = 0.8`), 2242 sources in the 0.6' trial circle, ~3 min,
+  converged in 5 astrometry passes (`scratch/wren/dr0.1_run_aug9b.log`).
+  Against the previous (Aug 9 00:55) run of the same config: bright fluxes
+  +4% median (`flux_1` new/old 1.040, 16/84 = 1.017/1.078 at SNR>5), bright
+  errors unchanged (+2-4%), faint errors +49% median (the PSF-wing extension
+  enlarges small templates), SNR>5 count 106 -> 105. The scene partition
+  changed (6 scenes, membership 320/920/69/667/137/128 vs
+  350/974/253/330/93/241), so scene PNGs are not one-to-one between runs.
+  `positivity=True` puts 1015/2242 sources exactly at flux 0, including both
+  monu `nondet_good` sources, so the faint end has no negative fluxes to
+  average.
+  Comparison products in `scratch/wren/compare/`, rebuilt with
+  `make_compare.py` plus the new `make_compare_subphot.py`: the latter renders
+  `Pipeline.diagnose_subphot` (via `from_config(run_dir)` + `load_fit`, no
+  re-solve) at `size=195`, `nsig=3` for the 12 monu QA sources in the trial
+  circle, into `compare/dr0.1/subphot_<MONU_ID>.png`, matching the monu
+  stamps' 1170x780 layout pixel for pixel. Result: the four good/mid-SNR
+  sources agree with monu to a constant factor 9.06-9.38 (a catalogue flux
+  unit/zeropoint offset, not a fit difference), the faint ones scatter as
+  expected at their SNR, and the close pair MIN_UDS48823/48824 sits low
+  (6.9-7.0), i.e. we assign ~30% more flux to each component. The bright
+  edge-on disk MIN_UDS48823 leaves a much stronger residual than monu's; 2x2
+  block sums cut its residual std to 0.60 of the per-pixel value (0.46 for
+  MIN_UDS38103, 0.84 for a faint source), so the excess is sub-block
+  checkerboard power from fitting the 80mas F770W block-replicated onto the
+  40mas grid, against monu's native 40mas drizzle.
 - [x] Astrometric step damping: new `FitConfig.astrom_damping = 0.8`;
   `Scene.solve` scales each pass's per-template shift increment by it before
   `apply_template_shifts` (log line reports the applied factor). Rationale:

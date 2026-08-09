@@ -1537,7 +1537,7 @@ class Templates:
         segmap: np.ndarray,
         positions: Iterable[Tuple[float, float]],
         wcs: WCS | None = None,
-        dilate_segmap: int = 2,
+        dilate_segmap: int = 0,
         *,
         extend_mode: str = "default",
         detection_psf: np.ndarray | PSFRegionMap | None = None,
@@ -1551,12 +1551,12 @@ class Templates:
         ----------
         dilate_segmap
             Disk radius (in pixels) used to dilate each segment *into
-            background only* before cutting. The input segmap is usually a
-            detection map (2-σ + small dilation) that captures only the
-            bright core of a point source; template photometry then loses
-            the PSF wings and biases the fit low. Dilating per-segment into
-            background (no overlap with neighbors) recovers the wings.
-            Pass 0 to disable. Neither reference scheme dilates.
+            background only* before cutting. Off by default, matching
+            :attr:`~mophongo.fit.FitConfig.template_dilate_segmap`: a dilated
+            ring is mostly sky noise, its contested-background tie-break is
+            catalog-id ordered rather than geometric, and recovering the PSF
+            wings is the job of template extension. Neither reference scheme
+            dilates.
         extend_mode
             Template build scheme, one of :data:`EXTEND_MODES`. ``'default'``
             (and the post-pass modes ``'psf'``/``'psf_model'``, which only
@@ -1637,20 +1637,27 @@ class Templates:
             # the true support of the composite.
             floor = int(max(psf_rep.shape))
             min_size = max(min_size, floor + floor % 2)
-            tmpl_rms = (
-                float(classic.rms)
-                if classic.rms is not None
-                else schemes.detection_rms(hires_image)
-            )
-            if not tmpl_rms > 0 and classic.tmpl_snrlo > 0:
-                raise ValueError(
-                    f"extend_mode='classic': detection rms is {tmpl_rms!r}, so the "
-                    f"low-SNR point-source replacement (tmpl_snrlo="
-                    f"{classic.tmpl_snrlo}) cannot be evaluated. Set ClassicParams.rms, "
-                    "or tmpl_snrlo=0 to disable the branch as IDL's "
-                    "keyword_set(tmpl_snrlo) guard does."
+            # IDL had no inverse-variance map, so its low-SNR test used one
+            # scalar per tile. With calibrated weights the per-source formal
+            # noise is used instead and no scalar is needed.
+            if detection_weight is None and classic.tmpl_snrlo > 0:
+                tmpl_rms = (
+                    float(classic.rms)
+                    if classic.rms is not None
+                    else schemes.detection_rms(hires_image)
                 )
-            logger.info("extend_mode='classic': detection rms %.4g", tmpl_rms)
+                if not tmpl_rms > 0:
+                    raise ValueError(
+                        f"extend_mode='classic': detection rms is {tmpl_rms!r}, so the "
+                        f"low-SNR point-source replacement (tmpl_snrlo="
+                        f"{classic.tmpl_snrlo}) cannot be evaluated. Pass "
+                        "detection_weight, set ClassicParams.rms, or tmpl_snrlo=0 to "
+                        "disable the branch as IDL's keyword_set(tmpl_snrlo) guard does."
+                    )
+                logger.info(
+                    "extend_mode='classic': no detection weights, using scalar "
+                    "detection rms %.4g", tmpl_rms
+                )
 
         # Resolve every position to its segment and cutout size up front: the
         # ownership ROI and the extraction loop must size cutouts identically.
@@ -1716,6 +1723,11 @@ class Templates:
                 stamp = np.asarray(hires_image[sl_o], dtype=float)
                 xs = float(cut.input_position_cutout[0]) - sl_c[1].start
                 ys = float(cut.input_position_cutout[1]) - sl_c[0].start
+                ivar_stamp = (
+                    np.asarray(detection_weight[sl_o], dtype=float)
+                    if detection_weight is not None
+                    else None
+                )
                 try:
                     psf_arr = Templates._psf_for_template(cut, detection_psf)
                 except ValueError:
@@ -1732,18 +1744,13 @@ class Templates:
                     )
                     comp, info = schemes.composite_classic(
                         stamp, seg_stamp, label, psf_stamp,
-                        params=classic, tmpl_rms=tmpl_rms,
+                        params=classic, tmpl_rms=tmpl_rms, ivar=ivar_stamp,
                     )
                 else:
                     # wren: bilinear resampling, unit-sum before interpolation.
                     psf_stamp = (
                         schemes.sample_psf_on_stamp(psf_arr, seg_stamp.shape, (xs, ys), order=1)
                         if psf_arr is not None
-                        else None
-                    )
-                    ivar_stamp = (
-                        np.asarray(detection_weight[sl_o], dtype=float)
-                        if detection_weight is not None
                         else None
                     )
                     comp, info = schemes.composite_wren(

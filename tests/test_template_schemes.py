@@ -505,6 +505,81 @@ def test_classic_refuses_to_run_with_an_unusable_rms():
     assert tmpls.templates[0].extend_info["psf_replaced"] is False
 
 
+def test_classic_ivar_noise_reduces_to_idl_scalar_for_uniform_weights():
+    """IDL's sqrt(n_seg)*tmpl_rms IS sqrt(sum 1/ivar) when the noise is
+    uniform, so the calibrated path must reproduce it exactly."""
+    psf = _psf(21, sigma=2.0)
+    shape = (41, 41)
+    cen = (20.0, 20.0)
+    psf_stamp = schemes.sample_psf_on_stamp(psf, shape, cen, order=3)
+    seg = np.zeros(shape, dtype=np.int32)
+    yy, xx = np.mgrid[0:shape[0], 0:shape[1]]
+    seg[np.hypot(xx - cen[0], yy - cen[1]) <= 3] = 1
+    data = 100.0 * psf_stamp
+    sigma = 0.7
+
+    params = schemes.ClassicParams(tmpl_snrlo=0.0)
+    _, scalar = schemes.composite_classic(
+        data, seg, 1, psf_stamp, params=params, tmpl_rms=sigma
+    )
+    _, formal = schemes.composite_classic(
+        data, seg, 1, psf_stamp, params=params,
+        tmpl_rms=0.0, ivar=np.full(shape, 1.0 / sigma ** 2),
+    )
+    assert formal["snr_seg"] == pytest.approx(scalar["snr_seg"], rel=1e-12)
+
+
+def test_classic_with_weights_needs_no_scalar_rms():
+    """A calibrated ivar map supersedes IDL's per-tile scalar entirely."""
+    image, segmap = _scene(amps=(1000.0,))
+    psf = _psf(41, sigma=2.0)
+    tmpls = Templates()
+    tmpls.extract_templates(
+        image, segmap, [(40.0, 40.0)], dilate_segmap=0,
+        extend_mode="classic", detection_psf=psf,
+        detection_weight=np.full(image.shape, 1e4),
+    )
+    assert tmpls.templates[0].extend_info["snr_seg"] > 0
+
+
+def test_template_extension_refuses_a_lower_resolution_psf():
+    """psfs[0] is the detection band and nothing else is substituted: a
+    lo-res PSF would give wrong wings and wrong radii, silently."""
+    from astropy.table import Table
+
+    from mophongo import pipeline
+    from mophongo.fit import FitConfig
+
+    image, segmap = _scene(shape=(81, 81), amps=(1000.0,))
+    image = image.astype(np.float32)
+    catalog = Table({"id": [1], "x": [40.0], "y": [40.0]})
+
+    for mode in ("psf", "wren", "classic"):
+        pipe = pipeline.Pipeline(
+            [image, image],
+            segmap,
+            catalog=catalog,
+            weights=[np.ones_like(image), np.ones_like(image)],
+            psfs=[None, _psf(11, sigma=2.0)],  # detection PSF missing
+            kernels=[None, None],
+            config=FitConfig(
+                fit_astrometry_niter=0, template_dilate_segmap=0, extend_mode=mode
+            ),
+        )
+        with pytest.raises(ValueError, match="detection-band PSF in psfs"):
+            pipe.run()
+
+
+def test_extract_templates_does_not_dilate_by_default():
+    image, segmap = _scene(amps=(1000.0,), seg_radius=2.0)
+    tmpls = Templates()
+    tmpls.extract_templates(image, segmap, [(40.0, 40.0)])
+    tmpl = tmpls.templates[0]
+    support = np.zeros(image.shape, bool)
+    support[tmpl.slices_original] = tmpl.data[tmpl.slices_cutout] != 0
+    assert int(support.sum()) == int((segmap == 1).sum())
+
+
 def test_wren_ownership_splits_a_blend_between_neighbours():
     """Two neighbours must not both claim the background between them."""
     image, segmap = _scene(

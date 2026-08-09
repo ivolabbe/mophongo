@@ -135,8 +135,12 @@ class ClassicParams:
         source (``phot.param:91`` sets 15.0). ``<= 0`` disables the branch,
         matching IDL's ``keyword_set(tmpl_snrlo)`` guard.
     rms
-        Detection-image noise entering that SNR. ``None`` measures it once per
-        extraction with :func:`robust_sigma`, IDL's ``robust_sigma(ttmpl)``.
+        Fallback detection-image noise, used only when no inverse-variance map
+        is supplied. ``None`` measures it once per extraction with
+        :func:`robust_sigma`, IDL's ``robust_sigma(ttmpl)``. IDL had no
+        per-pixel weights at all -- one scalar per tile was the best it could
+        do -- so a calibrated ivar map supersedes this (see
+        :func:`composite_classic`).
     force_psf
         IDL's ``/psf`` keyword: build every template as a pure point source.
     """
@@ -491,7 +495,8 @@ def composite_classic(
     psf_stamp: np.ndarray,
     *,
     params: ClassicParams,
-    tmpl_rms: float,
+    tmpl_rms: float = 0.0,
+    ivar: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, float]]:
     """Build one template the way IDL ``build_cube`` does.
 
@@ -521,6 +526,14 @@ def composite_classic(
       radius ``ceil(ksz/2)``. That belongs to the convolution stage and is not
       reproduced here; mophongo normalises the unconvolved template and does
       not mask after convolving.
+    * IDL's low-SNR test is ``sum_S D / (sqrt(n_S) * tmpl_rms)``, i.e. a single
+      scalar noise per tile, because ``subphot.pro`` carries no
+      inverse-variance map at any stage (it fits with ``wts = 1/rms``,
+      :541/:869). ``sqrt(n_S) * rms`` is exactly ``sqrt(sum_S 1/ivar)`` for
+      uniform noise, so when a calibrated ``ivar`` is supplied this uses the
+      formal per-pixel noise instead -- identical to IDL where the noise is
+      uniform, correct where it is not, and the same denominator
+      :func:`composite_wren` uses. ``tmpl_rms`` is then only a fallback.
 
     Parameters
     ----------
@@ -536,7 +549,10 @@ def composite_classic(
     params
         :class:`ClassicParams`.
     tmpl_rms
-        Detection-image noise entering the low-SNR test (IDL ``tmpl_rms``).
+        Scalar detection-image noise for the low-SNR test (IDL ``tmpl_rms``);
+        used only when ``ivar`` is None.
+    ivar
+        Detection inverse variance on the stamp. Preferred over ``tmpl_rms``.
 
     Returns
     -------
@@ -559,10 +575,20 @@ def composite_classic(
         m = np.where(own, D, 0.0) + fpsf * np.where(own, 0.0, P)
 
     # Low-SNR replacement (subphot.pro:310-313); the SNR uses the raw data sum
-    # in the segment, not the composite.
+    # in the segment, not the composite. Noise from the ivar map when there is
+    # one, else IDL's single scalar.
     snr_seg = np.nan
-    if n_seg and tmpl_rms > 0:
-        snr_seg = float(D[own].sum()) / (np.sqrt(n_seg) * float(tmpl_rms))
+    if n_seg:
+        noise = 0.0
+        if ivar is not None:
+            iv = np.asarray(ivar, dtype=float)[own]
+            good = iv > 0
+            if good.any():
+                noise = float(np.sqrt(np.sum(1.0 / iv[good])))
+        if noise <= 0 and tmpl_rms > 0:
+            noise = np.sqrt(n_seg) * float(tmpl_rms)
+        if noise > 0:
+            snr_seg = float(D[own].sum()) / noise
     replaced = bool(params.force_psf)
     if params.tmpl_snrlo > 0 and np.isfinite(snr_seg) and snr_seg < params.tmpl_snrlo:
         replaced = True

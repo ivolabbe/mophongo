@@ -942,8 +942,8 @@ def run_pipeline_extension_scenario(
     noise_info: dict[str, Any],
     truth: Table,
     psf_maps: WienerPSFMaps,
-    mock_dilate_segmap: int = 2,
-    template_dilate_segmap: int = 4,
+    mock_dilate_segmap: int = 2,  # how the truth segmap is grown, not a template knob
+    template_dilate_segmap: int = 0,  # matches FitConfig; wing recovery is extension's job
     fit_astrometry_niter: int = 2,
     fit_background: bool = False,
     source_diagnostic_count: int = 10,
@@ -1008,7 +1008,10 @@ def run_pipeline_extension_scenario(
         segmap,
         weights=[ivar_444, ivar_444, ivar_770],
         catalog=cat,
-        psfs=[None, psf_maps.source_map, psf_maps.target_map],
+        # psfs[0] is the detection band (images[0] = F444W): template
+        # extension reads it and accepts no substitute. Only fitted bands
+        # (ifilt >= 1) feed the throughput and PSF-EE bookkeeping.
+        psfs=[psf_maps.source_map, psf_maps.source_map, psf_maps.target_map],
         kernels=[None, None, psf_maps.kernel_map],
         psf_throughputs=[
             1.0,

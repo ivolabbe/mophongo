@@ -20,21 +20,18 @@ This file tracks future desired features, checks, and investigations.
   `Template.extend_info` but nothing consumes them. wren feeds them into its
   aperture-correction chain (`trunc = norm / (norm + flux_beyond_stamp)`).
   Wire them up, or drop them, once the scheme comparison settles.
-- [ ] Both `extend_mode` reference schemes use ONE global noise scalar
-  (`template_schemes.detection_rms` for classic's `tmpl_rms`,
-  `sky_sigma` for wren's `bg_rms` fallback). IDL and wren measure theirs on a
-  single fully-covered tile, so a mosaic with real depth variation biases
-  every per-source SNR by the local/global depth ratio — high in the deep
-  parts, low in the shallow ones. The zero-padding failure is fixed
-  (`covered_mask`), the depth-variation one is not. A per-scene or
-  block-median noise map would fix it for both schemes at once; wren already
-  avoids it entirely when a detection ivar map is supplied.
-- [ ] `extend_mode='wren'` gets no detection-band inverse variance on the
-  config-driven path: `RunConfig` has no `wht_hi`, so `load_data` passes
-  `weights=[None, ivar]` and every wren SNR (core and per-annulus) falls back
-  to the clipped `sky_sigma` scalar. wren's own run supplied `weights[0]`, so
-  the JSON path is not yet a like-for-like comparison. Add `wht_hi` to
-  `RunConfig` (optional) and thread it through.
+- [ ] Add an optional `wht_hi` to `RunConfig` and thread it to `weights[0]`.
+  Both build schemes then use the calibrated per-pixel noise
+  (`sqrt(sum 1/ivar)` over the mask) and no global scalar is involved at all.
+  Without it `load_data` passes `weights=[None, ivar]`, so wren falls back to
+  a single clipped `sky_sigma` and classic to a single `robust_sigma` — one
+  number for the whole mosaic, which a field with real depth variation biases
+  by the local/global depth ratio (high in the deep parts, low in the shallow
+  ones). The zero-padding failure of those fallbacks is fixed
+  (`covered_mask`); the depth-variation one is inherent to a scalar and is
+  the reason to supply the weights. Note IDL never had this option — it
+  carries no inverse-variance map at any stage and fits with `wts = 1/rms`
+  (`subphot.pro:541,869`), one scalar per tile.
 - [ ] `extend_mode='wren'`'s `WrenParams.containment` (wren's
   `PSFRegionMap.containment`, the detection-PSF stamp containment `c_det` in
   `flux_beyond_stamp`) defaults to 1.0 because this tree has no equivalent.

@@ -29,7 +29,8 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 
 from .psf_map import PSFRegionMap
 from .utils import bin_factor_from_wcs, downsample_psf, bin_remap
-from .templates import Templates, Template, _slices_from_bbox
+from .templates import EXTEND_MODES, Templates, Template, _slices_from_bbox
+from . import template_schemes
 from .fit import FitConfig as _FitConfig
 from .scene import generate_scenes
 
@@ -393,9 +394,12 @@ class Pipeline:
         self.psf_throughputs = psf_throughputs
         self.wcs = wcs
         self.window = window
+        # Legacy selector; None -> FitConfig.extend_mode decides (see
+        # _resolve_extend_mode). Resolved once per run() into self.extend_mode.
         self.extend_templates = extend_templates
         self.input_templates = templates
         self.config = config
+        self.extend_mode = self._resolve_extend_mode(config)
 
         if kernels is None:
             kernels = [None] * len(images)
@@ -665,7 +669,11 @@ class Pipeline:
             segmap,
             weights=[None, ivar],
             catalog=cat,
-            psfs=[None, self.prm_lo],
+            # psfs[0] is the detection-band map: template extension / the
+            # 'wren' and 'classic' build schemes look up their detection PSF
+            # there. Only fitted bands (ifilt >= 1) feed the throughput and
+            # PSF-EE bookkeeping, so index 0 is inert for those.
+            psfs=[self.prm_hi, self.prm_lo],
             kernels=[None, self.prm_kern],
             wcs=[wcs_hi, wcs_lo],
             config=_FitConfig(**cfg.fit),
@@ -1024,6 +1032,134 @@ class Pipeline:
             cat[f"err_pred_{idx}_total"][ci] = err_pred_total_sum[pid]
             cat[f"throughput_{idx}"][ci] = throughput
 
+    # ------------------------------------------------------------------
+    # template build scheme (extend_mode) resolution
+    # ------------------------------------------------------------------
+    #: Legacy ``Pipeline(extend_templates=...)`` values -> ``extend_mode``.
+    _LEGACY_EXTEND_MODES = {
+        None: "default",
+        "none": "default",
+        "default": "default",
+        "psf": "psf",
+        "psf_wings": "psf",
+        "psf_model": "psf_model",
+        "wren": "wren",
+        "classic": "classic",
+    }
+
+    def _resolve_extend_mode(self, config: FitConfig) -> str:
+        """Return the active build scheme.
+
+        ``Pipeline(extend_templates=...)`` still selects it when given (it
+        predates the config field and is used by tests and verification runs);
+        otherwise ``FitConfig.extend_mode`` decides.
+        """
+        if self.extend_templates is not None:
+            key = str(self.extend_templates).lower()
+            if key not in self._LEGACY_EXTEND_MODES:
+                raise ValueError(f"Unknown template extension mode {self.extend_templates!r}")
+            return self._LEGACY_EXTEND_MODES[key]
+        mode = str(getattr(config, "extend_mode", "default") or "default").lower()
+        if mode not in EXTEND_MODES:
+            raise ValueError(f"Unknown extend_mode {mode!r}; expected one of {EXTEND_MODES}")
+        return mode
+
+    def _extend_scheme_kwargs(self, mode: str, config: FitConfig) -> dict:
+        """``extract_templates`` kwargs for the ``'wren'``/``'classic'`` schemes.
+
+        The two reference codes size their stamps globally before extraction.
+        ``classic`` needs only the detection PSF; ``wren`` also needs the fill
+        radius ``r_fill = max(R_ee, r_aper + kernel_half_width)`` so the
+        template covers the measurement aperture plus a convolution margin.
+        """
+        if mode not in {"wren", "classic"}:
+            return {}
+
+        weights = self.weights if self.weights is not None else []
+        det_weight = weights[0] if len(weights) > 0 else None
+        kwargs: dict = {
+            "extend_mode": mode,
+            "detection_psf": self._psf_for_template_extension(),
+            "detection_weight": det_weight,
+        }
+        if mode == "classic":
+            kwargs["classic"] = template_schemes.ClassicParams(
+                tmpl_snrlo=float(config.classic_tmpl_snrlo),
+                rms=None if config.classic_rms is None else float(config.classic_rms),
+            )
+            return kwargs
+
+        # Detection-grid aperture radius (scalar apertures only; a per-band
+        # array leaves it None, which only disables the flux_beyond_aper
+        # crowding bookkeeping).
+        r_ap = None
+        scalar_ap = np.isscalar(config.aperture_diam) and not isinstance(config.aperture_diam, str)
+        if scalar_ap:
+            if config.aperture_units == "arcsec":
+                pscale = self._pixel_scale_arcsec(self.wcs[0] if self.wcs is not None else None)
+                if pscale:
+                    r_ap = 0.5 * float(config.aperture_diam) / pscale
+            else:
+                r_ap = 0.5 * float(config.aperture_diam)
+
+        # Largest matching-kernel effective half-width over the fitted bands
+        # (95% encircled radius of |K|, not the zero-padded array size).
+        kernel_hw = 0.0
+        for kern in (self.kernels or []):
+            arr = None
+            if isinstance(kern, PSFRegionMap):
+                arr = np.asarray(kern.psfs[0], dtype=float) if len(kern.psfs) else None
+            elif kern is not None:
+                arr = np.asarray(kern, dtype=float)
+            if arr is not None and arr.ndim == 2 and np.abs(arr).sum() > 0:
+                try:
+                    kernel_hw = max(kernel_hw, template_schemes.psf_ee_radius_pix(np.abs(arr), 0.95))
+                except ValueError:  # pragma: no cover - degenerate kernel
+                    pass
+
+        psf_rep = template_schemes.representative_psf(
+            kwargs["detection_psf"], float(config.wren_ee_fraction)
+        )
+        ee_reach = template_schemes.psf_ee_radius_pix(psf_rep, float(config.wren_ee_fraction))
+        r_fill = template_schemes.wren_fill_radius(
+            psf_rep,
+            ee_fraction=float(config.wren_ee_fraction),
+            aperture_radius_pix=r_ap,
+            kernel_half_width=kernel_hw,
+        )
+        logger.info(
+            "Template build scheme 'wren': fill radius %.1f pix, PSF-wing reach "
+            "%.1f pix @ %.0f%% EE", r_fill, ee_reach, 100.0 * float(config.wren_ee_fraction)
+        )
+        kwargs["wren"] = template_schemes.WrenParams(
+            max_radius_pix=float(r_fill),
+            psf_ee_radius_pix=float(ee_reach),
+            aperture_radius_pix=None if r_ap is None else float(r_ap),
+            ee_fraction=float(config.wren_ee_fraction),
+            fit_snrlo_psf=float(config.wren_fit_snrlo_psf),
+            wings_snr_psf=float(config.wren_wings_snr_psf),
+            blend_p=float(config.wren_blend_p),
+            blend_annulus=float(config.wren_blend_annulus),
+        )
+        return kwargs
+
+    def _apply_extension_pass(self, tmpls: Templates, mode: str, config: FitConfig) -> None:
+        """Run the post-extraction extension for ``'psf'``/``'psf_model'``."""
+        if mode == "psf":
+            tmpls.extend_with_psf(
+                self._psf_for_template_extension(),
+                skip_deblended=bool(config.skip_template_extension_for_deblended),
+                background_only=bool(config.extend_wings_background_only),
+                inplace=True,
+            )
+        elif mode == "psf_model":
+            tmpls.extend_with_psf_model(
+                self._psf_for_template_extension(),
+                mode="model",
+                skip_deblended=bool(config.skip_template_extension_for_deblended),
+                inplace=True,
+            )
+
     def _pixel_scale_arcsec(self, w: WCS | None) -> float | None:
         try:
             if w is None:
@@ -1255,6 +1391,7 @@ class Pipeline:
             elif self.kernels[-1] is None:
                 # data pre-loaded with load_data(kernels=False): finish the maps
                 self._ensure_maps()
+                self.psfs[0] = self.prm_hi
                 self.psfs[-1] = self.prm_lo
                 self.kernels[-1] = self.prm_kern
 
@@ -1304,6 +1441,11 @@ class Pipeline:
                 cat[config.aperture_catalog] = catalog[config.aperture_catalog]
 
         if self.input_templates is None:
+            # One selector over the four build schemes (see EXTEND_MODES):
+            # 'wren'/'classic' build their composite inside extract_templates,
+            # 'psf'/'psf_model' run as a post-pass below.
+            extend_mode = self._resolve_extend_mode(config)
+            self.extend_mode = extend_mode
             self.tmpls = Templates()
             self.tmpls.extract_templates(
                 images[0],
@@ -1311,6 +1453,7 @@ class Pipeline:
                 list(zip(cat["x"], cat["y"])),
                 wcs=wcs[0] if wcs is not None else None,
                 dilate_segmap=config.template_dilate_segmap,
+                **self._extend_scheme_kwargs(extend_mode, config),
             )
             if "is_deblended" in cat.colnames:
                 is_deblended_by_id = {
@@ -1341,40 +1484,10 @@ class Pipeline:
                 for tmpl in self.tmpls.templates:
                     tmpl.is_saturated = sat_by_id.get(int(tmpl.id), False)
             self.templates_extracted = deepcopy(self.tmpls)
-            if self.extend_templates in {"psf", "psf_wings"}:
-                psf_hi = psfs[0] if psfs is not None and psfs[0] is not None else None
-                if psf_hi is None and psfs is not None and len(psfs) > 1:
-                    psf_hi = psfs[1]
-                if psf_hi is None:
-                    raise ValueError(
-                        f"extend_templates={self.extend_templates!r} requires a high-resolution PSF in psfs[0]"
-                    )
-                # Template extension is a shape operation. The extension code
-                # normalizes finite PSF stamps to unit-sum shapes and keeps
-                # native finite-support sums only as throughput metadata.
-                self.tmpls.extend_with_psf_wings(
-                    psf_hi,
-                    skip_deblended=bool(config.skip_template_extension_for_deblended),
-                    background_only=bool(config.extend_wings_background_only),
-                    inplace=True,
-                )
-            elif self.extend_templates == "psf_model":
-                psf_hi = psfs[0] if psfs is not None and psfs[0] is not None else None
-                if psf_hi is None and psfs is not None and len(psfs) > 1:
-                    psf_hi = psfs[1]
-                if psf_hi is None:
-                    raise ValueError(
-                        "extend_templates='psf_model' requires a high-resolution PSF in psfs[0]"
-                    )
-                # Keep the same shape-vs-throughput convention as psf_wings.
-                self.tmpls.extend_with_psf_model(
-                    psf_hi,
-                    mode="model",
-                    skip_deblended=bool(config.skip_template_extension_for_deblended),
-                    inplace=True,
-                )
-            elif self.extend_templates not in {None, "none"}:
-                raise ValueError(f"Unknown template extension mode {self.extend_templates!r}")
+            # Template extension is a shape operation. The extension code
+            # normalizes finite PSF stamps to unit-sum shapes and keeps
+            # native finite-support sums only as throughput metadata.
+            self._apply_extension_pass(self.tmpls, extend_mode, config)
             self.templates_extended = deepcopy(self.tmpls)
         else:
             if isinstance(self.input_templates, Templates):
@@ -1825,7 +1938,8 @@ class Pipeline:
             psf_hi = psfs[1]
         if psf_hi is None:
             raise ValueError(
-                f"extend_templates={self.extend_templates!r} requires a high-resolution PSF"
+                f"extend_mode={getattr(self, 'extend_mode', self.extend_templates)!r} "
+                "requires a high-resolution PSF in psfs[0] (or psfs[1])"
             )
         return psf_hi
 
@@ -1842,6 +1956,7 @@ class Pipeline:
         later in-place mutations cannot change the diagnostic panels.
         """
         pos = self._source_position(source_id)
+        extend_mode = self._resolve_extend_mode(self.config)
         rebuilt = Templates()
         rebuilt.extract_templates(
             self.images[0],
@@ -1849,6 +1964,7 @@ class Pipeline:
             [pos],
             wcs=self.wcs[0] if self.wcs is not None else None,
             dilate_segmap=int(self.config.template_dilate_segmap),
+            **self._extend_scheme_kwargs(extend_mode, self.config),
         )
         if not rebuilt.templates:
             raise KeyError(f"could not re-extract source id {source_id} for diagnostics")
@@ -1874,26 +1990,10 @@ class Pipeline:
         work.wcs = getattr(rebuilt, "wcs", self.wcs[0] if self.wcs is not None else None)
         work.segmap = rebuilt.segmap
         work._templates = [tmpl]
-        if self.extend_templates in {"psf", "psf_wings"}:
-            work.extend_with_psf_wings(
-                self._psf_for_template_extension(),
-                skip_deblended=bool(self.config.skip_template_extension_for_deblended),
-                background_only=bool(self.config.extend_wings_background_only),
-                inplace=True,
-            )
-            tmpl_ext = work.templates[0]
-        elif self.extend_templates == "psf_model":
-            work.extend_with_psf_model(
-                self._psf_for_template_extension(),
-                mode="model",
-                skip_deblended=bool(self.config.skip_template_extension_for_deblended),
-                inplace=True,
-            )
-            tmpl_ext = work.templates[0]
-        elif self.extend_templates in {None, "none"}:
-            tmpl_ext = tmpl
-        else:
-            raise ValueError(f"Unknown template extension mode {self.extend_templates!r}")
+        # 'wren'/'classic' already built their composite in extract_templates
+        # above, so only the post-pass modes do anything here.
+        self._apply_extension_pass(work, extend_mode, self.config)
+        tmpl_ext = work.templates[0]
         after = self._snapshot_template(tmpl_ext)
 
         kernels = self.kernels if self.kernels is not None else [None] * len(self.images)

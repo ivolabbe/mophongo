@@ -369,7 +369,7 @@ def test_pipeline_propagates_catalog_deblend_flag_to_templates():
     assert tmpl.flag & pipeline.Template.FLAG_DEBLENDED
     assert tmpl.deblend_parent_label == 7
     assert tmpl.deblend_nchildren == 2
-    assert tmpl.extension_mode == "psf_wings"
+    assert tmpl.extension_mode == "psf"
     assert tmpl.extension_skip_reason == ""
 
 

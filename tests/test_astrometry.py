@@ -24,6 +24,15 @@ from utils import save_diagnostic_image
 # Shared helpers for the scene-solver astrometry tests
 # ---------------------------------------------------------------------------
 
+
+def _assign_solution(fitter, sol) -> None:
+    """Write a SceneFitter solution back onto the fitter and its templates."""
+    fitter.solution = sol.flux
+    for tmpl, flux, err in zip(fitter.templates, sol.flux, sol.err):
+        tmpl.flux = float(flux)
+        tmpl.err = float(err)
+
+
 def _make_gaussian_psf_array(fwhm: float, size: int = 51) -> np.ndarray:
     """Return a normalised 2-D Gaussian PSF of given FWHM (in pixels)."""
     sig = fwhm / 2.355
@@ -77,11 +86,8 @@ def test_polynomial_astrometry_reduces_residual(tmp_path):
 
     fitter = SparseFitter(tmpls.templates, images[1], wht[1], FitConfig())
     fitter.build_normal()
-    flux, _, _ = fitter.solve()
-    err = fitter.flux_errors()
-    perr = fitter.predicted_errors()
-    res = fitter.residual()
-
+    sol = SceneFitter.solve(fitter.ata, fitter.atb, config=FitConfig())
+    _assign_solution(fitter, sol)
     res0 = fitter.residual()
 
     ac = AstroCorrect(FitConfig())
@@ -126,8 +132,8 @@ def test_gp_astrometry_returns_models():
 
     fitter = SparseFitter(tmpls.templates, images[1], wht[1], FitConfig())
     fitter.build_normal()
-    fitter.solve()
-    fitter.flux_errors()
+    sol = SceneFitter.solve(fitter.ata, fitter.atb, config=FitConfig())
+    _assign_solution(fitter, sol)
     res = fitter.residual()
 
     cfg = FitConfig(astrom_model="gp", astrom_kwargs={"gp": {"length_scale": 30.0}})

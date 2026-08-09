@@ -9,12 +9,8 @@ import scipy.sparse as sp
 from .templates import Template, Templates
 from .fit import FitConfig
 from .scene_fitter import SceneFitter
-from .astrometry import cheb_basis, AstroCorrect, n_terms
-
-import numpy as np
-import scipy.sparse as sp
+from .astrometry import cheb_basis, AstroCorrect
 from scipy.sparse.csgraph import connected_components
-from .fit import FitConfig as FitConfig
 from .templates import _slices_from_bbox
 
 logger = logging.getLogger(__name__)
@@ -345,14 +341,6 @@ def merge_small_scenes(
     return new_labs, int(uniq.size)
 
 
-# scene_basis.py (or alongside your fitter helpers)
-
-import numpy as np
-from typing import List, Optional, Tuple
-from .templates import Template
-from .astrometry import cheb_basis
-
-
 def make_scene_basis(
     templates: List[Template],
     bright: np.ndarray,
@@ -544,25 +532,6 @@ def assemble_scene_system_AB(
                 bB[p : 2 * p] += (-ai) * float(np.sum(Gy[ti.slices_cutout] * w * img)) * Si
 
     return AB.tocsr(), sp.csr_matrix(BB), bB
-
-
-def summarize_scenes(labels: np.ndarray) -> np.ndarray:
-    """Log a brief summary of scene sizes."""
-
-    counts = np.bincount(labels)[1:]  # skip 0 bin
-    logger.info(
-        "%d scenes (max=%d, median=%d, min=%d)",
-        len(counts),
-        counts.max(),
-        int(np.median(counts)),
-        counts.min(),
-    )
-    topk = np.argsort(counts)[::-1][:5]
-    logger.info(
-        "Top scenes by size: %s",
-        [(int(cid), int(counts[cid])) for cid in topk],
-    )
-    return counts
 
 
 def generate_scenes(
@@ -967,7 +936,6 @@ class Scene:
         """
 
         from copy import deepcopy
-        from astropy.stats import mad_std
         from astropy.visualization import make_lupton_rgb
         from photutils.segmentation import SegmentationImage
         import matplotlib.pyplot as plt
@@ -1228,9 +1196,3 @@ class Scene:
         res_scene[self.weights[sl] <= 0 | np.isnan(self.weights[sl])] = 0.0
         return res_scene
 
-    # ------------------------------------------------------------------
-    # Placeholders for future extensions
-    # ------------------------------------------------------------------
-    def augment_templates(self, thresh: float, mode: str = "psf_core") -> None:
-        """Placeholder for residual-driven template augmentation."""
-        return None

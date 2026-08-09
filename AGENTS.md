@@ -91,8 +91,9 @@ Key components:
 - `saturate.py`: saturated-pixel repair (see Module Boundaries).
 - `template_schemes.py`: self-contained ports of the alternative template build
   schemes (wren fork, IDL classic) selected by `FitConfig.extend_mode`.
-- `astrometry.py`, `jwst_psf.py`, `deblender.py`, `astro_fit.py`: astrometric
-  corrections, JWST PSF utilities, deblending, and astrometry-aware fitting.
+- `astrometry.py`, `jwst_psf.py`: astrometric corrections and JWST PSF
+  utilities. Deblending uses `photutils.segmentation.deblend_sources`,
+  re-exported from `mophongo/__init__.py`.
 
 ## Module Boundaries
 

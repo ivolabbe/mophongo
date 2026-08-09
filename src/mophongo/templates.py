@@ -10,10 +10,9 @@ from astropy.wcs import WCS
 from astropy.wcs.utils import proj_plane_pixel_scales
 from photutils.segmentation import SegmentationImage
 from tqdm import tqdm
-from scipy.interpolate import interp1d
 from astropy.nddata import block_reduce
 
-from .utils import measure_shape, bin_remap, fftconvolve
+from .utils import bin_remap, fftconvolve
 from .psf_map import PSFRegionMap
 
 # Alternative template build schemes (wren fork, IDL classic). Imported as a
@@ -47,16 +46,13 @@ PRENORMALISED_MODES = ("psf_wings",)
 #: Accepted spellings that resolve onto :data:`EXTEND_MODES`.
 EXTEND_MODE_ALIASES = {"default": "psf_wings"}
 
-import numpy as np
-from copy import deepcopy
-
 try:
     from astropy.wcs import WCS, Sip
 except Exception:  # if astropy not available / SIP missing
     WCS = None
     Sip = None
 
-__all__ = ["AlignedCutout", "as_block_reduce", "as_block_replicate", "scale_wcs_pixel"]
+__all__ = ["AlignedCutout", "Template", "Templates", "scale_wcs_pixel"]
 
 # ───────────────────────── helpers ─────────────────────────
 
@@ -462,8 +458,6 @@ class Template(Cutout2D):
         self.err = 0.0
         self.err_pred = 0.0  # predicted error from weight map and profile
         self.wnorm = 0.0  # weighted norm of the template d * w * d
-        self.ee_rlim: float = 0.0
-        self.ee_fraction: float = 1.0
 
         # build/extension provenance
         # Sum of the template before the unit-sum normalisation, so the
@@ -647,81 +641,7 @@ class Template(Cutout2D):
 
         return new_cut
 
-    def downsample_wcs_old(self, image_lo: np.ndarray, wcs_lo, k: int) -> "Template":
-        """
-        Downsample this template to a lower resolution using the target image and WCS.
 
-        Parameters
-        ----------
-        image_lo : np.ndarray
-            The low-resolution image to extract the template from.
-        wcs_lo : astropy.wcs.WCS
-            The WCS of the low-resolution image.
-        k : int
-            Integer downsampling factor.
-
-        Returns
-        -------
-        Template
-            New template extracted from the low-res image using the correct WCS.
-        """
-        # Get the original position in the high-res WCS
-        pos = self.input_position_cutout  # needs to be cutout coordinates
-        ra, dec = self.wcs.wcs_pix2world(*pos, 0)
-
-        # Convert RA/Dec to pixel coordinates in the low-res WCS
-        # note: x_lo, y_lo are now original coordinates in the low-res image
-        x_lo, y_lo = wcs_lo.wcs_world2pix(ra, dec, 0)
-
-        # Calculate new size (downsampled)
-        height, width = self.data.shape[0] // k, self.data.shape[1] // k
-        # print('Original position:', pos)
-        # print(f"Downsampling {self.id} from {self.data.shape} to {height, width} at pos ({x_lo}, {y_lo})")
-        # print('original data shape:', self.shape_input, image_lo.shape)
-        # print(self.wcs)
-        # print(wcs_lo)
-        #        Create the new template using the low-res image and WCS
-        lowres_tmpl = Template(image_lo, (x_lo, y_lo), (height, width), wcs=wcs_lo, label=self.id)
-
-        # Fill the data with block-reduced (averaged) values from the high-res template
-        lowres_tmpl.data[:] = block_reduce(self.data, k, func=np.sum)
-        return lowres_tmpl
-
-    # block alignment methods currently not used
-    @staticmethod
-    def block_aligned(
-        pos: np.ndarray,  # [x_c, y_c] (float)
-        orig_size: np.ndarray,  # [ny, nx] (int)  <-- note reversed vs pos
-        block_align: int,
-        rfunc: Callable[[np.ndarray], np.ndarray] = np.ceil,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Return (size_aligned, idx_min_aligned) so that
-            idx_min_aligned = rfunc(pos - size_aligned/2)
-        and idx_min_aligned % k == 0,
-        with the smallest even Δsize per axis.
-
-        Conventions:
-        - pos is [x, y]
-        - size is [ny, nx]
-        """
-
-        # first force size to be minimum block size
-        size = np.maximum(np.asarray(orig_size), block_align).astype(np.int64)
-
-        # initial starts (paired with size[::-1] to match x↔nx, y↔ny)
-        idx0 = rfunc(pos - size[::-1] / 2.0).astype(np.int64)  # [x0, y0]
-
-        # minimal steps t: idx0 - t ≡ 0 (mod k)  ->  t ≡ idx0 (mod k)
-        steps = idx0 % block_align  # [tx, ty]
-
-        # add 2*steps to the paired sizes (map back with [::-1])
-        dsize = 2 * steps[::-1]  # [dny, dnx]
-        size_new = (size + dsize).astype(np.int64)  # [ny', nx']
-
-        # recompute aligned starts
-        idxmin = rfunc(pos - size_new[::-1] / 2.0).astype(np.int64)
-        return size_new, idxmin
 
     # verified for k=2,4 for sizes 4-16
     def downsample(self, k: int, image: np.ndarray | None = None, wcs_lo: WCS | None = None) -> "Template":
@@ -1050,73 +970,6 @@ class Templates:
             tmpl.to_shift[:] = 0.0
             tmpl.flag |= Template.FLAG_SHIFTED  # mark as shifted
 
-    @staticmethod
-    def _prepare_fft_fast(psf: np.ndarray) -> tuple[np.ndarray, np.ndarray, interp1d]:
-        """Return radial profile, EE curve and inverse profile interpolator."""
-        y, x = np.indices(psf.shape)
-        cy, cx = (np.array(psf.shape) - 1) / 2
-        r = np.hypot(y - cy, x - cx)
-        r_int = r.astype(int)
-        prof_num = np.bincount(r_int.ravel(), psf.ravel())
-        prof_den = np.bincount(r_int.ravel())
-        prof = prof_num / np.maximum(prof_den, 1)
-        rr = np.arange(len(prof))
-        ee = np.cumsum(prof * 2 * np.pi * rr)
-        if ee[-1] > 0:
-            ee /= ee[-1]
-        p2r = interp1d(prof[::-1], rr[::-1], bounds_error=False, fill_value=(rr.max(), rr.max()))
-        return prof, ee, p2r
-
-    @staticmethod
-    def _crop_kernel(kern: np.ndarray, rlim: float) -> tuple[np.ndarray, float]:
-        """Crop ``kern`` around its centre to ``rlim`` pixels."""
-        r = int(np.ceil(rlim))
-        cy, cx = (np.array(kern.shape) - 1) / 2
-        size_y = min(2 * r + (kern.shape[0] % 2), kern.shape[0])
-        size_x = min(2 * r + (kern.shape[1] % 2), kern.shape[1])
-        cut = Cutout2D(kern, (cx, cy), (size_y, size_x), mode="trim", copy=False)
-        kc = cut.data
-        return kc, float(kc.sum())
-
-    @staticmethod
-    def prepare_kernel_info(
-        templates: list["Template"],
-        psf_full: np.ndarray,
-        image_770: np.ndarray,
-        weight_770: np.ndarray | None,
-        *,
-        eta: float,
-        r_min_pix: float = 1.0,
-        r_max_pix: float | None = None,
-    ) -> None:
-        """Compute quick-flux based kernel crop radius and encircled energy."""
-        if not eta:
-            return
-
-        prof, ee, p2r = Templates._prepare_fft_fast(psf_full)
-        rr = np.arange(len(prof))
-
-        if weight_770 is not None:
-            sigma_pix = float(np.median(np.sqrt(1 / weight_770[weight_770 > 0])))
-        else:
-            sigma_pix = float(np.std(image_770))
-
-        qflux = Templates.quick_flux(templates, image_770)
-
-        for tmpl, Fq in zip(templates, qflux):
-            if not np.isfinite(Fq) or Fq <= 0:
-                tmpl.ee_rlim = 0.0
-                tmpl.ee_fraction = 1.0
-                continue
-
-            thresh = float(eta) * sigma_pix / Fq
-            thresh = np.clip(thresh, prof.min(), prof.max())
-            r_pix = float(p2r(thresh))
-            r_pix = max(r_min_pix, r_pix)
-            if r_max_pix is not None:
-                r_pix = min(r_pix, r_max_pix)
-            tmpl.ee_rlim = r_pix
-            tmpl.ee_fraction = float(np.interp(r_pix, rr, ee))
 
     @staticmethod
     def quick_flux(templates: List[Template], image: np.ndarray) -> np.ndarray:
@@ -1234,8 +1087,6 @@ class Templates:
         out.err = tmpl.err
         out.err_pred = tmpl.err_pred
         out.wnorm = tmpl.wnorm
-        out.ee_rlim = tmpl.ee_rlim
-        out.ee_fraction = tmpl.ee_fraction
         out.to_shift = tmpl.to_shift.copy()
         out.shifted = tmpl.shifted.copy()
         return out
@@ -1456,8 +1307,6 @@ class Templates:
             smeared.err = tmpl.err
             smeared.err_pred = tmpl.err_pred
             smeared.wnorm = tmpl.wnorm
-            smeared.ee_rlim = tmpl.ee_rlim
-            smeared.ee_fraction = tmpl.ee_fraction
             smeared.to_shift = tmpl.to_shift.copy()
             smeared.shifted = tmpl.shifted.copy()
             smeared.extension_mode = "psf"
@@ -1828,9 +1677,6 @@ class Templates:
         kernel : np.ndarray or PSFRegionMap or None
             Convolution kernel matching the template resolution. If ``None``,
             templates are returned unchanged (aside from optional padding).
-            If templates have ``ee_rlim`` set via :meth:`prepare_kernel_info`,
-            kernels are cropped to this radius and their ``ee_fraction`` is
-            stored on each template.
         inplace : bool, optional
             If ``True``, templates are modified in place and the internal list
             is returned. Otherwise a new list of convolved templates is
@@ -1870,8 +1716,6 @@ class Templates:
                     new_templates.append(new_tmpl)
                 continue
 
-            if tmpl.ee_rlim > 0.0 and tmpl.ee_fraction < 1.0:
-                kern, tmpl.ee_fraction = Templates._crop_kernel(kern, tmpl.ee_rlim)
 
             new_tmpl = tmpl.convolve_cutout(kern, parent_image=dummy_image)
 

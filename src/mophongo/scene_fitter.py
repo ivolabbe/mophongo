@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 import scipy.sparse as sp
-from scipy.sparse.linalg import cg, spsolve, splu
+from scipy.sparse.linalg import spsolve, splu
 from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)

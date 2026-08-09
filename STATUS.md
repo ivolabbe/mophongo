@@ -191,6 +191,123 @@ This file records completed implementations, validation runs, and the current wo
     detection-PSF / noise-scalar defects above came out of an adversarial
     review of both ports against their reference sources (43 agents, 3
     confirmed of 20 raised).
+- [x] Test suite fully green for the first time (118 passed, 0 failed).
+  Two long-standing failures fixed, neither caused by the cleanup:
+  `test_moffat_recovery[psf_wing-3-psf]` passed `kernels=` but never `psfs=`
+  to `pipeline.run`, so the `extend_templates='psf'` branch hit
+  "requires a high-resolution PSF in psfs[0]" and raised; the other four
+  scenarios use `extend=None` and never enter that branch. The test now
+  passes `fit_psfs = [psfs[0], psfs[0], psfs[1]]`, matching its
+  `[hires, hires, lowres]` image list. `test_catalog_from_fits_smoke` was
+  removed: it reads `data/uds-test-f444w_{sci,wht}.fits`, and CI checks out
+  without `lfs: true`, so those arrive as LFS pointer stubs and astropy
+  raises "No SIMPLE card found". It passed locally and failed on every CI
+  run. Adding `lfs: true` to `actions/checkout` in `.github/workflows/ci.yml`
+  would be the alternative fix if the coverage is wanted back.
+- [x] Dead-code cleanup (branch `cleanup`, off `main` @ d30be0f, tagged
+  `pre-cleanup`). `src/mophongo` went from 24,143 to 20,434 lines. Scan
+  method and full inventory: `scratch/CLEANUP_SCAN.md`.
+  Removed modules: `deblender.py`, `sim_data.py`, `astro_fit.py` (all three
+  reachable only through commented-out imports) and `photutils_deblend.py`
+  (unreferenced, and the source of three private-photutils imports flagged in
+  GUIDE.md). `__init__.py` now re-exports `photutils.segmentation.deblend_sources`
+  with no commented alternatives.
+  `fit.py` lost the 328-line block under its own `# OBSOLETE BELOW` banner
+  (`assemble_scene_system_old` referenced an undefined `tmpl_j`, so it could
+  never have run), the orphaned module-level `build_normal_matrix(self)` that
+  `build_normal()` dispatched to for `normal != 'tree'` (never bound to the
+  class: that config raised AttributeError), the unused
+  `sparse_cholesky`/`make_sparse_chol_prec` pair, and its duplicate copies of
+  `build_scene_tree_from_normal`, `merge_small_scenes` and `summarize_scenes`
+  (`solve_scene` now imports the `scene.py` versions lazily; `summarize_scenes`
+  was byte-identical, `merge_small_scenes` differed only in a default).
+  `build_normal()` and `solve()` now raise `ValueError` for the config values
+  whose implementations never existed (`normal != 'tree'`,
+  `solve_method != 'scene'`).
+  The `run_scene_solver=False` "legacy solver" branch in `Pipeline.run()` is
+  gone; the scene solver is the only fitting path and the flag now raises if
+  set False. `Pipeline._add_templates_for_bad_fits` (its only call site was
+  commented out), `_per_source_chi2` and `_stamp_slices_for_templates` went
+  with it.
+  The truncated-FFT kernel feature was inert end to end and is removed:
+  `Templates.prepare_kernel_info` was the only writer of a non-zero
+  `ee_rlim`, nothing called it, so `_crop_kernel`, `_prepare_fft_fast`, the
+  `ee_rlim`/`ee_fraction` template attributes and `FitConfig.fft_fast` are
+  all dropped. `FitConfig.block_size` was likewise never read.
+  `utils.py` lost the unused PSF-basis zoo (`difference_of_gaussians`,
+  `gaussian_laguerre`, `zernike`, `radial_bspline`,
+  `positive_monotone_radial_bspline`, `starlet`, `eigen_psf`, `powerlaw`),
+  `regularized_pixel_kernel_central`, `regularized_lstsq_kernel_central` and
+  `CircularApertureProfile.moffat_fit`/`.moffat_fwhm`.
+  `psf.py` lost `to_header` and `get_slice_wcs`, byte-identical copies of the
+  `utils` functions it already imported (the local defs shadowed the imports);
+  `saturate.py` now takes `get_slice_wcs` from `utils`. Its dead profile-fit
+  cluster (`_fit_profile`, `fit_moffat`, `fit_gaussian`, `GaussianFit`,
+  `MoffatFit`) is gone too.
+  Also removed: `verification.plot_lw_coadd_diagnostic`,
+  `astrometry.measure_template_shifts_old` with its now-orphaned
+  `make_gradients`/`basis_matrix`, `PSFRegionMap.lookup_key_slow`,
+  `Scene.augment_templates`, `Template.downsample_wcs_old`,
+  `Template.block_aligned`, five dead `catalog.py` helpers plus its
+  copy-pasted second definitions of `_mean_downsample` and `_expand_remap`
+  (the later definitions shadowed the earlier ones) and the repeated mid-file
+  import blocks in `catalog.py`, `scene.py` and `templates.py`, ~25 unused
+  imports, ~110 lines of commented-out code, six tracked `.DS_Store` files
+  and two zero-length `legacy/autopilot/.pdf` / `.pro` artifacts.
+  Up/down-sampling was preserved as requested: `Template.downsample`,
+  `project_to_block_replicated_grid`, `AlignedCutout.downsample`/`upsample`,
+  `as_block_reduced`/`as_block_replicated`, `utils.rebin_wcs`,
+  `downsample_psf`, `bin_factor_from_wcs` and both
+  `multi_resolution_method` modes all stay. Helpers used only from `scratch/`
+  and notebooks were kept and logged in TODO.md as untested public API.
+  Second pass, on request: the legacy `SparseFitter` solver is gone too.
+  Removed `SparseFitter.solve`, `.solve_scene`, `._solve_scenes_with_shifts`,
+  `.fit`, `.flux_errors`/`._flux_errors`, the module-level
+  `make_basis_per_scene`, `assemble_scene_system_self_AB`, `solve_scene_cg`
+  and `_diag_inv_hutch` that only served them, `scene.summarize_scenes` (its
+  last caller was `solve_scene`), and the dead-compute block in
+  `SparseFitter.__init__` that built an S/N array and discarded it.
+  `fit.py` is 1,686 -> 378 lines. `SparseFitter` is now a normal-matrix
+  builder with model/residual images and covariance-free flux/error
+  estimators; all flux solving goes through `SceneFitter`.
+  `FitConfig` lost seven knobs nothing reads any more: `solve_method`,
+  `fit_covariances`, `multi_tmpl_chi2_thresh`, `multi_tmpl_psf_core`,
+  `multi_tmpl_colour`, `scene_merge_small`, `negative_snr_thresh`. The only
+  files that passed them were four `scratch/claude_audit/v1/repros/` scripts
+  (B020, B024, B085, B088), which will now raise `TypeError` if re-run.
+  Tests: `test_fit.py::test_solve_scene_matches_global` deleted (it compared
+  `solve()` against `solve_scene()`, i.e. the same code path);
+  `test_scene_fitter.py::test_scene_solve_matches_legacy_solver` became
+  `test_scene_solve_matches_dense_normal_solution`, checking `Scene.solve` on
+  real templates against a dense solve of the same regularized system;
+  the two `test_astrometry.py` tests that called `fitter.solve()` now solve
+  with `SceneFitter.solve(fitter.ata, fitter.atb)` and write flux/err back
+  onto the templates via a local `_assign_solution` helper (the removed
+  `solve_scene` used to do that write-back, and `measure_template_shifts`
+  gates on `tmpl.flux / tmpl.err`); `test_pipeline_multitemplate.py` dropped
+  the now-nonexistent `multi_tmpl_chi2_thresh` kwarg.
+  Suite: 118 passed + the pre-existing
+  `test_moffat_recovery[psf_wing-3-psf]` failure (119 before, one test
+  deleted).
+  Third pass: the untracked `scratch/` tree was audited against the cleaned
+  API. Static check of all 176 scripts (import resolution, module-attribute
+  access, dataclass kwargs) plus an execution run of all 105
+  `claude_audit/v1/repros/*/repro.py`. Result: 18 repros failed, 16 of them
+  before reaching their subject. Repaired in place: `run_saturate.py`
+  (docstring pointed at the retired `jwst_psf.psf_grid_from_csv`; now names
+  `PSFFactory.from_csv` and warns that `PSF_FILTER`/`PSF_FILTER_LARGE` keep
+  the legacy `..._OS4_GRID{N}` naming), `moffat_recovery/ab_with_wings.py` and
+  `claude_audit/v1/repros/B069/repro.py` (both imported a class attribute as a
+  module-level name — `Templates.extend_with_psf_wings` and
+  `Template.FLAG_CONVOLVED` — and had been broken since they were written).
+  Moved to `scratch/_obsolete_2026-08-09/` with a README explaining each:
+  fifteen audit repros whose subject no longer exists, `build_large_psf.py`
+  (superseded by `build_psfs_mjd_grid.py`), and
+  `wren/uds_wren/run_uds_770_wren.py` (a byte-identical copy of the tracked
+  `examples/run_uds_770_wren.py`, which targets the `wren/dev-wren` fork API
+  and has never been runnable in this tree). Re-verified: the 90 remaining
+  repros run, except B014 and B105, which fail inside live code — that is the
+  bug each demonstrates, not staleness.
 - [x] Astrometric anchor selection unified (post-merge follow-up):
   `astrom_isolation_thresh` default 0.5 -> 0.7 (wren value); new
   `astrom_exclude_stars: bool = False` makes star exclusion opt-in at both

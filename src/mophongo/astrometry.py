@@ -17,8 +17,6 @@ from sklearn.base import clone
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import ConstantKernel, RBF, WhiteKernel
 from astropy.wcs import WCS
-from astropy.coordinates import SkyCoord
-from astropy.wcs.utils import skycoord_to_pixel
 
 from .templates import Template
 from .utils import fftconvolve
@@ -53,30 +51,6 @@ def cheb_basis(x: float, y: float, order: int) -> np.ndarray:
 def n_terms(order: int) -> int:
     """Number of 2-D Chebyshev terms for ``order``."""
     return (order + 1) * (order + 2) // 2
-
-
-def make_gradients(templates):
-    """Return per-template gradient images on the full frame."""
-    gx, gy = [], []
-    for tmpl in templates:
-        dy, dx = np.gradient(tmpl.data.astype(float))
-        gxi = deepcopy(tmpl)
-        gyi = deepcopy(tmpl)
-        gxi.data = dx
-        gyi.data = dy
-        gx.append(gxi)
-        gy.append(gyi)
-    return gx, gy
-
-
-def basis_matrix(templates, shape, order):
-    """Evaluate basis functions at template centres."""
-    h, w = shape
-    mat = np.zeros((len(templates), n_terms(order)), dtype=float)
-    for i, tmpl in enumerate(templates):
-        x, y = tmpl.input_position_original
-        mat[i] = cheb_basis(2 * x / (w - 1) - 1, 2 * y / (h - 1) - 1, order)
-    return mat
 
 
 def _safe_centroid_quadratic(img, x0, y0, box):
@@ -174,68 +148,6 @@ def measure_template_shifts(
         wt.append(snr**2)
 
     return (np.asarray(positions), np.asarray(dx), np.asarray(dy), np.asarray(wt))
-
-
-def measure_template_shifts_old(
-    templates: Sequence[Template],
-    coeffs: np.ndarray,
-    residual: np.ndarray,
-    *,
-    box_size: int = 5,
-    snr_threshold: float = 5.0,
-    method: str = "centroid",
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Estimate per-template image ⇄ model shift."""
-
-    if method not in {"centroid", "correlation"}:
-        raise ValueError("method must be 'centroid' or 'correlation'")
-
-    pos, dx, dy, w = [], [], [], []
-
-    for tmpl, amp in zip(templates, coeffs):
-        if tmpl.flux <= 0 or tmpl.err <= 0:
-            continue
-        snr = tmpl.flux / tmpl.err
-        if snr < snr_threshold:
-            continue
-
-        x_pix, y_pix = tmpl.input_position_original
-        x_loc, y_loc = tmpl.input_position_cutout
-        stamp_res = Cutout2D(residual, (x_pix, y_pix), 3 * box_size + 1)
-        stamp_tmp = Cutout2D(tmpl.data, (x_loc, y_loc), 3 * box_size + 1)
-
-        model = amp * stamp_tmp.data + stamp_res.data
-        xc, yc = stamp_tmp.input_position_cutout
-
-        if method == "centroid":
-            cx_m, cy_m = _safe_centroid_quadratic(model, xc, yc, box_size)
-            cx_t, cy_t = _safe_centroid_quadratic(stamp_tmp.data, xc, yc, box_size)
-        else:
-            tmpl0 = stamp_tmp.data.astype(float) - stamp_tmp.data.mean()
-            mod0 = model.astype(float) - model.mean()
-            denom = tmpl0.std() * mod0.std()
-            if denom == 0:
-                continue
-            ncc = correlate2d(mod0 / denom, tmpl0, mode="same", boundary="fill")
-            py, px = np.unravel_index(np.argmax(ncc), ncc.shape)
-            cx_m, cy_m = _safe_centroid_quadratic(ncc, px, py, box_size)
-            cx_t, cy_t = xc, yc
-
-        shift = np.array([cx_m - cx_t, cy_m - cy_t], float)
-        if np.isnan(shift).any():
-            continue
-
-        pos.append((x_pix, y_pix))
-        dx.append(shift[0])
-        dy.append(shift[1])
-        w.append(snr**2)
-
-    return (
-        np.asarray(pos, float),
-        np.asarray(dx, float),
-        np.asarray(dy, float),
-        np.asarray(w, float),
-    )
 
 
 def fit_polynomial_field(

@@ -95,3 +95,88 @@ def test_normal_construction_unaffected():
     seg = np.zeros((8, 8), dtype=int)
     pipe = Pipeline([img, img], seg)
     assert pipe.run_config is None
+
+
+def test_save_config_writes_full_snapshot(tmp_path):
+    from dataclasses import fields as dc_fields
+
+    from mophongo.fit import FitConfig
+
+    pipe = Pipeline.from_config(
+        _write_config(tmp_path, {"fit": {"scene_minimum_bright": 3}})
+    )
+    out = pipe.save_config()
+    assert out == pipe.f_config == pipe.out_dir / "test_run.json"
+
+    # every RunConfig field explicit in the snapshot
+    clean = "\n".join(
+        ln for ln in out.read_text().splitlines() if not ln.lstrip().startswith("#")
+    )
+    data = json.loads(clean)
+    assert set(data) == {f.name for f in dc_fields(RunConfig)}
+
+    # every *used* FitConfig setting explicit, overrides preserved, and
+    # round-trippable; unused scheme settings (wren_*/classic_*) are omitted
+    cfg2 = RunConfig.from_json(out)
+    unused = {
+        f.name
+        for f in dc_fields(FitConfig)
+        if f.name.startswith(("wren_", "classic_"))
+    }
+    assert unused  # guard: the pruning groups exist in FitConfig
+    assert set(cfg2.fit) == {f.name for f in dc_fields(FitConfig)} - unused
+    assert cfg2.fit["scene_minimum_bright"] == 3
+    FitConfig(**cfg2.fit)
+
+
+def test_save_config_keeps_selected_scheme_settings(tmp_path):
+    pipe = Pipeline.from_config(
+        _write_config(tmp_path, {"fit": {"extend_mode": "wren"}})
+    )
+    fit = RunConfig.from_json(pipe.save_config()).fit
+    assert fit["extend_mode"] == "wren"
+    assert any(k.startswith("wren_") for k in fit)
+    assert not any(k.startswith("classic_") for k in fit)
+
+    pipe.run_config.fit = {"extend_mode": "classic"}
+    fit = RunConfig.from_json(pipe.save_config()).fit
+    assert any(k.startswith("classic_") for k in fit)
+    assert not any(k.startswith("wren_") for k in fit)
+
+
+def test_from_config_accepts_run_directory(tmp_path):
+    pipe = Pipeline.from_config(_write_config(tmp_path))
+    snap = pipe.save_config()
+
+    # directory with a single json
+    pipe2 = Pipeline.from_config(pipe.out_dir)
+    assert pipe2.run_config.name == "test_run"
+
+    # <dir>/<dirname>.json wins over other jsons
+    d = tmp_path / "myrun"
+    d.mkdir()
+    (d / "myrun.json").write_text(snap.read_text())
+    (d / "zz.json").write_text("not json")
+    assert Pipeline.from_config(d).run_config.name == "test_run"
+
+    # ambiguous directory raises
+    (d / "myrun.json").rename(d / "aa.json")
+    with pytest.raises(ValueError, match="cannot pick"):
+        Pipeline.from_config(d)
+
+
+def test_load_outputs_resume(tmp_path):
+    import numpy as np
+    from astropy.io import fits
+    from astropy.table import Table
+
+    pipe = Pipeline.from_config(_write_config(tmp_path))
+    pipe.save_config()  # run() writes this snapshot; needed to resume from the dir
+    Table({"id": [1, 2], "flux_1": [1.0, 2.0]}).write(pipe.f_fit_table)
+    fits.writeto(pipe.f_residual, np.zeros((4, 4), dtype=np.float32))
+
+    fresh = Pipeline.from_config(pipe.out_dir).load_outputs()
+    assert len(fresh.table) == 2
+    assert fresh.residuals[0].shape == (4, 4)
+    assert "fitted" in repr(fresh)
+    assert "results: table 2 rows" in fresh.info()

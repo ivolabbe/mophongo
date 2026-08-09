@@ -16,6 +16,7 @@
   # No saturated-star repair has been run for COSMOS yet, so this is the raw
   # mosaic (DR0 used repair_saturate_out/*_sci_repaired.fits).
   "sci_hi": "/Users/ivo/Astro/PROJECTS/MINERVA/data/COSMOS/n3.0/cosmos-grizli-v8.0-minerva-v3.0-40mas-f444w-clear_drc_sci.fits",
+  "wht_hi": "/Users/ivo/Astro/PROJECTS/MINERVA/data/COSMOS/n3.0/cosmos-grizli-v8.0-minerva-v3.0-40mas-f444w-clear_drc_wht.fits",
   "segmap": "/Users/ivo/Astro/PROJECTS/MINERVA/data/COSMOS/n3.0_v1.3_SEC/LW Noise-Equalized Detection (F277W-F356W-F444W)/Ancillary/MINERVA-COSMOS_n3.0_v1.3_LW_SEGMAP.fits",
   "catalog": "/Users/ivo/Astro/PROJECTS/MINERVA/data/COSMOS/n3.0_v1.3_SEC/LW Noise-Equalized Detection (F277W-F356W-F444W)/MINERVA-COSMOS_n3.0_v1.3_LW_Kf444w_SUPER_CATALOG.fits",
   "csv_hi": "/Users/ivo/Astro/PROJECTS/MINERVA/data/COSMOS/n3.0/cosmos-grizli-v8.0-minerva-v3.0-40mas-f444w-clear_wcs.csv",

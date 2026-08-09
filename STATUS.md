@@ -3,6 +3,27 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Repeatable run configs + fresh-session resume. `Pipeline.save_config()`
+  writes the fully-explicit run config to `out_dir/<name>.json`: every
+  `RunConfig` field and every *used* `FitConfig` setting with its resolved
+  value, so the run stays repeatable even when code defaults change (e.g. the
+  recent `template_dilate_segmap` 2 -> 0). Settings of template build schemes
+  the run did not select are omitted (`wren_*`/`classic_*` pruned by
+  `extend_mode`). `run()` snapshots automatically before fitting. `Pipeline.from_config` now also accepts a run *directory*
+  (`<dir>/<dirname>.json` preferred, else the single `*.json` it contains,
+  ambiguity raises), so `Pipeline.from_config("uds_770_dr0.1/")` resumes from
+  the outputs. New `Pipeline.load_outputs()` loads a finished run's products
+  (fit table + residual, memmapped) into a fresh session for catalog-level
+  diagnostics; `repr` shows `[fitted]`, `info()` lists output-product
+  presence (`out config/table/residual`). `write_outputs`/`load_outputs`/
+  `info` share new `f_config`/`f_fit_table`/`f_residual` path properties.
+  Generated `examples/uds_770_dr0.1/uds_770.json` from the current
+  `examples/uds_770_dr0.1.json` (includes the new `wht_hi`, `extend_mode`,
+  `wren_*`, `classic_*` fields) and verified resume on the real run: 2242
+  rows, 106 at SNR>5, 25344x34560 residual. Tests: +4 in
+  `tests/test_pipeline_config.py` (full-snapshot fields, directory
+  resolution, resume, ambiguity) and +1 in `tests/test_pipeline_inspect.py`
+  (run() snapshots before fitting); 26 passed across the three suites.
 - [x] Template build schemes selectable with one knob, `FitConfig.extend_mode`
   (`'default'|'psf'|'psf_model'|'wren'|'classic'`), so the three codes of
   `scratch/wren/template_comparison.pdf` can be compared 1-1 on identical
@@ -64,13 +85,23 @@ This file records completed implementations, validation runs, and the current wo
     bookkeeping, so index 0 is inert there.
   * `RunConfig.wht_hi` supplies the detection weight map, so the config-driven
     path gets `weights[0]` and neither scheme needs a global noise scalar.
-    `None` (the default) derives it from `sci_hi`, then `driz_hi`, by the
-    grizli `_sci.fits` -> `_wht.fits` naming; `Pipeline._load_detection_ivar`
-    rescales it to a calibrated ivar with the same `get_bg_and_ivar` the
-    lo-res side uses. It is read **only** when `extend_mode` is `'wren'` or
-    `'classic'` — `'default'`/`'psf'` never touch `weights[0]`, and a
-    full-field hi-res weight map costs as much memory as the mosaic. Verified
-    end to end on COSMOS DR0.1 (32768x18944, 99.8% covered, median ivar 431).
+    Every run must have one: `Pipeline.resolve_wht_hi()` takes `wht_hi` when
+    set, else derives it from `sci_hi` by the grizli `_sci.fits` ->
+    `_wht.fits` naming, and **raises** when neither resolves rather than
+    degrading to one sky-sigma scalar for the whole mosaic. The pixels are
+    read only when `extend_mode` is `'wren'` or `'classic'` —
+    `'default'`/`'psf'` never touch `weights[0]`, and a full-field hi-res
+    weight map costs as much memory as the mosaic.
+    `Pipeline._load_detection_ivar` rescales it with the same
+    `get_bg_and_ivar` the lo-res side uses. All four example configs now name
+    `wht_hi` explicitly; verified end to end on COSMOS DR0.1 (32768x18944,
+    99.8% covered, median ivar 431).
+  * `RunConfig.driz_hi` removed. It was the DrizzlePSF footprint/grid source,
+    defaulting to `sci_hi` and null in every config ever written. `DrizzlePSF`
+    reads the header *and the pixels* of `driz_image` (`get_psf_radec`
+    centroids on them), so pointing it at a different file than the one being
+    fitted was the risky option, not the safe one — for a repaired mosaic the
+    repaired pixels are what you want. One pointer, `sci_hi`.
   * Noise: with a detection inverse-variance map (`weights[0]`) **neither**
     scheme uses a global scalar — both take the formal `sqrt(sum 1/ivar)` over
     the mask. That is wren's primary path already; classic now shares it,

@@ -3,6 +3,31 @@
 This file tracks future desired features, checks, and investigations.
 
 - [ ] scan for bug fixes / robustness improvements
+- [ ] `extend_mode='wren'`: `Templates.extract_templates` calls
+  `schemes.wren_fill_radius` without `kernel_half_width` and with
+  `WrenParams.aperture_radius_pix` at its `None` default, so out of the box
+  `r_fill` collapses to `R_95` (20.6 px on UDS 40 mas) instead of the fork's
+  `max(R_95, r_ap + kernel_hw)` = 29.0 px. That shrinks the ownership-contest
+  disk, the halo-annulus reach and the cutout floor relative to the code being
+  ported. The helper already takes both arguments; decide whether the pipeline
+  should supply them (aperture from the low-res band, half-width from the
+  matching kernel) or whether the collapse is intended, and say so in
+  `template_schemes`. Flagged while rebuilding `template_comparison.tex` Fig. 6,
+  which documents the fork's chain and now carries the discrepancy as a note.
+- [ ] `positivity=True` puts 45% of the UDS DR0.1 F770W trial sources
+  (1015/2242) at exactly flux 0, so the non-detection population has no
+  negative fluxes and cannot be stacked or averaged without bias. Decide
+  whether the default should be an unconstrained solve with the positivity
+  clip reported as a flag, or a per-source switch above/below some SNR.
+- [ ] Bright resolved sources in the upsample path leave sub-block
+  checkerboard residuals: the model is smooth while the block-replicated
+  80mas data is piecewise constant over each 2x2 cell, so on MIN_UDS48823 a
+  2x2 block sum cuts the residual std to 0.60 of its per-pixel value (0.46 on
+  MIN_UDS38103). It is a resolution-mismatch display/chi2 artefact rather
+  than a flux error, but it inflates per-pixel chi2 on the brightest sources
+  and makes residual panels look worse than the equivalent native-40mas monu
+  stamps. Check whether the chi2/error estimate should be evaluated on the
+  native low-res grid.
 - [ ] Run the four `extend_mode` schemes head to head on injected-truth mocks
   (`verification.py`, not ad hoc comparisons) and pick a default. The synthesis
   `template_comparison.tex` Sec. 8.3 recommends: wren's blended extension but

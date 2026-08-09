@@ -797,8 +797,11 @@ class Scene:
                 predict = AstroCorrect.build_poly_predictor(self.shifts, x0, y0, order, Sx, Sy)
                 pts = np.array([t.position_original for t in self.templates], dtype=float)
                 dx, dy = predict(pts[:, 0], pts[:, 1])
+                damp = float(getattr(cfg, "astrom_damping", 1.0))
                 for k, tmpl in enumerate(self.templates):
-                    tmpl.to_shift = np.array([float(dx[k]), float(dy[k])], dtype=float)
+                    tmpl.to_shift = damp * np.array(
+                        [float(dx[k]), float(dy[k])], dtype=float
+                    )
 
                 # optionally apply shifts to templates now and clear A/b
                 if apply_shifts:
@@ -814,7 +817,8 @@ class Scene:
                 mean_dx = float(phi0 @ bx)
                 mean_dy = float(phi0 @ by)
                 logger.info(
-                    "[Scenes] Scene %s shift at x0,y0 ≈ (%.3f, %.3f) px", sid, mean_dx, mean_dy
+                    "[Scenes] Scene %s shift at x0,y0 ≈ (%.3f, %.3f) px (applied x%.2f)",
+                    sid, mean_dx, mean_dy, damp,
                 )
 
                 logger.debug(

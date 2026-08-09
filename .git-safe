@@ -1,0 +1,8 @@
+# Repo-scoped git-safe allowlist, merged on top of ~/.claude/git-safe/config.
+
+# Ship flow: after `gh pr merge`, the merged branch is deleted on both sides
+# (worktree removed first, then `git branch -d`, then the remote ref).
+# Scope note: git-safe matches this as one flag, so it also permits
+# `git push origin --delete <tag>` — including the `pre-cleanup` tag.
+# Deleted branches are recoverable from the merge commit; deleted tags are not.
+allow: push --delete

@@ -3,6 +3,208 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] IDL subphot diagnostic port: `Pipeline.plot_subphot(source_id)` renders
+  the legacy `subphot.pro::mkdiag`/`fptv` 6-panel PNG (img/tmpl/seg/model/
+  res/clean, 2x3 at 2x nearest-neighbour zoom) pixel-for-pixel for 1-1
+  comparison against IDL outputs (e.g. `scratch/wren/compare/monu/*.png`).
+  Reproduced exactly from the canonical source
+  (`~/Documents/Astro/PROG/idl/ifl/pro/fitphot/subphot.pro`): IDL `bytscl`
+  (`floor(255.9999*frac)`), img/model/clean at `+-nsig*prms`, res at
+  `(img-model)/err*(1-mask)` with `+-nsig` and
+  `err = sqrt(prms^2+(sys_err*model)^2)` (sys_err 0.02), tmpl at
+  `median +- 8*robust_sigma` (Tukey biweight c=6), seg = distance-sorted
+  5-level gray cycle [0.2,0.8,0.4,0.6,1.0] minus `0.1*mask` at bytscl
+  [-0.2,1] (unfitted segments keep raw ids -> clip white), circular `rlim`
+  fit mask, and the `prms` estimator (aperture-scale `na = floor(raper*
+  sqrt(pi)/sqrt(2))` block sums of masked residual background, 2-sigma
+  clipped, `prms = rms/na`, block median re-subtracted from the display
+  stamps). Defaults follow the survey-era run config (`phot.param`):
+  `nsig=3` (`subphot_nsigma=3`; IDL code default was 5), `maskhi` off,
+  `photbin=1`. Optional SNR-preserving display binning kept as `photbin`.
+  White DejaVu-Bold labels at the IDL xyouts positions (+5, 20 below panel
+  top). Requires fit grid == reference grid (upsample path). Tests:
+  `tests/test_subphot_diag.py` (4: bytscl vs IDL values, fptv binning/zoom,
+  full-render layout + masked-corner grays + labels, defaults/errors).
+- [x] `template_comparison.pdf` v5 (12 pp): naming finalized — current python
+  is **ivo** (memory `mophongo-version-names`), IDL = the `subphot.pro` run
+  path only (rewrite behaviours purged from IDL descriptions: quadrature floor
+  and competitive dilation are labelled "the rewrite (never ran)" everywhere,
+  including the priors figure). Sections merged: single "How the template is
+  constructed, end to end" with step-by-step + flow diagram + dissection
+  figure per method (`fig_method_flows`, `fig_idl_dissect`, `fig_ivo_dissect`,
+  matching the wren anatomy style, all on the same real mid source). Fig. 1
+  support insert now lists segment | IDL | ivo | wren.
+- [x] `FitConfig.template_dilate_segmap` default changed 2 -> 0 (`fit.py:105`).
+  The IDL reference run path (`subphot.pro::build_cube`) uses the exact
+  segment; dilation only adds a ring of sky noise, and
+  `safe_dilate_segmentation`'s contested-background tie-break is catalog-id
+  ordered. Wing recovery belongs to template extension, not dilation.
+  41 tests pass (`test_pipeline*`, `test_fit`, `test_template_convolution`).
+  `template_comparison.pdf` updated: "current python" renamed to **ifl**
+  throughout, ifl column/figures regenerated with dilation off (faint-source
+  support EE 0.69 -> 0.44).
+- [x] Pre-run data loading + pipeline inspection. `Pipeline.load_data` gained
+  `kernels=False` to load/preprocess images+catalog without touching the
+  PSF/kernel maps (`run()` finishes them later via the new `_ensure_maps`
+  helper, which also replaces the duplicated map-loading block in
+  `load_data`). New `Pipeline.info()` prints a stage-aware summary: before
+  loading it reports each input file's existence, size, shape/row/frame counts
+  from headers only (no pixel data read); after `load_data` the image shapes,
+  pixel scales, weights, segmap, catalog columns, and region maps; after
+  `run()` the fit table and scenes. New `Pipeline.plot_inputs()` quicklook
+  (hi-res sci with catalog overlay, lo-res sci, weight, segmap) and a concise
+  `__repr__` (`<Pipeline 'uds_770' [configured|loaded|fitted] images=N
+  sources=N>`). CLI steps `load` and `info` added
+  (`python -m mophongo.pipeline cfg.json info`). Tests:
+  `tests/test_pipeline_inspect.py` (9); `test_pipeline.py` +
+  `test_pipeline_config.py` unchanged (19 passed).
+- [x] `scratch/wren/template_comparison.pdf` (+ `.tex`, figures from
+  `scratch/wren/tmplfig/mk_*.py`): 10-page explainer comparing template
+  construction in IDL classic (`subphot.pro::build_cube` — verified as the code
+  that produced the `uds_monu` QA run; `mophongo__define.pro` is an unfinished
+  rewrite that never ran), current python, and the wren fork. Verified: the run
+  path has NO segmap dilation (plain `tseg eq id`; competitive dilation
+  `kseg > knn` exists only in the rewrite), the low-SNR PSF replacement WAS
+  active (`phot.param:91 tmpl_snrlo = 15.0`, confirmed from LOG arithmetic —
+  same threshold as wren's core-weight saturation), and IDL fits on the
+  detection grid with one global rms. New "How wren determines a profile" deep
+  dive: sizing chain diagram, 8-panel anatomy of `_extended_composite` on a
+  real neighbour-truncated source, faint-limit blend takeover, and a knob
+  reference (two knobs confirmed dead). Numerical rulings: our k² ivar
+  convention is correct (wren errors x k/kappa: 2.0 isolated, 0.65 heavily
+  blended — no scalar repair possible); missing block projection biases wren
+  fluxes −4.9%. Documents-only; no code changed.
+- [x] Canonical dr0.1 run at the new defaults (psf_size 4.0, scene_max_size
+  500, floor 1e-3, r_trial 0.6', 2242 sources; stale 8" PSF/kernel caches
+  cleared first): local split threshold 0.0379 confined to the one giant,
+  674 tree scenes (max 494) -> 6 final scenes 350(5)/974(18)/253(8)/330(8)/
+  93(8)/241(13). Scene 2 (974) exceeds the cap because the original merge is
+  capless — under-bright fragments re-fuse past 500; acceptable soft-cap
+  behaviour, noted for review. Fitted fluxes agree with the ps3 run (psf 3.0,
+  cap 300) to med ratio 0.9998 at SNR > 10 (nmad 0.17 sigma, n=71).
+  `scratch/wren/compare/` rebuilt from this run (6 scene pngs).
+- [x] Defaults adopted after review of the ps3 result: `scene_max_size = 500`
+  (FitConfig) and `psf_size: 4.0` in `uds_770_dr0.1.json` (RunConfig default
+  was already 4.0; the json had overridden it to null/8" stamps). Smaller
+  stamps both improve the fits and thin the coupling graph. EE inside the
+  max inscribed circle (r = width/2, from the latest MJD UDS ePSF grids,
+  normalized to full-stamp sum): F444W 0.983/0.996/— (4.1" grid stamp),
+  F770W 0.909/0.935/0.994, F1280W 0.918/0.953/0.995, F1500W
+  0.917/0.946/0.994, F1800W 0.918/0.932/0.994 for 3"/4"/8" widths; F1000W
+  (no UDS grid, STPSF model) 0.942/0.959/0.996.
+- [x] Scene size cap landed as one knob: `scene_max_size` (FitConfig,
+  default None = original behaviour; now 500, see above). A component over the cap is split by
+  bisecting over its own edge scores — threshold raised only inside that
+  component, local leakage logged, rest of field untouched at the 1e-3
+  floor. Original merge untouched. The wren discrepancy resolved first:
+  coupling range = segment (+) kernel stamp = `psf_size`; our `null` = 8"
+  stamps percolate (one 2241-template scene at 0.6'), wren's 3" reproduces
+  wren exactly — including a 1738-template giant in this deepest-region
+  patch, so wren's ~200-source scenes were typical-field, not algorithmic.
+  On the 3" graph the giant breaks at local threshold 0.0289 (vs 0.16 at
+  8"), below the 0.044 level where partition changes left fluxes unchanged
+  (nmad 0.13 sigma). `uds_770_dr0.1_ps3.json` (psf_size 3.0, cap 300,
+  r_trial 0.6') -> 9 compact scenes, 75-628 templates, 5-8 bright each.
+  Adopting 3" stamps for science awaits the `flux_<i>_total` stamp-sum fix
+  (+4.9% bias at 3.0", `TODO.md`). Tests: `tests/test_scene_max_size.py`
+  (ceiling-not-target, other components untouched). `scratch/wren/compare/`
+  now built from the ps3 run (9 scene pngs vs 5 wren + 12 monu).
+- [x] Scene-partition experiments, reverted to the original two-step
+  algorithm (coupling-threshold components + merge-small-scenes). A sequence
+  of size-driven designs (`scene_max_size` with global/local threshold
+  bisection, then bright-balanced, then coupling-guided merging) each fixed
+  the previous one's failure but produced non-compact, oddly shaped scenes on
+  the UDS F770W dr0.1 patch; per "make it simpler, not more complex" the
+  original algorithm was restored (experimental code in `git stash`:
+  "session scene-partition experiments (reverted)"). Durable measurements
+  kept in `docs/SCENE_PARTITION.md`: the per-band threshold ladder collapses
+  to 0.030 +/- 0.005 after dividing by SNR and PSF area (percolation + 1/SNR);
+  the 8" `psf_size: null` stamps make the coupling graph percolate at any
+  usable threshold while wren's 3" stamps ran fixed 1e-3 (template support is
+  the scene-size lever, not the partition algorithm); partition changes at
+  cut levels <= 0.044 leave photometry unchanged (nmad 0.13 sigma), while
+  breaking the F770W giant (thresh ~0.1-0.16) moves bright fluxes 1-3%;
+  elongated scenes are internally misaligned because offsets vary on ~arcmin
+  scales. `uds_770_dr0.1.json`: `r_trial` 0.5' -> 0.6' (2242 sources),
+  fit overrides back to `{fit_astrometry_joint, scene_minimum_bright: 5,
+  aperture_diam}`. `scratch/wren/compare/` regenerated by
+  `scratch/wren/make_compare.py` at the 0.6' circle.
+- [x] flux-estimator note v3 (`scratch/wren/flux_estimator_comparison_v3.tex`,
+  compiled over the unversioned pdf; v1/v2 preserved): corrects v2's claim that
+  IDL's overlapping wings are benignly apportioned by the solve. Data-derived
+  cores carry neighbour wing light, so both wing placements fit a wrong profile
+  — structured bridge residuals + biased amplitudes, worst for
+  faint-beside-bright; region-integrated algebra shows IDL's contaminated wing
+  normalisation cancels in the unit-sum (coarse allocation exact, bias
+  intra-segment only) while background-only fill misallocates the cross-segment
+  light at first order. Fix documented: subtract neighbour wing models at
+  extraction, renormalise, then fill wings everywhere. Also added: low-SNR
+  blend engagement numbers (quadratic w has 20% PSF at 2*S0 vs IDL quadrature's
+  ~12%; `fit_snrlo_psf <= 0` disables) and the operating decision deferring the
+  residual-region question for totals. COSMOS n3.0_v1.3 check: catalogue
+  `tot_cor` = (fauto_KRON/faper_KRON) x 1/EE_f444w(kron_radius_circ) with ~1%
+  scatter at fixed radius — decomposable and consistent, safe to adopt
+  wholesale. `docs/FLUX_ESTIMATORS.md` (new section 2.3) and `TODO.md` updated
+  to match. Documents-only; no code changed. Follow-up edits after review:
+  "wings everywhere" renamed **full-complement fill** (wings never replace the
+  source's own positive segment data — the fill region is the complement of
+  `kseg ∧ data>0` within the stamp; "everywhere" wrongly implied inside own
+  segment); and a wing-construction comparison added (IDL tile vs ifl
+  `psf_wings` self-convolution vs wren radial blend) — the ifl construction
+  convolves segment data with the PSF, i.e. wings follow PSF^⊛2, over-broad
+  worst for compact sources, converging to the tile only far-field; wren
+  (FORK_DIFF_WREN §4) blends data with a point-source tile per annulus.
+  Terminology adopted: ifl = this repo, wren = dev-wren fork.
+- [x] `docs/FORK_DIFF_WREN.md`: active-path comparison of
+  `wrensuess/mophongo@dev-wren` against `flux-bug`, scoped to
+  `examples/run_uds_770_wren.py` (fork) vs `run_uds_770_dr0.1.py` +
+  `uds_770_dr0.1.json` (ours). Covers orchestration, `run()` step order,
+  solver, template extension, PSF encircled-energy bookkeeping, and the output
+  column sets. Two defects found on our side and recorded in `TODO.md`:
+  `flux_<i>_total` divides by the low-res stamp sum when the unnormalized
+  kernel's DC means the fitted amplitude carries the *detection* stamp sum
+  (−0.7% at `psf_size: null`, +3.1% at the `RunConfig` default 4.0"), and
+  `PSFSZ<i>`/`RCIRC<i>` are half their true value because `wcs[ifilt] =
+  wcs[0]` aliases `self.wcs` before `_record_psf_ee` reads it. Fork-side
+  findings include the merge-base kernel-region lookup bug that ours already
+  fixed via `wcs_original`, `wcslin_pscale=1.0` masked by `renormalize=True`,
+  an `eval_ePSF` 0.375-native-px centring error on even grids, and
+  `containment` measured against the parent grid's own sum rather than the
+  true total (+2.9% F444W / +1.5% F770W on every EE it feeds).
+  Documents-only; no code changed.
+- [x] `scratch/wren/flux_estimator_comparison_v2.pdf` (+ `_v2.tex` source, v1
+  preserved as `_v1.pdf`): rewrite of Monu Sharma's estimator note. Adds the
+  collapsed identities (`f2 = A + sum_Omega(res)` exactly, so Estimator 2 needs
+  no aperture photometry at all), a table of the several PSF-EE corrections and
+  the `apcor1`/`totcor1` naming trap, what the legacy IDL did (competitive
+  dilation, wings over neighbours, low-SNR PSF prior at template SNR 15), the
+  python column mapping including its `R_cat != R_img` generalisation, the
+  residual-region choice, and an assessment against catalogue-matching and
+  low-SNR robustness. Key conclusions: the total correction cancels in colour
+  only if the same factor is used for all bands, so totals should use the
+  catalogue's `tot_cor`; and bounding `ap_F`/`ap_B` by the PSF EE removes the
+  40x correction tail without touching templates.
+- [x] `docs/FLUX_ESTIMATORS.md`: analysis of the three total-flux estimators in
+  `scratch/wren/flux_estimator_comparison.pdf` against the legacy IDL in
+  `legacy/autopilot/mophongo__define.pro`. Establishes that (a) current python
+  computes the PDF's `fcor1`, i.e. Estimator 1 stopped one factor short of
+  total; (b) IDL templates were never truncated at the segmap — PSF wings were
+  pasted outside every segment (`:218-219`) with a low-SNR quadrature PSF floor
+  (`:215-216`), and IDL `apcor` was a pure detection-PSF EE at the Kron ellipse
+  (`:1300-1303`); (c) python's inflated corrections for small segmaps are a
+  template-truncation artifact, and `extend_templates` is currently unreachable
+  from `RunConfig`, so both MINERVA runs ran truncated. Concludes the estimator
+  choice is second-order to fixing templates. Documents-only; no code changed.
+- [x] `docs/PHOTOMETRY_APERTURES.md`: technical explainer for the two photometry
+  schemes (template-fit `flux_<i>`/`flux_<i>_total` with PSF throughput, and
+  aperture photometry on model+residual with the `ap_*` columns), the two
+  aperture radii and the grids they live on, and the exact set of aperpy catalog
+  columns/meta the corrections require. Documents-only; no code changed. Notes
+  four latent issues for later: `KERNEL` vs `sci_hi` consistency is unasserted,
+  the `None` `r_cat` default mixes grids in the `downsample` path (the
+  `upsample` path is correct via the `wcs[ifilt] = wcs[0]` rebinding at
+  `pipeline.py:1207`), the documented 1.5xFWHM `r_cat` fallback is dead code,
+  and `ap_flux_*` has no error column. Proposed refactor sketched in section 7.
 - [x] UDS F770W run on the wren-era inputs, as a config-driven run:
   `examples/uds_770_dr0.1.json` + `examples/run_uds_770_dr0.1.py` reproduce
   `examples/run_uds_770_wren.py` with the modern `RunConfig` path and the same input

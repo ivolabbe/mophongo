@@ -298,6 +298,55 @@ def _record_psf_ee(
     )
 
 
+def _bytscl(a: np.ndarray, mn: float, mx: float) -> np.ndarray:
+    """IDL ``bytscl``: linear byte scale, ``floor(255.9999*(x-mn)/(mx-mn))``."""
+    f = (np.clip(np.asarray(a, dtype=float), mn, mx) - mn) * (255.9999 / (mx - mn))
+    return np.minimum(f, 255.0).astype(np.uint8)
+
+
+def _idl_robust_sigma(a: np.ndarray) -> float:
+    """IDL ``robust_sigma``: Tukey biweight scale with tuning constant 6."""
+    from astropy.stats import biweight_scale
+
+    s = float(biweight_scale(np.asarray(a, dtype=float).ravel(), c=6.0))
+    if not np.isfinite(s) or s <= 0.0:
+        s = float(np.std(a))
+    if not np.isfinite(s) or s <= 0.0:
+        s = 1.0
+    return s
+
+
+def _fptv_panel(
+    img: np.ndarray,
+    *,
+    mm: tuple[float, float] | None = None,
+    fac: float = 5.0,
+    bin: int = 1,
+    os: int = 2,
+) -> np.ndarray:
+    """One diagnostic panel, replicating IDL subphot's ``fptv``.
+
+    Optional SNR-preserving display binning (block mean times ``sqrt(bin)``,
+    then nearest-neighbour replication), byte scaling to ``mm`` or, when ``mm``
+    is None, to ``median(img) +- fac*robust_sigma(img)``, and ``os``-times
+    nearest-neighbour upsampling.
+    """
+    img = np.asarray(img, dtype=float).copy()
+    sz = img.shape[0]
+    b = int(bin)
+    if b > 1:
+        bsz = sz // b
+        n = bsz * b
+        blk = img[:n, :n].reshape(bsz, b, bsz, b).mean(axis=(1, 3)) * np.sqrt(b)
+        img[:n, :n] = np.repeat(np.repeat(blk, b, axis=0), b, axis=1)
+    if mm is None:
+        rms = _idl_robust_sigma(img)
+        img = img - np.median(img)
+        mm = (-fac * rms, fac * rms)
+    out = _bytscl(img, mm[0], mm[1])
+    return np.repeat(np.repeat(out, os, axis=0), os, axis=1)
+
+
 class Pipeline:
     """Photometry pipeline orchestrator.
 
@@ -544,9 +593,22 @@ class Pipeline:
         self.prm_kern = prm_kern
         return self
 
+    def _ensure_maps(self) -> None:
+        """Load the cached lo-res PSF map and build the kernel map if missing."""
+        if self.prm_lo is None and self.f_psf_lo.exists():
+            self.prm_lo = PSFRegionMap.from_geojson(str(self.f_psf_lo))
+        if self.prm_kern is None:
+            self.build_kernels()
+
     # -- step 3: data ------------------------------------------------------
-    def load_data(self) -> "Pipeline":
-        """Load images/segmap/catalog, preprocess, and finish construction."""
+    def load_data(self, kernels: bool = True) -> "Pipeline":
+        """Load images/segmap/catalog, preprocess, and finish construction.
+
+        Args:
+            kernels: When ``False``, skip loading/building the PSF and kernel
+                maps so data can be loaded and inspected quickly before a run
+                (:meth:`run` finishes the maps later).
+        """
         from astropy.io import fits
         from .catalog import get_bg_and_ivar
 
@@ -593,10 +655,8 @@ class Pipeline:
         ivar[~np.isfinite(ivar)] = 0.0
         np.nan_to_num(tmpl_hi, copy=False)
 
-        if self.prm_lo is None and self.f_psf_lo.exists():
-            self.prm_lo = PSFRegionMap.from_geojson(str(self.f_psf_lo))
-        if self.prm_kern is None:
-            self.build_kernels()
+        if kernels:
+            self._ensure_maps()
 
         # finish construction: regular __init__ on the loaded products
         Pipeline.__init__(
@@ -611,6 +671,163 @@ class Pipeline:
             config=_FitConfig(**cfg.fit),
         )
         return self
+
+    # -- inspection --------------------------------------------------------
+    def __repr__(self) -> str:
+        cfg = getattr(self, "run_config", None)
+        name = f" {cfg.name!r}" if cfg is not None else ""
+        if getattr(self, "images", None) is None:
+            stage = "configured"
+        elif getattr(self, "table", None) is not None:
+            stage = "fitted"
+        else:
+            stage = "loaded"
+        nimg = len(self.images) if getattr(self, "images", None) is not None else 0
+        cat = getattr(self, "catalog", None)
+        nsrc = len(cat) if cat is not None else 0
+        return f"<Pipeline{name} [{stage}] images={nimg} sources={nsrc}>"
+
+    def info(self) -> str:
+        """Print and return a summary of config, inputs, data, maps, and results.
+
+        Usable at every stage: after :meth:`from_config` it reports the input
+        files (existence, size, shape from the FITS headers, frame counts)
+        without reading pixel data; after :meth:`load_data` it adds the loaded
+        images/segmap/catalog; after :meth:`run` the fit products.
+        """
+        from astropy.io import fits
+
+        lines = [repr(self)]
+        cfg = getattr(self, "run_config", None)
+        if cfg is not None:
+            lines.append(f"config: out_dir={self.out_dir}")
+            for key in ("sci_hi", "segmap", "catalog", "sci_lo", "wht_lo", "csv_hi", "csv_lo"):
+                path = Path(getattr(cfg, key))
+                if not path.exists():
+                    lines.append(f"  {key:8s} MISSING  {path}")
+                    continue
+                desc = f"{path.stat().st_size / 1e6:8.1f} MB"
+                try:
+                    if path.suffix == ".csv":
+                        desc += f"  {sum(1 for _ in open(path)) - 1} frames"
+                    elif key == "catalog":
+                        desc += f"  {fits.getheader(path, 1)['NAXIS2']} rows"
+                    else:
+                        hdr = fits.getheader(path)
+                        desc += f"  {hdr['NAXIS2']}x{hdr['NAXIS1']}"
+                except Exception as exc:
+                    desc += f"  (unreadable: {exc})"
+                lines.append(f"  {key:8s} {desc}  {path}")
+            for label, f in (
+                ("psf_hi", self.f_psf_hi),
+                ("psf_lo", self.f_psf_lo),
+                ("kernel", self.f_kernel),
+            ):
+                state = "cached" if f.exists() else "not built"
+                lines.append(f"  map {label:6s} {state}  {f.name}")
+
+        if getattr(self, "images", None) is None:
+            lines.append("data: not loaded — load_data() reads images and catalog")
+        else:
+            lines.append("data:")
+            for i, img in enumerate(self.images):
+                if img is None:
+                    continue
+                ps = self._pixel_scale_arcsec(self.wcs[i]) if self.wcs is not None else None
+                pstxt = f"  {ps * 1000:.0f} mas/pix" if ps else ""
+                wht = self.weights[i] if self.weights is not None else None
+                whttxt = "  +weight" if wht is not None else ""
+                lines.append(
+                    f"  image[{i}]  {img.shape[0]}x{img.shape[1]} {img.dtype}{pstxt}{whttxt}"
+                )
+            seg = np.asarray(self.segmap)
+            lines.append(f"  segmap    {seg.shape[0]}x{seg.shape[1]}  max label {int(seg.max())}")
+            cat = getattr(self, "catalog", None)
+            if cat is not None:
+                cols = ", ".join(cat.colnames[:10])
+                more = f" (+{len(cat.colnames) - 10} more)" if len(cat.colnames) > 10 else ""
+                lines.append(f"  catalog   {len(cat)} rows: {cols}{more}")
+
+        for label in ("prm_hi", "prm_lo", "prm_kern"):
+            prm = getattr(self, label, None)
+            if prm is None:
+                continue
+            stamp = ""
+            if getattr(prm, "psfs", None) is not None:
+                stamp = f", stamps {np.asarray(prm.psfs).shape[-1]} px"
+            lines.append(f"  {label:8s} {len(prm.regions)} regions{stamp}")
+
+        table = getattr(self, "table", None)
+        if table is not None:
+            fluxcols = [c for c in table.colnames if c.startswith("flux_")]
+            lines.append(
+                f"results: table {len(table)} rows ({', '.join(fluxcols)}); "
+                f"{len(self.residuals)} residual image(s)"
+            )
+            if getattr(self, "all_scenes", None):
+                lines.append(f"  scenes per band: {[len(s) for s in self.all_scenes]}")
+
+        text = "\n".join(lines)
+        print(text)
+        return text
+
+    def plot_inputs(
+        self,
+        *,
+        sources: bool = True,
+        save: str | os.PathLike | None = None,
+    ):
+        """Quicklook of the loaded inputs: hi-res, lo-res, weight, and segmap.
+
+        Args:
+            sources: Overlay catalog positions on the hi-res panel.
+            save: Optional path to save the figure to.
+
+        Returns:
+            Tuple of the created figure and its flat array of axes.
+        """
+        import matplotlib.pyplot as plt
+        from photutils.segmentation import SegmentationImage
+
+        if getattr(self, "images", None) is None:
+            raise RuntimeError("no data loaded — call load_data() first")
+
+        img_hi = self.images[0]
+        img_lo = self.images[-1]
+        wht_lo = self.weights[-1] if self.weights is not None else None
+        seg = np.asarray(self.segmap)
+
+        fig, axes = plt.subplots(2, 2, figsize=(12, 12 * img_hi.shape[0] / img_hi.shape[1]))
+        axes = axes.flatten()
+
+        self._imshow_scaled(axes[0], img_hi)
+        axes[0].set_title(f"images[0] hi-res {img_hi.shape[0]}x{img_hi.shape[1]}")
+        cat = getattr(self, "catalog", None)
+        if sources and cat is not None:
+            axes[0].scatter(
+                cat["x"], cat["y"], s=8, facecolors="none", edgecolors="tab:red", lw=0.5
+            )
+        self._imshow_scaled(axes[1], img_lo)
+        axes[1].set_title(f"images[{len(self.images) - 1}] lo-res {img_lo.shape[0]}x{img_lo.shape[1]}")
+        if wht_lo is not None:
+            self._imshow_scaled(axes[2], wht_lo)
+            axes[2].set_title("weight (inverse variance)")
+        else:
+            axes[2].set_axis_off()
+        if seg.max() > 0:
+            axes[3].imshow(
+                seg, origin="lower", cmap=SegmentationImage(seg).cmap, interpolation="nearest"
+            )
+        else:
+            axes[3].imshow(seg, origin="lower", cmap="gray")
+        axes[3].set_title(f"segmap (max label {int(seg.max())})")
+        for ax in axes:
+            ax.set_xticks([])
+            ax.set_yticks([])
+        fig.tight_layout()
+        if save is not None:
+            fig.savefig(save, dpi=180, bbox_inches="tight")
+        return fig, axes
 
     # -- step 4: outputs ---------------------------------------------------
     def write_outputs(self) -> "Pipeline":
@@ -1036,8 +1253,14 @@ class Pipeline:
         import warnings
 
         # config-driven construction: load data + maps on first run()
-        if getattr(self, "run_config", None) is not None and self.images is None:
-            self.load_data()
+        if getattr(self, "run_config", None) is not None:
+            if self.images is None:
+                self.load_data()
+            elif self.kernels[-1] is None:
+                # data pre-loaded with load_data(kernels=False): finish the maps
+                self._ensure_maps()
+                self.psfs[-1] = self.prm_lo
+                self.kernels[-1] = self.prm_kern
 
         images = self.images
         segmap = self.segmap
@@ -1248,6 +1471,7 @@ class Pipeline:
                     images[ifilt],
                     weights_i,
                     coupling_thresh=float(config.scene_coupling_thresh),
+                    max_size=config.scene_max_size,
                     snr_thresh_astrom=float(config.snr_thresh_astrom),
                     minimum_bright=int(config.scene_minimum_bright),
                     max_merge_radius=float(getattr(config, "scene_max_merge_radius", np.inf)),
@@ -1864,6 +2088,198 @@ class Pipeline:
             save=save,
         )
 
+    def plot_subphot(
+        self,
+        source_id: int,
+        *,
+        ifilt: int = 1,
+        size: int | None = None,
+        rlim: float | None = None,
+        nsig: float = 3.0,
+        sys_err: float = 0.02,
+        photbin: int = 1,
+        raper: float | None = None,
+        save: str | os.PathLike | None = None,
+    ) -> np.ndarray:
+        """IDL subphot-style 6-panel diagnostic (img/tmpl/seg/model/res/clean).
+
+        Pixel-for-pixel port of the legacy ``subphot.pro`` ``mkdiag``/``fptv``
+        diagnostic so outputs compare 1-1 against IDL PNGs of the same source:
+        same panel layout (2x3 at 2x nearest-neighbour zoom), byte scalings,
+        background/rms estimator (aperture-scale block sums, 2-sigma clipped,
+        ``prms = rms/na``), circular ``rlim`` fit mask on res/clean, and the
+        distance-sorted 5-level grayscale segmap colouring.
+
+        Panels: ``img`` = low-res stamp at ``+-nsig*prms``; ``tmpl`` = hi-res
+        template at ``median +- 8*robust_sigma``; ``seg`` = colour-cycled
+        segmap minus ``0.1*mask``; ``model`` = full model at ``+-nsig*prms``;
+        ``res`` = masked ``(img-model)/err`` at ``+-nsig``; ``clean`` = masked
+        image minus neighbour models at ``+-nsig*prms``.
+
+        Args:
+            source_id: Catalog id of the source to centre on.
+            ifilt: Fitted image index (fit grid must equal the reference grid).
+            size: Stamp side in fit-grid pixels (IDL ``tsz``); default the
+                source's template-footprint size, made odd. Pass the IDL tile
+                size for exact comparisons.
+            rlim: Fit-mask radius in pixels; default ``(size-1)/2``.
+            nsig: Display stretch in sigma. Default 3 matches the survey-era
+                ``subphot_nsigma=3`` runs (the IDL code default was 5).
+            sys_err: Systematic error fraction in ``err = sqrt(prms^2 +
+                (sys_err*model)^2)`` (IDL default 0.02).
+            photbin: Optional SNR-preserving display binning of the
+                photometry-based panels (IDL ``photbin``).
+            raper: Aperture radius in pixels for the rms block size ``na``;
+                default from the fit configuration.
+            save: Optional PNG output path.
+
+        Returns:
+            The rendered RGB image as a ``(4*size, 6*size, 3)`` uint8 array.
+        """
+        from astropy.stats import sigma_clipped_stats
+        from PIL import Image, ImageDraw, ImageFont
+
+        if not getattr(self, "all_templates", None):
+            raise RuntimeError("run the pipeline before calling plot_subphot")
+        if ifilt <= 0 or ifilt >= len(self.images):
+            raise ValueError("ifilt must be between 1 and len(images)-1")
+        if self.images[ifilt].shape != self.images[0].shape:
+            raise NotImplementedError(
+                "plot_subphot requires the fit grid to match the reference grid"
+            )
+
+        templates = self.all_templates[ifilt - 1]
+        own = [
+            t
+            for t in templates
+            if int(t.id_parent if getattr(t, "parent_id", None) is not None else t.id)
+            == int(source_id)
+        ]
+        if not own:
+            raise KeyError(f"source id {source_id} not found in fitted templates")
+
+        if size is None:
+            size = max(own[0].data.shape)
+            size += (size + 1) % 2
+        size = int(size)
+        if rlim is None:
+            rlim = (size - 1) / 2.0
+
+        xc_full, yc_full = self._source_position(source_id)
+        ny, nx = self.images[0].shape
+        x1 = int(np.clip(round(xc_full - (size - 1) / 2.0), 0, nx - size))
+        y1 = int(np.clip(round(yc_full - (size - 1) / 2.0), 0, ny - size))
+        sl = (slice(y1, y1 + size), slice(x1, x1 + size))
+
+        tphot = np.asarray(self.images[ifilt][sl], dtype=float).copy()
+        ttmpl = np.asarray(self.images[0][sl], dtype=float)
+        tseg = np.asarray(self.segmap[sl])
+        res = np.asarray(self.residuals[ifilt - 1][sl], dtype=float).copy()
+        model = np.asarray(self.model_images[ifilt - 1][sl], dtype=float)
+        zero0 = tphot == 0.0
+
+        w_full = self.weights[ifilt] if self.weights is not None else None
+        if w_full is None:
+            wht = np.ones_like(tphot)
+        elif w_full.shape == self.images[ifilt].shape:
+            wht = np.asarray(w_full[sl], dtype=float)
+        else:
+            k = self.images[ifilt].shape[0] // w_full.shape[0]
+            wht = (
+                np.repeat(np.repeat(np.asarray(w_full, dtype=float), k, 0), k, 1)[sl]
+                * k**2
+            )
+
+        own_img = np.zeros_like(tphot)
+        for t in own:
+            own_img += float(t.flux) * self._template_on_stamp(t, sl)
+        nn_img = model - own_img
+
+        # background + per-pixel rms on aperture scales (IDL tile_stat on rbin)
+        if raper is None:
+            raper = self._resolve_image_ap_radius_pix(ifilt, self.config)
+        na = max(int(raper * np.sqrt(np.pi) / np.sqrt(2.0)), 1)
+        pos = wht > 0
+        rms_glob = 1.0 / np.sqrt(np.median(wht[pos])) if np.any(pos) else float(mad_std(res))
+        bgmask = (model / 15.0 < rms_glob) & (ttmpl != 0) & pos
+        dif = np.where(bgmask, res, np.nan)
+        nb = size // na
+        bsum = dif[: nb * na, : nb * na].reshape(nb, na, nb, na).sum(axis=(1, 3))
+        bsum = bsum[np.isfinite(bsum)]
+        if bsum.size >= 5:
+            _, bgmed1, bgrms1 = sigma_clipped_stats(
+                bsum, sigma=2.0, maxiters=5, stdfunc="mad_std"
+            )
+            prms = float(bgrms1) / na
+            tphot -= float(bgmed1) / na**2
+            res = res - float(bgmed1) / na**2
+        else:
+            prms = rms_glob
+        if not np.isfinite(prms) or prms <= 0.0:
+            prms = rms_glob if rms_glob > 0 else 1.0
+        scl = nsig * prms
+        err_img = np.sqrt(prms**2 + (sys_err * model) ** 2)
+
+        yy, xx = np.mgrid[0:size, 0:size]
+        d = np.hypot(xx - (xc_full - x1), yy - (yc_full - y1))
+        mask = ((d >= rlim) | zero0).astype(float)
+
+        # segmap colouring: cycle 5 gray levels through fitted ids by distance
+        in_stamp = [
+            t
+            for t in templates
+            if x1 <= t.position_original[0] < x1 + size
+            and y1 <= t.position_original[1] < y1 + size
+        ]
+        order = sorted(
+            in_stamp,
+            key=lambda t: (t.position_original[0] - xc_full) ** 2
+            + (t.position_original[1] - yc_full) ** 2,
+        )
+        lv = [0.2, 0.8, 0.4, 0.6, 1.0]
+        tvseg = tseg.astype(float)
+        for i, t in enumerate(order):
+            tvseg[tseg == int(t.id)] = lv[i % 5]
+
+        panels = [
+            _fptv_panel(tphot, mm=(-scl, scl), bin=photbin),
+            _fptv_panel(ttmpl, fac=8.0),
+            _fptv_panel(tvseg - 0.1 * mask, mm=(-0.2, 1.0)),
+            _fptv_panel(model, mm=(-scl, scl), bin=photbin),
+            _fptv_panel(res / err_img * (1.0 - mask), mm=(-nsig, nsig), bin=photbin),
+            _fptv_panel((tphot - nn_img) * (1.0 - mask), mm=(-scl, scl), bin=photbin),
+        ]
+
+        t2 = 2 * size
+        canvas = np.zeros((2 * t2, 3 * t2), dtype=np.uint8)
+        for i, p in enumerate(panels):
+            r, c = divmod(i, 3)
+            canvas[r * t2 : (r + 1) * t2, c * t2 : (c + 1) * t2] = p[::-1]
+
+        rgb = Image.fromarray(canvas).convert("RGB")
+        draw = ImageDraw.Draw(rgb)
+        try:
+            import matplotlib
+
+            font = ImageFont.truetype(
+                str(Path(matplotlib.get_data_path()) / "fonts/ttf/DejaVuSans-Bold.ttf"),
+                15,
+            )
+        except Exception:
+            font = ImageFont.load_default()
+        labels = [["img", "tmpl", "seg"], ["model", "res", "clean"]]
+        for r, row in enumerate(labels):
+            for c, lab in enumerate(row):
+                xy = (c * t2 + 5, r * t2 + 20)
+                try:
+                    draw.text(xy, lab, fill=(255, 255, 255), font=font, anchor="ls")
+                except (TypeError, ValueError):
+                    draw.text((xy[0], xy[1] - 12), lab, fill=(255, 255, 255), font=font)
+
+        if save is not None:
+            rgb.save(save)
+        return np.asarray(rgb)
+
     def plot_result(
         self,
         ifilt: int = 1,
@@ -2103,6 +2519,8 @@ def run(
 STEPS = {
     "psfs": "build_psfs",
     "kernels": "build_kernels",
+    "load": "load_data",
+    "info": "info",
     "fit": "run",
     "outputs": "write_outputs",
     "all": "run_all",

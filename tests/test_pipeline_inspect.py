@@ -247,6 +247,8 @@ def test_run_saves_config_snapshot(tiny_config, monkeypatch):
 def test_load_fit_offline_diagnostics(tiny_config, monkeypatch):
     """Fresh-session resume: load_outputs + load_fit + diagnose_subphot from files."""
     pipe = Pipeline.from_config(tiny_config)
+    # no template extension: the fixture has no PSF maps to extend with
+    pipe.run_config.fit = {"extend_mode": "none"}
     pipe.save_config()
     # fake run products: zero residual on the reference grid + fit/template tables
     Table(

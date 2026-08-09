@@ -20,20 +20,15 @@ This file tracks future desired features, checks, and investigations.
   `Template.extend_info` but nothing consumes them. wren feeds them into its
   aperture-correction chain (`trunc = norm / (norm + flux_beyond_stamp)`).
   Wire them up, or drop them, once the scheme comparison settles.
-- [ ] `uds_770_dr0.json` gets no detection ivar: its `sci_hi` is the
-  saturated-star-repaired mosaic in `repair_saturate_out/`, and the weight map
-  sits with the original under `MINERVA/data/UDS/DR0/`. `RunConfig.wht_hi`
-  auto-derivation tries `sci_hi` then `driz_hi` (`_sci.fits` -> `_wht.fits`)
-  and neither resolves, so a `wren`/`classic` run there warns and falls back
-  to the scalar sky sigma. Set `wht_hi` (or `driz_hi`) explicitly in that
-  config before using it for a scheme comparison. `cosmos_770_dr0.1.json`
-  resolves automatically (verified: 32768x18944, 99.8% covered).
-- [ ] The detection background is measured in `_load_detection_ivar` and
-  logged but not subtracted (COSMOS median -7.2e-4), because subtracting it
-  would change `default` templates too. `template_comparison.tex` Sec. 8.1
-  lists "raw detection image, no background subtraction" as a wren defect —
-  a sky pedestal enters the halo linearly with its area, over ~855 px. Decide
-  whether the extended schemes should subtract it.
+- [ ] The detection background is measured in `_load_detection_ivar` (by the
+  same `get_bg_and_ivar` used on the lo-res side) and logged but **discarded**
+  — it is the only `get_bg_and_ivar` call in the tree whose `bg` is not
+  subtracted; the lo-res one feeds `sci_fit = sci_lo - bg`. Subtracting it
+  would change `default` templates too, so it is left alone for now, but
+  `template_comparison.tex` Sec. 8.1 lists "raw detection image, no
+  background subtraction" as a wren defect: a sky pedestal enters the halo
+  linearly with its area, over ~855 px. Decide whether the extended schemes
+  should subtract it (COSMOS DR0.1 median bg -7.2e-4).
 - [ ] `extend_mode='wren'`'s `WrenParams.containment` (wren's
   `PSFRegionMap.containment`, the detection-PSF stamp containment `c_det` in
   `flux_beyond_stamp`) defaults to 1.0 because this tree has no equivalent.

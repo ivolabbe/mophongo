@@ -68,16 +68,13 @@ class RunConfig:
     wht_lo: str  # low-resolution weight map
     csv_hi: str  # per-frame WCS csv of the hi-res mosaic
     csv_lo: str  # per-frame WCS csv of the lo-res mosaic
-    # mosaic used for DrizzlePSF footprints/grid of the hi-res side
-    # (defaults to sci_hi; set when sci_hi is a derived template image)
-    driz_hi: str | None = None
-    # High-resolution weight map, rescaled to a calibrated inverse variance the
-    # same way wht_lo is. Needed by the template build schemes that weight data
-    # against a PSF model by SNR ('wren' always, 'classic' for its low-SNR
-    # point-source branch); unused by 'default'/'psf'. None (the default)
-    # derives it from sci_hi by the standard '_sci' -> '_wht' naming; it is
-    # read only when the selected extend_mode needs it, since a full-field
-    # hi-res weight map costs as much memory as the mosaic itself.
+    # High-resolution weight map: the detection-band counterpart of wht_lo, and
+    # what turns the detection image into a calibrated inverse variance. Every
+    # run must have one, so the path is resolved (and its absence raised) on
+    # every run; the pixels are read only when the selected extend_mode uses
+    # them, since a full-field hi-res weight map costs as much memory as the
+    # mosaic itself. None means "derive from sci_hi by the standard
+    # '_sci' -> '_wht' naming" (see :meth:`Pipeline.resolve_wht_hi`).
     wht_hi: str | None = None
     # --- PSFs -------------------------------------------------------------
     psf_dir: str = "data/PSF"
@@ -444,14 +441,36 @@ class Pipeline:
     # region centroids (safe for position lookups), while matching kernels
     # are built from PSF pairs drizzled at the hi/lo overlay centroids.
     # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_config_path(path: str | Path) -> Path:
+        """Resolve a config argument that may be a JSON file or a run directory.
+
+        A directory resolves to ``<dir>/<dirname>.json`` (the snapshot written
+        by :meth:`save_config`), or to the single ``*.json`` file it contains.
+        """
+        p = Path(path)
+        if not p.is_dir():
+            return p
+        named = p / f"{p.name}.json"
+        if named.exists():
+            return named
+        candidates = sorted(p.glob("*.json"))
+        if len(candidates) == 1:
+            return candidates[0]
+        raise ValueError(
+            f"cannot pick a run config in {p}: found {[f.name for f in candidates]}"
+        )
+
     @classmethod
     def from_config(cls, path: str | Path | RunConfig) -> "Pipeline":
         """Create a deferred Pipeline from a JSON run config.
 
-        Data are loaded lazily: :meth:`run` (or :meth:`load_data`) reads the
-        images and finishes construction.
+        ``path`` may be a config file, a run directory containing one (see
+        :meth:`_resolve_config_path`), or a :class:`RunConfig`. Data are loaded
+        lazily: :meth:`run` (or :meth:`load_data`) reads the images and
+        finishes construction; :meth:`load_outputs` resumes a finished run.
         """
-        cfg = path if isinstance(path, RunConfig) else RunConfig.from_json(path)
+        cfg = path if isinstance(path, RunConfig) else RunConfig.from_json(cls._resolve_config_path(path))
         obj = cls.__new__(cls)
         obj.run_config = cfg
         obj.out_dir = Path(cfg.out_dir)
@@ -479,6 +498,19 @@ class Pipeline:
     def f_kernel(self) -> Path:
         return self.out_dir / f"{self.run_config.name}_kernel.geojson"
 
+    # -- output paths ------------------------------------------------------
+    @property
+    def f_config(self) -> Path:
+        return self.out_dir / f"{self.run_config.name}.json"
+
+    @property
+    def f_fit_table(self) -> Path:
+        return self.out_dir / f"{self.run_config.name}_fit_table.fits"
+
+    @property
+    def f_residual(self) -> Path:
+        return self.out_dir / f"{self.run_config.name}_residual.fits"
+
     @property
     def scenes(self):
         """Scenes of the (first) fitted band, once :meth:`run` has completed."""
@@ -505,7 +537,7 @@ class Pipeline:
         cfg = self.run_config
         if self.dpsf_hi is None:
             self.dpsf_hi = DrizzlePSF(
-                driz_image=str(cfg.driz_hi or cfg.sci_hi), csv_file=str(cfg.csv_hi)
+                driz_image=str(cfg.sci_hi), csv_file=str(cfg.csv_hi)
             )
             self.dpsf_lo = DrizzlePSF(
                 driz_image=str(cfg.sci_lo), csv_file=str(cfg.csv_lo)
@@ -618,58 +650,61 @@ class Pipeline:
         if self.prm_kern is None:
             self.build_kernels()
 
+    def resolve_wht_hi(self) -> Path:
+        """Resolve the detection-band weight map, raising if there is none.
+
+        ``RunConfig.wht_hi`` when set, else ``sci_hi`` with the standard
+        ``_sci.fits`` -> ``_wht.fits`` substitution. A run without a detection
+        weight map has no calibrated detection noise, so this raises rather
+        than degrading: the SNR-weighted build schemes would silently fall back
+        to one sky-sigma scalar for the whole mosaic.
+        """
+        cfg = self.run_config
+        if cfg.wht_hi is not None:
+            path = Path(cfg.wht_hi)
+            if not path.exists():
+                raise FileNotFoundError(f"wht_hi does not exist: {path}")
+            return path
+        guess = Path(str(cfg.sci_hi).replace("_sci.fits", "_wht.fits"))
+        if guess == Path(cfg.sci_hi) or not guess.exists():
+            raise FileNotFoundError(
+                "no detection-band weight map: wht_hi is unset and the standard "
+                f"'_sci.fits' -> '_wht.fits' sibling of sci_hi does not exist ({guess}). "
+                "Set wht_hi in the run config -- without it the detection noise is "
+                "uncalibrated and the SNR-weighted build schemes fall back to a "
+                "single sky-sigma scalar for the whole mosaic."
+            )
+        return guess
+
     def _load_detection_ivar(self, sci_hi: np.ndarray) -> np.ndarray | None:
-        """Detection-band inverse variance, or None when the run does not need it.
+        """Detection-band inverse variance, or None when the run does not read it.
 
-        Only the SNR-weighted build schemes read ``weights[0]``: ``'wren'``
-        weights data against its PSF model by SNR everywhere, and ``'classic'``
-        needs it for the low-SNR point-source branch. ``'default'`` and
-        ``'psf'`` never touch it, and a full-field hi-res weight map costs as
-        much memory as the mosaic itself, so it is read only when it is used.
-
-        Without it both schemes fall back to a single scalar sky sigma for the
-        whole mosaic, which a field with real depth variation biases by the
-        local/global depth ratio -- hence the default is to load it.
+        The weight map is always resolved (:meth:`resolve_wht_hi`, which raises
+        if there is none), but its pixels are read only by the build schemes
+        that weight real data against a PSF model by SNR: ``'wren'`` for every
+        weight, ``'classic'`` for its low-SNR point-source branch.
+        ``'default'`` and ``'psf'`` never touch ``weights[0]``, and a
+        full-field hi-res weight map costs as much memory as the mosaic itself.
         """
         from astropy.io import fits
         from .catalog import get_bg_and_ivar
 
         cfg = self.run_config
+        path = self.resolve_wht_hi()
         mode = str(cfg.fit.get("extend_mode", "default") or "default").lower()
         if mode not in ("wren", "classic"):
+            logger.info("detection weight map %s (not read: extend_mode=%r)", path.name, mode)
             return None
 
-        path = cfg.wht_hi
-        if path is None:
-            # standard grizli naming: <root>_drc_sci.fits -> <root>_drc_wht.fits.
-            # driz_hi is the second candidate: when sci_hi is a derived template
-            # image (e.g. a saturated-star-repaired mosaic) the weight map still
-            # sits with the original.
-            for src in (cfg.sci_hi, cfg.driz_hi):
-                if src is None:
-                    continue
-                guess = Path(str(src).replace("_sci.fits", "_wht.fits"))
-                if guess != Path(src) and guess.exists():
-                    path = str(guess)
-                    break
-        if path is None:
-            logger.warning(
-                "extend_mode=%r weights data against a PSF model by SNR, but no "
-                "wht_hi is set and none was found next to sci_hi or driz_hi; "
-                "falling back to one scalar sky sigma for the whole mosaic", mode
-            )
-            return None
-
-        wht_hi = fits.getdata(path)
         bg_hi, ivar_hi = get_bg_and_ivar(
-            sci_hi, wht_hi, bg_filter_sigma=cfg.bg_filter_sigma
+            sci_hi, fits.getdata(path), bg_filter_sigma=cfg.bg_filter_sigma
         )
         # The detection background is measured but NOT subtracted: that would
         # change 'default' templates too. It matters for the extended schemes,
         # which blend raw data over a large halo, so report it (see TODO.md).
         logger.info(
             "detection ivar from %s (median background %.4g; not subtracted)",
-            Path(path).name, float(np.median(bg_hi)),
+            path.name, float(np.median(bg_hi)),
         )
         return ivar_hi
 
@@ -755,14 +790,72 @@ class Pipeline:
         )
         return self
 
+    # -- config snapshot + resume ------------------------------------------
+    def save_config(self, path: str | Path | None = None) -> Path:
+        """Write the fully-explicit run config to ``out_dir/<name>.json``.
+
+        Every :class:`RunConfig` field and every *used* :class:`FitConfig`
+        setting is written with its resolved value, so the run stays
+        repeatable even if code defaults change later. Settings of template
+        build schemes the run did not select (``wren_*``/``classic_*`` for
+        other ``extend_mode`` values) are omitted. :meth:`run` calls this
+        automatically; :meth:`from_config` accepts the snapshot (or its
+        directory) back.
+        """
+        from dataclasses import asdict, replace
+        from datetime import date
+
+        if getattr(self, "config", None) is not None:
+            fit = asdict(self.config)
+        else:
+            fit = asdict(_FitConfig(**self.run_config.fit))
+        # drop settings of template build schemes this run did not use
+        mode = fit.get("extend_mode", "default")
+        for prefix in {"wren": "classic_", "classic": "wren_"}.get(
+            mode, ("wren_", "classic_")
+        ):
+            fit = {k: v for k, v in fit.items() if not k.startswith(prefix)}
+        cfg = replace(self.run_config, fit=fit)
+        out = Path(path) if path is not None else self.f_config
+        header = (
+            f"# full '{cfg.name}' run config snapshot, {date.today()}: all\n"
+            "# RunConfig and FitConfig settings explicit (Pipeline.save_config)\n"
+        )
+        out.write_text(header + json.dumps(asdict(cfg), indent=2) + "\n")
+        logger.info("wrote full run config to %s", out)
+        return out
+
+    def load_outputs(self) -> "Pipeline":
+        """Load a previous run's products from ``out_dir`` (fresh-session resume).
+
+        Reads the fit table and residual image written by :meth:`write_outputs`.
+        Catalog-level diagnostics work directly on ``self.table``; image-based
+        diagnostics additionally need :meth:`load_data`.
+        """
+        from astropy.io import fits
+
+        if getattr(self, "run_config", None) is None:
+            raise RuntimeError("load_outputs requires a config-driven Pipeline")
+        if self.f_fit_table.exists():
+            self.table = Table.read(self.f_fit_table)
+            logger.info("loaded %s (%d rows)", self.f_fit_table.name, len(self.table))
+        else:
+            logger.warning("no fit table %s", self.f_fit_table)
+        if self.f_residual.exists():
+            self.residuals = [fits.getdata(self.f_residual)]
+            logger.info("loaded %s", self.f_residual.name)
+        else:
+            logger.warning("no residual image %s", self.f_residual)
+        return self
+
     # -- inspection --------------------------------------------------------
     def __repr__(self) -> str:
         cfg = getattr(self, "run_config", None)
         name = f" {cfg.name!r}" if cfg is not None else ""
-        if getattr(self, "images", None) is None:
-            stage = "configured"
-        elif getattr(self, "table", None) is not None:
+        if getattr(self, "table", None) is not None:
             stage = "fitted"
+        elif getattr(self, "images", None) is None:
+            stage = "configured"
         else:
             stage = "loaded"
         nimg = len(self.images) if getattr(self, "images", None) is not None else 0
@@ -784,11 +877,17 @@ class Pipeline:
         cfg = getattr(self, "run_config", None)
         if cfg is not None:
             lines.append(f"config: out_dir={self.out_dir}")
-            keys = ["sci_hi", "segmap", "catalog", "sci_lo", "wht_lo", "csv_hi", "csv_lo"]
-            if cfg.wht_hi is not None:  # optional: auto-derived from sci_hi when unset
-                keys.insert(1, "wht_hi")
+            keys = ["sci_hi", "wht_hi", "segmap", "catalog", "sci_lo", "wht_lo",
+                    "csv_hi", "csv_lo"]
             for key in keys:
-                path = Path(getattr(cfg, key))
+                if key == "wht_hi":
+                    try:  # unset -> derived from sci_hi; report what will be used
+                        path = self.resolve_wht_hi()
+                    except FileNotFoundError:
+                        lines.append(f"  {key:8s} MISSING  (unset, no '_wht' sibling of sci_hi)")
+                        continue
+                else:
+                    path = Path(getattr(cfg, key))
                 if not path.exists():
                     lines.append(f"  {key:8s} MISSING  {path}")
                     continue
@@ -811,6 +910,13 @@ class Pipeline:
             ):
                 state = "cached" if f.exists() else "not built"
                 lines.append(f"  map {label:6s} {state}  {f.name}")
+            for label, f in (
+                ("config", self.f_config),
+                ("table", self.f_fit_table),
+                ("residual", self.f_residual),
+            ):
+                state = "present" if f.exists() else "absent"
+                lines.append(f"  out {label:8s} {state}  {f.name}")
 
         if getattr(self, "images", None) is None:
             lines.append("data: not loaded — load_data() reads images and catalog")
@@ -848,7 +954,7 @@ class Pipeline:
             fluxcols = [c for c in table.colnames if c.startswith("flux_")]
             lines.append(
                 f"results: table {len(table)} rows ({', '.join(fluxcols)}); "
-                f"{len(self.residuals)} residual image(s)"
+                f"{len(getattr(self, 'residuals', []))} residual image(s)"
             )
             if getattr(self, "all_scenes", None):
                 lines.append(f"  scenes per band: {[len(s) for s in self.all_scenes]}")
@@ -926,12 +1032,12 @@ class Pipeline:
         stem = self.out_dir / cfg.name
         # residual is on the hi-res reference grid (upsample path)
         fits.writeto(
-            f"{stem}_residual.fits",
+            self.f_residual,
             self.residuals[0],
             fits.getheader(cfg.sci_hi),
             overwrite=True,
         )
-        self.table.write(f"{stem}_fit_table.fits", overwrite=True)
+        self.table.write(self.f_fit_table, overwrite=True)
 
         rows = []
         for s in self.scenes:
@@ -1467,11 +1573,12 @@ class Pipeline:
         if getattr(self, "run_config", None) is not None:
             if self.images is None:
                 self.load_data()
-            elif self.kernels[-1] is None:
+            elif self.kernels is not None and self.kernels[-1] is None:
                 # data pre-loaded with load_data(kernels=False): finish the maps
                 self._ensure_maps()
-                self.psfs[0] = self.prm_hi
-                self.psfs[-1] = self.prm_lo
+                if self.psfs is not None:
+                    self.psfs[0] = self.prm_hi
+                    self.psfs[-1] = self.prm_lo
                 self.kernels[-1] = self.prm_kern
 
         images = self.images
@@ -1490,6 +1597,10 @@ class Pipeline:
             config = self.config
         else:
             self.config = config
+
+        # snapshot the fully-explicit config next to the outputs (repeatable run)
+        if getattr(self, "run_config", None) is not None:
+            self.save_config()
 
         print(f"Pipeline (start) memory: {memory():.1f} GB")
         print(f"Pipeline config: {config}")

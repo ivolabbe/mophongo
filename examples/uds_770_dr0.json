@@ -6,6 +6,8 @@
 
   # high-res template side: saturated-star-repaired F444W + DR0 segmap/catalog
   "sci_hi": "repair_saturate_out/uds-grizli-v8.0-minerva-v2.3-40mas-f444w-clear_sci_repaired.fits",
+  # sci_hi is the repaired mosaic; the weight map stays with the original
+  "wht_hi": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/DR0/uds-grizli-v8.0-minerva-v2.3-40mas-f444w-clear_drc_wht.fits",
   "segmap": "repair_saturate_out/MINERVA-UDSDR0_SEGMAP_REPAIRED.fits",
   "catalog": "repair_saturate_out/MINERVA-UDSDR0_REPAIRED.fits",
   "csv_hi": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/DR0/uds-grizli-v8.0-minerva-v2.3-40mas-f444w-clear_wcs.csv",

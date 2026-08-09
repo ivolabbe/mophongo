@@ -40,6 +40,11 @@ def tiny_config(tmp_path):
     fits.writeto(tmp_path / "seg.fits", seg, _wcs_header(n_hi, scale_hi))
     fits.writeto(tmp_path / "lo.fits", lo, _wcs_header(n_lo, 2 * scale_hi))
     fits.writeto(tmp_path / "wht.fits", wht, _wcs_header(n_lo, 2 * scale_hi))
+    fits.writeto(
+        tmp_path / "hi_wht.fits",
+        np.full((n_hi, n_hi), 1e6, dtype=np.float32),
+        _wcs_header(n_hi, scale_hi),
+    )
     Table(
         {"id": [1], "x": [32.0], "y": [32.0], "ra": [34.0], "dec": [-5.0]}
     ).write(tmp_path / "cat.fits")
@@ -50,6 +55,7 @@ def tiny_config(tmp_path):
         "name": "tiny",
         "out_dir": str(tmp_path / "out"),
         "sci_hi": str(tmp_path / "hi.fits"),
+        "wht_hi": str(tmp_path / "hi_wht.fits"),
         "segmap": str(tmp_path / "seg.fits"),
         "catalog": str(tmp_path / "cat.fits"),
         "sci_lo": str(tmp_path / "lo.fits"),
@@ -105,20 +111,10 @@ def test_load_data_without_kernels(tiny_config):
     assert "catalog   1 rows" in text
 
 
-def test_detection_ivar_loaded_only_for_the_snr_weighted_schemes(tiny_config):
+def test_detection_ivar_read_only_for_the_snr_weighted_schemes(tiny_config):
     """weights[0] is read only by the build schemes that weight data against a
     PSF model by SNR; a full-field hi-res weight map is as big as the mosaic."""
     cfg = json.loads(tiny_config.read_text())
-    # standard grizli naming, so wht_hi resolves without being set
-    hi = Path(cfg["sci_hi"])
-    wht_hi = hi.with_name(hi.name.replace(".fits", "_sci.fits"))
-    fits.writeto(wht_hi, np.ones((64, 64), dtype=np.float32), _wcs_header(64, 0.04 / 3600.0))
-    fits.writeto(
-        str(wht_hi).replace("_sci.fits", "_wht.fits"),
-        np.full((64, 64), 1e6, dtype=np.float32),
-        _wcs_header(64, 0.04 / 3600.0),
-    )
-    cfg["sci_hi"] = str(wht_hi)
 
     def _load(fit_kwargs):
         cfg["fit"] = fit_kwargs
@@ -132,15 +128,42 @@ def test_detection_ivar_loaded_only_for_the_snr_weighted_schemes(tiny_config):
     assert _load({"extend_mode": "classic"}).weights[0] is not None
 
 
-def test_detection_ivar_warns_when_no_hi_weight_exists(tiny_config, caplog):
+def test_wht_hi_is_derived_from_sci_hi_when_unset(tiny_config, tmp_path):
+    """Standard grizli naming: <root>_sci.fits -> <root>_wht.fits."""
     cfg = json.loads(tiny_config.read_text())
-    cfg["fit"] = {"extend_mode": "wren"}  # sci_hi is "hi.fits": no _sci -> _wht sibling
+    hdr = _wcs_header(64, 0.04 / 3600.0)
+    fits.writeto(tmp_path / "drc_sci.fits", np.ones((64, 64), dtype=np.float32), hdr)
+    fits.writeto(tmp_path / "drc_wht.fits", np.full((64, 64), 1e6, np.float32), hdr)
+    cfg["sci_hi"] = str(tmp_path / "drc_sci.fits")
+    del cfg["wht_hi"]
+    path = tiny_config.parent / "run_derived.json"
+    path.write_text(json.dumps(cfg))
+    assert Pipeline.from_config(path).resolve_wht_hi() == tmp_path / "drc_wht.fits"
+
+
+def test_run_without_a_detection_weight_map_is_refused(tiny_config):
+    """A run with no wht_hi has no calibrated detection noise. Refuse it rather
+    than degrade to one sky-sigma scalar for the whole mosaic."""
+    cfg = json.loads(tiny_config.read_text())
+    del cfg["wht_hi"]  # sci_hi is "hi.fits": no _sci.fits -> _wht.fits sibling
     path = tiny_config.parent / "run_nowht.json"
     path.write_text(json.dumps(cfg))
-    with caplog.at_level("WARNING"):
-        pipe = Pipeline.from_config(path).load_data(kernels=False)
-    assert pipe.weights[0] is None
-    assert "scalar sky sigma" in caplog.text
+
+    pipe = Pipeline.from_config(path)
+    with pytest.raises(FileNotFoundError, match="no detection-band weight map"):
+        pipe.resolve_wht_hi()
+    with pytest.raises(FileNotFoundError, match="no detection-band weight map"):
+        pipe.load_data(kernels=False)
+    assert "wht_hi   MISSING" in pipe.info()
+
+
+def test_wht_hi_must_exist_when_set(tiny_config, tmp_path):
+    cfg = json.loads(tiny_config.read_text())
+    cfg["wht_hi"] = str(tmp_path / "nope.fits")
+    path = tiny_config.parent / "run_badwht.json"
+    path.write_text(json.dumps(cfg))
+    with pytest.raises(FileNotFoundError, match="wht_hi does not exist"):
+        Pipeline.from_config(path).resolve_wht_hi()
 
 
 def test_load_data_default_ensures_maps(tiny_config, monkeypatch):
@@ -200,3 +223,20 @@ def test_plain_pipeline_repr_and_info():
 def test_cli_steps_include_inspection():
     assert STEPS["load"] == "load_data"
     assert STEPS["info"] == "info"
+
+
+def test_run_saves_config_snapshot(tiny_config, monkeypatch):
+    """run() must snapshot the fully-explicit config before fitting."""
+
+    class Stop(Exception):
+        pass
+
+    pipe = Pipeline.from_config(tiny_config).load_data(kernels=False)
+    monkeypatch.setattr(pipe, "_ensure_maps", lambda: None)
+
+    def fake_save():
+        raise Stop()
+
+    monkeypatch.setattr(pipe, "save_config", fake_save)
+    with pytest.raises(Stop):
+        pipe.run()

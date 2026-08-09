@@ -3,6 +3,40 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Astrometric step damping: new `FitConfig.astrom_damping = 0.8`;
+  `Scene.solve` scales each pass's per-template shift increment by it before
+  `apply_template_shifts` (log line reports the applied factor). Rationale:
+  the central-difference shift basis underestimates gradients of sharp
+  structure, so the linearized Gauss-Newton step overshoots by k/sin(k) per
+  mode — harmless for convolved templates (power-weighted factor 1.1–1.3)
+  but able to approach the stability limit 2 for scenes dominated by
+  marginally sampled cores. Damping guarantees contraction; the fixed point
+  is unchanged (synthetic check: same offset to 1e-4 px, contraction ~7x
+  per pass instead of ~20x, tol reached on pass 3 vs 2 — dashed curves in
+  `scratch/wren/fitfig/fig_iteration_convergence.pdf`). `fit.pdf` gained a
+  section deriving the k/sin(k) overshoot, the two convergence regimes, the
+  stationary-point bias, and the ranked basis/scheme fixes (incl. the
+  Aitken step-scale formula); the path-independence figure was dropped
+  (point retained in text). Set 1.0 to restore
+  the old behavior. Improvement roadmap for the basis/scheme (tangent-
+  consistent B-spline derivative, kernel-side spectral gradient, direct
+  chi2 scan, Aitken step-scale estimation) recorded in the
+  `scratch/wren/fit.py` module docstring and `fit.pdf` Sec. 4. Tests:
+  `test_pipeline`, `test_scene_saturated`, `test_scene_max_size`,
+  `test_subphot_diag` — 24 passed with damping active.
+- [x] `scratch/wren/fit.pdf` (+ `fit.tex`, figures from `scratch/wren/fit.py`
+  into `fitfig/`): 4-page writeup of the scene solver for talks/paper — the
+  linear model and scene partition, the joint flux+astrometry solve (shift
+  basis, Chebyshev field, per-template dx/dy prediction), why the linearized
+  step is a smoothed operator (Fourier transfer functions: Taylor truncation
+  + central-difference low-pass vs measured cubic-spline response; 2D
+  anatomy figure, linear error 5% of peak vs spline 2e-3 at 0.5 px), the
+  iterate-linearize-reshift loop (TikZ flow diagram; synthetic convergence:
+  increment decays ~20x/pass, injected (1.5,-0.8) px recovered to 1e-4 px),
+  path independence of the applied-shift operator (single vs incremental
+  spline MTF erosion), and why (dx, dy, flux) per template is the complete
+  fit state (persisted-products table, offline reconstruction).
+  Documents-only; no package code changed.
 - [x] Repeatable run configs + fresh-session resume. `Pipeline.save_config()`
   writes the fully-explicit run config to `out_dir/<name>.json`: every
   `RunConfig` field and every *used* `FitConfig` setting with its resolved
@@ -24,6 +58,28 @@ This file records completed implementations, validation runs, and the current wo
   `tests/test_pipeline_config.py` (full-snapshot fields, directory
   resolution, resume, ambiguity) and +1 in `tests/test_pipeline_inspect.py`
   (run() snapshots before fitting); 26 passed across the three suites.
+  Follow-up: full fit state is now persisted and image diagnostics work
+  offline. `write_outputs` also writes `<name>_templates.fits`
+  (`_template_fit_table`: per final template id, id_parent, x, y, fitted
+  shift dx/dy, flux, err, scene id) — the only solve products a
+  deterministic template rebuild cannot re-derive; everything else
+  (raw/extended/convolved template shapes) reconstructs from sci_hi + segmap
+  + config + the cached PSF/kernel maps, and the total model is
+  `image - residual`. New `load_fit()` restores image-based state in a fresh
+  session: loads data, re-upsamples the fitted band onto the reference grid
+  exactly as `run()` does, derives `model_images` from the saved residual,
+  and loads the template table. `diagnose_subphot` and `diagnose_sources` then
+  work without a solve — each source's convolved template is rebuilt on
+  demand (`_rebuild_source_stage_templates`) and the saved flux/shift
+  applied; `diagnose_subphot`'s seg colouring falls back to template-table (or
+  catalog) positions. Verified: resumed-session `diagnose_subphot` reproduces
+  the in-session render bit-identically on the img/tmpl/seg/model/res
+  panels (clean differs only through the rebuilt-template spline;
+  `test_template_fit_table_and_resumed_render`), plus an end-to-end
+  files-only resume test (`test_load_fit_offline_diagnostics`); 31 passed.
+  Note: runs finished before this change have no `_templates.fits` —
+  `load_outputs` warns, and resumed renders then use catalog fluxes with
+  zero shift.
 - [x] Template build schemes selectable with one knob, `FitConfig.extend_mode`
   (`'default'|'psf'|'psf_model'|'wren'|'classic'`), so the three codes of
   `scratch/wren/template_comparison.pdf` can be compared 1-1 on identical
@@ -150,7 +206,7 @@ This file records completed implementations, validation runs, and the current wo
   stricter than the per-scene solve-time one (out-of-scene neighbours still
   count). Test: `test_isolation_thresh_counts_only_isolated_toward_floor`.
   Suite: 119 passed + pre-existing moffat failure.
-- [x] IDL subphot diagnostic port: `Pipeline.plot_subphot(source_id)` renders
+- [x] IDL subphot diagnostic port: `Pipeline.diagnose_subphot(source_id)` renders
   the legacy `subphot.pro::mkdiag`/`fptv` 6-panel PNG (img/tmpl/seg/model/
   res/clean, 2x3 at 2x nearest-neighbour zoom) pixel-for-pixel for 1-1
   comparison against IDL outputs (e.g. `scratch/wren/compare/monu/*.png`).

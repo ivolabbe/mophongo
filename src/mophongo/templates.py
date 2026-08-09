@@ -45,7 +45,7 @@ BUILD_TIME_MODES = ("psf_wings", "wren", "classic")
 #: exactly the double-counting protection that ordering buys.
 PRENORMALISED_MODES = ("psf_wings",)
 #: Accepted spellings that resolve onto :data:`EXTEND_MODES`.
-EXTEND_MODE_ALIASES = {"default": "psf_wings", "segment": "none"}
+EXTEND_MODE_ALIASES = {"default": "psf_wings"}
 
 import numpy as np
 from copy import deepcopy

@@ -72,7 +72,7 @@ class FitConfig:
     # k/sin(k) per mode; damping keeps the iteration contracting even for
     # scenes dominated by marginally sampled cores, at the cost of ~1 extra
     # pass. 1.0 = undamped.
-    astrom_damping: float = 0.7
+    astrom_damping: float = 0.8
     fit_astrometry_joint: bool = True  # Use joint astrometry fitting, or separate step
     # --- astrometry options -------------------------------------------------
     reg_astrom: float = 1e-4

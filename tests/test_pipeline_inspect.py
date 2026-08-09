@@ -122,8 +122,10 @@ def test_detection_ivar_read_only_for_the_snr_weighted_schemes(tiny_config):
         path.write_text(json.dumps(cfg))
         return Pipeline.from_config(path).load_data(kernels=False)
 
-    assert _load({}).weights[0] is None
+    assert _load({}).weights[0] is not None          # 'default' is a wings scheme
+    assert _load({"extend_mode": "none"}).weights[0] is None
     assert _load({"extend_mode": "psf"}).weights[0] is None
+    assert _load({"extend_mode": "default"}).weights[0] is not None
     assert _load({"extend_mode": "wren"}).weights[0] is not None
     assert _load({"extend_mode": "classic"}).weights[0] is not None
 
@@ -240,3 +242,29 @@ def test_run_saves_config_snapshot(tiny_config, monkeypatch):
     monkeypatch.setattr(pipe, "save_config", fake_save)
     with pytest.raises(Stop):
         pipe.run()
+
+
+def test_load_fit_offline_diagnostics(tiny_config, monkeypatch):
+    """Fresh-session resume: load_outputs + load_fit + diagnose_subphot from files."""
+    pipe = Pipeline.from_config(tiny_config)
+    pipe.save_config()
+    # fake run products: zero residual on the reference grid + fit/template tables
+    Table(
+        {"id": [1], "x": [32.0], "y": [32.0], "flux_1": [2.5], "err_1": [0.1]}
+    ).write(pipe.f_fit_table)
+    fits.writeto(pipe.f_residual, np.zeros((64, 64), dtype=np.float32))
+    Table(
+        rows=[(1, 1, 32.0, 32.0, 0.0, 0.0, 2.5, 0.1, 1)],
+        names=["id", "id_parent", "x", "y", "dx", "dy", "flux", "err", "id_scene"],
+    ).write(pipe.f_templates)
+
+    fresh = Pipeline.from_config(pipe.out_dir)
+    monkeypatch.setattr(fresh, "_ensure_maps", lambda: None)  # no PSF machinery
+    fresh.load_fit()
+
+    assert fresh.template_table is not None
+    assert fresh.images[1].shape == (64, 64)  # upsampled onto the ref grid
+    assert fresh.model_images[0].shape == (64, 64)
+    img = fresh.diagnose_subphot(1, size=21)
+    assert img.shape == (4 * 21, 6 * 21, 3)
+    assert img.dtype == np.uint8

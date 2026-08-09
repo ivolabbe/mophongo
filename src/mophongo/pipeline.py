@@ -696,7 +696,7 @@ class Pipeline:
         cfg = self.run_config
         path = self.resolve_wht_hi()
         mode = str(cfg.fit.get("extend_mode", "default") or "default").lower()
-        if mode not in ("wren", "classic"):
+        if mode not in ("default", "wren", "classic"):
             logger.info("detection weight map %s (not read: extend_mode=%r)", path.name, mode)
             return None
 
@@ -1303,11 +1303,11 @@ class Pipeline:
     # ------------------------------------------------------------------
     #: Legacy ``Pipeline(extend_templates=...)`` values -> ``extend_mode``.
     _LEGACY_EXTEND_MODES = {
-        None: "default",
-        "none": "default",
+        None: "none",
+        "none": "none",
         "default": "default",
+        "psf_wings": "default",
         "psf": "psf",
-        "psf_wings": "psf",
         "psf_model": "psf_model",
         "wren": "wren",
         "classic": "classic",
@@ -1338,7 +1338,7 @@ class Pipeline:
         radius ``r_fill = max(R_ee, r_aper + kernel_half_width)`` so the
         template covers the measurement aperture plus a convolution margin.
         """
-        if mode not in {"wren", "classic"}:
+        if mode not in ("default", "wren", "classic"):
             return {}
 
         weights = self.weights if self.weights is not None else []
@@ -1348,6 +1348,14 @@ class Pipeline:
             "detection_psf": self._psf_for_template_extension(),
             "detection_weight": det_weight,
         }
+        if mode == "default":
+            kwargs["psf_wings"] = template_schemes.PsfWingsParams(
+                snrlo_psf=float(config.psf_wings_snrlo),
+                blend_p=float(config.psf_wings_blend_p),
+                background_only=bool(config.extend_wings_background_only),
+                rms=None if config.psf_wings_rms is None else float(config.psf_wings_rms),
+            )
+            return kwargs
         if mode == "classic":
             kwargs["classic"] = template_schemes.ClassicParams(
                 tmpl_snrlo=float(config.classic_tmpl_snrlo),

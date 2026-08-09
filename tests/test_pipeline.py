@@ -186,7 +186,9 @@ def test_pipeline_flux_recovery(tmp_path):
     kernel = [mutils.matching_kernel(psfs[0], psf) for psf in psfs]
     kernel[0] = kernel[1] = dirac(3)  # no kernel for the first image, it is the hires image
     table, resid, templates = pipeline.run(
-        images, segmap, catalog=catalog, weights=wht, kernels=kernel
+        images, segmap, catalog=catalog, weights=wht, kernels=kernel,
+        # no detection PSF supplied here: this test predates the wings default
+        config=pipeline._FitConfig(extend_mode="none"),
     )
 
     # @@@ sometimes flux_true is NEGATIVE?
@@ -241,6 +243,7 @@ def test_pipeline_flux_recovery(tmp_path):
         catalog=catalog,
         kernels=[dirac(3), psfs[1]],
         weights=[np.zeros(wht[0].shape), wht[1]],
+        config=pipeline._FitConfig(extend_mode="none"),
     )
     table_true["flux_true"] = catalog["flux_true"]
     # Plot for high-res (flux_0) vs truth
@@ -326,6 +329,7 @@ def test_pipeline_accepts_prebuilt_templates(tmp_path):
         weights=[wht[0], wht[0]],
         kernels=[dirac, dirac],
         templates=tmpls,
+        config=pipeline._FitConfig(extend_mode="none"),
     )
     assert len(table) == len(catalog)
     assert len(pipe.tmpls.templates) == len(tmpls.templates)
@@ -360,7 +364,7 @@ def test_pipeline_propagates_catalog_deblend_flag_to_templates():
         weights=[np.ones_like(image), np.ones_like(image)],
         psfs=[np.eye(3, dtype=float), np.eye(3, dtype=float)],
         kernels=[None, None],
-        extend_templates="psf_wings",
+        extend_templates="psf",
     )
     pipe.run(config=FitConfig(fit_astrometry_niter=0, template_dilate_segmap=0))
 
@@ -395,7 +399,7 @@ def test_pipeline_can_skip_template_extension_for_deblended_sources():
         weights=[np.ones_like(image), np.ones_like(image)],
         psfs=[np.eye(3, dtype=float), np.eye(3, dtype=float)],
         kernels=[None, None],
-        extend_templates="psf_wings",
+        extend_templates="psf",
     )
     pipe.run(
         config=FitConfig(

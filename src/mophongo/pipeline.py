@@ -29,7 +29,7 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 
 from .psf_map import PSFRegionMap
 from .utils import bin_factor_from_wcs, downsample_psf, bin_remap
-from .templates import EXTEND_MODES, Templates, Template, _slices_from_bbox
+from .templates import EXTEND_MODE_ALIASES, EXTEND_MODES, Templates, Template, _slices_from_bbox
 from . import template_schemes
 from .fit import FitConfig as _FitConfig
 from .scene import generate_scenes
@@ -695,8 +695,9 @@ class Pipeline:
 
         cfg = self.run_config
         path = self.resolve_wht_hi()
-        mode = str(cfg.fit.get("extend_mode", "default") or "default").lower()
-        if mode not in ("default", "wren", "classic"):
+        mode = str(cfg.fit.get("extend_mode", _FitConfig.extend_mode) or "none").lower()
+        mode = EXTEND_MODE_ALIASES.get(mode, mode)
+        if mode not in ("psf_wings", "wren", "classic"):
             logger.info("detection weight map %s (not read: extend_mode=%r)", path.name, mode)
             return None
 
@@ -1305,8 +1306,8 @@ class Pipeline:
     _LEGACY_EXTEND_MODES = {
         None: "none",
         "none": "none",
-        "default": "default",
-        "psf_wings": "default",
+        "default": "psf_wings",
+        "psf_wings": "psf_wings",
         "psf": "psf",
         "psf_model": "psf_model",
         "wren": "wren",
@@ -1338,7 +1339,7 @@ class Pipeline:
         radius ``r_fill = max(R_ee, r_aper + kernel_half_width)`` so the
         template covers the measurement aperture plus a convolution margin.
         """
-        if mode not in ("default", "wren", "classic"):
+        if mode not in ("psf_wings", "wren", "classic"):
             return {}
 
         weights = self.weights if self.weights is not None else []
@@ -1348,7 +1349,7 @@ class Pipeline:
             "detection_psf": self._psf_for_template_extension(),
             "detection_weight": det_weight,
         }
-        if mode == "default":
+        if mode == "psf_wings":
             kwargs["psf_wings"] = template_schemes.PsfWingsParams(
                 snrlo_psf=float(config.psf_wings_snrlo),
                 blend_p=float(config.psf_wings_blend_p),

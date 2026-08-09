@@ -386,7 +386,7 @@ def test_pipeline_extend_mode_selects_the_build_scheme():
     catalog = Table({"id": [1], "x": [40.0], "y": [40.0]})
 
     modes = {}
-    for mode in ("none", "default", "psf", "wren", "classic"):
+    for mode in ("none", "psf_wings", "psf", "wren", "classic"):
         pipe = pipeline.Pipeline(
             [image, image],
             segmap,
@@ -406,17 +406,17 @@ def test_pipeline_extend_mode_selects_the_build_scheme():
         pipe.run()
         tmpl = pipe.templates_extended.templates[0]
         modes[mode] = tmpl
-        # 'default' deliberately sums to < 1 (neighbour wings dropped)
-        assert tmpl.data.sum() == pytest.approx(1.0, rel=1e-6) or mode == "default"
+        # 'psf_wings' deliberately sums to < 1 (neighbour wings dropped)
+        assert tmpl.data.sum() == pytest.approx(1.0, rel=1e-6) or mode == "psf_wings"
 
     assert modes["none"].extension_mode == "none"
-    assert modes["default"].extension_mode == "default"
+    assert modes["psf_wings"].extension_mode == "psf_wings"
     assert modes["psf"].extension_mode == "psf"
     assert modes["wren"].extension_mode == "wren"
     assert modes["classic"].extension_mode == "classic"
     # every extending scheme puts light outside the segment
     n_none = int(np.count_nonzero(modes["none"].data))
-    for mode in ("default", "psf", "wren", "classic"):
+    for mode in ("psf_wings", "psf", "wren", "classic"):
         assert int(np.count_nonzero(modes[mode].data)) > n_none
 
 
@@ -436,9 +436,9 @@ def test_pipeline_legacy_extend_templates_still_selects_the_mode():
         kernels=[None, None],
     )
 
-    assert pipeline.Pipeline([image, image], segmap, extend_templates="psf_wings", **kwargs).extend_mode == "default"
+    assert pipeline.Pipeline([image, image], segmap, extend_templates="psf_wings", **kwargs).extend_mode == "psf_wings"
     assert pipeline.Pipeline([image, image], segmap, extend_templates="none", **kwargs).extend_mode == "none"
-    assert pipeline.Pipeline([image, image], segmap, **kwargs).extend_mode == "default"  # config default
+    assert pipeline.Pipeline([image, image], segmap, **kwargs).extend_mode == "psf_wings"  # config default
     with pytest.raises(ValueError, match="Unknown template extension mode"):
         pipeline.Pipeline([image, image], segmap, extend_templates="bogus", **kwargs)
 
@@ -557,7 +557,7 @@ def test_template_extension_refuses_a_lower_resolution_psf():
     image = image.astype(np.float32)
     catalog = Table({"id": [1], "x": [40.0], "y": [40.0]})
 
-    for mode in ("default", "psf", "wren", "classic"):
+    for mode in ("psf_wings", "psf", "wren", "classic"):
         pipe = pipeline.Pipeline(
             [image, image],
             segmap,

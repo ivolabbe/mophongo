@@ -56,6 +56,7 @@ __all__ = [
     "build_ownership",
     "composite_classic",
     "composite_wren",
+    "covered_mask",
     "cutout_roi",
     "detection_rms",
     "psf_ee_radius_pix",
@@ -103,6 +104,12 @@ class WrenParams:
     containment
         Detection-PSF stamp containment ``c_det`` used by ``flux_beyond_stamp``.
         wren reads it from ``PSFRegionMap.containment``; 1.0 disables it.
+    bg_rms
+        Explicit detection-image sky rms, used when no inverse-variance map is
+        supplied. ``None`` measures it with :func:`sky_sigma`. Every blend
+        weight comes from an SNR, so with neither an ivar map nor a usable
+        sky rms every weight would be 0 and every template a bare point
+        source; the caller must therefore supply one or the other.
     """
 
     max_radius_pix: float = 0.0
@@ -114,6 +121,7 @@ class WrenParams:
     blend_p: float = 2.0
     blend_annulus: float = 0.15
     containment: float = 1.0
+    bg_rms: float | None = None
 
 
 @dataclass
@@ -190,13 +198,36 @@ def _decimate(arr: np.ndarray, max_pixels: int) -> np.ndarray:
     return arr[::step, ::step]
 
 
-def detection_rms(image: np.ndarray, max_pixels: int = 4_000_000) -> float:
+def covered_mask(image: np.ndarray) -> np.ndarray:
+    """Finite, non-zero pixels: the covered part of a drizzled mosaic.
+
+    Both noise estimators below are single scalars that IDL and wren measured
+    on one fully-covered tile. Run over a whole mosaic instead, they see the
+    zero-padded margin outside the footprint (``Pipeline.load_data`` runs
+    ``nan_to_num`` on the detection image, so no-coverage pixels are exact
+    zeros rather than NaN). That spike at zero drags a median-absolute
+    deviation down and collapses it to 0 once it holds the median, which would
+    silently disable IDL's low-SNR branch or drive every wren blend weight to
+    0. An exactly-zero pixel in a drizzled sky is no-coverage, not sky.
+    """
+    arr = np.asarray(image)
+    return np.isfinite(arr) & (arr != 0)
+
+
+def detection_rms(
+    image: np.ndarray,
+    valid: np.ndarray | None = None,
+    max_pixels: int = 4_000_000,
+) -> float:
     """IDL ``tmpl_rms = robust_sigma(ttmpl)`` on the detection image.
 
-    Measured over the image as given (sources included): the biweight scale
-    downweights them, which is precisely IDL's intent.
+    Measured over the covered image as given, sources included: the biweight
+    scale downweights them, which is precisely IDL's intent. ``valid`` defaults
+    to :func:`covered_mask`.
     """
-    return robust_sigma(_decimate(image, max_pixels))
+    arr = _decimate(image, max_pixels)
+    keep = _decimate(valid, max_pixels) if valid is not None else covered_mask(arr)
+    return robust_sigma(arr[keep])
 
 
 def sky_sigma(
@@ -205,16 +236,18 @@ def sky_sigma(
     n_clip: float = 3.0,
     n_iter: int = 3,
     max_pixels: int = 4_000_000,
+    valid: np.ndarray | None = None,
 ) -> float | None:
     """Robust sky sigma from un-segmented pixels, sigma-clipped.
 
     The wren noise fallback when no detection weight map is supplied.
     ``segmap == 0`` pixels still hold source wings and undetected light, which
-    would bias a plain MAD high; iterative clipping removes them.
+    would bias a plain MAD high; iterative clipping removes them. ``valid``
+    defaults to :func:`covered_mask`.
     """
     image = _decimate(image, max_pixels)
-    segmap = _decimate(segmap, max_pixels)
-    bg = np.asarray(image)[np.asarray(segmap) == 0]
+    keep = _decimate(valid, max_pixels) if valid is not None else covered_mask(image)
+    bg = np.asarray(image)[(np.asarray(_decimate(segmap, max_pixels)) == 0) & keep]
     bg = bg[np.isfinite(bg)]
     if bg.size < 10:
         return None

@@ -47,18 +47,39 @@ This file records completed implementations, validation runs, and the current wo
     implies is reconstructable — `template_comparison.tex` Sec. 7 listed its
     absence as an ivo defect.
   * `Pipeline.load_data` now passes `psfs=[prm_hi, prm_lo]` instead of
-    `[None, prm_lo]`. Template extension previously fell back to `psfs[1]`,
-    i.e. the **low-res** PSF, and no `RunConfig` field reached the extension
-    branches at all; with `extend_mode` in the `fit` dict the whole family is
-    now reachable from a JSON run with the correct detection PSF. Only fitted
-    bands (`ifilt >= 1`) feed throughput/PSF-EE bookkeeping, so index 0 is
-    inert there.
+    `[None, prm_lo]`, and `_ensure_maps` loads the cached `prm_hi` (it only
+    ever loaded `prm_lo` + built the kernel map, so `psfs[0]` stayed `None`
+    even after the `load_data` change). `_psf_for_template_extension` builds
+    the detection map on demand on a config-driven run rather than falling
+    through to `psfs[1]` — which in the two-image config layout is the
+    **low-res** PSF, so `wren`/`classic`/`psf` would have built wings from the
+    wrong band and derived `r_fill`/`R95` in lo-res pixels while applying them
+    as hi-res radii, with no error. The `psfs[1]` fallback is kept for the
+    three-image verification layout, where it really is the detection map. No
+    `RunConfig` field reached the extension branches at all before; with
+    `extend_mode` in the `fit` dict the whole family is now reachable from a
+    JSON run. Only fitted bands (`ifilt >= 1`) feed throughput/PSF-EE
+    bookkeeping, so index 0 is inert there.
+  * Both global noise scalars are measured over `covered_mask` (finite and
+    non-zero) rather than the whole array. IDL and wren measure them on one
+    fully-covered tile; over a mosaic, `load_data`'s `nan_to_num` turns the
+    out-of-footprint margin into exact zeros, and that spike at zero drags the
+    MAD down — measured 0.05 -> 0.019 at 61% blank, and exactly 0 at ~50%.
+    Zero would have silently disabled IDL's low-SNR branch and driven every
+    wren blend weight to 0, i.e. every template a bare point source with
+    `extend_failed` False. Both schemes now also raise instead of degrading
+    silently when no usable noise estimate exists (`WrenParams.bg_rms` /
+    `FitConfig.wren_bg_rms` and `ClassicParams.rms` are the overrides;
+    `tmpl_snrlo=0` skips the branch as IDL's `keyword_set` guard does).
   * Verified on a synthetic faint source (fraction of a point source the
     support can hold): `default` 0.40, `wren` 0.955 (R95 cap), `classic` 1.00,
     `psf` 1.00; classic `added_flux` 2.49 and `f_psf` within 1% of the true
     amplitude — matching `template_comparison.tex` Fig. 1.
-  * Tests: `tests/test_template_schemes.py` (29). Suite: 148 passed +
-    pre-existing `test_moffat_flux_recovery[psf_wing-3-psf]` failure.
+  * Tests: `tests/test_template_schemes.py` (32). Suite: 151 passed +
+    pre-existing `test_moffat_flux_recovery[psf_wing-3-psf]` failure. The three
+    detection-PSF / noise-scalar defects above came out of an adversarial
+    review of both ports against their reference sources (43 agents, 3
+    confirmed of 20 raised).
 - [x] Astrometric anchor selection unified (post-merge follow-up):
   `astrom_isolation_thresh` default 0.5 -> 0.7 (wren value); new
   `astrom_exclude_stars: bool = False` makes star exclusion opt-in at both

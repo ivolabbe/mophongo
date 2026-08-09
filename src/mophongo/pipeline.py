@@ -598,7 +598,13 @@ class Pipeline:
         return self
 
     def _ensure_maps(self) -> None:
-        """Load the cached lo-res PSF map and build the kernel map if missing."""
+        """Load the cached PSF maps and build the kernel map if missing."""
+        # prm_hi is only needed by template extension, but it must be loaded
+        # here too: load_data() calls this and not build_psfs(), and psfs[0]
+        # left at None makes _psf_for_template_extension fall through to
+        # psfs[1] -- the LOW-RES map in the two-image config layout.
+        if self.prm_hi is None and self.f_psf_hi.exists():
+            self.prm_hi = PSFRegionMap.from_geojson(str(self.f_psf_hi))
         if self.prm_lo is None and self.f_psf_lo.exists():
             self.prm_lo = PSFRegionMap.from_geojson(str(self.f_psf_lo))
         if self.prm_kern is None:
@@ -1140,6 +1146,7 @@ class Pipeline:
             wings_snr_psf=float(config.wren_wings_snr_psf),
             blend_p=float(config.wren_blend_p),
             blend_annulus=float(config.wren_blend_annulus),
+            bg_rms=None if config.wren_bg_rms is None else float(config.wren_bg_rms),
         )
         return kwargs
 
@@ -1931,9 +1938,22 @@ class Pipeline:
         return float(self.table["x"][row]), float(self.table["y"][row])
 
     def _psf_for_template_extension(self):
-        """Return the high-resolution PSF object used by template extension."""
+        """Return the high-resolution PSF object used by template extension.
+
+        ``psfs[0]`` is the detection band. The ``psfs[1]`` fallback exists for
+        callers whose detection image is ``images[1]`` (e.g. the three-image
+        verification layout ``psfs=[None, source_map, target_map]``). On a
+        config-driven run ``psfs[1]`` is the *low-res* map, so the detection
+        map is built/loaded on demand rather than silently substituted.
+        """
         psfs = self.psfs if self.psfs is not None else []
         psf_hi = psfs[0] if len(psfs) > 0 and psfs[0] is not None else None
+        if psf_hi is None and getattr(self, "run_config", None) is not None:
+            if self.prm_hi is None:
+                self.build_psfs()
+            psf_hi = self.prm_hi
+            if psf_hi is not None and self.psfs is not None and len(self.psfs) > 0:
+                self.psfs[0] = psf_hi
         if psf_hi is None and len(psfs) > 1:
             psf_hi = psfs[1]
         if psf_hi is None:

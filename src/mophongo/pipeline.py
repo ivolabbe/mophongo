@@ -512,6 +512,10 @@ class Pipeline:
         return self.out_dir / f"{self.run_config.name}_residual.fits"
 
     @property
+    def f_templates(self) -> Path:
+        return self.out_dir / f"{self.run_config.name}_templates.fits"
+
+    @property
     def scenes(self):
         """Scenes of the (first) fitted band, once :meth:`run` has completed."""
         return self.all_scenes[0] if getattr(self, "all_scenes", None) else None
@@ -846,6 +850,79 @@ class Pipeline:
             logger.info("loaded %s", self.f_residual.name)
         else:
             logger.warning("no residual image %s", self.f_residual)
+        if self.f_templates.exists():
+            self.template_table = Table.read(self.f_templates)
+            logger.info(
+                "loaded %s (%d templates)", self.f_templates.name, len(self.template_table)
+            )
+        else:
+            self.template_table = None
+            logger.warning("no template table %s (older run?)", self.f_templates)
+        return self
+
+    def _template_fit_table(self) -> Table:
+        """Per-template fit state of the first fitted band as a flat table.
+
+        Records what a deterministic template rebuild cannot re-derive:
+        per-component fitted amplitudes/errors, the applied astrometric
+        shifts, and scene membership.
+        """
+        scene_of = {id(t): s.id for s in (self.scenes or []) for t in s.templates}
+        rows = []
+        for t in self.all_templates[0]:
+            pid = t.id_parent if getattr(t, "parent_id", None) is not None else t.id
+            x, y = t.position_original
+            dx, dy = (float(v) for v in t.shifted[:2])
+            rows.append(
+                (int(t.id), int(pid), float(x), float(y), dx, dy,
+                 float(t.flux), float(t.err), int(scene_of.get(id(t), 0)))
+            )
+        return Table(
+            rows=rows,
+            names=["id", "id_parent", "x", "y", "dx", "dy", "flux", "err", "id_scene"],
+        )
+
+    def load_fit(self) -> "Pipeline":
+        """Restore image-based fit state from a finished run, without solving.
+
+        After :meth:`load_outputs`, loads the input data (if needed), puts the
+        fitted image on the reference grid exactly as :meth:`run` does, and
+        derives the model image from ``image - residual``. Per-source model
+        templates are then rebuilt on demand by the diagnostics using the
+        fitted fluxes/shifts from the saved template table, so
+        :meth:`diagnose_subphot` and :meth:`diagnose_sources` work in a fresh
+        session.
+        """
+        # data first: load_data() finishes construction via __init__, which
+        # resets the product lists that load_outputs() fills
+        if self.images is None:
+            self.load_data()
+        if not getattr(self, "residuals", []):
+            self.load_outputs()
+        if not self.residuals:
+            raise RuntimeError("no residual product to restore the model from")
+
+        ifilt = len(self.images) - 1
+        self.fit_bin_factors = []
+        k = bin_factor_from_wcs(self.wcs[0], self.wcs[ifilt]) if self.wcs is not None else 1
+        self.fit_bin_factors.append(int(k))
+        if k > 1:
+            if self.config.multi_resolution_method != "upsample":
+                raise NotImplementedError("load_fit supports the upsample path only")
+            weights_i = self.weights[ifilt] if self.weights is not None else None
+            self.images[ifilt], weights_i = _upsample_flux_conserving_image_and_ivar(
+                self.images[ifilt], weights_i, k
+            )
+            if weights_i is not None:
+                self.weights[ifilt] = weights_i
+            self.wcs[ifilt] = self.wcs[0]
+        if self.images[ifilt].shape != self.residuals[0].shape:
+            raise ValueError(
+                f"residual shape {self.residuals[0].shape} does not match "
+                f"image shape {self.images[ifilt].shape}"
+            )
+        self.model_images = [self.images[ifilt] - self.residuals[0]]
+        logger.info("restored model image as image - residual (bin factor %d)", k)
         return self
 
     # -- inspection --------------------------------------------------------
@@ -1038,6 +1115,11 @@ class Pipeline:
             overwrite=True,
         )
         self.table.write(self.f_fit_table, overwrite=True)
+
+        # per-template fit state: everything the solve produced that a rebuild
+        # cannot re-derive (component amplitudes, astrometric shifts, scenes)
+        if getattr(self, "all_templates", None):
+            self._template_fit_table().write(self.f_templates, overwrite=True)
 
         rows = []
         for s in self.scenes:
@@ -2244,12 +2326,13 @@ class Pipeline:
 
         if ifilt <= 0 or ifilt >= len(self.images):
             raise ValueError("ifilt must be between 1 and len(images)-1")
-        if self.templates_extracted is None or self.templates_extended is None:
-            raise RuntimeError("run the pipeline before calling diagnose_sources")
-        if len(self.all_templates) < ifilt:
-            raise RuntimeError("run the pipeline before calling diagnose_sources")
+        if len(getattr(self, "residuals", [])) < ifilt:
+            raise RuntimeError("run() or load_fit() before calling diagnose_sources")
 
-        final_templates = self.all_templates[ifilt - 1]
+        # in a resumed session (load_fit) there are no in-memory fit templates;
+        # every source is rebuilt through the primary per-source path instead
+        all_templates = getattr(self, "all_templates", None) or []
+        final_templates = all_templates[ifilt - 1] if len(all_templates) >= ifilt else []
         residual = self.residuals[ifilt - 1]
         model = (
             self.model_images[ifilt - 1]
@@ -2399,7 +2482,7 @@ class Pipeline:
             save=save,
         )
 
-    def plot_subphot(
+    def diagnose_subphot(
         self,
         source_id: int,
         *,
@@ -2419,7 +2502,10 @@ class Pipeline:
         same panel layout (2x3 at 2x nearest-neighbour zoom), byte scalings,
         background/rms estimator (aperture-scale block sums, 2-sigma clipped,
         ``prms = rms/na``), circular ``rlim`` fit mask on res/clean, and the
-        distance-sorted 5-level grayscale segmap colouring.
+        distance-sorted 5-level grayscale segmap colouring. Works in-session
+        after :meth:`run` and in a fresh session after :meth:`load_fit`
+        (the source's template is rebuilt and the saved fitted flux/shift
+        applied from the template table).
 
         Panels: ``img`` = low-res stamp at ``+-nsig*prms``; ``tmpl`` = hi-res
         template at ``median +- 8*robust_sigma``; ``seg`` = colour-cycled
@@ -2450,24 +2536,44 @@ class Pipeline:
         from astropy.stats import sigma_clipped_stats
         from PIL import Image, ImageDraw, ImageFont
 
-        if not getattr(self, "all_templates", None):
-            raise RuntimeError("run the pipeline before calling plot_subphot")
         if ifilt <= 0 or ifilt >= len(self.images):
             raise ValueError("ifilt must be between 1 and len(images)-1")
+        have_run = bool(getattr(self, "all_templates", None))
+        if not have_run and len(getattr(self, "model_images", [])) < ifilt:
+            raise RuntimeError("run() or load_fit() before calling diagnose_subphot")
         if self.images[ifilt].shape != self.images[0].shape:
             raise NotImplementedError(
-                "plot_subphot requires the fit grid to match the reference grid"
+                "diagnose_subphot requires the fit grid to match the reference grid"
             )
 
-        templates = self.all_templates[ifilt - 1]
-        own = [
-            t
-            for t in templates
-            if int(t.id_parent if getattr(t, "parent_id", None) is not None else t.id)
-            == int(source_id)
-        ]
-        if not own:
-            raise KeyError(f"source id {source_id} not found in fitted templates")
+        if have_run:
+            templates = self.all_templates[ifilt - 1]
+            own = [
+                t
+                for t in templates
+                if int(t.id_parent if getattr(t, "parent_id", None) is not None else t.id)
+                == int(source_id)
+            ]
+            if not own:
+                raise KeyError(f"source id {source_id} not found in fitted templates")
+        else:
+            # resumed session: rebuild this source's convolved template and
+            # apply the saved fitted shift/flux from the template table
+            templates = None
+            _, _, final = self._rebuild_source_stage_templates(source_id, ifilt=ifilt)
+            flux = None
+            ttab = getattr(self, "template_table", None)
+            if ttab is not None:
+                rows = ttab[np.asarray(ttab["id_parent"], dtype=int) == int(source_id)]
+                if len(rows):
+                    final.to_shift[:] = [float(rows["dx"][0]), float(rows["dy"][0])]
+                    Templates.apply_template_shifts([final])
+                    flux = float(np.sum(rows["flux"]))
+            if flux is None:
+                idx = np.flatnonzero(np.asarray(self.table["id"], dtype=int) == int(source_id))
+                flux = float(self.table[f"flux_{ifilt}"][int(idx[0])])
+            final.flux = flux
+            own = [final]
 
         if size is None:
             size = max(own[0].data.shape)
@@ -2536,21 +2642,29 @@ class Pipeline:
         mask = ((d >= rlim) | zero0).astype(float)
 
         # segmap colouring: cycle 5 gray levels through fitted ids by distance
+        if templates is not None:
+            src = [(int(t.id), *t.position_original) for t in templates]
+        else:
+            tt = getattr(self, "template_table", None)
+            tab = tt if tt is not None else self.table
+            src = list(
+                zip(
+                    np.asarray(tab["id"], dtype=int),
+                    np.asarray(tab["x"], dtype=float),
+                    np.asarray(tab["y"], dtype=float),
+                )
+            )
         in_stamp = [
-            t
-            for t in templates
-            if x1 <= t.position_original[0] < x1 + size
-            and y1 <= t.position_original[1] < y1 + size
+            s for s in src if x1 <= s[1] < x1 + size and y1 <= s[2] < y1 + size
         ]
         order = sorted(
             in_stamp,
-            key=lambda t: (t.position_original[0] - xc_full) ** 2
-            + (t.position_original[1] - yc_full) ** 2,
+            key=lambda s: (s[1] - xc_full) ** 2 + (s[2] - yc_full) ** 2,
         )
         lv = [0.2, 0.8, 0.4, 0.6, 1.0]
         tvseg = tseg.astype(float)
-        for i, t in enumerate(order):
-            tvseg[tseg == int(t.id)] = lv[i % 5]
+        for i, (sid, _, _) in enumerate(order):
+            tvseg[tseg == sid] = lv[i % 5]
 
         panels = [
             _fptv_panel(tphot, mm=(-scl, scl), bin=photbin),

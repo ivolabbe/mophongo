@@ -132,32 +132,6 @@ def _upsample_flux_conserving_image_and_ivar(
     return image_hi, weight_hi
 
 
-def _per_source_chi2(
-    residual: np.ndarray, weights: np.ndarray, templates: Sequence[Template]
-) -> np.ndarray:
-    """Compute template-weighted chi² for each template.
-
-    For each template, computes the sum of squared, template-weighted residuals
-    divided by the noise variance, normalized by the sum of template weights.
-
-    Returns
-    -------
-    ndarray
-        Array of template-weighted chi² values, one per template in ``templates``.
-    """
-    chi2 = np.zeros(len(templates), dtype=float)
-    for i, tmpl in enumerate(templates):
-        res = residual[tmpl.slices_original]
-        tmpl_data = tmpl.data[tmpl.slices_cutout]
-        ivar = weights[tmpl.slices_original]  # inverse variance
-        mask = ivar > 0
-        # Template-weighted chi²: sum((res * tmpl)^2 / var) / sum(tmpl^2)
-        num = np.sum(mask * (res * tmpl_data) ** 2 * ivar)
-        denom = np.sum(mask * tmpl_data**2)
-        chi2[i] = num / denom if denom > 0 else 0.0
-    return chi2
-
-
 # should support PSFRegionMap as well, like in template.convolve_templates
 #   ra, dec = tmpl.wcs.wcs_pix2world(x, y, 0)
 # else:
@@ -879,74 +853,6 @@ class Pipeline:
         self.write_outputs()
         return self
 
-    # ------------------------------------------------------------------
-    # Helper methods
-    # ------------------------------------------------------------------
-    def _add_templates_for_bad_fits(
-        self,
-        templates: list[Template],
-        tmpls_lo: Templates,
-        psf: np.ndarray | PSFRegionMap | None,
-        weights: np.ndarray | None,
-        fitter: "SparseFitter",
-        image: np.ndarray,
-        fitter_cls,
-        config: _FitConfig,
-    ) -> tuple[list[Template], "SparseFitter"]:
-        """Add secondary templates for poorly fitted sources.
-
-        Parameters
-        ----------
-        templates
-            Current list of templates used in the fit.
-        tmpls_lo
-            Base templates prior to convolution. Used when adding new
-            components.
-        psf
-            PSF image for the current low-resolution frame.
-        weights
-            Weight map corresponding to ``image``.
-        fitter
-            Fitter instance from the initial solve.
-        image
-            Image data being modelled.
-        fitter_cls
-            Fitter class used to instantiate a new fitter if additional
-            templates are required.
-        config
-            Fit configuration options.
-
-        Returns
-        -------
-        list[Template], SparseFitter
-            Possibly extended template list and a corresponding fitter
-            instance.
-        """
-
-        if not (
-            (config.multi_tmpl_psf_core or config.multi_tmpl_colour)
-            and psf is not None
-            and weights is not None
-        ):
-            fitter._ata = None
-            return templates, fitter
-
-        res = fitter.residual()
-        chi_nu = _per_source_chi2(res, weights, templates)
-        bad_idx = np.where(chi_nu > config.multi_tmpl_chi2_thresh)[0]
-        if bad_idx.size > 0:
-            logger.info("Adding %d new templates for poor fits", bad_idx.size)
-            for bi in bad_idx:
-                parent = templates[bi]
-                if config.multi_tmpl_psf_core:
-                    stamp = _extract_psf_at(parent, psf)
-                    add_tmpl = tmpls_lo.add_component(parent, stamp, "psf")
-                    templates.append(add_tmpl)
-            fitter = fitter_cls(templates, image, weights, config)
-        else:
-            fitter._ata = None
-        return templates, fitter
-
     def _update_catalog_with_fluxes(
         self,
         cat: Table,
@@ -1243,7 +1149,6 @@ class Pipeline:
             The fitter instance used for the final fit.
         """
         from .fit import SparseFitter
-        from .astro_fit import GlobalAstroFitter
         from .astrometry import AstroCorrect
         from . import utils
         import warnings
@@ -1465,143 +1370,86 @@ class Pipeline:
                 assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
 
             # @@@ split scenes here
-            # Optional scene-based solver: does not alter legacy path
-            if getattr(config, "run_scene_solver", False):
-                # Work on a copy of templates to avoid affecting legacy loop
-                templates_scene = templates
-                scenes, labels = generate_scenes(
-                    templates_scene,
-                    images[ifilt],
-                    weights_i,
-                    coupling_thresh=float(config.scene_coupling_thresh),
-                    max_size=config.scene_max_size,
-                    snr_thresh_astrom=float(config.snr_thresh_astrom),
-                    isolation_thresh=float(config.astrom_isolation_thresh),
-                    minimum_bright=int(config.scene_minimum_bright),
-                    max_merge_radius=float(getattr(config, "scene_max_merge_radius", np.inf)),
-                    exclude_stars=bool(config.astrom_exclude_stars),
+            if not getattr(config, "run_scene_solver", True):
+                raise ValueError(
+                    "run_scene_solver=False is no longer supported; the scene solver "
+                    "is the only fitting path"
                 )
-                # Assume each scene has .ra and .dec attributes (center coordinates)
-                # Compute RA/Dec for each scene center using WCS
-                if config.generate_scene_catalog:
-                    self.all_scenes.append(scenes)
-                    ras, decs = [], []
-                    for s in scenes:
-                        xy_mean = np.mean([t.position_original for t in s.templates], axis=0)
-                        if wcs[0] is not None:
-                            ra, dec = wcs[0].wcs_pix2world([xy_mean], 0)[0]
-                        else:
-                            ra, dec = np.nan, np.nan
-                        ras.append(ra)
-                        decs.append(dec)
-
-                    scene_table = Table(
-                        {
-                            "id": [s.id for s in scenes],
-                            "n_templates": [len(s.templates) for s in scenes],
-                            "is_bright": [s.is_bright.sum() for s in scenes],
-                            "ra": ras,
-                            "dec": decs,
-                        }
-                    )
-                    scene_table.write(
-                        f"scene_catalog_{ifilt}.ecsv", format="ascii.ecsv", overwrite=True
-                    )
-                    print(f"Wrote scene catalog scene_catalog_{ifilt}.ecsv")
-                    import sys
-
-                    sys.exit()
-
+            templates_scene = templates
+            scenes, labels = generate_scenes(
+                templates_scene,
+                images[ifilt],
+                weights_i,
+                coupling_thresh=float(config.scene_coupling_thresh),
+                max_size=config.scene_max_size,
+                snr_thresh_astrom=float(config.snr_thresh_astrom),
+                isolation_thresh=float(config.astrom_isolation_thresh),
+                minimum_bright=int(config.scene_minimum_bright),
+                max_merge_radius=float(getattr(config, "scene_max_merge_radius", np.inf)),
+                exclude_stars=bool(config.astrom_exclude_stars),
+            )
+            # Assume each scene has .ra and .dec attributes (center coordinates)
+            # Compute RA/Dec for each scene center using WCS
+            if config.generate_scene_catalog:
+                self.all_scenes.append(scenes)
+                ras, decs = [], []
                 for s in scenes:
-                    logger.info(f"Scene {s.id}: {len(s.templates)} (bright: {s.is_bright.sum()})")
+                    xy_mean = np.mean([t.position_original for t in s.templates], axis=0)
+                    if wcs[0] is not None:
+                        ra, dec = wcs[0].wcs_pix2world([xy_mean], 0)[0]
+                    else:
+                        ra, dec = np.nan, np.nan
+                    ras.append(ra)
+                    decs.append(dec)
 
-                niter_scene = max(config.fit_astrometry_niter, 1)
-                shift_tol = float(getattr(config, "astrom_shift_tol", 0.02))
-                for j in range(niter_scene):
-                    logger.info(f"[Scenes] Running iteration {j+1} of {niter_scene}")
-                    max_step = 0.0
-                    for scn in scenes:
-                        prev = np.array([t.shifted[:2] for t in scn.templates], dtype=float)
-                        scn.set_band(images[ifilt], weights_i, config=config)
-                        scn.solve(config=config, apply_shifts=True)
-                        cur = np.array([t.shifted[:2] for t in scn.templates], dtype=float)
-                        if prev.size and cur.shape == prev.shape:
-                            max_step = max(max_step, float(np.max(np.abs(cur - prev))))
+                scene_table = Table(
+                    {
+                        "id": [s.id for s in scenes],
+                        "n_templates": [len(s.templates) for s in scenes],
+                        "is_bright": [s.is_bright.sum() for s in scenes],
+                        "ra": ras,
+                        "dec": decs,
+                    }
+                )
+                scene_table.write(
+                    f"scene_catalog_{ifilt}.ecsv", format="ascii.ecsv", overwrite=True
+                )
+                print(f"Wrote scene catalog scene_catalog_{ifilt}.ecsv")
+                import sys
+
+                sys.exit()
+
+            for s in scenes:
+                logger.info(f"Scene {s.id}: {len(s.templates)} (bright: {s.is_bright.sum()})")
+
+            niter_scene = max(config.fit_astrometry_niter, 1)
+            shift_tol = float(getattr(config, "astrom_shift_tol", 0.02))
+            for j in range(niter_scene):
+                logger.info(f"[Scenes] Running iteration {j+1} of {niter_scene}")
+                max_step = 0.0
+                for scn in scenes:
+                    prev = np.array([t.shifted[:2] for t in scn.templates], dtype=float)
+                    scn.set_band(images[ifilt], weights_i, config=config)
+                    scn.solve(config=config, apply_shifts=True)
+                    cur = np.array([t.shifted[:2] for t in scn.templates], dtype=float)
+                    if prev.size and cur.shape == prev.shape:
+                        max_step = max(max_step, float(np.max(np.abs(cur - prev))))
+                logger.info(
+                    f"[Scenes] iteration {j+1}: max shift increment {max_step:.4f} pix"
+                )
+                if config.fit_astrometry_niter > 0 and max_step < shift_tol:
                     logger.info(
-                        f"[Scenes] iteration {j+1}: max shift increment {max_step:.4f} pix"
+                        f"[Scenes] shifts converged (< {shift_tol} pix) after {j+1} passes"
                     )
-                    if config.fit_astrometry_niter > 0 and max_step < shift_tol:
-                        logger.info(
-                            f"[Scenes] shifts converged (< {shift_tol} pix) after {j+1} passes"
-                        )
-                        break
+                    break
 
-                # build model in res first, then subtract from image
-                res = np.zeros_like(images[ifilt])
-                for s in scenes:
-                    sl = _slices_from_bbox(s.bbox)
-                    res[sl] += s.model_image()  # adds models in place
-                # then subtract from image to get residual
-                res = images[ifilt] - res
-
-            else:
-                print("Running legacy solver")
-                # fitter_cls = (
-                #     GlobalAstroFitter
-                #     if (config.fit_astrometry_niter > 0 and config.fit_astrometry_joint)
-                #     else SparseFitter
-                # )
-                fitter_cls = SparseFitter
-                niter = max(config.fit_astrometry_niter, 1)
-                for j in range(niter):
-                    print(f"Running iteration {j+1} of {niter}")
-
-                    fitter = fitter_cls(templates, images[ifilt], weights_i, config)
-                    fluxes, errs, info = fitter.solve()
-                    print(f"Pipeline (residual) memory: {memory():.1f} GB")
-
-                    # if config.fit_astrometry_niter > 0 and not config.fit_astrometry_joint:
-                    #     # @@@ this is very expensive. We dont need to form the whole residual image
-                    #     # can do it on the stamps only
-                    #     res = fitter.residual()
-                    #     logger.info("fitting astrometry separately")
-                    #     astro.fit(templates, res, fitter.solution)
-
-                    if config.fit_astrometry_niter > 0 and config.fit_astrometry_joint:
-                        Templates.apply_template_shifts(templates)
-
-                res = fitter.residual()
-
-                #            print("END of TEMPLATES FITTING")
-
-                # one final flux only solve after astrometry
-                # cfg_noshift = _FitConfig(**config.__dict__)
-                # cfg_noshift.fit_astrometry_niter = 0
-                # templates, fitter = self._add_templates_for_bad_fits(
-                #     templates,
-                #     tmpls_lo,
-                #     psfs[ifilt] if psfs is not None else None,
-                #     weights_i,
-                #     fitter,
-                #     images[ifilt],
-                #     fitter_cls,
-                #     config,
-                # )
-
-                # add soft non-negative priors if fluxes are < 0.0 and resolve.
-                # note idx is relative to initial list of templates. But additional templates were added at the end, so idx still works
-
-                # snr = np.divide(fluxes, errs, out=np.zeros_like(errs), where=errs > 0)
-                # selneg = snr < config.negative_snr_thresh
-                # if np.any(selneg):
-                #     logger.info(
-                #         f"{selneg.sum()} fluxes are negative, applying soft non-negative prior and resolving."
-                #     )
-                #     # this updates ata and atb, so we can resolve again
-                #     scale = np.clip(-snr, 1.0, 5.0)  # more negative → tighter prior
-                #     fitter.add_flux_priors(selneg, mu=0.0, sigma=(errs / scale))
-
-                #            fluxes, errs, info = fitter.solve(config=cfg_noshift)
+            # build model in res first, then subtract from image
+            res = np.zeros_like(images[ifilt])
+            for s in scenes:
+                sl = _slices_from_bbox(s.bbox)
+                res[sl] += s.model_image()  # adds models in place
+            # then subtract from image to get residual
+            res = images[ifilt] - res
 
             fluxes = [t.flux for t in templates]
             errs = [t.err for t in templates]
@@ -1620,18 +1468,6 @@ class Pipeline:
                 throughput,
             )
 
-            # calculate a full image residual from the scenes and their slice
-            #            res_scene
-            # if getattr(config, "run_scene_solver", False):
-            #     # sanity check
-            #     diff = np.abs(res - res_scene)
-            #     maxdiff = np.nanmax(diff)
-            #     if maxdiff > 1e-5 * np.nanmax(np.abs(res)):
-            #         warnings.warn(f"Scene residual differs from full residual: max diff {maxdiff}")
-            #     else:
-            #         print(f"Scene residual matches full residual: max diff {maxdiff}")
-            # #                res = res_scene
-            # print("Done...")
 
             if config.aperture_diam is not None:
                 pscale = self._pixel_scale_arcsec(
@@ -1717,33 +1553,6 @@ class Pipeline:
             x0 - tx0 : x1 - tx0,
         ]
         return stamp
-
-    @staticmethod
-    def _stamp_slices_for_templates(
-        templates: Sequence[Template],
-        image_shape: tuple[int, int],
-    ) -> tuple[slice, slice]:
-        """Return parent-image slices covering all template footprints."""
-        x0s: list[int] = []
-        x1s: list[int] = []
-        y0s: list[int] = []
-        y1s: list[int] = []
-        for tmpl in templates:
-            tx0, ty0 = map(int, tmpl._origin_original_true)
-            tx1 = tx0 + tmpl.data.shape[1]
-            ty1 = ty0 + tmpl.data.shape[0]
-            x0s.append(tx0)
-            x1s.append(tx1)
-            y0s.append(ty0)
-            y1s.append(ty1)
-
-        x0 = max(0, min(x0s))
-        x1 = min(image_shape[1], max(x1s))
-        y0 = max(0, min(y0s))
-        y1 = min(image_shape[0], max(y1s))
-        if x1 <= x0 or y1 <= y0:
-            return templates[0].slices_original
-        return slice(y0, y1), slice(x0, x1)
 
     @staticmethod
     def _diagnostic_display_scale(arrays: Sequence[np.ndarray]) -> tuple[float, float]:
@@ -2309,7 +2118,6 @@ class Pipeline:
             Tuple containing the created figure and the array of axes.
         """
 
-        import math
 
         import matplotlib.pyplot as plt
         import numpy as np
@@ -2481,44 +2289,6 @@ def run(
     )
     table, residuals = pipeline.run()
     return table, residuals, pipeline
-
-    # # EXTREMELY SLOW
-    # # block into tiles for faster access
-    # store = zarr.storage.MemoryStore()
-    # group = zarr.group(store=store)  # container
-    # fast = Blosc(cname="lz4", clevel=1, shuffle=Blosc.BITSHUFFLE)  # fastest
-    # tight = Blosc(cname="zstd", clevel=1, shuffle=Blosc.BITSHUFFLE)  # better ratio, still fast
-    # # You can control threads with Blosc(nthreads=<N>) if desired.
-    # for i in range(len(images)):
-    #     if images[i] is not None:
-    #         img = group.create_array(
-    #             f"images/{i}",
-    #             shape=(images[i].shape),
-    #             chunks=(512, 512),
-    #             dtype="float32",
-    #             compressors=None,  # <- critical
-    #             filters=None,  # <- critical
-    #             overwrite=True,
-    #             fill_value=0.0,
-    #         )
-    #         img[:] = images[i]
-    #         images[i] = img
-
-    #     if weights[i] is not None:
-    #         wht = group.create_array(
-    #             f"weights/{i}",
-    #             shape=(weights[i].shape),
-    #             chunks=(512, 512),
-    #             dtype="float32",
-    #             compressors=None,  # <- critical
-    #             filters=None,  # <- critical
-    #             overwrite=True,
-    #             fill_value=0.0,
-    #         )
-    #         wht[:] = weights[i]
-    #         weights[i] = wht
-
-    # # print(f"Pipeline (blocked storage) memory: {memory():.1f} GB")
 
 
 STEPS = {

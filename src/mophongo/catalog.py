@@ -8,11 +8,10 @@ from typing import Tuple
 
 import numpy as np
 from scipy import ndimage as ndi
-from astropy.convolution import Gaussian2DKernel, Box2DKernel
+from astropy.convolution import Gaussian2DKernel
 from astropy.io import fits
 from astropy.table import Table
-from photutils.background import MADStdBackgroundRMS
-from astropy.stats import SigmaClip, mad_std
+from astropy.stats import mad_std
 from astropy.wcs import WCS
 from photutils.segmentation import (
     SourceCatalog,
@@ -22,12 +21,10 @@ from photutils.segmentation import (
 from photutils.segmentation.catalog import DEFAULT_COLUMNS
 from photutils.segmentation import deblend_sources
 from skimage.morphology import binary_dilation, dilation, disk  # , square
-from skimage.segmentation import watershed
 from skimage.measure import label
 
-from itertools import product
 
-from astropy.nddata import block_reduce, block_replicate
+from astropy.nddata import block_reduce
 
 import matplotlib.pyplot as plt
 from scipy.ndimage import median_filter
@@ -76,16 +73,6 @@ from skimage.morphology import disk
 from .utils import fftconvolve
 
 # --- helpers ---------------------------------------------------------------
-
-
-def _mean_downsample(arr: np.ndarray, fact: int) -> np.ndarray:
-    a = np.asarray(arr, dtype=np.float32)
-    H, W = a.shape
-    H2, W2 = (H // fact) * fact, (W // fact) * fact
-    if H2 != H or W2 != W:
-        a = a[:H2, :W2]
-    a = a.reshape(H2 // fact, fact, W2 // fact, fact)
-    return a.mean(axis=(1, 3), dtype=np.float32)
 
 
 def bg_gaussian_normalized(img, bgmask, sigma=20.0, truncate=3.0):
@@ -376,8 +363,6 @@ def safe_dilate_segmentation(segmap: SegmentationImage, selem=disk(1.5)):
 
 
 import numpy as np
-from numpy.lib.stride_tricks import sliding_window_view
-from scipy.ndimage import binary_dilation as _dilate
 from astropy.stats import mad_std
 
 
@@ -388,37 +373,6 @@ def _mean_downsample(arr, fact):
     trimmed = arr[: ny2 * fact, : nx2 * fact]  # drop edge pixels
     view = trimmed.reshape(ny2, fact, nx2, fact)
     return view.mean(axis=(1, 3), dtype=arr.dtype)
-
-
-def _sigma_clip(arr, sigma=3.0):
-    """Vectorised σ-clip that returns a boolean mask."""
-    med = np.median(arr)
-    dev = sigma * mad_std(arr, ignore_nan=True)
-    return np.abs(arr - med) > dev
-
-
-def noise_equalised_image(data: np.ndarray, weight: np.ndarray | None = None) -> np.ndarray:
-    """Return image divided by the per-pixel noise."""
-    if weight is None:
-        return data
-    return data * np.sqrt(weight)
-
-
-def detect_peaks(
-    img_eq: np.ndarray,
-    sigma: float = 3.0,
-    npix_min: int = 5,
-    kernel_w: int = 3,
-) -> tuple[SegmentationImage, SourceCatalog]:
-    """Detect peaks in a noise-equalised image."""
-
-    kernel = Gaussian2DKernel(kernel_w / 2.355, x_size=npix_min, y_size=npix_min)
-
-    sm = fftconvolve(img_eq, kernel.array, mode="same")
-    std = mad_std(sm)
-    seg = detect_sources(sm, sigma * std, npixels=npix_min)
-    props = SourceCatalog(img_eq, seg)
-    return seg, props
 
 
 def fit_psf_stamp(
@@ -438,28 +392,6 @@ def fit_psf_stamp(
     chi2 = np.sum(((data - model) ** 2) / sigma**2)
     dof = data.size - 2
     return coeff[0], chi2 / dof
-
-
-def vet_by_chi2(star_list: Table, chi2_max: float = 3.0) -> Table:
-    """Filter table rows by reduced chi^2."""
-
-    mask = star_list["chi2_red"] < chi2_max
-    return star_list[mask]
-
-
-import numpy as np
-from astropy.nddata import block_reduce
-from astropy.table import Table
-from astropy.stats import mad_std
-from photutils.segmentation import detect_sources, SourceCatalog
-from scipy.ndimage import minimum_filter
-
-
-def _expand_remap(pos_xy, k):
-    # center-of-pixel convention (pixel centers at integers)
-    shift = (k - 1) / 2.0
-    x, y = pos_xy
-    return (x + shift) * k, (y + shift) * k
 
 
 import numpy as np
@@ -620,13 +552,6 @@ def _deblend_label_info(
     }
 
 
-@dataclass
-class CatConfig:
-    """Configuration options for :class:`SparseFitter`."""
-
-    # aperture in
-    aperture: float | str = "use_aper"
-    aperture_units: str = "arcsec"
 
 
 @dataclass
@@ -848,7 +773,6 @@ class Catalog:
                 flux_psf.append(flux)
             table["flux_psf"] = flux_psf
             table["chi2_red"] = chi2
-        #            table = vet_by_chi2(table, chi2_max)
 
         return table, idx_stars
 

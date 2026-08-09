@@ -573,8 +573,10 @@ def generate_scenes(
     coupling_thresh: float = 0.01,
     max_size: int | None = None,
     snr_thresh_astrom: float = 7.0,
+    isolation_thresh: float = 0.0,
     minimum_bright: int | None = None,
     max_merge_radius: float = np.inf,
+    exclude_stars: bool = False,
     isolate_saturated: bool = True,
 ) -> tuple[List["Scene"], np.ndarray]:
     """
@@ -617,8 +619,16 @@ def generate_scenes(
     snr_proxy = np.divide(
         ATb, np.sqrt(np.maximum(d, 1e-12)), out=np.zeros_like(ATb, dtype=float), where=d > 0
     )
-    not_star = ~np.array([t.is_star for t in templates], dtype=bool)
-    bright_mask = np.asarray(snr_proxy > float(snr_thresh_astrom), dtype=bool) & not_star
+    bright_mask = np.asarray(snr_proxy > float(snr_thresh_astrom), dtype=bool)
+    if exclude_stars:
+        bright_mask &= ~np.array([t.is_star for t in templates], dtype=bool)
+    if isolation_thresh > 0:
+        # Count only isolated sources toward minimum_bright, so merged scenes
+        # are guaranteed enough usable astrometric anchors. The full-field
+        # normal matrix makes this dominance measure stricter (more honest)
+        # than the per-scene one at solve time: out-of-scene neighbours still
+        # count against a source here.
+        bright_mask &= _astrom_isolation_mask(ATA, ATb, float(isolation_thresh))
 
     labels, nscene = merge_small_scenes(
         labels0,
@@ -742,14 +752,15 @@ class Scene:
 
         A, b = self.A, self.b
 
-        # bright mask: SNR cut + exclude stars + isolation cut
+        # bright mask: SNR cut + isolation cut (+ optional star exclusion)
         d = np.asarray(A.diagonal(), dtype=float)
         snr_proxy = np.divide(
             b, np.sqrt(np.maximum(d, 1e-12)), out=np.zeros_like(b, dtype=float), where=d > 0
         )
-        not_star = ~np.array([t.is_star for t in self.templates], dtype=bool)
         isolated = _astrom_isolation_mask(A, b, float(cfg.astrom_isolation_thresh))
-        self.is_bright = (snr_proxy > float(cfg.snr_thresh_astrom)) & not_star & isolated
+        self.is_bright = (snr_proxy > float(cfg.snr_thresh_astrom)) & isolated
+        if getattr(cfg, "astrom_exclude_stars", False):
+            self.is_bright &= ~np.array([t.is_star for t in self.templates], dtype=bool)
 
         # flux-only path
         if (not cfg.fit_astrometry_joint) or int(getattr(cfg, "fit_astrometry_niter", 0)) <= 0:

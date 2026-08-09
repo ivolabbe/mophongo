@@ -20,18 +20,20 @@ This file tracks future desired features, checks, and investigations.
   `Template.extend_info` but nothing consumes them. wren feeds them into its
   aperture-correction chain (`trunc = norm / (norm + flux_beyond_stamp)`).
   Wire them up, or drop them, once the scheme comparison settles.
-- [ ] Add an optional `wht_hi` to `RunConfig` and thread it to `weights[0]`.
-  Both build schemes then use the calibrated per-pixel noise
-  (`sqrt(sum 1/ivar)` over the mask) and no global scalar is involved at all.
-  Without it `load_data` passes `weights=[None, ivar]`, so wren falls back to
-  a single clipped `sky_sigma` and classic to a single `robust_sigma` — one
-  number for the whole mosaic, which a field with real depth variation biases
-  by the local/global depth ratio (high in the deep parts, low in the shallow
-  ones). The zero-padding failure of those fallbacks is fixed
-  (`covered_mask`); the depth-variation one is inherent to a scalar and is
-  the reason to supply the weights. Note IDL never had this option — it
-  carries no inverse-variance map at any stage and fits with `wts = 1/rms`
-  (`subphot.pro:541,869`), one scalar per tile.
+- [ ] `uds_770_dr0.json` gets no detection ivar: its `sci_hi` is the
+  saturated-star-repaired mosaic in `repair_saturate_out/`, and the weight map
+  sits with the original under `MINERVA/data/UDS/DR0/`. `RunConfig.wht_hi`
+  auto-derivation tries `sci_hi` then `driz_hi` (`_sci.fits` -> `_wht.fits`)
+  and neither resolves, so a `wren`/`classic` run there warns and falls back
+  to the scalar sky sigma. Set `wht_hi` (or `driz_hi`) explicitly in that
+  config before using it for a scheme comparison. `cosmos_770_dr0.1.json`
+  resolves automatically (verified: 32768x18944, 99.8% covered).
+- [ ] The detection background is measured in `_load_detection_ivar` and
+  logged but not subtracted (COSMOS median -7.2e-4), because subtracting it
+  would change `default` templates too. `template_comparison.tex` Sec. 8.1
+  lists "raw detection image, no background subtraction" as a wren defect —
+  a sky pedestal enters the halo linearly with its area, over ~855 px. Decide
+  whether the extended schemes should subtract it.
 - [ ] `extend_mode='wren'`'s `WrenParams.containment` (wren's
   `PSFRegionMap.containment`, the detection-PSF stamp containment `c_det` in
   `flux_beyond_stamp`) defaults to 1.0 because this tree has no equivalent.

@@ -62,6 +62,15 @@ This file records completed implementations, validation runs, and the current wo
     `extend_mode` in the `fit` dict the whole family is now reachable from a
     JSON run. Only fitted bands (`ifilt >= 1`) feed throughput/PSF-EE
     bookkeeping, so index 0 is inert there.
+  * `RunConfig.wht_hi` supplies the detection weight map, so the config-driven
+    path gets `weights[0]` and neither scheme needs a global noise scalar.
+    `None` (the default) derives it from `sci_hi`, then `driz_hi`, by the
+    grizli `_sci.fits` -> `_wht.fits` naming; `Pipeline._load_detection_ivar`
+    rescales it to a calibrated ivar with the same `get_bg_and_ivar` the
+    lo-res side uses. It is read **only** when `extend_mode` is `'wren'` or
+    `'classic'` — `'default'`/`'psf'` never touch `weights[0]`, and a
+    full-field hi-res weight map costs as much memory as the mosaic. Verified
+    end to end on COSMOS DR0.1 (32768x18944, 99.8% covered, median ivar 431).
   * Noise: with a detection inverse-variance map (`weights[0]`) **neither**
     scheme uses a global scalar — both take the formal `sqrt(sum 1/ivar)` over
     the mask. That is wren's primary path already; classic now shares it,
@@ -89,7 +98,8 @@ This file records completed implementations, validation runs, and the current wo
     support can hold): `default` 0.40, `wren` 0.955 (R95 cap), `classic` 1.00,
     `psf` 1.00; classic `added_flux` 2.49 and `f_psf` within 1% of the true
     amplitude — matching `template_comparison.tex` Fig. 1.
-  * Tests: `tests/test_template_schemes.py` (36). Suite: 155 passed +
+  * Tests: `tests/test_template_schemes.py` (36) + 2 in
+    `tests/test_pipeline_inspect.py`. Suite: 157 passed +
     pre-existing `test_moffat_flux_recovery[psf_wing-3-psf]` failure. The three
     detection-PSF / noise-scalar defects above came out of an adversarial
     review of both ports against their reference sources (43 agents, 3

@@ -97,11 +97,12 @@ class FitConfig:
     aperture_units: str = "arcsec"  # "arcsec" or "pix"
 
     # Template extraction: dilate each segment by this many pixels (disk radius)
-    # so the template captures more of the point-source PSF wings. The input
-    # catalog segmap is typically 2-σ detection with minimal dilation — that
-    # misses ~10% of the PSF EE for bright sources, biasing template fits low.
-    # 0 disables dilation; 2 is a good default for JWST NIRCam LW at 40 mas.
-    template_dilate_segmap: int = 2
+    # to capture more of the point-source PSF wings. Off by default (0): the
+    # IDL reference (subphot.pro::build_cube) uses the exact segment, dilation
+    # only adds a ring of sky noise, and its background tie-break is
+    # catalog-id ordered rather than geometric. Proper wing recovery is the
+    # job of template extension, not dilation.
+    template_dilate_segmap: int = 0
     # By default template extension is applied to every source, including
     # catalog deblend children. Set True to preserve deblended child templates
     # without PSF-wing/model completion when that is desired for a validation run.
@@ -117,6 +118,10 @@ class FitConfig:
     # scene processing
     run_scene_solver: bool = True  # Whether to run the scene solver at all
     scene_coupling_thresh: float = 1e-3  # 1% leakage threshold for scene splitting
+    # Soft cap on templates per scene. Components over the cap are split by
+    # raising the coupling threshold locally (inside that component only);
+    # the accepted local leakage is logged. None = no cap.
+    scene_max_size: int | None = 500
     generate_scene_catalog: bool = False  # If True, generate scene catalog and exit
 
     def __post_init__(self):

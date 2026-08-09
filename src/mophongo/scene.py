@@ -50,6 +50,7 @@ def build_scene_tree_from_normal(
     ATb: np.ndarray,
     *,
     coupling_thresh: float = 0.01,  # 3% leakage threshold
+    max_size: int | None = None,
     return_0_based: bool = False,
 ) -> tuple[np.ndarray, int]:
     """
@@ -66,6 +67,13 @@ def build_scene_tree_from_normal(
     coupling_thresh : float
         Edge if max(|A_ij α_j|/(A_ii|α_i|), |A_ij α_i|/(A_jj|α_j|)) >= threshold.
         0.02–0.05 works well; higher → more aggressive splitting.
+    max_size : int, optional
+        Soft cap on templates per component. A component over the cap is split
+        by raising the threshold *locally* — bisecting over that component's
+        own edge scores until its pieces fit — so strong couplings elsewhere
+        in the field are never cut on behalf of one crowded region. The final
+        local threshold is logged: it is the cross-scene leakage accepted
+        inside that region. None (default) disables the cap.
     return_0_based : bool
         If True, labels are 0..K-1; else 1..K (default).
 
@@ -135,6 +143,68 @@ def build_scene_tree_from_normal(
     adj = sp.coo_matrix((data, (rows, cols)), shape=(n, n)).tocsr()
 
     nscene, labels0 = connected_components(adj, directed=False)
+
+    if max_size is not None and np.bincount(labels0).max() > int(max_size):
+        sizes = np.bincount(labels0)
+        next_label = int(labels0.max()) + 1
+        t_hi = 0.0
+        n_split = 0
+        for comp in np.nonzero(sizes > int(max_size))[0]:
+            # Kept edges live entirely inside one component, so testing one
+            # endpoint suffices.
+            em = mask & (labels0[i] == comp)
+            ei, ej, es = i[em], j[em], score[em]
+            memb = np.nonzero(labels0 == comp)[0]
+            loc = np.full(n, -1, dtype=int)
+            loc[memb] = np.arange(memb.size)
+            li, lj = loc[ei], loc[ej]
+            # Bisect over this component's own edge scores for the smallest
+            # local threshold whose pieces all fit; dropping every edge leaves
+            # singletons, so a solution always exists.
+            cands = np.unique(es)
+            lo, hi = 0, cands.size
+            best_labs, best_t = None, 0.0
+            while lo < hi:
+                mid = (lo + hi) // 2
+                keep = es >= cands[mid]
+                data_m = np.ones(keep.sum() * 2, dtype=np.uint8)
+                adj_m = sp.coo_matrix(
+                    (
+                        data_m,
+                        (
+                            np.concatenate([li[keep], lj[keep]]),
+                            np.concatenate([lj[keep], li[keep]]),
+                        ),
+                    ),
+                    shape=(memb.size, memb.size),
+                ).tocsr()
+                _, labs_m = connected_components(adj_m, directed=False)
+                if np.bincount(labs_m).max() <= int(max_size):
+                    hi = mid
+                    best_labs, best_t = labs_m, float(cands[mid])
+                else:
+                    lo = mid + 1
+            if best_labs is None:
+                best_labs = np.arange(memb.size)  # drop all edges
+                best_t = float(cands[-1]) if cands.size else 0.0
+            labels0 = labels0.copy()
+            labels0[memb] = next_label + best_labs
+            next_label += int(best_labs.max()) + 1
+            t_hi = max(t_hi, best_t)
+            n_split += 1
+        labels0 = np.unique(labels0, return_inverse=True)[1]
+        nscene = int(labels0.max()) + 1
+        logger.info(
+            "split %d component(s) over max_size=%d locally: threshold up to "
+            "%.3g (floor %.3g), max scene %d, %d scenes",
+            n_split,
+            int(max_size),
+            t_hi,
+            float(coupling_thresh),
+            int(np.bincount(labels0).max()),
+            nscene,
+        )
+
     return (labels0 if return_0_based else labels0 + 1), int(nscene)
 
 
@@ -477,6 +547,7 @@ def generate_scenes(
     weight: np.ndarray | None = None,
     *,
     coupling_thresh: float = 0.01,
+    max_size: int | None = None,
     snr_thresh_astrom: float = 7.0,
     minimum_bright: int | None = None,
     max_merge_radius: float = np.inf,
@@ -513,7 +584,7 @@ def generate_scenes(
 
     # 2) Initial scene labels from normal-equation couplings
     labels0, _ = build_scene_tree_from_normal(
-        ATA, ATb, coupling_thresh=coupling_thresh, return_0_based=False
+        ATA, ATb, coupling_thresh=coupling_thresh, max_size=max_size, return_0_based=False
     )
 
     # 3) Merge scenes that are too small in terms of "bright" members

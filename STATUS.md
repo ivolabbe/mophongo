@@ -3,6 +3,13 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] `DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC` extended from F770W-only to all MIRI
+  imaging bands used so far: 0.08" (F560W, F770W), 0.10" (F1000W,
+  interpolated), 0.12" (F1280W), 0.18" (F1500W), 0.24" (F1800W). Values are
+  the MINERVA-UDS star-test measurements (0.088/0.116/0.189/0.246") rounded;
+  report at `scratch/wren/psf.pdf` (versioned `psf_vN.*`, figures rebuilt by
+  `scratch/wren/make_psf_report_figs.py`). Tests touching the defaults pass
+  (`test_pipeline_config.py`, `test_mock_mosaic.py`).
 - [x] Cached run products carry provenance, and missing PSF grids build
   themselves. Three artefacts are cached across runs and each is now reused
   only when it matches the run asking for it.

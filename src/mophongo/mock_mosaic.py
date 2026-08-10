@@ -365,7 +365,17 @@ def gaussian_blur_fourier(arr: np.ndarray, sigma_pix: float) -> np.ndarray:
 # realistic mocks and the real-data drivers (examples/run_*.py): the mock
 # injects this blur to be realistic, so any model-PSF chain fitting such data
 # (mock or real) must apply the same broadening before kernel construction.
-DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC: dict[str, float] = {"f770w": 0.08}
+# Values adopted from the MINERVA-UDS star test (scratch/wren/psf.pdf): the
+# measured per-band widths (0.088, 0.116, 0.189, 0.246" for F770W-F1800W),
+# rounded, with F560W set to the F770W value and F1000W interpolated.
+DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC: dict[str, float] = {
+    "f560w": 0.08,
+    "f770w": 0.08,
+    "f1000w": 0.10,
+    "f1280w": 0.12,
+    "f1500w": 0.18,
+    "f1800w": 0.24,
+}
 
 # FWHM/sigma conversion used by every blur path (mock painting, verification
 # kernel maps, real-data drivers) so all apply the bit-identical operator.

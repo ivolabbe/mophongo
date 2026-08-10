@@ -421,6 +421,17 @@ class Template(Cutout2D):
         self.flag |= Template.FLAG_VALID
         self.is_star: bool = False  # set by pipeline from catalog flag_star
 
+        # encircled energy of the low-res PSF stamp at this position, set by
+        # convolve_templates.  NaN until then, so an unset value fails loudly
+        # rather than silently applying no correction.
+        self.ee_psf_lo: float = np.nan
+        # fraction of the normalised source model this template retains, i.e.
+        # sum(data) once construction is finished.  Below one when wing flux has
+        # been handed to a neighbour.  Diagnostic only: the fitted amplitude does
+        # not scale with it, because the blanked pixels carry flux but almost no
+        # fitting weight (docs/ENCIRCLED_ENERGY.pdf).
+        self.ee_tmpl: float = np.nan
+
         # flux
         self.flux = 0.0
         self.err = 0.0
@@ -596,6 +607,8 @@ class Template(Cutout2D):
         new_cut.deblend_parent_label = self.deblend_parent_label
         new_cut.deblend_nchildren = self.deblend_nchildren
         new_cut.name = self.name
+        new_cut.ee_tmpl = self.ee_tmpl
+        new_cut.ee_psf_lo = self.ee_psf_lo
 
         return new_cut
 
@@ -1239,6 +1252,7 @@ class Templates:
                 smeared.flag |= Template.FLAG_SUM_ZERO
 
             smeared.data = data.astype(tmpl.data.dtype, copy=False)
+            smeared.ee_tmpl = float(np.nansum(smeared.data))
             smeared.flag = tmpl.flag
             if total == 0.0 or not np.isfinite(total):
                 smeared.flag |= Template.FLAG_SUM_ZERO
@@ -1401,6 +1415,7 @@ class Templates:
                 cut.data /= total
             else:
                 cut.flag |= Template.FLAG_SUM_ZERO
+            cut.ee_tmpl = float(cut.data.sum())
 
             templates.append(cut)
 
@@ -1408,7 +1423,10 @@ class Templates:
         return templates
 
     def convolve_templates(
-        self, kernel: np.ndarray | PSFRegionMap | None, inplace: bool = False
+        self,
+        kernel: np.ndarray | PSFRegionMap | None,
+        inplace: bool = False,
+        psf_lo: PSFRegionMap | None = None,
     ) -> list[Template]:
         """Convolve all templates with ``kernel``.
 
@@ -1421,6 +1439,11 @@ class Templates:
             If ``True``, templates are modified in place and the internal list
             is returned. Otherwise a new list of convolved templates is
             produced.
+        psf_lo : PSFRegionMap, optional
+            Low-resolution PSF map for the band being convolved to. When given,
+            each output template records ``ee_psf_lo``, the encircled energy of
+            that band's PSF stamp at the source position, which is the factor
+            that converts the fitted amplitude to a total flux.
 
         Returns
         -------
@@ -1439,25 +1462,27 @@ class Templates:
         for i, tmpl in enumerate(tqdm(tmpls, desc="Convolving templates")):
 
             # Obtain kernel for this template
-            if isinstance(kernel, PSFRegionMap):
+            ra = dec = None
+            if isinstance(kernel, PSFRegionMap) or psf_lo is not None:
                 x, y = tmpl.position_original
                 w_lookup = tmpl.wcs_original if tmpl.wcs_original is not None else tmpl.wcs
                 if w_lookup is not None:
                     ra, dec = w_lookup.wcs_pix2world(x, y, 0)
                 else:
                     ra, dec = x, y
-                kern = kernel.get_psf(ra, dec)
-            else:
-                kern = kernel
+            kern = kernel.get_psf(ra, dec) if isinstance(kernel, PSFRegionMap) else kernel
+            ee_lo = psf_lo.get_ee_box(ra, dec) if psf_lo is not None else np.nan
 
             if _is_identity_kernel(kern):
                 new_tmpl = tmpl if inplace else deepcopy(tmpl)
+                new_tmpl.ee_psf_lo = ee_lo
                 if not inplace:
                     new_templates.append(new_tmpl)
                 continue
 
 
             new_tmpl = tmpl.convolve_cutout(kern, parent_image=dummy_image)
+            new_tmpl.ee_psf_lo = ee_lo
 
             if not inplace:
                 new_templates.append(new_tmpl)

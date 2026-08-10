@@ -194,6 +194,17 @@ def _extract_psf_at(tmpl: Template, psf: np.ndarray | PSFRegionMap) -> np.ndarra
     return stamp
 
 
+def normalize(arr: np.ndarray) -> np.ndarray:
+    """Return ``arr`` scaled to unit sum, leaving non-positive sums untouched.
+
+    Separates PSF *shape* from PSF *throughput*: the caller keeps the native
+    stamp sum as metadata and passes the shape on to kernel construction.
+    """
+    a = np.asarray(arr, dtype=float)
+    s = float(np.nansum(a))
+    return a / s if np.isfinite(s) and s > 0.0 else a
+
+
 def _filter_psf_throughput(
     psf: np.ndarray | PSFRegionMap | None,
     explicit_throughput: float | None = None,
@@ -540,8 +551,22 @@ class Pipeline:
         return self
 
     # -- step 2: matching-kernel map --------------------------------------
-    def build_kernels(self, overwrite: bool = False) -> "Pipeline":
-        """Build (or reload) the matching-kernel map on the hi/lo overlay."""
+    def build_kernels(
+        self,
+        overwrite: bool = False,
+        *,
+        method: str = "wiener",
+        reg: float | None = None,
+    ) -> "Pipeline":
+        """Build (or reload) the matching-kernel map on the hi/lo overlay.
+
+        Args:
+            overwrite: Rebuild even if a cached kernel map exists.
+            method: Matching method passed to :func:`mophongo.utils.matching_kernel`.
+                Defaults to ``"wiener"``, matching the verification harness.
+            reg: Regularization parameter. When ``None`` and the method is
+                regularized, it is optimized once on a representative region.
+        """
         from . import utils
 
         if self.f_kernel.exists() and not overwrite:
@@ -558,11 +583,65 @@ class Pipeline:
         psf_lo = self._drizzle_lo_blurred(pos)
 
         pixel_ratio = round(self.dpsf_lo.driz_pscale / self.dpsf_hi.driz_pscale)
+        # Kernels are matched between unit-sum PSF *shapes*
+        # (docs/PSF_SHAPE_THROUGHPUT_CONVENTION.md).  Feeding native-sum stamps
+        # would make sum(kernel) carry sum(psf_lo)/sum(psf_hi), which then hides
+        # the kernel's own fidelity error inside a throughput factor.  The maps
+        # written by :meth:`build_psfs` keep their native sums; only the copies
+        # used here are normalized.
+        shapes_hi = [normalize(p) for p in psf_hi]
+        shapes_lo = [normalize(p) for p in psf_lo]
+
+        # The default SplitCosineBell window low-passes the model, which biases
+        # every fitted amplitude high by sum(W|P|^2)/sum(W^2|P|^2) -- 2.2% on the
+        # F444W/F770W pair, independent of stamp size.  A regularized method with
+        # an optimized parameter avoids it (docs/ENCIRCLED_ENERGY.pdf).
+        kw: dict[str, Any] = {"method": method}
+        if method.strip().lower() != "window":
+            if reg is None:
+                # One scan on the median shape, reused for every region: a
+                # per-region grid search would cost 21 kernels per region.
+                from .psf import PSF
+
+                med_hi = normalize(np.median(np.asarray(shapes_hi), axis=0))
+                med_lo = normalize(np.median(np.asarray(shapes_lo), axis=0))
+                fit = PSF.from_array(med_hi).optimize_matching_kernel_regularization(
+                    PSF.from_array(med_lo),
+                    method=method,
+                    pixel_ratio=pixel_ratio,
+                    recenter=False,
+                    growth_weight=1.0,
+                    core_weight=1.0,
+                    l2_weight=1.0,
+                    kernel_regularization_weight=1e-3,
+                )
+                reg = float(fit.reg)
+                logger.info(
+                    "%s regularization from a %d-point scan on the median PSF: "
+                    "reg=%.4g (score %.5g)",
+                    method, len(fit.reg_grid), reg, float(fit.score),
+                )
+            kw["reg"] = reg
         kernels = [
-            utils.matching_kernel(p_hi, p_lo, pixel_ratio=pixel_ratio)
-            for p_hi, p_lo in zip(psf_hi, psf_lo)
+            utils.matching_kernel(s_hi, s_lo, pixel_ratio=pixel_ratio, **kw)
+            for s_hi, s_lo in zip(shapes_hi, shapes_lo)
         ]
-        prm_kern.psfs = np.asarray(kernels)
+        # Renormalize to unit sum.  Unit-sum inputs already put sum(k) within a
+        # part in 1e3 of one, so this only removes the residual regularization
+        # DC, but it guarantees the kernel carries no flux scale of its own:
+        # the total flux correction is then ee_psf_lo and nothing else.  It says
+        # nothing about whether the kernel has the right *shape*, which is a
+        # separate term (docs/ENCIRCLED_ENERGY.pdf).
+        raw_sums = np.array([float(np.nansum(k)) for k in kernels])
+        prm_kern.psfs = np.asarray([normalize(k) for k in kernels])
+        logger.info(
+            "kernel map: method=%s reg=%s, DC before renormalization "
+            "mean %.6f, range %.6f-%.6f; renormalized to 1",
+            method, "n/a" if reg is None else f"{reg:.4g}",
+            float(np.nanmean(raw_sums)),
+            float(np.nanmin(raw_sums)),
+            float(np.nanmax(raw_sums)),
+        )
         prm_kern.to_file(self.f_kernel)
         self.prm_kern = prm_kern
         return self
@@ -874,8 +953,11 @@ class Pipeline:
         fluxes, errs, err_pred
             Model-template flux measurements and their uncertainties.
         throughput
-            Filter-level finite-support PSF sum.  Total-flux columns divide
-            model fluxes/errors by this value.  A value of 1 applies no
+            Filter-level finite-support PSF sum, used only for templates whose
+            per-source ``ee_psf_lo`` is missing.  Total-flux columns divide
+            model fluxes/errors by the encircled energy of the low-resolution
+            PSF stamp at each source position, which is the one factor between
+            the fitted amplitude and a total flux.  A value of 1 applies no
             missing-PSF-support correction.
         idx
             Index of the current image (used for column naming).
@@ -904,18 +986,37 @@ class Pipeline:
         flux_total_sum: defaultdict[int, float] = defaultdict(float)
         err_total_sum: defaultdict[int, float] = defaultdict(float)
         err_pred_total_sum: defaultdict[int, float] = defaultdict(float)
-        for pid, fl, er, ep in zip(parent_ids, fluxes, errs, err_pred):
+        # ee_psf_lo is measured on the drizzled stamp at each source position
+        # (PSFRegionMap.get_ee_box, recorded by Templates.convolve_templates).
+        # The filter-level mean is the fallback for templates that never saw a
+        # PSF map.  ee_tmpl is deliberately not used here: the amplitude does
+        # not scale with blanked wing flux (docs/ENCIRCLED_ENERGY.pdf).
+        ee_used: list[float] = []
+        for tmpl, pid, fl, er, ep in zip(templates, parent_ids, fluxes, errs, err_pred):
             if pid is None:
                 continue
+            ee = getattr(tmpl, "ee_psf_lo", np.nan)
+            if not np.isfinite(ee) or ee <= 0.0:
+                ee = throughput
+            ee = float(ee)
+            ee_used.append(ee)
             flux_sum[pid] += fl
             err_sum[pid] = float(np.sqrt(err_sum[pid] ** 2 + er**2))
             err_pred_sum[pid] = float(np.sqrt(err_pred_sum[pid] ** 2 + ep**2))
-            flux_total_sum[pid] += fl / throughput
+            flux_total_sum[pid] += fl / ee
             err_total_sum[pid] = float(
-                np.sqrt(err_total_sum[pid] ** 2 + (er / throughput) ** 2)
+                np.sqrt(err_total_sum[pid] ** 2 + (er / ee) ** 2)
             )
             err_pred_total_sum[pid] = float(
-                np.sqrt(err_pred_total_sum[pid] ** 2 + (ep / throughput) ** 2)
+                np.sqrt(err_pred_total_sum[pid] ** 2 + (ep / ee) ** 2)
+            )
+        if ee_used:
+            arr = np.asarray(ee_used)
+            logger.info(
+                "flux_%d_total divided by ee_psf_lo: median %.5f, range %.5f-%.5f "
+                "over %d templates (%d fell back to the filter mean %.5f)",
+                idx, float(np.median(arr)), float(arr.min()), float(arr.max()),
+                arr.size, int(np.sum(arr == throughput)), throughput,
             )
 
         for pid, fl in flux_sum.items():
@@ -1356,7 +1457,9 @@ class Pipeline:
             if weights_i is not None:
                 tmpls_lo.prune_outside_weight(weights_i)
 
-            templates = tmpls_lo.convolve_templates(kernel, inplace=False)
+            templates = tmpls_lo.convolve_templates(
+                kernel, inplace=False, psf_lo=getattr(self, "prm_lo", None)
+            )
             if k > 1 and config.multi_resolution_method == "upsample":
                 dummy_image = np.zeros(images[ifilt].shape, dtype=np.byte)
                 templates = [

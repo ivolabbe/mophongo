@@ -39,6 +39,7 @@ from .utils import (
     fftconvolve,
     pad_to_shape,
     matching_kernel,
+    resize_flux_conserving_inter_cubic,
 )
 from astropy.nddata import Cutout2D
 from astropy.coordinates import SkyCoord
@@ -1178,6 +1179,7 @@ class PSF:
         *,
         method: str = "tikhonov",
         reg_grid: np.ndarray | None = None,
+        pixel_ratio: float = 1.0,
         core_radius: float | None = None,
         growth_weight: float = 1.0,
         core_weight: float = 1.0,
@@ -1212,6 +1214,13 @@ class PSF:
         """
         psf_hi = np.asarray(self.array, dtype=float)
         psf_lo = other.array if isinstance(other, PSF) else np.asarray(other, dtype=float)
+        # Bring the pair onto a common grid the same way matching_kernel does,
+        # so the scan scores the kernel that will actually be built.  The inner
+        # matching_kernel calls then see pixel_ratio == 1.
+        if pixel_ratio > 1.0:
+            psf_lo = resize_flux_conserving_inter_cubic(psf_lo, pixel_ratio)
+        elif 0.0 < pixel_ratio < 1.0:
+            psf_hi = resize_flux_conserving_inter_cubic(psf_hi, pixel_ratio)
         psf_hi, psf_lo = _prepare_psf_pair(psf_hi, psf_lo)
 
         if reg_grid is None:
@@ -1868,7 +1877,8 @@ def stamp_encircled_energy(
     pscale: float,
     *,
     ee_fraction: float | None = None,
-) -> dict[str, float]:
+    per_stamp: bool = False,
+) -> dict[str, float] | dict[str, np.ndarray | float]:
     """Measure the *realized* encircled energy of drizzled PSF stamp(s).
 
     Absolutely calibrated ePSFs drizzle onto an absolute flux scale, so a stamp
@@ -1936,6 +1946,16 @@ def stamp_encircled_energy(
             # tiny negative wing pixels can make the raw sum non-monotonic
             idx = int(np.searchsorted(np.maximum.accumulate(cum), ee_fraction))
             radii.append(r_sorted[min(idx, len(r_sorted) - 1)])
+
+    if per_stamp:
+        # one value per stamp, in cube order, for callers that need a per-region
+        # lookup rather than a filter-level average
+        return {
+            "ee_box": np.asarray(ee_box, dtype=float),
+            "ee_circ": np.asarray(ee_circ, dtype=float),
+            "r_circ": r_circ,
+            "r_ee": np.asarray(radii, dtype=float) if radii else np.array([]),
+        }
 
     return {
         "ee_box": float(np.mean(ee_box)),

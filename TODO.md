@@ -67,6 +67,24 @@ This file tracks future desired features, checks, and investigations.
   `CHECKLIST.md`; the mechanism is live here and recorded nowhere else).
 - [ ] The flux-block ridge biases faint sources low: -33% at
   `d_i/median = 1e-6` (also from wren's `CHECKLIST.md`).
+- [ ] Wing deficit in the drizzled PSF, found by `examples/check_psf.ipynb`:
+  the azimuthally averaged model/star ratio sits at 0.83-0.95 (F444W, F770W)
+  and 0.72-0.76 (F1500W) outside the core, so the drizzled ePSF is missing
+  wing flux. Candidates: the 4-native-pixel edge taper applied at load time,
+  the finite STDPSF stamp, and the MIRI extended-PSF handling. Until it is
+  understood, any full-stamp kernel fit trades core against wings.
+- [ ] F444W central blur is censored: 82 % of stars land on the narrowest
+  Gaussian basis element (0.4 drizzle pixels), so the fit only bounds the blur
+  from above. Either extend the basis below 0.4 px or read the blur off the
+  basis-free width comparison (`blur_quad`, 0.037" for F444W).
+- [ ] The catalog-free finder in `examples/check_psf.ipynb` (peaks plus an
+  aperture-ratio locus) is worth promoting into `catalog.py` if it holds up: it
+  finds 37 usable F1500W stars where `flag_star` yields 3, and needs neither a
+  background model nor inverse variance. It currently lives in the notebook.
+- [ ] Fetch the m3.1 F1500W mosaic. The catalog's MIRI photometry is m3.1 but
+  the only local F1500W image is DR0 v2.4, so catalog positions land on
+  zero-weight pixels. Less critical now that selection no longer needs the
+  catalog, but the two versions should not be mixed.
 - [ ] scan for bug fixes / robustness improvements
 - [ ] `tests/test_pipeline_multitemplate.py::test_pipeline_multitemplate_pass`
   no longer exercises a multi-template pass: `_add_templates_for_bad_fits` and

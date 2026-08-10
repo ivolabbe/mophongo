@@ -329,7 +329,7 @@ def build_realistic_two_detector_mock(
     psf_gaussian_fwhm_arcsec
         Extra Gaussian broadening of the injected PSFs (FWHM, arcsec; float or
         per-filter dict). ``None`` uses the ``MockMosaic`` default
-        (``mock_mosaic.DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC``, F770W 0.08");
+        (``mock_mosaic.DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC``, e.g. F770W 0.08");
         pass ``0.0`` or ``{}`` to disable. Model-PSF chains fitting this mock
         (and real-data drivers such as ``examples/run_770.py``) must apply the
         same broadening before kernel construction.

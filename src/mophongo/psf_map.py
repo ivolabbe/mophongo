@@ -50,6 +50,18 @@ class PSFRegionMap:
     
     # optional ndarray to store PSF kernels as a lookup table
     psfs: np.ndarray | None = None
+    # pixel scale of ``psfs``; only sets the units of ``r_lim``.  Left at 1.0
+    # the radii are in pixels, while the encircled-energy fractions are
+    # unaffected either way.
+    pscale: float = 1.0
+
+    # encircled-energy cache, filled by refresh_ee().  Declared without
+    # annotations so the dataclass does not treat them as fields, and set here
+    # so the constructors that bypass __post_init__ still find them.
+    _ee_src = None
+    _ee_box = None
+    _ee_rlim = None
+    _r_lim = float("nan")
 
     # ------------------------------------------------------------------
     # orientation helper
@@ -84,6 +96,8 @@ class PSFRegionMap:
     def __post_init__(self) -> None:
         self._area_min = self.area_factor * self.buffer_tol
         self._rebuild_spatial_index()
+        self._ee_src: int | None = None
+        self.refresh_ee()
 
     def _rebuild_spatial_index(self) -> None:
         """Rebuild geometry lookup caches after replacing ``regions``."""
@@ -539,6 +553,78 @@ class PSFRegionMap:
                 key = 0
 
         return self.psfs[key]
+
+    # -------------------------------------------------------------------
+    # encircled energy of the stored stamps
+    # -------------------------------------------------------------------
+    def refresh_ee(self) -> None:
+        """Measure the encircled energy of every stamp in ``psfs``.
+
+        Called once when the map is constructed and again whenever ``psfs`` is
+        replaced, so the lookups below are a single array index.  The values
+        are derived from the stamps themselves rather than stored alongside
+        them, which means the drizzle kernel, any edge taper and any
+        broadening are already inside the sum.  For absolutely calibrated
+        stamps (STPSF ``NORMALIZ = first``, drizzled with ``in_units="cps"``)
+        they are absolute encircled energies.
+        """
+        if self.psfs is None:
+            self._ee_box = self._ee_rlim = None
+            self._r_lim = float("nan")
+            self._ee_src = None
+            return
+        from .psf import stamp_encircled_energy
+
+        ee = stamp_encircled_energy(np.asarray(self.psfs), self.pscale, per_stamp=True)
+        self._ee_box = ee["ee_box"]
+        self._ee_rlim = ee["ee_circ"]
+        self._r_lim = float(ee["r_circ"])
+        self._ee_src = id(self.psfs)
+
+    def _ee_arrays(self) -> None:
+        """Recompute only if ``psfs`` was replaced since the last measurement."""
+        if self._ee_src != id(self.psfs):
+            self.refresh_ee()
+        if self._ee_box is None:
+            raise ValueError(
+                f"PSFRegionMap {self.name!r} has no psfs; cannot report encircled energy"
+            )
+
+    @property
+    def ee_box(self) -> np.ndarray:
+        """Encircled energy in the square stamp, one value per psf_key."""
+        self._ee_arrays()
+        return self._ee_box
+
+    @property
+    def ee_rlim(self) -> np.ndarray:
+        """Encircled energy in the inscribed circle, one value per psf_key."""
+        self._ee_arrays()
+        return self._ee_rlim
+
+    @property
+    def r_lim(self) -> float:
+        """Inscribed-circle radius of the stamps, in units of ``pscale``."""
+        self._ee_arrays()
+        return self._r_lim
+
+    def _ee_at(self, arr: np.ndarray, ra: float | None, dec: float | None) -> float:
+        if ra is None or dec is None or np.isnan(ra) or np.isnan(dec):
+            logging.warning("RA/Dec is None or NaN, returning encircled energy at index 0.")
+            return float(arr[0])
+        key = self.lookup_key(ra, dec)
+        if key is None or np.isnan(key):
+            logging.warning("no region at requested ra,dec; returning index 0.")
+            key = 0
+        return float(arr[int(key)])
+
+    def get_ee_box(self, ra: float | None, dec: float | None) -> float:
+        """Encircled energy in the square stamp at a sky position."""
+        return self._ee_at(self.ee_box, ra, dec)
+
+    def get_ee_rlim(self, ra: float | None, dec: float | None) -> float:
+        """Encircled energy in the inscribed circle at a sky position."""
+        return self._ee_at(self.ee_rlim, ra, dec)
 
     def to_file(self, filename, driver="GeoJSON"):
         """

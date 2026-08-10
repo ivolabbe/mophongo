@@ -3,6 +3,67 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Encircled-energy bookkeeping settled end to end. One scalar converts a
+  fitted amplitude to a total flux: `ee_psf_lo`, the absolute encircled energy
+  of the low-resolution PSF stamp at the source position. For a point source
+  `A = f * S_lo` exactly, for any weight map and independently of how the
+  high-resolution stamp is truncated, because the kernel's target is the
+  low-resolution shape and the `1/S_hi` from normalising the input cancels.
+  Verified through the production code path (even stamps, real `Template`
+  cutouts, `convolve_cutout`): `A/S_lo` = 1.00140 to 1.00160 for the JWST pair
+  while `S_lo` moves from 0.85 to 1.00, and exact to five decimals for a
+  compact Moffat pair. Report: `docs/ENCIRCLED_ENERGY.pdf` (LaTeX source, figures and the scripts that
+  produce every number: `scratch/wren/encircled_energy.tex` and
+  `scratch/wren/ee_report/`, local only).
+  Changes:
+  * `build_kernels` matches unit-sum PSF *shapes* and renormalises the kernel
+    to unit sum, so it carries no flux scale of its own. Stored PSF maps keep
+    their native sums.
+  * `build_kernels` defaults to `method="wiener"` with the regularisation
+    scanned once on the median of the hi/lo PSF stacks. The old
+    `SplitCosineBellWindow` default biases the flux scale by 2.3-3.3% on the
+    JWST pair, of which a stamp-independent 2.2% has the closed form
+    `sum(W|P|^2)/sum(W^2|P|^2)`; wiener leaves 0.16%, flat in stamp size.
+  * `optimize_matching_kernel_regularization` accepts `pixel_ratio`, so the
+    scan scores the kernel that will actually be built.
+  * `PSFRegionMap.refresh_ee` measures `ee_box` and `ee_rlim` per region once
+    when `psfs` is set; `get_ee_box`/`get_ee_rlim` cost 11.8 us against 11.3 us
+    for `get_psf`. Derived from the stamps in use, so the edge taper, negative
+    clipping, drizzle kernel and blur are all inside the sum.
+  * `Template.ee_psf_lo` and `Template.ee_tmpl`, both `nan` by default and
+    carried through `convolve_cutout`. `flux_<i>_total` now divides by the
+    per-source `ee_psf_lo`; the filter-level mean from
+    `_filter_psf_throughput` is the fallback only.
+  * `ee_tmpl` is a diagnostic and is deliberately never read as a correction.
+    The amplitude scales with the leverage of the blanked pixels, not their
+    flux, and neighbour segments lie in the faint wings: measured, dividing by
+    it turns a 0.2% error into 0.9% isolated, and 3.3% into 6.7% for a pair at
+    8 px.
+  **Consequence:** `flux_<i>` and `flux_<i>_total` change on the next run, and
+  cached kernel maps must be rebuilt with `build_kernels(overwrite=True)`.
+  Full suite green (118 passed).
+- [x] `build_kernels` now matches unit-sum PSF *shapes* (`pipeline.py`,
+  `_unit_sum`), as `docs/PSF_SHAPE_THROUGHPUT_CONVENTION.md` has always
+  prescribed. Previously it passed native-sum stamps, so `sum(kernel)` carried
+  `sum(psf_lo)/sum(psf_hi)` and the kernel's own fidelity error was hidden
+  inside what looked like a throughput factor. Measured on the cached UDS
+  DR0.1 maps (1694 hi / 294 lo / 2911 kernel regions): `sum(psf_hi)` 0.96106,
+  `sum(psf_lo)` 0.91699, old kernel DC 0.95512 over the range 0.9357-0.9671,
+  matching `S_lo/S_hi` to 5.8e-6 per position. New kernel DC is 1.000005 with
+  a maximum deviation of 6.1e-6, so the old spread was throughput, not
+  regularization: there is nothing in the DC left to renormalize, and any
+  future deviation from 1 is a window/regularization diagnostic.
+  Amplitude effect, measured on region 0 with a unit-sum template and the
+  resampled F770W stamp as data: `A` 0.930420 -> 0.889643, exactly
+  `S_lo/S_hi` = 0.956173, and `A/S_lo` 1.013247 -> 0.968840. The remaining
+  0.9688 is the SplitCosineBell kernel's projection efficiency, now isolated
+  instead of cancelling against a +4.6% DC excess. `prm_hi`/`prm_lo` keep
+  their native sums, so `_filter_psf_throughput` is unchanged.
+  **Consequence:** `flux_<i>` and `flux_<i>_total` drop ~4.4% on UDS-like
+  fields on the next kernel rebuild (`build_kernels(overwrite=True)`; cached
+  kernel maps are reused otherwise). The divisor in `flux_<i>_total` is a
+  separate open decision - see TODO. Supporting analysis:
+  `scratch/ee_bookkeeping_facts.md`. Full suite green (118 passed).
 - [x] `examples/check_psf.ipynb` rewritten as a drizzled-PSF versus empirical-star
   check on the MINERVA-UDS mosaics in F444W (n3.0 40 mas), F770W (m3.0 80 mas)
   and F1500W (DR0 v2.4 80 mas), branch `drizzlepsf_star_mismatch`.

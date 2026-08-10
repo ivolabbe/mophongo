@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import psutil
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Sequence
@@ -77,6 +79,8 @@ class RunConfig:
     filter_lo: str = ""  # lo-res filter name, e.g. "f770w" (blur lookup)
     # PSF stamp size in arcsec; None = full native ePSF stamp as generated
     psf_size: float | None = 4.0
+    psf_autobuild: bool = True  # generate missing PSF grids with PSFFactory
+    psf_fov_arcsec: float | None = None  # PSFFactory field of view; None = backend default
     # extra Gaussian broadening of the lo-res model PSF (FWHM arcsec);
     # "default" = mock_mosaic.DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC[filter_lo],
     # a number = that value, None = no broadening
@@ -203,6 +207,94 @@ def normalize(arr: np.ndarray) -> np.ndarray:
     a = np.asarray(arr, dtype=float)
     s = float(np.nansum(a))
     return a / s if np.isfinite(s) and s > 0.0 else a
+
+
+_PSF_PATTERN_RE = re.compile(
+    r"^(?P<prefix>[A-Za-z0-9+-]+)_(?P<det>.+?)_(?P<filt>[Ff]\d+[A-Za-z]*)"
+    r"(?P<mjd>_MJD[^_]+)?_GRID(?P<n>\d+)_(?P<samp>OS\d+|DET)$"
+)
+
+
+def _psf_factory_kwargs(pattern: str) -> dict[str, Any]:
+    """Recover PSFFactory settings from an STDPSF filename pattern.
+
+    The pattern is what the loader searches with, so deriving the generator
+    settings from it is what guarantees the generated files are found again.
+    ``PSFFactory.filename`` builds
+    ``{prefix}_{DET}_{FILT}[_MJD{int}]_GRID{N}_{OS4|DET}.fits``; the detector is
+    left to the factory, which decodes it per exposure from the CSV.
+    """
+    m = _PSF_PATTERN_RE.match(pattern.strip())
+    if m is None:
+        raise ValueError(
+            f"cannot derive PSFFactory settings from pattern {pattern!r}; "
+            "expected {prefix}_{DET}_{FILT}[_MJD..]_GRID{N}_{OS4|DET}"
+        )
+    samp = m.group("samp")
+    return {
+        "prefix": m.group("prefix"),
+        "num_psfs": int(m.group("n")),
+        "oversample": 4 if samp == "DET" else int(samp[2:]),
+        "use_detsampled_psf": samp == "DET",
+        "include_mjd": m.group("mjd") is not None,
+    }
+
+
+def _stamp_provenance(prm: PSFRegionMap, **fields: Any) -> None:
+    """Record on a region map what produced it, as geojson-round-tripping columns."""
+    for key, value in fields.items():
+        prm.regions[key] = value
+
+
+def _provenance(prm: PSFRegionMap, key: str) -> Any:
+    """Read one provenance field back, or None when the map predates it."""
+    if key not in prm.regions.columns or not len(prm.regions):
+        return None
+    return prm.regions[key].iloc[0]
+
+
+def _provenance_matches(prm: PSFRegionMap, want: dict[str, Any]) -> str | None:
+    """Return the first field that disagrees with *want*, or None if all match."""
+    for key, value in want.items():
+        got = _provenance(prm, key)
+        if got is None:
+            return key
+        if isinstance(value, float):
+            if not np.isclose(float(got), value, rtol=0, atol=1e-9):
+                return key
+        elif str(got) != str(value):
+            return key
+    return None
+
+
+class _Tee:
+    """Write to a stream and a log file at once, one whole line at a time.
+
+    Progress bars rewrite a line with carriage returns; only the last state of
+    such a line reaches the file, so the log stays readable.
+    """
+
+    def __init__(self, stream, handle) -> None:
+        self._stream = stream
+        self._handle = handle
+        self._buf = ""
+
+    def write(self, text: str) -> int:
+        self._buf += text
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._handle.write(line.rsplit("\r", 1)[-1] + "\n")
+        return self._stream.write(text)
+
+    def flush(self) -> None:
+        self._stream.flush()
+        self._handle.flush()
+
+    def isatty(self) -> bool:
+        return self._stream.isatty()
+
+    def fileno(self) -> int:
+        return self._stream.fileno()
 
 
 def _filter_psf_throughput(
@@ -493,13 +585,58 @@ class Pipeline:
                         f"lo {got_lo} (expect {n_lo})"
                     )
         if load_epsf and not self._epsf_loaded:
-            self.dpsf_hi.epsf_obj.load_jwst_stdpsf(
-                local_dir=str(cfg.psf_dir), filter_pattern=cfg.pattern_hi
-            )
-            self.dpsf_lo.epsf_obj.load_jwst_stdpsf(
-                local_dir=str(cfg.psf_dir), filter_pattern=cfg.pattern_lo
-            )
+            self._load_epsf(self.dpsf_hi, cfg.pattern_hi, cfg.csv_hi, "hi")
+            self._load_epsf(self.dpsf_lo, cfg.pattern_lo, cfg.csv_lo, "lo")
             self._epsf_loaded = True
+
+    def _load_epsf(self, dpsf, pattern: str, csv: str, band: str) -> None:
+        """Load the ePSF grids for one band, generating them if absent.
+
+        ``load_jwst_stdpsf`` matches files under ``psf_dir`` against *pattern*
+        and loads nothing when none match, so a missing grid would otherwise
+        pass unnoticed and the run would continue without a PSF. When
+        ``psf_autobuild`` is set the grids are generated from the band's
+        exposure list; either way an empty result is an error.
+        """
+        cfg = self.run_config
+        dpsf.epsf_obj.load_jwst_stdpsf(local_dir=str(cfg.psf_dir), filter_pattern=pattern)
+        if dpsf.epsf_obj.epsf:
+            logger.info(
+                "%s-res band: loaded %d ePSF grid(s) matching %r",
+                band, len(dpsf.epsf_obj.epsf), pattern,
+            )
+            return
+
+        if not cfg.psf_autobuild:
+            raise FileNotFoundError(
+                f"no PSF grids under {cfg.psf_dir} match {pattern!r} for the "
+                f"{band}-res band, and psf_autobuild is off"
+            )
+
+        from .psf_factory import PSFFactory
+
+        kw = _psf_factory_kwargs(pattern)
+        logger.warning(
+            "no PSF grids match %r under %s; generating them from %s with "
+            "PSFFactory(%s). This is slow.",
+            pattern, cfg.psf_dir, csv,
+            ", ".join(f"{k}={v!r}" for k, v in sorted(kw.items())),
+        )
+        Path(cfg.psf_dir).mkdir(parents=True, exist_ok=True)
+        PSFFactory(outdir=str(cfg.psf_dir), fov_arcsec=cfg.psf_fov_arcsec, **kw).from_csv(
+            str(csv), save=True
+        )
+        dpsf.epsf_obj.load_jwst_stdpsf(local_dir=str(cfg.psf_dir), filter_pattern=pattern)
+        if not dpsf.epsf_obj.epsf:
+            raise FileNotFoundError(
+                f"PSFFactory ran for the {band}-res band but no file under "
+                f"{cfg.psf_dir} matches {pattern!r}; the pattern and the "
+                "generated filenames disagree"
+            )
+        logger.info(
+            "%s-res band: generated and loaded %d ePSF grid(s)",
+            band, len(dpsf.epsf_obj.epsf),
+        )
 
     def _region_maps(self):
         """Region maps for both bands (geometry only, deterministic)."""
@@ -530,11 +667,27 @@ class Pipeline:
     def build_psfs(self, overwrite: bool = False) -> "Pipeline":
         """Build (or reload) per-band PSF maps with PSFs at their own centroids."""
         self._ensure_dpsfs()
+        cfg = self.run_config
+        want_hi = {"pattern": cfg.pattern_hi, "psf_size": float(cfg.psf_size or 0.0),
+                   "blur_fwhm": 0.0}
+        want_lo = {"pattern": cfg.pattern_lo, "psf_size": float(cfg.psf_size or 0.0),
+                   "blur_fwhm": float(self._blur_fwhm() or 0.0)}
         if self.f_psf_hi.exists() and self.f_psf_lo.exists() and not overwrite:
-            self.prm_hi = PSFRegionMap.from_geojson(str(self.f_psf_hi))
-            self.prm_lo = PSFRegionMap.from_geojson(str(self.f_psf_lo))
-            logger.info("loaded cached PSF maps from %s", self.out_dir)
-            return self
+            cached_hi = PSFRegionMap.from_geojson(str(self.f_psf_hi))
+            cached_lo = PSFRegionMap.from_geojson(str(self.f_psf_lo))
+            stale = (_provenance_matches(cached_hi, want_hi)
+                     or _provenance_matches(cached_lo, want_lo))
+            if stale is None:
+                self.prm_hi, self.prm_lo = cached_hi, cached_lo
+                logger.info(
+                    "loaded cached PSF maps from %s (psf_size=%.3g, blur=%.3g)",
+                    self.out_dir, want_lo["psf_size"], want_lo["blur_fwhm"],
+                )
+                return self
+            logger.warning(
+                "cached PSF maps in %s disagree on %r; rebuilding",
+                self.out_dir, stale,
+            )
 
         self._ensure_dpsfs(load_epsf=True)
         prm_hi, prm_lo = self._region_maps()
@@ -545,6 +698,8 @@ class Pipeline:
         blur = self._blur_fwhm()
         if blur:
             logger.info('applied %.3f" FWHM Gaussian broadening to lo-res PSFs', blur)
+        _stamp_provenance(prm_hi, **want_hi)
+        _stamp_provenance(prm_lo, **want_lo)
         prm_hi.to_file(self.f_psf_hi)
         prm_lo.to_file(self.f_psf_lo)
         self.prm_hi, self.prm_lo = prm_hi, prm_lo
@@ -566,13 +721,32 @@ class Pipeline:
                 Defaults to ``"wiener"``, matching the verification harness.
             reg: Regularization parameter. When ``None`` and the method is
                 regularized, it is optimized once on a representative region.
+
+        A cached map records the method and regularization that produced it and
+        is reused only when the method matches; otherwise it is rebuilt. The
+        matching method is worth a few percent in the flux scale
+        (docs/ENCIRCLED_ENERGY.pdf), so silently reusing a map built another way
+        would apply a correction the run did not ask for.
         """
         from . import utils
 
         if self.f_kernel.exists() and not overwrite:
-            self.prm_kern = PSFRegionMap.from_geojson(str(self.f_kernel))
-            logger.info("loaded cached kernel map %s", self.f_kernel)
-            return self
+            cached = PSFRegionMap.from_geojson(str(self.f_kernel))
+            cached_method = _provenance(cached, "kernel_method")
+            cached_reg = _provenance(cached, "kernel_reg")
+            cached_reg = float("nan") if cached_reg is None else float(cached_reg)
+            if cached_method is not None and str(cached_method) == method:
+                self.prm_kern = cached
+                logger.info(
+                    "loaded cached kernel map %s (method=%s, reg=%.4g)",
+                    self.f_kernel, cached_method, cached_reg,
+                )
+                return self
+            logger.warning(
+                "cached kernel map %s was built with method=%s; this run wants "
+                "%s, so it is being rebuilt",
+                self.f_kernel, cached_method or "unrecorded", method,
+            )
 
         self._ensure_dpsfs(load_epsf=True)
         prm_hi_geom, prm_lo_geom = self._region_maps()
@@ -634,6 +808,14 @@ class Pipeline:
         # separate term (docs/ENCIRCLED_ENERGY.pdf).
         raw_sums = np.array([float(np.nansum(k)) for k in kernels])
         prm_kern.psfs = np.asarray([normalize(k) for k in kernels])
+        # Stamp the provenance so a cached map is never reused under a
+        # different method.  These round-trip through the geojson as columns.
+        _stamp_provenance(
+            prm_kern,
+            kernel_method=method,
+            kernel_reg=float("nan") if reg is None else float(reg),
+            psf_size=float(self.run_config.psf_size or 0.0),
+        )
         logger.info(
             "kernel map: method=%s reg=%s, DC before renormalization "
             "mean %.6f, range %.6f-%.6f; renormalized to 1",
@@ -924,12 +1106,67 @@ class Pipeline:
         logger.info("outputs written to %s", self.out_dir)
         return self
 
+    @contextmanager
+    def log_run(self, path: str | Path | None = None):
+        """Capture everything the run emits into ``<out_dir>/<name>.log``.
+
+        Both ``logging`` records and bare ``print``/``tqdm`` output go to the
+        file, since the package emits through both. The console is unchanged.
+        Appends, so successive runs against one output directory accumulate
+        rather than overwrite.
+        """
+        import platform
+        import sys
+        import time
+
+        path = Path(path) if path is not None else self.out_dir / f"{self.run_config.name}.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path, "a", buffering=1)
+        started = time.time()
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        handle.write(f"\n{'=' * 78}\nmophongo run {self.run_config.name}  {stamp}\n")
+        handle.write(f"python {platform.python_version()} on {platform.platform()}\n")
+        handle.write(f"out_dir {self.out_dir}\n{'=' * 78}\n")
+
+        old_out, old_err = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = _Tee(old_out, handle), _Tee(old_err, handle)
+        # attach a handler only if nothing else is consuming package logs, so
+        # records are not written twice when the caller configured logging
+        pkg = logging.getLogger("mophongo")
+        handler = None
+        if not pkg.handlers:
+            handler = logging.StreamHandler(sys.stdout)
+            handler.setFormatter(
+                logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s", "%H:%M:%S")
+            )
+            pkg.addHandler(handler)
+            if pkg.level == logging.NOTSET:
+                pkg.setLevel(logging.INFO)
+        try:
+            yield path
+        except BaseException as exc:
+            handle.write(f"FAILED after {time.time() - started:.1f}s: "
+                         f"{type(exc).__name__}: {exc}\n")
+            raise
+        else:
+            handle.write(f"finished in {time.time() - started:.1f}s\n")
+        finally:
+            if handler is not None:
+                pkg.removeHandler(handler)
+            sys.stdout, sys.stderr = old_out, old_err
+            handle.close()
+
     def run_all(self) -> "Pipeline":
-        """All steps in order: psfs, kernels, fit, outputs."""
-        self.build_psfs()
-        self.build_kernels()
-        self.run()
-        self.write_outputs()
+        """All steps in order: psfs, kernels, fit, outputs.
+
+        Everything the run emits is also written to ``<out_dir>/<name>.log``.
+        """
+        with self.log_run() as log_path:
+            logger.info("logging this run to %s", log_path)
+            self.build_psfs()
+            self.build_kernels()
+            self.run()
+            self.write_outputs()
         return self
 
     def _update_catalog_with_fluxes(

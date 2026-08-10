@@ -3,6 +3,192 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] `examples/check_psf.ipynb` rewritten as a drizzled-PSF versus empirical-star
+  check on the MINERVA-UDS mosaics in F444W (n3.0 40 mas), F770W (m3.0 80 mas)
+  and F1500W (DR0 v2.4 80 mas), branch `drizzlepsf_star_mismatch`.
+  Stars, neighbour masks and isolation all come from the
+  `n3.0_m3.1_v1.2.1` SUPER catalog; nothing is detected on the images. Only
+  data-quality tests (finite pixels, non-zero weight, unsaturated core) touch
+  the pixels. Outputs land in `examples/star_psf_check/`.
+  MJD coverage of the updated STPSFs confirmed: F444W uses 29 of 32 loaded
+  grids over 297 frames, F770W 9 of 9 over 229 frames, F1500W 4 of 4 over 162
+  frames; worst frame-to-grid offset 2.0 d, median 0.6-1.1 d.
+  The Gaussian-basis kernel fit runs on a core box (about three PSF FWHM), not
+  the full stamp: over the full stamp the fit is dominated by a wing deficit in
+  the drizzled model, and NNLS pays for it with a broad component that depresses
+  the core and leaves the corrected model worse than the raw one. The wing ratio
+  is now reported separately: azimuthal model/star is 0.94 at F444W, 0.75-0.80
+  at F770W and 0.54-0.69 at F1500W (the MIRI numbers got worse once neighbour
+  segments were masked, because the stars' own wings are no longer inflated by
+  neighbour light).
+  Star selection has two finders, `STAR_FINDER`. The catalog one (`flag_star`)
+  is badly incomplete for this purpose: only 60 of its stars reach SNR 100 in
+  F770W and 9 in F1500W, since the flag rides on the F444W detection. The
+  default is now catalog-free: a plain peak search per band (median and MAD from
+  a strided pixel sample, no background model, no ivar; exact zeros dropped, or
+  the MAD collapses on the background-subtracted MIRI mosaics), the 2000
+  brightest peaks, then a point-source cut on the ratio of two raw apertures,
+  r = FWHM and r = 2 FWHM, with the FWHM from that band's drizzled PSF. The
+  model gives ratio 0.817 / 0.811 / 0.820 and the stellar locus is +-0.04 around
+  it. Survivors also carry `psf_corr`, the normalised correlation with the model
+  PSF. This delivers 98 / 89 / 37 stars against 88 / 46 / 3 from the catalog —
+  F1500W is the band it rescues.
+  Sample: SNR > 150, unsaturated, covered, centroidable, and isolated by
+  a PSF-based test — a neighbour's contribution inside the star's R80 aperture
+  is computed from the band's own drizzled PSF shifted to the neighbour's
+  separation, and anything above 20 % of the star's flux in that aperture is
+  rejected. R80 is 0.254" (F444W), 0.495" (F770W), 0.777" (F1500W); a neighbour
+  sitting at one R80 puts 0.35-0.42 of its flux inside the aperture. Of the 835
+  flagged stars, 514 reach SNR 100 in F444W, 60 in F770W, 9 in F1500W; the
+  analysis runs on 100, 49 and 3. Stars are about 1.8 mag fainter at 15 um than
+  at 4.4 um (median catalog flux ratio 0.18), which is what makes F1500W thin.
+  Neighbours are masked with their catalog segments (the n3.0_v1.2 segmap,
+  whose labels are the catalog ids), resampled onto each stamp WCS and grown by
+  0.05-0.30" so the 40 mas NIRCam segments still cover the wider MIRI PSF. Only
+  the star's own segment plus a 2 px core is protected; guarding the whole
+  normalisation aperture, as a first version did, left neighbours inside it
+  unmasked, which is precisely the light that has to go.
+  A last cut removes extended sources: the data/model growth-curve ratio at the
+  data's own R80 must be at least 0.95. Galaxies with a compact core pass every
+  point-source test and fail here — 12 of 100 in F444W, 3 of 49 in F770W.
+  The kernel basis carries an explicit identity element, so "no broadening" is a
+  solution the fit can select rather than one it must approximate with its
+  narrowest Gaussian, and the run reports a no-blur baseline (the model at its
+  best-fit amplitude) alongside the fitted kernel.
+  All five bands now run: F444W plus the four MIRI bands. F1280W, F1500W and
+  F1800W all come from the DR0 v2.4 release (no download was needed, they were
+  already local); F1280W and F1500W sit in the 60881-60906 window, F1800W on the
+  earlier 59789-60514 baseline, and each has matching MJD-resolved grids.
+  Final samples: 98 stars (F444W), 89 (F770W), 37 (F1280W), 37 (F1500W),
+  23 (F1800W). Every star gets its own stamp figure (284 in total); stale
+  figures from an earlier run are cleared per band so the directory always
+  matches the current sample.
+  The MIRI diffusion kernel grows with wavelength — 0.084" (F770W), 0.111"
+  (F1280W), 0.172" (F1500W), 0.200" (F1800W) — roughly a quarter to a third of
+  the PSF FWHM in each band.
+  The kernel fit now solves for a constant background at the same time, in real
+  space with `scipy.optimize.lsq_linear` (kernel coefficients bounded
+  non-negative, the offset free either way). The annulus median that
+  `clean_with_catalog` subtracts is measured over a ring that still holds PSF
+  wings, so it overshoots, and the growth curves used to peak and then turn back
+  down. Two details matter. The design matrix is built with the pipeline's own
+  operator: column zero is the untouched model (the identity, exact by
+  construction) and the rest are `mock_mosaic.gaussian_blur_fourier` applied at
+  each basis width — the same flux-conserving analytic transfer function
+  `Pipeline._drizzle_lo_blurred` uses. An earlier version assembled the basis by
+  hand instead, from a delta placed at `(n-1)//2`, which disagrees with the
+  `n//2` kernel centre `utils.fftconvolve` documents; on the even stamps the
+  pipeline uses that shifted the identity column by a pixel, and the only
+  symptom was a fit that silently refused all pass-through weight while
+  `resid_fit` rose to 0.29. Reusing the production operator removes the question
+  entirely, and a check cell asserts per band that the identity column equals
+  the model exactly (0.0) and that convolving with the returned kernel image
+  reproduces the fitted model (round-trip 5-8e-8) on 100x100 and 125x125 stamps
+  alike. Separately verified that the pipeline itself was never affected: its
+  kernels come from `matching_kernel` on a PSF pair in the same frame, which
+  cancels any centring convention (0.0000 px shift, even and odd), and its one
+  analytic path, `gaussian_blur_psf`, goes through the same Fourier operator
+  (0.0000 px, flux 1.000000).
+  The offset must be constrained on the core box *plus* an outer ring
+  (`BG_ANNULUS_FRAC = 0.8` of the stamp half-width): on the core box alone it is
+  degenerate with the model's wing deficit and soaks it up as a positive
+  constant, which made the F770W turnover worse (outer growth curve at 0.79 of
+  its peak) instead of better. With the ring the outer growth curve sits at
+  1.000 (F444W, F770W) and 0.996 (F1500W), against 0.998/0.998/0.950 before.
+  Each star's fitted offset and registration shift are recorded, and the shift
+  is printed in the ratio panel of its figure.
+  `compare_psf_to_star` takes `save_curves=True` and writes the growth curves it
+  plotted to `<figure>_cog.csv` (radius, encircled energy for data/psf/psf x
+  diff, and both ratios). A stacking cell reads all of them and overplots the
+  whole sample per band with a 16-84 percentile band, which is where the core
+  mismatch shows up cleanly: the median data/psf ratio dips to 0.97 (F444W) and
+  0.88-0.91 (F1280W-F1800W) at small radius.
+  A pipeline would carry one number per band rather than a kernel per star, so
+  the median `fwhm_eff` per band is applied as a single Gaussian to every model
+  through `gaussian_blur_psf` — the same operator the pipeline broadens with —
+  and its growth-curve ratio is stored alongside. The widths are 0.031" (F444W),
+  0.088" (F770W), 0.116" (F1280W), 0.189" (F1500W) and 0.246" (F1800W), i.e.
+  0.8-3.1 drizzle pixels. One blur per band tracks the median of the per-star
+  fits closely: both sit within about 1-2 % of unity from the core out to the
+  normalisation radius, so the per-star freedom buys little over a single
+  per-band Gaussian.
+  Results (median over stars): F444W puts 88 % of the diffusion-kernel weight on
+  the identity — the core needs no extra smoothing, and the remaining 12 % is a
+  0.090" FWHM halo term; the basis-free width check gives 0.036". F770W needs a
+  real core term, 0.082" (kernel half-max) against 0.084" from the width check,
+  the two agreeing. F1500W needs 0.176", with 0.173" from the width check.
+  Core peak residual, no-blur baseline -> fitted kernel: 6.3 % -> 5.4 % (F444W),
+  8.0 % -> 5.9 % (F770W), 6.8 % -> 5.2 % (F1500W). The no-blur baseline already
+  wins for 19 % of F444W, 15 % of F770W and 11 % of F1500W stars, and the model
+  is measurably broader than the star for 18 % and 13 % of F444W and F770W —
+  cases no non-negative kernel can repair, since NNLS cannot sharpen.
+  The multi-Gaussian kernel is well approximated by a single convolution with
+  its largest-coefficient element: median |full basis - single element| is
+  1.9 % of peak in F444W, 2.9 % in F770W, 4.4 % in F1500W, and 0.7-1.6 % on the
+  growth curve.
+  PSF-region-map PSFs (drizzled at the region centroid, as the pipeline uses
+  them) need more smoothing than PSFs drizzled at the star: 0.053" versus 0.090"
+  halo term in F444W, 0.107" versus 0.082" in F770W, 0.176" versus 0.176" in
+  F1500W.
+  Distributions plot `fwhm_half_all` and `fwhm_dom_all`, which report zero when
+  the identity dominates, so stars needing no smoothing sit at zero instead of
+  being counted at the width of whatever sliver of Gaussian weight they carry.
+  A cross-band figure asks whether the extra width is intrinsic to the sources:
+  the reference band is re-measured at every other band's star positions (the
+  per-band samples are each band's brightest and barely overlap), and its kernel
+  width is plotted against the other band's. The extended-source cut is switched
+  off for that pass, since resolved objects are exactly what would produce a
+  correlation. The result is no correlation worth the name — r = +0.16 to +0.19
+  for the kernel width across the MIRI bands, and -0.14 to +0.06 for the
+  point-like subsets — so the extra width is a per-band PSF-model property, not
+  source size.
+  A note on what that pass exposed: measured with the annulus-median background
+  alone, most MIRI-selected stars failed the extended-source cut in F444W. With
+  the offset fitted, nearly all pass. The over-subtraction was making point
+  sources look resolved.
+- [x] The outer growth-curve scatter is not a background-model failure, checked
+  rather than assumed. Plane, 2D-quadratic and sigma-clipped background models
+  were each measured against the constant on 30 stars per band: all agree within
+  the noise (F770W ratio scatter 0.0222 / 0.0223 / 0.0232, F1500W 0.0167 /
+  0.0168 / 0.0169). Enlarging the ring onto a 1.6x or 2.2x stamp changes nothing
+  either. What the scatter does track is star brightness — correlation -0.4 to
+  -0.6 between log flux and outer scatter, with the bright half scattering 2-3x
+  less than the faint half (F770W 0.0048 versus 0.0140) — while its correlation
+  with the size of the fitted offset is -0.07 to -0.33. It is sky noise divided
+  by stellar flux. A far-field background (clipped median at 7-19", segments
+  masked) does reduce the scatter by 20-50 %, but it measures essentially zero
+  and so leaves the local bowl uncorrected, and the growth curves then turn over
+  again (outer COG/peak 0.92-0.97 against 1.000). The local fitted offset is
+  kept, since flattening the growth curve is the point.
+- [x] Blur width against source size: for every object measured in both bands,
+  the MIRI diffusion width is plotted against its F444W half-light radius
+  (`r50_data`, from its own growth curve normalised at Rnorm). No consistent
+  trend — r = +0.18 (F770W), -0.41 (F1280W), -0.30 (F1500W), +0.11 (F1800W) —
+  which agrees with the band-versus-band comparison: the extra width belongs to
+  the band, not to the sources.
+- [x] Comparison/diagnostic figure changes in `utils.py`:
+  `CircularApertureProfile._plot_cog` marks R50 instead of R20 alongside R80 and
+  annotates both with rotated labels on the lines rather than legend entries;
+  `_plot_ratio` marks the normalisation radius; `compare_psf_to_star` labels the
+  fitted kernel a diffusion kernel and reports its effective (second-moment)
+  FWHM, from the new `utils.kernel_effective_fwhm`, as green text in the ratio
+  panel. The kernel stamp panel is gone (a smooth blob shows nothing), and the
+  growth-curve legend is now a three-row R50/R80 table (data, psf, psf x diff)
+  with colour-matched row labels. `compare_psf_to_star` also takes `clean=False`,
+  so a caller that already masked neighbours keeps its own stamp instead of
+  being re-cleaned by `clean_stamp` detection, and an optional `composite` RGB
+  array that becomes a fifth image panel — the notebook fills it with an
+  F444W + F770W Lupton composite. Channels are built as in the scene
+  diagnostics (each over its own standard deviation, high-resolution band
+  block-reduced onto the low-resolution grid), but with `stretch = 1`, `Q = 30`
+  rather than the scene default `Q = 8`: `Q`, not `stretch`, is what keeps a
+  bright core from collapsing into a flat blob, and raising `stretch` alone only
+  darkens the frame. The greyscale panels also take `vmin`/`vmax` arguments and
+  default to a wider `-5.3 .. -1.0` dex ramp, so sky noise occupies less of it.
+- [x] `utils.clean_stamp` no longer crashes when `detect_sources` finds nothing
+  (it passed `None` into `safe_dilate_segmentation`). It now logs and returns
+  the background-subtracted stamp with an empty object mask. Hit by faint
+  F1500W stars through `compare_psf_to_star`.
 - [x] Test suite fully green for the first time (118 passed, 0 failed).
   Two long-standing failures fixed, neither caused by the cleanup:
   `test_moffat_recovery[psf_wing-3-psf]` passed `kernels=` but never `psfs=`

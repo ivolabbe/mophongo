@@ -3,6 +3,31 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Cached run products carry provenance, and missing PSF grids build
+  themselves. Three artefacts are cached across runs and each is now reused
+  only when it matches the run asking for it.
+  * STPSF grids. `_load_epsf` loads the grids matching `pattern_hi`/`pattern_lo`
+    under `psf_dir`; when none match it derives the generator settings from the
+    pattern itself (`_psf_factory_kwargs`: prefix, `num_psfs`, oversampling,
+    detector sampling, MJD) and runs `PSFFactory.from_csv` on that band's
+    exposure list, then reloads. Deriving from the pattern is what guarantees
+    the generated filenames are found again. An empty result is now an error
+    instead of a silent no-op that let a run continue with no PSF. Off with
+    `psf_autobuild=False`; field of view via `psf_fov_arcsec`.
+  * Drizzled PSF maps. Stamped with `pattern`, `psf_size` and `blur_fwhm`, and
+    rebuilt when any of them differs.
+  * Kernel maps. Stamped with `kernel_method`, `kernel_reg` and `psf_size`, and
+    rebuilt when the method differs. The matching method is worth a few percent
+    in the flux scale, so reusing a map built another way applied a correction
+    the run had not asked for.
+  Maps written before this carry no provenance columns and count as stale, so
+  the first run against an existing output directory rebuilds them.
+- [x] `Pipeline.run_all` writes a full log to `<out_dir>/<name>.log`. The
+  package reports through both `logging` and bare `print`/`tqdm`, so the log
+  tees stdout and stderr as well as attaching a handler, and keeps only the
+  final state of each progress line. Appends across runs, with a header
+  (timestamp, python, platform, out_dir) and a footer giving elapsed time or
+  the exception. Available on its own as `Pipeline.log_run()`.
 - [x] Encircled-energy bookkeeping settled end to end. One scalar converts a
   fitted amplitude to a total flux: `ee_psf_lo`, the absolute encircled energy
   of the low-resolution PSF stamp at the source position. For a point source

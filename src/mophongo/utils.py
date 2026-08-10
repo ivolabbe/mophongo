@@ -1179,22 +1179,23 @@ class CircularApertureProfile(RadialProfile):
         ax.set_xlabel(f"Radius ({self._radius_unit()})")
         ax.set_ylabel("Encircled Energy")
         if self.norm_radius is not None:
-            r20 = self.cog.calc_radius_at_ee(0.2)
-            r80 = self.cog.calc_radius_at_ee(0.8)
-            ax.axvline(
-                self._convert_radius(r20),
-                color=color,
-                ls=":",
-                label=f"R20 {self._convert_radius(r20):.2f} {self._radius_unit()}",
-                **kwargs,
-            )
-            ax.axvline(
-                self._convert_radius(r80),
-                color=color,
-                ls="--",
-                label=f"R80 {self._convert_radius(r80):.2f} {self._radius_unit()}",
-                **kwargs,
-            )
+            # values kept for callers that tabulate them instead of using the legend
+            self.r50 = self.cog.calc_radius_at_ee(0.5)
+            self.r80 = self.cog.calc_radius_at_ee(0.8)
+            for r, ls, tag in ((self.r50, ":", "R50"), (self.r80, "--", "R80")):
+                rx = self._convert_radius(r)
+                ax.axvline(rx, color=color, ls=ls, **kwargs)
+                ax.text(
+                    rx,
+                    0.02,
+                    tag,
+                    rotation=90,
+                    color=color,
+                    fontsize=8,
+                    ha="right",
+                    va="bottom",
+                    transform=ax.get_xaxis_transform(),
+                )
         ax.set_ylim(0, 1.05)
         ax.legend()
 
@@ -1248,6 +1249,21 @@ class CircularApertureProfile(RadialProfile):
             label=f"Gauss FWHM {self._convert_radius(gfwhm):.2f} {self._radius_unit()}",
             **kwargs,
         )
+        if self.norm_radius is not None:
+            # the curves are normalized here, so the ratio is 1 by construction
+            rn = self._convert_radius(self.norm_radius)
+            ax.axvline(rn, color="gray", ls="-.")
+            ax.text(
+                rn,
+                0.02,
+                f"Rnorm {rn:.2f} {self._radius_unit()}",
+                rotation=90,
+                color="gray",
+                fontsize=8,
+                ha="right",
+                va="bottom",
+                transform=ax.get_xaxis_transform(),
+            )
         ax.set_xlabel(f"Radius ({self._radius_unit()})")
         ax.set_ylabel("COG Ratio " + ylabel)
         ax.set_ylim(0.8, 1.2)
@@ -1356,6 +1372,11 @@ def clean_stamp(
         print(f"Mean: {det_mean}, Median: {det_median}, Std: {det_std}")
 
     seg = detect_sources(detimg, threshold=threshold * det_std, npixels=3 * w**2)
+    if seg is None:
+        # nothing above threshold: no neighbours to mask, only remove the background
+        logger.warning("clean_stamp: no source detected, returning background-subtracted stamp")
+        bg_level = np.nanmedian(data)
+        return data.copy() - bg_level, np.zeros(data.shape, dtype=bool), bg_level
     seg = SegmentationImage(safe_dilate_segmentation(seg, selem=np.ones((2 * w, 2 * w))))
 
     cy, cx = data.shape[0] // 2, data.shape[1] // 2
@@ -1390,6 +1411,23 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
 
+def kernel_effective_fwhm(kernel: np.ndarray, pixel_scale: float = 1.0) -> float:
+    """Second-moment FWHM of a non-negative convolution kernel.
+
+    Zero for a pure delta (no diffusion), and the FWHM itself for a single
+    Gaussian, so a delta-plus-broad mixture reports the width its diffuse part
+    actually carries.
+    """
+    k = np.clip(np.asarray(kernel, dtype=float), 0.0, None)
+    total = k.sum()
+    if not np.isfinite(total) or total <= 0:
+        return float("nan")
+    yy, xx = np.indices(k.shape)
+    r2 = (yy - (k.shape[0] - 1) / 2) ** 2 + (xx - (k.shape[1] - 1) / 2) ** 2
+    sigma = np.sqrt((k * r2).sum() / total / 2.0)
+    return float(2.0 * np.sqrt(2.0 * np.log(2.0)) * sigma * pixel_scale)
+
+
 def compare_psf_to_star(
     cutout_data_in,
     psf_data_in,
@@ -1402,6 +1440,14 @@ def compare_psf_to_star(
     title_prefix="",
     fit_kernel=False,
     register_psf=False,
+    clean=True,
+    composite=None,
+    composite_title="",
+    shift=None,
+    kernel_fwhm=None,
+    save_curves=False,
+    vmin=-5.3,
+    vmax=-1.0,
     **kwargs,
 ):
     """
@@ -1436,8 +1482,11 @@ def compare_psf_to_star(
         convolve2d,
     )
 
-    # remove neighbors and subtract background
-    cutout_data, obj_mask, bg_level = clean_stamp(cutout_data_in.copy(), imshow=False)
+    # remove neighbors and subtract background, unless the caller already did
+    if clean:
+        cutout_data, obj_mask, bg_level = clean_stamp(cutout_data_in.copy(), imshow=False)
+    else:
+        cutout_data = cutout_data_in.copy()
 
     if weight is not None:
         error = np.sqrt(1.0 / weight)
@@ -1494,7 +1543,7 @@ def compare_psf_to_star(
         conv = convolve2d(psf_data, kernel)
         rp_conv = CircularApertureProfile(
             conv,
-            name="psf x kernel",
+            name="psf x diff",
             norm_radius=Rnorm,
             pixel_scale=pixel_scale,
             recenter=True,
@@ -1502,13 +1551,18 @@ def compare_psf_to_star(
         )
 
     # --- Plotting ---
-    fig = plt.figure(figsize=(15, 8))
-    gs = gridspec.GridSpec(2, 5, height_ratios=[1, 1.0])
+    ncol = 4 + (composite is not None)
+    fig = plt.figure(figsize=(3.75 * ncol, 8))
+    gs = gridspec.GridSpec(2, ncol, height_ratios=[1, 1.0])
 
-    # First row: 5 images
-    ax1 = [fig.add_subplot(gs[0, i]) for i in range(5)]
-    titles = ["data", "psf", "data - psf", "", ""]
-    kws = dict(vmin=-5.3, vmax=-1.5, cmap="bone_r", origin="lower")
+    # First row: 4 images, plus an optional colour composite. The diffusion
+    # kernel is a smooth blob and carries no visual information, so its width is
+    # reported in the ratio panel instead of getting a panel of its own.
+    ax1 = [fig.add_subplot(gs[0, i]) for i in range(ncol)]
+    titles = ["data", "psf", "data - psf", ""] + ([""] if composite is not None else [])
+    # log10 display range in dex. The top used to sit at -1.5; -1.0 widens the
+    # ramp, so the sky noise takes up less of it and the panels read calmer
+    kws = dict(vmin=vmin, vmax=vmax, cmap="bone_r", origin="lower")
     for a, title in zip(ax1, titles):
         a.set_title(f"{title_prefix}{title}")
         a.axis("off")
@@ -1520,9 +1574,17 @@ def compare_psf_to_star(
         # the other panels work in PSF-flux units (cutout_data/scl). Divide
         # `conv` by `scl` to keep the residual in the same units.
         ax1[3].imshow(np.log10((cutout_data - conv) / scl + offset), **kws)
-        ax1[4].imshow(np.log10(pad_to_shape(kernel, conv.shape) + offset), **kws)
-        ax1[3].set_title("data - psf x kernel")
-        ax1[4].set_title("kernel")
+        ax1[3].set_title("data - psf x diff")
+        # a caller that fitted the kernel knows its width analytically; measuring
+        # the second moment off the image instead picks up far-field FFT residue
+        # and overstates it several-fold on a large stamp
+        fwhm_diff = (kernel_effective_fwhm(kernel, pixel_scale) if kernel_fwhm is None
+                     else float(kernel_fwhm))
+        unit = "arcsec" if pixel_scale != 1.0 else "pix"
+
+    if composite is not None:
+        ax1[-1].imshow(composite, origin="lower")
+        ax1[-1].set_title(composite_title or "colour composite")
 
     # Add filename as a textbox in the left top corner
     if to_file is not None:
@@ -1554,7 +1616,72 @@ def compare_psf_to_star(
     for a, title in zip(ax2, ["profile", "growthcurve", "ratio of growthcurves"]):
         a.set_title(title)
 
-    plt.tight_layout()
+    # growth-curve panel: the radii are marked on the curves, so trade the
+    # legend for a compact R50/R80 table
+    entries = [("data", rp_data, "C0"), ("psf", rp_psf, "C3")]
+    if kernel is not None:
+        entries.append(("psf x diff", rp_conv, "C2"))
+    legend = ax2[1].get_legend()
+    if legend is not None:
+        legend.remove()
+    table = ax2[1].table(
+        cellText=[
+            [f"{p._convert_radius(p.cog.calc_radius_at_ee(0.5)):.2f}",
+             f"{p._convert_radius(p.cog.calc_radius_at_ee(0.8)):.2f}"]
+            for _, p, _ in entries
+        ],
+        rowLabels=[name for name, _, _ in entries],
+        colLabels=['R50 (")', 'R80 (")'],
+        colWidths=[0.22, 0.22],
+        cellLoc="center",
+        loc="lower right",
+        edges="horizontal",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    for row, (_, _, color) in enumerate(entries, start=1):
+        table[row, -1].get_text().set_color(color)
+
+    # the diffusion kernel itself: one number, next to the curve it produced
+    if kernel is not None:
+        ax2[2].text(
+            0.04,
+            0.06,
+            f"diffusion kernel eff FWHM {fwhm_diff:.3f} {unit}",
+            color="C2",
+            fontsize=9,
+            transform=ax2[2].transAxes,
+        )
+    if shift is not None:
+        ax2[2].text(
+            0.04,
+            0.13,
+            f"registration shift dx {shift[0]:+.2f}, dy {shift[1]:+.2f} pix",
+            color="0.35",
+            fontsize=9,
+            transform=ax2[2].transAxes,
+        )
+
+    # the growth curves themselves, so many stars can be overplotted later
+    if save_curves and to_file is not None:
+        import os
+
+        from astropy.table import Table
+
+        curves = Table()
+        curves["radius"] = rp_data._convert_radius(rp_data.cog.radius)
+        curves["ee_data"] = rp_data.cog.profile
+        curves["ee_psf"] = np.interp(rp_data.cog.radius, rp_psf.cog.radius, rp_psf.cog.profile)
+        curves["ratio_psf"] = rp_data.cog_ratio(rp_psf)
+        if kernel is not None:
+            curves["ee_conv"] = np.interp(
+                rp_data.cog.radius, rp_conv.cog.radius, rp_conv.cog.profile
+            )
+            curves["ratio_conv"] = rp_data.cog_ratio(rp_conv)
+        curves.meta["norm_radius"] = rp_data._convert_radius(rp_data.norm_radius)
+        curves.write(os.path.splitext(str(to_file))[0] + "_cog.csv", overwrite=True)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])   # leave room for the corner label
     if to_file is not None:
         fig.savefig(to_file, dpi=150)
         plt.close(fig)

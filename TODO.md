@@ -2,6 +2,71 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] Validate the `ee_psf_lo` divisor on a real rerun. `flux_<i>_total` now
+  divides by the per-source `ee_psf_lo` recorded by `convolve_templates`,
+  falling back to the filter mean only where it is missing. Against the old
+  filter-level mean this moves fluxes by -1.0% to +0.6% across the UDS field,
+  in a pattern that tracks the exposure layout, so DR0.1 outputs need a rerun
+  before they are compared with anything. Requires `build_kernels(overwrite=
+  True)` as well, since cached kernel maps do not record the method that built
+  them.
+- [ ] `ee_tmpl` is recorded per template and is deliberately not applied as a
+  correction: the fitted amplitude does not scale with the blanked wing flux,
+  it scales with the leverage of the blanked pixels, and dividing by `ee_tmpl`
+  over-corrects in every configuration tested (isolated, 0.2% error becomes
+  0.9%; blended pair at 8 px, 3.3% becomes 6.7%). Keep it as a trust
+  diagnostic. It is 1.0 on the current default path and only becomes
+  informative once `composite_psf_wings` (normalise over the whole stamp, then
+  blank neighbours) is ported from the `template` branch.
+- [ ] Check the two anomalies in the PSF grid EEs (measured with
+  `sum(plane)/oversampling**2`): F444W spans 0.9179-0.9809 across the 25 grid
+  points of one MJD file and F770W 0.9659-1.0030 across 9, a +-3% spatial
+  spread that now propagates straight into photometry; and F770W's 1.0030 is
+  unphysical by 0.3%. Also confirm that `normalize='first'` loses flux only to
+  FOV truncation, by generating one large-FOV (~20") grid and checking that
+  `sum/oversampling**2` approaches 1.0 - anything it saturates below would be
+  optical loss already carried by the mosaic zeropoint, and correcting for it
+  would double-count.
+- [ ] The F444W PSF grids have a 4.09" FOV against F770W's 8.10", so the
+  *detection* PSF model is the more truncated one: 4.3% of F444W light is
+  outside the model entirely versus 1.5% for F770W. Enlarging `psf_size` past
+  ~4" for F444W measures the grid edge rather than the PSF. Regenerate the
+  NIRCam grids at a larger FOV if the hi-side wings start to matter.
+- [ ] Decouple PSF support from kernel support. `psf_size` currently sets
+  both, so shrinking the stamp to save time also renormalizes the PSFs the
+  kernel is derived from, which biases the kernel core by `S_hi/S_lo`:
+  +6.3% at 2", +3.1% at the 4" default, -0.7% on the full parent grid
+  (`scratch/wren/template_comparison.tex` rec 4). Derive kernels on the
+  largest available grid and crop the resulting kernel afterwards; do not
+  renormalize the crop.
+- [ ] Replace or tune the default `matching_kernel` window: it costs 1-9% in
+  flux scale and is the largest remaining term in the EE chain.
+  Measured on truncated Moffat pairs at fixed R with `S_hi` = 0.9820, as
+  `A/S_lo` for an injected point source (1.0 is exact):
+
+  | `S_hi/S_lo` | window | tikhonov 1e-3 | tikhonov 1e-6 |
+  |---|---|---|---|
+  | 1.3289 | 1.01255 | 1.00178 | 1.00000 |
+  | 1.0244 | 1.01643 | 1.00213 | 1.00000 |
+  | 0.9822 | 1.02159 | 1.00252 | 1.00000 |
+  | 1.0000 (lo == hi) | 1.09053 | 1.01561 | 1.00007 |
+
+  The error is worst when the two PSFs are similar, i.e. when the true kernel
+  approaches a delta and the SplitCosineBell low-pass damages it most, so
+  adjacent-band matching suffers more than NIRCam-to-MIRI. On the real UDS
+  F444W/F770W pair the window gives `A/S_lo` = 0.9688, the opposite sign, so
+  this has to be measured per band pair rather than assumed.
+  With a faithful kernel (`tikhonov` at `reg` = 1e-6, match residual 2e-5 to
+  2e-4 of peak) the recovery is exact at every truncation and every EE
+  mismatch, which is what establishes that `S_lo` alone is the complete PSF-side
+  correction. `reg` = 1e-6 is on noise-free analytic PSFs; real drizzled ePSFs
+  need a bias-variance compromise, so tune with
+  `PSF.optimize_matching_kernel_regularization(..., diagnostic_path=...)` and
+  add `A/S_lo` on an injected point source to its criteria.
+- [ ] Scene partitioning is not reproducible run to run (from wren's
+  `CHECKLIST.md`; the mechanism is live here and recorded nowhere else).
+- [ ] The flux-block ridge biases faint sources low: -33% at
+  `d_i/median = 1e-6` (also from wren's `CHECKLIST.md`).
 - [ ] scan for bug fixes / robustness improvements
 - [ ] `tests/test_pipeline_multitemplate.py::test_pipeline_multitemplate_pass`
   no longer exercises a multi-template pass: `_add_templates_for_bad_fits` and
@@ -45,23 +110,6 @@ This file tracks future desired features, checks, and investigations.
   new machinery. Template support (`psf_size`, currently null = 8" stamps) is
   the real lever for scene size: wren's 3" stamps ran the full field at a
   fixed 1e-3.
-- [ ] `flux_<i>_total` divides by the wrong stamp sum. `matching_kernel`
-  deliberately does not normalize, so `sum(k) = S_lo/S_hi` (verified: cached
-  kernel median 1.00747 vs `S_lo/S_hi` 1.00672). For a point source the
-  unit-sum detection template convolves to `psf_lo/S_hi`, so the fitted
-  amplitude is `flux_<i> = A_true * S_hi` — the *detection* stamp sum
-  (verified numerically: a = 0.9557 vs S_hi = 0.9606). `pipeline.py:790` then
-  divides by `throughput = mean(S_lo)`, but `S_lo` already cancelled inside
-  the kernel DC, so `flux_<i>_total = A_true * S_hi/S_lo`. The right divisor
-  is `S_hi`. Bias is only −0.7% on `uds_770_dr0.1.json` because
-  `"psf_size": null` leaves both stamps near-native (0.9613 vs 0.9678); at the
-  `RunConfig` default 4.0" it is +3.1%, at 3.0" +4.9%, at 2.0" +6.3%.
-  Either divide by the detection-side sum, or normalize the kernel and pass
-  unit-sum shapes as `utils.matching_kernel`'s own docstring recommends.
-  Caveat: this is the point-source limit (`T = P_hi/S_hi`); path A's templates
-  are segmap-truncated with no extension, so the real bias is source-dependent.
-  Settle it together with the drizzle-normalization item below — that is the
-  same order of magnitude. See `docs/FORK_DIFF_WREN.md` Sec 5.
 - [ ] `PSFSZ<i>` and `RCIRC<i>` in `cat.meta` are half their true value in
   upsample mode. `pipeline.py:1207` sets `wcs[ifilt] = wcs[0]` and `wcs` is an
   alias of `self.wcs` (`:1053`), so `_record_psf_ee` (`:1384`) reads the 0.04"

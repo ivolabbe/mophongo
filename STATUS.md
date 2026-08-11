@@ -817,6 +817,234 @@ This file records completed implementations, validation runs, and the current wo
   (it passed `None` into `safe_dilate_segmentation`). It now logs and returns
   the background-subtracted stamp with an empty object mask. Hit by faint
   F1500W stars through `compare_psf_to_star`.
+- [x] `scratch/wren/template_comparison.tex` Figs. 2-10 rebuilt on the shipped
+  code. New `scratch/wren/tmplfig/shipped.py` holds the common inputs (cutout,
+  resampled PSFs, `utils.matching_kernel`, the Fig. 1 segmentation rendering)
+  and an `agrees()` guard; every panel intermediate is now rebuilt from the
+  numbers the schemes return and checked against the shipped composite before
+  it is drawn, so a divergence raises instead of being plotted. Fig. 5 was the
+  substantive change: it still showed the old segment-masked `'none'` build and
+  now dissects `composite_psf_wings`. Figs. 3, 4, 7, 8, 10 gained the
+  segmentation panel; Figs. 4 and 7 gained the double-counting and truncation
+  panels. The detection rms is measured once per source on a fixed 12" box, so
+  the same galaxy reports the same SNR (21.5 mid, 5.2 faint) in every figure.
+  Captions and the affected in-text numbers ($R_{95}$ 16.5 -> 20.6 px, panel
+  letters) were resynced; `template_comparison.pdf` rebuilt, 12 pages.
+- [x] UDS DR0.1 F770W rerun on the current code (`psf_wings` default scheme +
+  `astrom_damping = 0.8`), 2242 sources in the 0.6' trial circle, ~3 min,
+  converged in 5 astrometry passes (`scratch/wren/dr0.1_run_aug9b.log`).
+  Against the previous (Aug 9 00:55) run of the same config: bright fluxes
+  +4% median (`flux_1` new/old 1.040, 16/84 = 1.017/1.078 at SNR>5), bright
+  errors unchanged (+2-4%), faint errors +49% median (the PSF-wing extension
+  enlarges small templates), SNR>5 count 106 -> 105. The scene partition
+  changed (6 scenes, membership 320/920/69/667/137/128 vs
+  350/974/253/330/93/241), so scene PNGs are not one-to-one between runs.
+  `positivity=True` puts 1015/2242 sources exactly at flux 0, including both
+  monu `nondet_good` sources, so the faint end has no negative fluxes to
+  average.
+  Comparison products in `scratch/wren/compare/`, rebuilt with
+  `make_compare.py` plus the new `make_compare_subphot.py`: the latter renders
+  `Pipeline.diagnose_subphot` (via `from_config(run_dir)` + `load_fit`, no
+  re-solve) at `size=195`, `nsig=3` for the 12 monu QA sources in the trial
+  circle, into `compare/dr0.1/subphot_<MONU_ID>.png`, matching the monu
+  stamps' 1170x780 layout pixel for pixel. Result: the four good/mid-SNR
+  sources agree with monu to a constant factor 9.06-9.38 (a catalogue flux
+  unit/zeropoint offset, not a fit difference), the faint ones scatter as
+  expected at their SNR, and the close pair MIN_UDS48823/48824 sits low
+  (6.9-7.0), i.e. we assign ~30% more flux to each component. The bright
+  edge-on disk MIN_UDS48823 leaves a much stronger residual than monu's; 2x2
+  block sums cut its residual std to 0.60 of the per-pixel value (0.46 for
+  MIN_UDS38103, 0.84 for a faint source), so the excess is sub-block
+  checkerboard power from fitting the 80mas F770W block-replicated onto the
+  40mas grid, against monu's native 40mas drizzle.
+- [x] Astrometric step damping: new `FitConfig.astrom_damping = 0.8`;
+  `Scene.solve` scales each pass's per-template shift increment by it before
+  `apply_template_shifts` (log line reports the applied factor). Rationale:
+  the central-difference shift basis underestimates gradients of sharp
+  structure, so the linearized Gauss-Newton step overshoots by k/sin(k) per
+  mode — harmless for convolved templates (power-weighted factor 1.1–1.3)
+  but able to approach the stability limit 2 for scenes dominated by
+  marginally sampled cores. Damping guarantees contraction; the fixed point
+  is unchanged (synthetic check: same offset to 1e-4 px, contraction ~7x
+  per pass instead of ~20x, tol reached on pass 3 vs 2 — dashed curves in
+  `scratch/wren/fitfig/fig_iteration_convergence.pdf`). `fit.pdf` gained a
+  section deriving the k/sin(k) overshoot, the two convergence regimes, the
+  stationary-point bias, and the ranked basis/scheme fixes (incl. the
+  Aitken step-scale formula); the path-independence figure was dropped
+  (point retained in text). Set 1.0 to restore
+  the old behavior. Improvement roadmap for the basis/scheme (tangent-
+  consistent B-spline derivative, kernel-side spectral gradient, direct
+  chi2 scan, Aitken step-scale estimation) recorded in the
+  `scratch/wren/fit.py` module docstring and `fit.pdf` Sec. 4. Tests:
+  `test_pipeline`, `test_scene_saturated`, `test_scene_max_size`,
+  `test_subphot_diag` — 24 passed with damping active.
+- [x] `scratch/wren/fit.pdf` (+ `fit.tex`, figures from `scratch/wren/fit.py`
+  into `fitfig/`): 4-page writeup of the scene solver for talks/paper — the
+  linear model and scene partition, the joint flux+astrometry solve (shift
+  basis, Chebyshev field, per-template dx/dy prediction), why the linearized
+  step is a smoothed operator (Fourier transfer functions: Taylor truncation
+  + central-difference low-pass vs measured cubic-spline response; 2D
+  anatomy figure, linear error 5% of peak vs spline 2e-3 at 0.5 px), the
+  iterate-linearize-reshift loop (TikZ flow diagram; synthetic convergence:
+  increment decays ~20x/pass, injected (1.5,-0.8) px recovered to 1e-4 px),
+  path independence of the applied-shift operator (single vs incremental
+  spline MTF erosion), and why (dx, dy, flux) per template is the complete
+  fit state (persisted-products table, offline reconstruction).
+  Documents-only; no package code changed.
+- [x] Repeatable run configs + fresh-session resume. `Pipeline.save_config()`
+  writes the fully-explicit run config to `out_dir/<name>.json`: every
+  `RunConfig` field and every *used* `FitConfig` setting with its resolved
+  value, so the run stays repeatable even when code defaults change (e.g. the
+  recent `template_dilate_segmap` 2 -> 0). Settings of template build schemes
+  the run did not select are omitted (`wren_*`/`classic_*` pruned by
+  `extend_mode`). `run()` snapshots automatically before fitting. `Pipeline.from_config` now also accepts a run *directory*
+  (`<dir>/<dirname>.json` preferred, else the single `*.json` it contains,
+  ambiguity raises), so `Pipeline.from_config("uds_770_dr0.1/")` resumes from
+  the outputs. New `Pipeline.load_outputs()` loads a finished run's products
+  (fit table + residual, memmapped) into a fresh session for catalog-level
+  diagnostics; `repr` shows `[fitted]`, `info()` lists output-product
+  presence (`out config/table/residual`). `write_outputs`/`load_outputs`/
+  `info` share new `f_config`/`f_fit_table`/`f_residual` path properties.
+  Generated `examples/uds_770_dr0.1/uds_770.json` from the current
+  `examples/uds_770_dr0.1.json` (includes the new `wht_hi`, `extend_mode`,
+  `wren_*`, `classic_*` fields) and verified resume on the real run: 2242
+  rows, 106 at SNR>5, 25344x34560 residual. Tests: +4 in
+  `tests/test_pipeline_config.py` (full-snapshot fields, directory
+  resolution, resume, ambiguity) and +1 in `tests/test_pipeline_inspect.py`
+  (run() snapshots before fitting); 26 passed across the three suites.
+  Follow-up: full fit state is now persisted and image diagnostics work
+  offline. `write_outputs` also writes `<name>_templates.fits`
+  (`_template_fit_table`: per final template id, id_parent, x, y, fitted
+  shift dx/dy, flux, err, scene id) — the only solve products a
+  deterministic template rebuild cannot re-derive; everything else
+  (raw/extended/convolved template shapes) reconstructs from sci_hi + segmap
+  + config + the cached PSF/kernel maps, and the total model is
+  `image - residual`. New `load_fit()` restores image-based state in a fresh
+  session: loads data, re-upsamples the fitted band onto the reference grid
+  exactly as `run()` does, derives `model_images` from the saved residual,
+  and loads the template table. `diagnose_subphot` and `diagnose_sources` then
+  work without a solve — each source's convolved template is rebuilt on
+  demand (`_rebuild_source_stage_templates`) and the saved flux/shift
+  applied; `diagnose_subphot`'s seg colouring falls back to template-table (or
+  catalog) positions. Verified: resumed-session `diagnose_subphot` reproduces
+  the in-session render bit-identically on the img/tmpl/seg/model/res
+  panels (clean differs only through the rebuilt-template spline;
+  `test_template_fit_table_and_resumed_render`), plus an end-to-end
+  files-only resume test (`test_load_fit_offline_diagnostics`); 31 passed.
+  Note: runs finished before this change have no `_templates.fits` —
+  `load_outputs` warns, and resumed renders then use catalog fluxes with
+  zero shift.
+- [x] Template build schemes selectable with one knob, `FitConfig.extend_mode`
+  (`'default'|'psf'|'psf_model'|'wren'|'classic'`), so the three codes of
+  `scratch/wren/template_comparison.pdf` can be compared 1-1 on identical
+  inputs. `Templates.extend_with_psf_wings` renamed `extend_with_psf` (it is a
+  convolution with the PSF, not a scaled-PSF paste); `extension_mode` on those
+  templates is now `"psf"`.
+  * `'wren'` and `'classic'` are **build-time** schemes: their composite
+    replaces the segment-masked data inside `Templates.extract_templates`,
+    before the unit-sum normalisation, so `template_norm` covers the extended
+    shape. `'psf'`/`'psf_model'` stay post-extraction passes (they reshape the
+    cutout), leaving `templates_extracted` / `templates_extended` meaningful.
+  * Ports live in the new `src/mophongo/template_schemes.py`, self-contained
+    and importing nothing from the fit/catalog/pipeline layers: pure numpy in,
+    `(composite, info)` out. Dispatch is one block in `extract_templates` plus
+    `Pipeline._extend_scheme_kwargs`, so either scheme can be adapted or
+    deleted as a unit.
+  * `classic` = IDL `subphot.pro::build_cube` (:294-330) from the canonical
+    source `~/Documents/Astro/PROG/idl/ifl/pro/fitphot/subphot.pro`:
+    `m = S.D + f_psf (1-S).P` with `f_psf = sum_S P D / sum_S P^2` floored at
+    0, the `f_psf<=0` bare-PSF branch, and the hard replacement by a point
+    source below `tmpl_snrlo=15` measured against `robust_sigma` (astrolib
+    biweight, ported). No dilation, no positivity clip, wings pasted over
+    neighbouring segments too. Cutout floored at the detection PSF stamp — the
+    resampled PSF is identically zero beyond it, so that footprint *is* the
+    support IDL's whole-tile paste produces. Records IDL's log columns
+    (`fpsf`, `flux_in_seg`, `added_flux`) in `Template.extend_info`. IDL's
+    step 7 (normalise the *convolved* plane, then `apermask` at
+    `ceil(ksz/2)`, `subphot.pro:324`) belongs to the convolution stage and is
+    deliberately not reproduced.
+  * `wren` = `dev-wren:templates.py::_extended_composite`: global
+    area-weighted `build_ownership` (disk contest, ROI-restricted), support
+    `own | (owned background within R95)`, one core weight
+    `w(S_seg; 1.5*fit_snrlo_psf)` and one weight per 0.15" halo annulus forced
+    monotone non-increasing outward and seeded at the core, blend
+    `H = W D + (1-W) A_src P`, positivity clip *before* `template_norm`, plus
+    `snr_seg`/`A_src`/`f_cut`/`flux_beyond_stamp`/`flux_beyond_aper`
+    bookkeeping and `FLAG_PSF_EXTENDED`/`FLAG_EXTEND_FAILED`. Sizing chain
+    (`r_fill = max(R95, r_aper + kernel_hw)`, `min_size = 2*ceil(r_fill)+2`)
+    reproduced in `Pipeline._extend_scheme_kwargs`.
+  * `Template.template_norm` is now recorded on **every** path (the one
+    behaviour change to `'default'`), so the detection-band flux a template
+    implies is reconstructable — `template_comparison.tex` Sec. 7 listed its
+    absence as an ivo defect.
+  * `Pipeline.load_data` now passes `psfs=[prm_hi, prm_lo]` instead of
+    `[None, prm_lo]`, and `_ensure_maps` loads the cached `prm_hi` (it only
+    ever loaded `prm_lo` + built the kernel map, so `psfs[0]` stayed `None`
+    even after the `load_data` change). `_psf_for_template_extension` is now
+    **strictly `psfs[0]`** and raises otherwise: the old fallback to `psfs[1]`
+    is gone. In the two-image config layout `psfs[1]` is the **low-res** PSF,
+    so `wren`/`classic`/`psf` would have built wings from the wrong band and
+    derived `r_fill`/`R95` in lo-res pixels while applying them as hi-res
+    radii, with no error. There is no correct fallback for a detection-band
+    PSF, so the path is disallowed rather than substituted; on a config-driven
+    run the cached detection map is built/loaded on demand instead.
+    `verification.py` updated to pass the detection map at index 0. No
+    `RunConfig` field reached the extension branches at all before; with
+    `extend_mode` in the `fit` dict the whole family is now reachable from a
+    JSON run. Only fitted bands (`ifilt >= 1`) feed throughput/PSF-EE
+    bookkeeping, so index 0 is inert there.
+  * `RunConfig.wht_hi` supplies the detection weight map, so the config-driven
+    path gets `weights[0]` and neither scheme needs a global noise scalar.
+    Every run must have one: `Pipeline.resolve_wht_hi()` takes `wht_hi` when
+    set, else derives it from `sci_hi` by the grizli `_sci.fits` ->
+    `_wht.fits` naming, and **raises** when neither resolves rather than
+    degrading to one sky-sigma scalar for the whole mosaic. The pixels are
+    read only when `extend_mode` is `'wren'` or `'classic'` —
+    `'default'`/`'psf'` never touch `weights[0]`, and a full-field hi-res
+    weight map costs as much memory as the mosaic.
+    `Pipeline._load_detection_ivar` rescales it with the same
+    `get_bg_and_ivar` the lo-res side uses. All four example configs now name
+    `wht_hi` explicitly; verified end to end on COSMOS DR0.1 (32768x18944,
+    99.8% covered, median ivar 431).
+  * `RunConfig.driz_hi` removed. It was the DrizzlePSF footprint/grid source,
+    defaulting to `sci_hi` and null in every config ever written. `DrizzlePSF`
+    reads the header *and the pixels* of `driz_image` (`get_psf_radec`
+    centroids on them), so pointing it at a different file than the one being
+    fitted was the risky option, not the safe one — for a repaired mosaic the
+    repaired pixels are what you want. One pointer, `sci_hi`.
+  * Noise: with a detection inverse-variance map (`weights[0]`) **neither**
+    scheme uses a global scalar — both take the formal `sqrt(sum 1/ivar)` over
+    the mask. That is wren's primary path already; classic now shares it,
+    since IDL's `sum_S D / (sqrt(n_S)*tmpl_rms)` is exactly that expression
+    for uniform noise (IDL carries no ivar map at any stage and fits with
+    `wts = 1/rms`, `subphot.pro:541,869`, so one scalar per tile was the best
+    it could do). Test:
+    `test_classic_ivar_noise_reduces_to_idl_scalar_for_uniform_weights`.
+    The scalar fallbacks are for runs without detection weights, and are now
+    measured over `covered_mask` (finite and non-zero): over a mosaic
+    `load_data`'s `nan_to_num` turns the out-of-footprint margin into exact
+    zeros, and that spike drags the MAD down — 0.05 -> 0.019 at 61% blank,
+    exactly 0 at ~50%. Zero would have silently disabled IDL's low-SNR branch
+    and driven every wren blend weight to 0, i.e. every template a bare point
+    source with `extend_failed` False. Both schemes now raise instead of
+    degrading silently (`WrenParams.bg_rms` / `FitConfig.wren_bg_rms` and
+    `ClassicParams.rms` override; `classic_tmpl_snrlo=0` skips the branch as
+    IDL's `keyword_set` guard does).
+  * `Templates.extract_templates(dilate_segmap=...)` and
+    `verification.run_pipeline_extension_scenario(template_dilate_segmap=...)`
+    now default to **0**, matching `FitConfig.template_dilate_segmap`. The
+    verification default was 4. (`mock_dilate_segmap` is unchanged: it grows
+    the truth segmap, not a template.)
+  * Verified on a synthetic faint source (fraction of a point source the
+    support can hold): `default` 0.40, `wren` 0.955 (R95 cap), `classic` 1.00,
+    `psf` 1.00; classic `added_flux` 2.49 and `f_psf` within 1% of the true
+    amplitude — matching `template_comparison.tex` Fig. 1.
+  * Tests: `tests/test_template_schemes.py` (36) + 2 in
+    `tests/test_pipeline_inspect.py`. Suite: 157 passed +
+    pre-existing `test_moffat_flux_recovery[psf_wing-3-psf]` failure. The three
+    detection-PSF / noise-scalar defects above came out of an adversarial
+    review of both ports against their reference sources (43 agents, 3
+    confirmed of 20 raised).
 - [x] Test suite fully green for the first time (118 passed, 0 failed).
   Two long-standing failures fixed, neither caused by the cleanup:
   `test_moffat_recovery[psf_wing-3-psf]` passed `kernels=` but never `psfs=`
@@ -949,7 +1177,7 @@ This file records completed implementations, validation runs, and the current wo
   stricter than the per-scene solve-time one (out-of-scene neighbours still
   count). Test: `test_isolation_thresh_counts_only_isolated_toward_floor`.
   Suite: 119 passed + pre-existing moffat failure.
-- [x] IDL subphot diagnostic port: `Pipeline.plot_subphot(source_id)` renders
+- [x] IDL subphot diagnostic port: `Pipeline.diagnose_subphot(source_id)` renders
   the legacy `subphot.pro::mkdiag`/`fptv` 6-panel PNG (img/tmpl/seg/model/
   res/clean, 2x3 at 2x nearest-neighbour zoom) pixel-for-pixel for 1-1
   comparison against IDL outputs (e.g. `scratch/wren/compare/monu/*.png`).

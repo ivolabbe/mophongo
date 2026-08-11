@@ -220,6 +220,64 @@ This file tracks future desired features, checks, and investigations.
   zero-weight pixels. Less critical now that selection no longer needs the
   catalog, but the two versions should not be mixed.
 - [ ] scan for bug fixes / robustness improvements
+- [ ] `extend_mode='wren'`: `Templates.extract_templates` calls
+  `schemes.wren_fill_radius` without `kernel_half_width` and with
+  `WrenParams.aperture_radius_pix` at its `None` default, so out of the box
+  `r_fill` collapses to `R_95` (20.6 px on UDS 40 mas) instead of the fork's
+  `max(R_95, r_ap + kernel_hw)` = 29.0 px. That shrinks the ownership-contest
+  disk, the halo-annulus reach and the cutout floor relative to the code being
+  ported. The helper already takes both arguments; decide whether the pipeline
+  should supply them (aperture from the low-res band, half-width from the
+  matching kernel) or whether the collapse is intended, and say so in
+  `template_schemes`. Flagged while rebuilding `template_comparison.tex` Fig. 6,
+  which documents the fork's chain and now carries the discrepancy as a note.
+- [ ] `positivity=True` puts 45% of the UDS DR0.1 F770W trial sources
+  (1015/2242) at exactly flux 0, so the non-detection population has no
+  negative fluxes and cannot be stacked or averaged without bias. Decide
+  whether the default should be an unconstrained solve with the positivity
+  clip reported as a flag, or a per-source switch above/below some SNR.
+- [ ] Bright resolved sources in the upsample path leave sub-block
+  checkerboard residuals: the model is smooth while the block-replicated
+  80mas data is piecewise constant over each 2x2 cell, so on MIN_UDS48823 a
+  2x2 block sum cuts the residual std to 0.60 of its per-pixel value (0.46 on
+  MIN_UDS38103). It is a resolution-mismatch display/chi2 artefact rather
+  than a flux error, but it inflates per-pixel chi2 on the brightest sources
+  and makes residual panels look worse than the equivalent native-40mas monu
+  stamps. Check whether the chi2/error estimate should be evaluated on the
+  native low-res grid.
+- [ ] Run the four `extend_mode` schemes head to head on injected-truth mocks
+  (`verification.py`, not ad hoc comparisons) and pick a default. The synthesis
+  `template_comparison.tex` Sec. 8.3 recommends: wren's blended extension but
+  with the halo running to the full PSF support instead of stopping at R95, a
+  background subtraction before blending raw data over an ~855 px halo, and
+  IDL's least-squares halo amplitude in place of wren's flux-ratio anchor.
+  Each of those is a small edit inside `template_schemes.py`.
+- [ ] `extend_mode='classic'` does not reproduce IDL step 7 (`subphot.pro:324`:
+  normalise the *convolved* plane, then apply a circular `apermask` of radius
+  `ceil(ksz/2)` centred on the source, so the fitted template sums to slightly
+  less than 1 by a different amount per source). It sits in the convolution
+  stage, which is scheme-agnostic. Decide whether the 1-1 comparison needs it;
+  if so it wants a scheme hook in `convolve_templates`, not an inline branch.
+- [ ] `extend_mode='wren'` carries `flux_beyond_stamp`/`flux_beyond_aper` in
+  `Template.extend_info` but nothing consumes them. wren feeds them into its
+  aperture-correction chain (`trunc = norm / (norm + flux_beyond_stamp)`).
+  Wire them up, or drop them, once the scheme comparison settles.
+- [ ] The detection background is measured in `_load_detection_ivar` (by the
+  same `get_bg_and_ivar` used on the lo-res side) and logged but **discarded**
+  — it is the only `get_bg_and_ivar` call in the tree whose `bg` is not
+  subtracted; the lo-res one feeds `sci_fit = sci_lo - bg`. Subtracting it
+  would change `default` templates too, so it is left alone for now, but
+  `template_comparison.tex` Sec. 8.1 lists "raw detection image, no
+  background subtraction" as a wren defect: a sky pedestal enters the halo
+  linearly with its area, over ~855 px. Decide whether the extended schemes
+  should subtract it (COSMOS DR0.1 median bg -7.2e-4).
+- [ ] `extend_mode='wren'`'s `WrenParams.containment` (wren's
+  `PSFRegionMap.containment`, the detection-PSF stamp containment `c_det` in
+  `flux_beyond_stamp`) defaults to 1.0 because this tree has no equivalent.
+  `psf.stamp_encircled_energy` / `DrizzlePSF.ee_box` measure the same thing;
+  wire one in if the wren truncation bookkeeping is kept. Note
+  `template_comparison.tex` Sec. 8.1 flags wren's own `containment` as
+  normalised to the parent grid and therefore ~+2.9% (F444W) high.
 - [ ] `tests/test_pipeline_multitemplate.py::test_pipeline_multitemplate_pass`
   no longer exercises a multi-template pass: `_add_templates_for_bad_fits` and
   the `multi_tmpl_*` config knobs were removed in the 2026-08 cleanup (the

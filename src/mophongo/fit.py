@@ -53,6 +53,13 @@ class FitConfig:
     # solve only captures part of a large offset per pass, so set
     # fit_astrometry_niter to the maximum passes allowed and let this tol stop.
     astrom_shift_tol: float = 0.05
+    # Damping applied to each pass's shift increment before it is applied to
+    # the templates. The central-difference shift basis underestimates
+    # gradients of sharp structure, so the linearized step can overshoot by
+    # k/sin(k) per mode; damping keeps the iteration contracting even for
+    # scenes dominated by marginally sampled cores, at the cost of ~1 extra
+    # pass. 1.0 = undamped.
+    astrom_damping: float = 0.8
     fit_astrometry_joint: bool = True  # Use joint astrometry fitting, or separate step
     # --- astrometry options -------------------------------------------------
     reg_astrom: float = 1e-4
@@ -98,6 +105,36 @@ class FitConfig:
     # segmentation map by default, so blended neighbours keep ownership of
     # their own segment pixels. Set False to fill every zero template pixel.
     extend_wings_background_only: bool = True
+
+    # --- template build scheme ---------------------------------------------
+    # One selector over the four schemes, for 1-1 comparison:
+    #   'none'      segment-masked detection data only
+    #   'psf_wings' least-squares PSF wings outside the segment, smooth faint
+    #               limit, normalised before neighbour-owned pixels are zeroed
+    #               (alias: 'default')
+    #   'psf'       'none' + Templates.extend_with_psf (template convolved
+    #               with the PSF fills the zero pixels)
+    #   'psf_model' 'none' + Templates.extend_with_psf_model
+    #   'wren'      wren/dev-wren _extended_composite (ownership + SNR blend)
+    #   'classic'   IDL subphot.pro::build_cube (hard switch below tmpl_snrlo)
+    # The build-time schemes live in mophongo.template_schemes; the knobs below
+    # are theirs and are ignored by the other modes.
+    extend_mode: str = "psf_wings"
+    # 'psf_wings' scheme: in-segment SNR at which the template is pure data. Below it
+    # the core rolls off to the scaled PSF, reaching a pure point source at 0.
+    psf_wings_snrlo: float = 5.0
+    psf_wings_blend_p: float = 2.0
+    psf_wings_rms: float | None = None  # None: robust_sigma of the detection image
+    wren_ee_fraction: float = 0.95  # EE fraction setting the support cap R95
+    wren_fit_snrlo_psf: float = 10.0  # core-weight onset is 1.5x this
+    wren_wings_snr_psf: float = 3.0  # per-annulus weight onset
+    wren_blend_p: float = 2.0  # blend-weight rolloff exponent
+    wren_blend_annulus: float = 0.15  # halo annulus width, arcsec
+    # Detection-image sky rms used when weights[0] is absent (the config-driven
+    # path has no detection weight map). None: measure it with sky_sigma.
+    wren_bg_rms: float | None = None
+    classic_tmpl_snrlo: float = 15.0  # below this in-segment SNR: pure point source
+    classic_rms: float | None = None  # None: robust_sigma of the detection image
 
     # scene processing
     run_scene_solver: bool = True  # Whether to run the scene solver at all

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Tuple
@@ -28,6 +29,8 @@ from astropy.nddata import block_reduce
 
 import matplotlib.pyplot as plt
 from scipy.ndimage import median_filter
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "Catalog",
@@ -205,11 +208,27 @@ def get_bg_and_ivar(
         # fallback: use all valid pixels
         bg_ok = pos
     sigma_bin = mad_std(det_bsub[bg_ok].astype(np.float32))
+    # ``det_bsub`` is the coarse residual in units of the weight map's own claimed
+    # sigma. Block-averaging step^2 independent pixels divides its scatter by
+    # ``step``, so ``sigma_true`` is 1 exactly when ``wht`` IS a calibrated
+    # inverse variance and the noise is uncorrelated. Otherwise it is the factor
+    # by which the real noise exceeds what the weight map claims, and it absorbs
+    # BOTH an arbitrary weight normalisation (drizzle weights, exposure time, ...)
+    # and the drizzle pixel-to-pixel correlation, because it is measured after
+    # resampling on a step x step block scale.
     sigma_true = np.float32(step) * np.float32(sigma_bin)
 
     # 7) rescale full-res weights
     scale = np.float32(1.0) / (sigma_true * sigma_true + np.float32(1e-30))
     ivar_new = np.where(valid_w, (w * scale).astype(np.float32), 0.0).astype(np.float32)
+    logger.info(
+        "weight calibration: sigma_true=%.4g (ivar x %.4g); measured on %dx%d blocks; "
+        "median wht %.4g -> ivar %.4g; median background %.4g",
+        float(sigma_true), float(scale), step, step,
+        float(np.median(w[valid_w])) if np.any(valid_w) else np.nan,
+        float(np.median(ivar_new[valid_w])) if np.any(valid_w) else np.nan,
+        float(np.median(bg_img_bin[bgmask])) if np.any(bgmask) else np.nan,
+    )
 
     # Linearly upsample bgmask to full resolution
     bg_img = expand_to_full(bg_img_bin.astype(np.float32), step, s.shape)

@@ -365,7 +365,7 @@ def test_moffat_flux_recovery(tmp_path, scenario, ndilate, extend):
         fit_images, segmap,
         catalog=catalog, weights=fit_wht, kernels=fit_kernels,
         psfs=fit_psfs,
-        extend_templates=extend,
+        extend_templates=extend or "none",
         config=FitConfig(snr_thresh_astrom=0.0),
     )
     table["flux_true"] = catalog["flux_true"]

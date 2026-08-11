@@ -7,6 +7,7 @@ import logging
 import numpy as np
 from astropy.nddata import Cutout2D
 from astropy.wcs import WCS
+from astropy.wcs.utils import proj_plane_pixel_scales
 from photutils.segmentation import SegmentationImage
 from tqdm import tqdm
 from astropy.nddata import block_reduce
@@ -14,7 +15,36 @@ from astropy.nddata import block_reduce
 from .utils import as_label_array, bin_remap, fftconvolve
 from .psf_map import PSFRegionMap
 
+# Alternative template build schemes (wren fork, IDL classic). Imported as a
+# module so the whole feature is one import and one dispatch block, and can be
+# adapted or dropped without touching the rest of this file.
+from . import template_schemes as schemes
+
 logger = logging.getLogger(__name__)
+
+#: Template build schemes selectable with ``extend_mode``.
+#:
+#: ``default``    segment-masked detection data (current mophongo).
+#: ``none``       segment-masked detection data only, unit sum.
+#: ``psf_wings``  :func:`mophongo.template_schemes.composite_psf_wings`:
+#:                least-squares PSF wings outside the segment, smooth faint
+#:                limit, normalised before neighbour-owned pixels are zeroed.
+#: ``psf``        ``none`` + :meth:`Templates.extend_with_psf` post-pass.
+#: ``psf_model``  ``none`` + :meth:`Templates.extend_with_psf_model` post-pass.
+#: ``wren``       :func:`mophongo.template_schemes.composite_wren`.
+#: ``classic``    :func:`mophongo.template_schemes.composite_classic` (IDL).
+#:
+#: ``psf``/``psf_model`` reshape the cutout, so they run after extraction; the
+#: build-time modes replace the masked data before the unit-sum normalisation.
+EXTEND_MODES = ("none", "psf_wings", "psf", "psf_model", "wren", "classic")
+BUILD_TIME_MODES = ("psf_wings", "wren", "classic")
+#: Build-time modes whose composite is already normalised. ``psf_wings``
+#: normalises over the whole stamp and *then* zeroes neighbour-owned pixels, so
+#: its template deliberately sums to less than one; renormalising would undo
+#: exactly the double-counting protection that ordering buys.
+PRENORMALISED_MODES = ("psf_wings",)
+#: Accepted spellings that resolve onto :data:`EXTEND_MODES`.
+EXTEND_MODE_ALIASES = {"default": "psf_wings"}
 
 try:
     from astropy.wcs import WCS, Sip
@@ -382,6 +412,8 @@ class Template(Cutout2D):
     FLAG_SHIFTED = 0x20  # 10 0000: Template has been shifted
     FLAG_DEBLENDED = 0x40  # catalog ``is_deblended`` provenance flag
     FLAG_SATURATED = 0x80  # catalog ``FLAG_SATURATED_<FILTER>`` provenance
+    FLAG_PSF_EXTENDED = 0x100  # build scheme blended PSF wings into the template
+    FLAG_EXTEND_FAILED = 0x200  # extension attempted but the PSF was unusable
 
     def __init__(
         self,
@@ -438,6 +470,16 @@ class Template(Cutout2D):
         self.err = 0.0
         self.err_pred = 0.0  # predicted error from weight map and profile
         self.wnorm = 0.0  # weighted norm of the template d * w * d
+
+        # build/extension provenance
+        # Sum of the template before the unit-sum normalisation, so the
+        # detection-band flux a template implies stays reconstructable
+        # (``template_norm * data == composite``).
+        self.template_norm: float = 0.0
+        self.extension_mode: str = "none"
+        # Per-source bookkeeping from an alternative build scheme
+        # (:mod:`mophongo.template_schemes`); empty for ``extend_mode='default'``.
+        self.extend_info: dict[str, float] = {}
 
         # astrometry
         # record shift from original position here
@@ -816,7 +858,8 @@ class Templates:
     def __init__(self) -> None:
         self._templates: List[Template] = []
         # dilated segmentation map recorded by extract_templates; used by
-        # extend_with_psf_wings to restrict wing filling to background pixels
+        # extend_with_psf to restrict wing filling to background pixels and by
+        # the 'wren' build scheme to build its ownership map
         self.segmap: np.ndarray | None = None
 
     def __len__(self) -> int:
@@ -895,7 +938,7 @@ class Templates:
 
         # if type(extension) == np.ndarray:
         # Extend templates with PSF wings
-        # obj.extend_with_psf_wings(extension, inplace=True)
+        # obj.extend_with_psf(extension, inplace=True)
 
         # Step 2: Convolve with kernel (includes padding)
         if kernel is not None:
@@ -1222,6 +1265,7 @@ class Templates:
             else:
                 expanded.flag |= Template.FLAG_SUM_ZERO
             expanded.data = data.astype(tmpl.data.dtype, copy=False)
+            expanded.template_norm = total
             expanded.extension_mode = mode
             expanded.extension_skip_reason = ""
             expanded.extension_sigma_pix = float(best_sigma)
@@ -1235,7 +1279,7 @@ class Templates:
             return self._templates
         return completed
 
-    def extend_with_psf_wings(
+    def extend_with_psf(
         self,
         psf: np.ndarray | PSFRegionMap,
         *,
@@ -1244,6 +1288,12 @@ class Templates:
         inplace: bool = False,
     ) -> list[Template]:
         """Fill zero-valued template pixels with the local high-resolution PSF response.
+
+        This is the ``extend_mode='psf'`` scheme: the wings inserted here are
+        the template *convolved* with the detection PSF, not a scaled PSF
+        model (contrast :func:`mophongo.template_schemes.composite_classic`,
+        which pastes a least-squares-scaled PSF, and ``composite_wren``, which
+        blends towards a core-anchored one).
 
         This method operates on already-extracted templates.  The template data
         are assumed to encode the segmentation ownership implicitly: nonzero
@@ -1265,6 +1315,11 @@ class Templates:
         The native finite-stamp sum is stored as throughput metadata only; it
         must not change the relative amount of wing light inserted into a
         unit-normalized fitting template.
+
+        Note that ``template_norm`` means something different here than at
+        extraction: the input template is already unit-sum, so the recorded
+        pre-normalisation sum is the multiplicative wing boost (IDL's
+        ``added_flux``), not the detection-band flux in the segment.
         """
         if not self._templates:
             raise ValueError("No templates to extend. Run extract_templates first.")
@@ -1313,6 +1368,7 @@ class Templates:
 
             smeared.data = data.astype(tmpl.data.dtype, copy=False)
             smeared.ee_tmpl = float(np.nansum(smeared.data))
+            smeared.template_norm = total
             smeared.flag = tmpl.flag
             if total == 0.0 or not np.isfinite(total):
                 smeared.flag |= Template.FLAG_SUM_ZERO
@@ -1327,7 +1383,7 @@ class Templates:
             smeared.wnorm = tmpl.wnorm
             smeared.to_shift = tmpl.to_shift.copy()
             smeared.shifted = tmpl.shifted.copy()
-            smeared.extension_mode = "psf_wings"
+            smeared.extension_mode = "psf"
             smeared.extension_skip_reason = ""
             smeared.extension_psf_sum = float(np.sum(psf_arr))
             smeared.extension_psf_throughput = float(psf_throughput)
@@ -1422,7 +1478,14 @@ class Templates:
         segmap: np.ndarray,
         positions: Iterable[Tuple[float, float]],
         wcs: WCS | None = None,
-        dilate_segmap: int = 2,
+        dilate_segmap: int = 0,
+        *,
+        extend_mode: str = "none",
+        detection_psf: np.ndarray | PSFRegionMap | None = None,
+        detection_weight: np.ndarray | None = None,
+        wren: schemes.WrenParams | None = None,
+        classic: schemes.ClassicParams | None = None,
+        psf_wings: schemes.PsfWingsParams | None = None,
     ) -> list[Template]:
         """Extract cutout templates around segmentation regions.
 
@@ -1430,13 +1493,35 @@ class Templates:
         ----------
         dilate_segmap
             Disk radius (in pixels) used to dilate each segment *into
-            background only* before cutting. The input segmap is usually a
-            detection map (2-σ + small dilation) that captures only the
-            bright core of a point source; template photometry then loses
-            the PSF wings and biases the fit low. Dilating per-segment into
-            background (no overlap with neighbors) recovers the wings.
-            Pass 0 to disable.
+            background only* before cutting. Off by default, matching
+            :attr:`~mophongo.fit.FitConfig.template_dilate_segmap`: a dilated
+            ring is mostly sky noise, its contested-background tie-break is
+            catalog-id ordered rather than geometric, and recovering the PSF
+            wings is the job of template extension. Neither reference scheme
+            dilates.
+        extend_mode
+            Template build scheme, one of :data:`EXTEND_MODES`. ``'default'``
+            (and the post-pass modes ``'psf'``/``'psf_model'``, which only
+            differ after extraction) masks the data with the segment.
+            ``'wren'`` and ``'classic'`` instead build a composite that
+            replaces the masked data *before* the unit-sum normalisation, so
+            ``template_norm`` covers the extended shape. See
+            :mod:`mophongo.template_schemes`.
+        detection_psf
+            High-resolution PSF (array or :class:`~mophongo.psf_map.PSFRegionMap`)
+            required by ``'wren'`` and ``'classic'``.
+        detection_weight
+            Detection-band inverse variance. Used by ``'wren'`` for its SNR
+            statistics; without it a clipped sky sigma is used instead.
+        wren, classic
+            Per-scheme parameters; defaults are used when omitted.
         """
+
+        mode = str(extend_mode or "none").lower()
+        mode = EXTEND_MODE_ALIASES.get(mode, mode)
+        if mode not in EXTEND_MODES:
+            raise ValueError(f"extend_mode must be one of {EXTEND_MODES}, got {extend_mode!r}")
+        build_mode = mode if mode in BUILD_TIME_MODES else "none"
 
         self.original_shape = hires_image.shape
         segm = SegmentationImage(as_label_array(segmap))
@@ -1449,7 +1534,79 @@ class Templates:
         templates: list[Template] = []
         ny, nx = hires_image.shape
 
-        for pos in tqdm(positions, desc="Extracting templates"):
+        # ------------------------------------------------------------------
+        # alternative build schemes: resolve reaches, cutout floor and any
+        # shared state (ownership map, noise scalars) once per extraction.
+        # ------------------------------------------------------------------
+        min_size = int(self.min_size)
+        psf_rep = None
+        owner_map = None
+        bg_rms: float | None = None
+        tmpl_rms = 0.0
+        r_fill = 0.0
+        ee_reach = 0.0
+        annulus_pix = 4.0
+        if build_mode != "none":
+            if detection_psf is None:
+                raise ValueError(f"extend_mode={mode!r} requires a detection_psf")
+            wren = wren or schemes.WrenParams()
+            classic = classic or schemes.ClassicParams()
+            psf_wings = psf_wings or schemes.PsfWingsParams()
+            psf_rep = schemes.representative_psf(detection_psf, wren.ee_fraction)
+
+        if build_mode == "wren":
+            r_fill = float(wren.max_radius_pix)
+            if r_fill <= 0:
+                r_fill = schemes.wren_fill_radius(
+                    psf_rep,
+                    ee_fraction=wren.ee_fraction,
+                    aperture_radius_pix=wren.aperture_radius_pix,
+                )
+            ee_reach = (
+                float(wren.psf_ee_radius_pix)
+                if wren.psf_ee_radius_pix is not None
+                else schemes.psf_ee_radius_pix(psf_rep, wren.ee_fraction)
+            )
+            # Pre-size cutouts to hold the fill radius so slice bookkeeping is
+            # correct from birth (wren's ``min_size`` floor).
+            floor = 2 * int(np.ceil(r_fill)) + 1
+            min_size = max(min_size, floor + floor % 2)
+            if wcs is not None:
+                pscale = float(proj_plane_pixel_scales(wcs)[0]) * 3600.0
+                if pscale > 0:
+                    annulus_pix = float(wren.blend_annulus) / pscale
+        elif build_mode in ("classic", "psf_wings"):
+            # Both paste the PSF over the whole stamp; the resampled PSF is
+            # identically zero beyond its own stamp, so the stamp footprint is
+            # the true support of the composite.
+            floor = int(max(psf_rep.shape))
+            min_size = max(min_size, floor + floor % 2)
+            # IDL had no inverse-variance map, so its low-SNR test used one
+            # scalar per tile. With calibrated weights the per-source formal
+            # noise is used instead and no scalar is needed.
+            onset = classic.tmpl_snrlo if build_mode == "classic" else psf_wings.snrlo_psf
+            explicit = classic.rms if build_mode == "classic" else psf_wings.rms
+            if detection_weight is None and onset > 0:
+                tmpl_rms = (
+                    float(explicit)
+                    if explicit is not None
+                    else schemes.detection_rms(hires_image)
+                )
+                if not tmpl_rms > 0:
+                    raise ValueError(
+                        f"extend_mode={mode!r}: detection rms is {tmpl_rms!r}, so the "
+                        f"faint-source SNR (onset {onset}) cannot be evaluated. Pass "
+                        "detection_weight, set the scheme's rms, or set the onset to 0."
+                    )
+                logger.info(
+                    "extend_mode=%r: no detection weights, using scalar detection "
+                    "rms %.4g", mode, tmpl_rms
+                )
+
+        # Resolve every position to its segment and cutout size up front: the
+        # ownership ROI and the extraction loop must size cutouts identically.
+        sized: list[tuple[Tuple[float, float], int, int, int]] = []
+        for pos in positions:
             # silently skip invalid positions
             if not np.isfinite(pos).all():
                 continue
@@ -1462,27 +1619,130 @@ class Templates:
 
             idx = segm.get_index(label)
             bbox = segm.bbox[idx]
-            segm.slices[idx]
 
             # Make bbox symmetric around the center to ensure proper centering
             # enfore minimum size
-            height = max(y - bbox.iymin, bbox.iymax - y, self.min_size // 2) * 2
-            width = max(x - bbox.ixmin, bbox.ixmax - x, self.min_size // 2) * 2
+            height = max(y - bbox.iymin, bbox.iymax - y, min_size // 2) * 2
+            width = max(x - bbox.ixmin, bbox.ixmax - x, min_size // 2) * 2
+            sized.append((pos, int(label), height, width))
 
+        if build_mode == "wren":
+            roi_step = 8
+            owner_map = schemes.build_ownership(
+                self.segmap,
+                r_fill,
+                roi=schemes.cutout_roi(
+                    [(p[0], p[1], h, w) for p, _lab, h, w in sized], (ny, nx), step=roi_step
+                ),
+                roi_step=roi_step,
+            )
+            if detection_weight is None:
+                # Every wren weight comes from an SNR, so without a usable
+                # noise scalar w_core and every w_k collapse to 0 and every
+                # template becomes a bare point source. Fail loudly instead.
+                bg_rms = (
+                    float(wren.bg_rms)
+                    if wren.bg_rms is not None
+                    else schemes.sky_sigma(hires_image, self.segmap)
+                )
+                if not (bg_rms and bg_rms > 0):
+                    raise ValueError(
+                        "extend_mode='wren' needs a noise estimate: no detection_weight "
+                        "was given and the sky sigma of the detection image is "
+                        f"{bg_rms!r}. Pass detection_weight, or set WrenParams.bg_rms."
+                    )
+                logger.info("extend_mode='wren': sky rms fallback %.4g", bg_rms)
+
+        for pos, label, height, width in tqdm(sized, desc="Extracting templates"):
             # Create template cutout
             cut = Template(hires_image, pos, (height, width), wcs=wcs, label=label)
+            sl_o, sl_c = cut.slices_original, cut.slices_cutout
+            seg_stamp = self.segmap[sl_o]
 
-            # zero out all non segment pixels
-            cut.data[cut.slices_cutout] *= (segm.data[cut.slices_original] == label).astype(cut.data.dtype)
+            if build_mode == "none":
+                # zero out all non segment pixels
+                cut.data[sl_c] *= (seg_stamp == label).astype(cut.data.dtype)
+            else:
+                # --- alternative build scheme ------------------------------
+                stamp = np.asarray(hires_image[sl_o], dtype=float)
+                xs = float(cut.input_position_cutout[0]) - sl_c[1].start
+                ys = float(cut.input_position_cutout[1]) - sl_c[0].start
+                ivar_stamp = (
+                    np.asarray(detection_weight[sl_o], dtype=float)
+                    if detection_weight is not None
+                    else None
+                )
+                try:
+                    psf_arr = Templates._psf_for_template(cut, detection_psf)
+                except ValueError:
+                    psf_arr = None
+
+                if build_mode in ("classic", "psf_wings"):
+                    if psf_arr is None:
+                        raise ValueError(
+                            f"extend_mode={mode!r}: no detection PSF for source {label}"
+                        )
+                    # IDL: interpolate(..., cubic=-0.5) -> cubic resampling.
+                    psf_stamp = schemes.sample_psf_on_stamp(
+                        psf_arr, seg_stamp.shape, (xs, ys), order=3
+                    )
+                    if build_mode == "classic":
+                        comp, info = schemes.composite_classic(
+                            stamp, seg_stamp, label, psf_stamp,
+                            params=classic, tmpl_rms=tmpl_rms, ivar=ivar_stamp,
+                        )
+                    else:
+                        comp, info = schemes.composite_psf_wings(
+                            stamp, seg_stamp, label, psf_stamp,
+                            params=psf_wings, tmpl_rms=tmpl_rms, ivar=ivar_stamp,
+                        )
+                else:
+                    # wren: bilinear resampling, unit-sum before interpolation.
+                    psf_stamp = (
+                        schemes.sample_psf_on_stamp(psf_arr, seg_stamp.shape, (xs, ys), order=1)
+                        if psf_arr is not None
+                        else None
+                    )
+                    comp, info = schemes.composite_wren(
+                        stamp, seg_stamp, owner_map[sl_o] == label, label,
+                        psf_stamp, ivar_stamp, (xs, ys),
+                        params=wren,
+                        max_radius_pix=r_fill,
+                        ee_reach_pix=ee_reach,
+                        annulus_pix=annulus_pix,
+                        bg_rms=bg_rms,
+                    )
+
+                cut.data[sl_c] = comp.astype(cut.data.dtype)
+                cut.extend_info = info
+                cut.extension_mode = build_mode
+                if info.get("psf_extended"):
+                    cut.flag |= Template.FLAG_PSF_EXTENDED
+                if info.get("extend_failed"):
+                    cut.flag |= Template.FLAG_EXTEND_FAILED
+                if build_mode == "wren":
+                    # wren clips before recording template_norm, so the stored
+                    # norm is sum(max(H, 0)) over the full support.
+                    np.clip(cut.data, 0.0, None, out=cut.data)
 
             # sum data should never be zero. There should
             # there should also never be NaNs.
-            # Normalize the template so its sum is 1 (if nonzero)
-            total = cut.data.sum()
-            if total != 0:
-                cut.data /= total
+            # Normalize the template so its sum is 1 (if nonzero), keeping the
+            # pre-normalisation sum so the implied detection flux stays known.
+            # PRENORMALISED_MODES normalise inside the scheme and then drop
+            # neighbour-owned pixels on purpose: renormalising here would undo
+            # exactly the double-counting protection that buys.
+            if mode in PRENORMALISED_MODES:
+                cut.template_norm = float(cut.extend_info.get("template_norm", 0.0))
+                if not cut.data.any():
+                    cut.flag |= Template.FLAG_SUM_ZERO
             else:
-                cut.flag |= Template.FLAG_SUM_ZERO
+                total = cut.data.sum()
+                cut.template_norm = float(total)
+                if total != 0:
+                    cut.data /= total
+                else:
+                    cut.flag |= Template.FLAG_SUM_ZERO
             cut.ee_tmpl = float(cut.data.sum())
 
             templates.append(cut)

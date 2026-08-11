@@ -3,6 +3,23 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Cross-reference follow-ups (2026-08-11). `Pipeline.from_config` now
+  accepts a directory holding exactly one `*.json` (ambiguity raises
+  FileNotFoundError naming the candidates) and config-driven `run()`
+  stamps the executed config to `<out_dir>/<name>.json`, so a finished run
+  reopens with `from_config(out_dir).load_fit()` — the wren run-directory
+  convention, restored with provenance (test:
+  `test_from_config_accepts_directory`). Docs: pipeline.md documents the
+  reopen path, the CWD caveat, and that catalog x/y are 0-indexed (1-based
+  FITS-convention externals shift by one); psf.md states production keeps
+  the default MIRI blur while star-comparison tests disable it;
+  diagnostics.md documents plot_subphot's KeyError and the reopen recipe.
+  scratch/wren/make_psf_report_figs.py: KERNEL/PIXFRAC reads guarded with
+  the pipeline's square/0.75 fallbacks, pixel_ratio derived from the cube
+  stamp-size ratio instead of hard-coded 2, deliberate no-blur choice
+  documented. astrom_damping NOT documented: `git log main..template`
+  shows the template branch is still unmerged and the field is absent at
+  main HEAD.
 - [x] Wren cross-reference (2026-08-11). Twelve agents (analysis +
   adversarial verification per script) cross-checked `scratch/wren/*.py`
   against main `3d9e7d4` and the docs; full report in

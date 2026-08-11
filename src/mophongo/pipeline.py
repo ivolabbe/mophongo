@@ -522,9 +522,23 @@ class Pipeline:
     def from_config(cls, path: str | Path | RunConfig) -> "Pipeline":
         """Create a deferred Pipeline from a JSON run config.
 
-        Data are loaded lazily: :meth:`run` (or :meth:`load_data`) reads the
-        images and finishes construction.
+        ``path`` may be the config JSON, a directory holding exactly one
+        ``*.json`` (e.g. a finished run's ``out_dir``, which carries a copy
+        of its config), or a :class:`RunConfig`. Data are loaded lazily:
+        :meth:`run` (or :meth:`load_data`) reads the images and finishes
+        construction. Relative paths inside the config still resolve
+        against the process working directory.
         """
+        if not isinstance(path, RunConfig):
+            p = Path(path)
+            if p.is_dir():
+                candidates = sorted(p.glob("*.json"))
+                if len(candidates) != 1:
+                    found = [c.name for c in candidates] or "none"
+                    raise FileNotFoundError(
+                        f"expected exactly one run config JSON in {p}, found {found}"
+                    )
+                path = candidates[0]
         cfg = path if isinstance(path, RunConfig) else RunConfig.from_json(path)
         obj = cls.__new__(cls)
         obj.run_config = cfg
@@ -2195,6 +2209,9 @@ class Pipeline:
 
         # config-driven construction: load data + maps on first run()
         if getattr(self, "run_config", None) is not None:
+            # record the executed config in out_dir so a finished run can be
+            # reopened later with from_config(out_dir)
+            self.run_config.to_json(self.out_dir / f"{self.run_config.name}.json")
             if self.images is None:
                 self.load_data()
             elif self.kernels[-1] is None:

@@ -460,7 +460,11 @@ low-resolution model PSF by an extra Gaussian before kernel construction
 `mophongo.mock_mosaic.DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC`, which carries MIRI
 defaults (0.08 arcsec at F560W/F770W rising to 0.30 arcsec at F2100W, no
 broadening for unlisted filters), accounting for the broadening of real
-MIRI mosaics relative to the optical `stpsf` model.
+MIRI mosaics relative to the optical `stpsf` model. Production runs should
+keep this default blur on for MIRI bands; disable it (`psf_blur_fwhm=None`)
+only when deliberately testing the unblurred optical model, for example
+when comparing drizzled model PSFs against real stars to measure the
+broadening itself.
 
 ## `jwst_psf` utilities
 

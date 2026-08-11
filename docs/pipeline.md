@@ -109,7 +109,9 @@ fit.
   of the low-resolution PSF stamp at each source position (per-source
   `ee_psf_lo` where available, else the filter-mean stamp sum). Native PSF
   stamps are never silently renormalized in a way that loses the throughput.
-- **Coordinates.** Catalog `x`, `y` are pixels on the high-resolution grid;
+- **Coordinates.** Catalog `x`, `y` are 0-indexed pixels on the
+  high-resolution grid (numpy convention). External catalogs written with
+  the 1-based FITS convention must be shifted by one pixel on input;
   templates carry both original-image and cutout coordinate systems.
 
 ## `pipeline.run()` and the `Pipeline` constructor
@@ -186,9 +188,15 @@ hi-res + one lo-res band). It loads from JSON with
 {meth}`~mophongo.pipeline.RunConfig.from_json` (lines starting with `#` are
 stripped, so the file can carry comments); unknown keys raise an error.
 {meth}`Pipeline.from_config <mophongo.pipeline.Pipeline.from_config>` accepts
-either a path or a `RunConfig` instance and defers data loading until
+a config JSON path, a directory containing exactly one `*.json`, or a
+`RunConfig` instance, and defers data loading until
 {meth}`~mophongo.pipeline.Pipeline.run` or
-{meth}`~mophongo.pipeline.Pipeline.load_data`.
+{meth}`~mophongo.pipeline.Pipeline.load_data`. `run()` writes a copy of the
+executed config to `<out_dir>/<name>.json`, so a finished run reopens with
+`Pipeline.from_config(out_dir)` followed by
+{meth}`~mophongo.pipeline.Pipeline.load_fit`. Relative paths inside a
+config resolve against the process working directory, not the config file's
+location, so reopen from the same working directory as the original run.
 
 ```python
 from mophongo.pipeline import Pipeline

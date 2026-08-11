@@ -62,7 +62,7 @@ class FitConfig:
     # default: unsaturated stars are the best astrometric anchors, and
     # saturated ones are already isolated into their own scenes.
     astrom_exclude_stars: bool = False
-    astrom_model: str = "gp"  # 'polynomial' or 'gp'
+    astrom_model: str = "gp"  # 'poly' or 'gp'
     astrom_centroid: str = "centroid"  # "centroid" (=old) | "correlation"
     astrom_kwargs: dict[str, dict] = field(
         default_factory=lambda: {"poly": {"order": 0}, "gp": {"length_scale": 400}}

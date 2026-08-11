@@ -390,7 +390,7 @@ def build_realistic_two_detector_mock(
     if f770w_position_shift_xy is not None:
         dx, dy = float(f770w_position_shift_xy[0]), float(f770w_position_shift_xy[1])
         if abs(dx) > 1.0 or abs(dy) > 1.0:
-            raise ValueError("f770w_position_shift_xy is limited to +/-1 native F770W pixel per axis")
+            raise ValueError("f770w_position_shift_xy is limited to +/-1 F770W mosaic pixel per axis")
         filter_position_offsets = {"f770w": (dx, dy)}
     truth = mock.inject_point_sources(
         paths,
@@ -470,6 +470,7 @@ def build_wiener_psf_maps(
     source_filter: str = "f444w",
     target_filter: str = "f770w",
     psf_size_arcsec: float = 8.0,
+    target_label: str | None = None,
 ) -> WienerPSFMaps:
     """Build PSF region maps and a spatial Wiener kernel map.
 
@@ -490,13 +491,15 @@ def build_wiener_psf_maps(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     reg_grid = parse_regularization_grid(reg_grid)
+    # display name for diagnostics; the data plumbing stays on target_filter
+    tlabel = (target_label or target_filter).upper()
 
     dpsf_source = dpsfs[source_filter]
     dpsf_target = dpsfs[target_filter]
     source_map = PSFRegionMap.from_footprints(dpsf_source.footprint, name=source_filter.upper()).overlay_with(
         dpsf_source.driz_footprint
     )
-    target_map = PSFRegionMap.from_footprints(dpsf_target.footprint, name=target_filter.upper()).overlay_with(
+    target_map = PSFRegionMap.from_footprints(dpsf_target.footprint, name=tlabel).overlay_with(
         dpsf_target.driz_footprint
     )
     if int(kernel_grid_nside) != 1:
@@ -563,7 +566,7 @@ def build_wiener_psf_maps(
     target_throughputs = []
     for psf_source, psf_target in zip(source_native, target_native):
         source_shape = prepare_psf_shape(psf_source, source_filter.upper())
-        target_shape = prepare_psf_shape(psf_target, target_filter.upper())
+        target_shape = prepare_psf_shape(psf_target, tlabel)
         source_shapes.append(source_shape.shape)
         target_shapes.append(target_shape.shape)
         source_throughputs.append(source_shape.throughput)
@@ -582,7 +585,7 @@ def build_wiener_psf_maps(
         kernel_regularization_weight=1e-3,
         diagnostic_path=out_dir / "diagnostic_wiener.png",
         source_label=source_filter.upper(),
-        target_label=f"{target_filter.upper()} (target)",
+        target_label=f"{tlabel} (target)",
         diagnostic_title="PSF matching kernel diagnostic - wiener",
         diagnostic_note=(
             "two-detector representative region 0; PSF shapes are unit-sum for "
@@ -910,12 +913,13 @@ def diagnostic_note(
     wiener_lambda: float | None = None,
     template_extension: str | None = None,
     f770w_position_shift_xy: tuple[float, float] | None = None,
+    target_label: str = "F770W",
 ) -> str:
     """Return a compact caption for realistic two-detector verification output."""
 
     parts = [
         "Two-detector MockMosaic: F444W NRCA5+NRCB5, 6 NIRCam phase dithers",
-        "F770W two macro pointings x 8 MIRI subpixel dithers",
+        f"{target_label} two macro pointings x 8 MIRI subpixel dithers",
         f"nsrc={int(nsrc)}",
         f"source sigma=[{sigma_range[0]:g}, {sigma_range[1]:g}] F444W pix",
         f"point sources={point_source_fraction:.0%}",
@@ -955,6 +959,7 @@ def run_pipeline_extension_scenario(
     point_source_fraction: float = 0.10,
     max_match_offset_pix: float = 3.0,
     fit_overrides: dict[str, Any] | None = None,
+    target_label: str = "F770W",
 ) -> PipelineScenarioResult:
     """Run one standard realistic verification scenario.
 
@@ -965,6 +970,10 @@ def run_pipeline_extension_scenario(
         fit_overrides: Extra :class:`~mophongo.fit.FitConfig` keyword overrides
             merged over the scenario defaults, e.g. a per-band
             ``aperture_diam`` or scene limits matching a production run.
+        target_label: Display name of the low-resolution band in plot titles
+            and axis labels. The data plumbing keys that band ``f770w``
+            internally regardless; this only fixes what the figures say, e.g.
+            when the slot carries another MIRI band's PSF and blur.
     """
 
     import matplotlib.pyplot as plt
@@ -1068,6 +1077,7 @@ def run_pipeline_extension_scenario(
         wiener_lambda=psf_maps.wiener_lambda,
         template_extension=scenario,
         f770w_position_shift_xy=f770w_position_shift_xy,
+        target_label=target_label,
     )
     deblended_mask = (
         np.asarray(source_table["is_deblended"], dtype=bool)
@@ -1113,13 +1123,13 @@ def run_pipeline_extension_scenario(
         np.asarray(source_table["flux_2_total"], dtype=float)[sel],
         error=np.asarray(source_table["err_pred_2_total"], dtype=float)[sel],
         label=(
-            "F770W fit: unit PSF-shape templates + throughput-corrected total flux; "
+            f"{target_label} fit: unit PSF-shape templates + throughput-corrected total flux; "
             f"nsrc={int(nsrc if nsrc is not None else len(truth))}, "
             f"sigma=[{sigma_range[0]:g}, {sigma_range[1]:g}], "
             f"template_extension={scenario}"
         ),
         xlabel="True Flux",
-        ylabel="Recovered Total Flux (F770W)",
+        ylabel=f"Recovered Total Flux ({target_label})",
         snr_values=np.asarray(source_table["snr_f770w"], dtype=float)[sel]
         if "snr_f770w" in source_table.colnames
         else None,

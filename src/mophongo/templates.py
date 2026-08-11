@@ -425,11 +425,12 @@ class Template(Cutout2D):
         # convolve_templates.  NaN until then, so an unset value fails loudly
         # rather than silently applying no correction.
         self.ee_psf_lo: float = np.nan
-        # fraction of the normalised source model this template retains, i.e.
-        # sum(data) once construction is finished.  Below one when wing flux has
-        # been handed to a neighbour.  Diagnostic only: the fitted amplitude does
-        # not scale with it, because the blanked pixels carry flux but almost no
-        # fitting weight (docs/ENCIRCLED_ENERGY.pdf).
+        # sum(data) recorded AFTER the final unit-sum renormalization, so it is
+        # 1.0 for any nonzero template and 0.0 for a zero-sum one (NaN when
+        # neither extraction nor wing extension ran).  Wing flux withheld from
+        # neighbouring segments is reported by extension_blocked_sum instead.
+        # Diagnostic only: the fitted amplitude does not scale with it
+        # (docs/ENCIRCLED_ENERGY.pdf).
         self.ee_tmpl: float = np.nan
 
         # flux
@@ -985,7 +986,8 @@ class Templates:
                 tmpl._data_unshifted = base.copy()
             total_dx = float(tmpl.shifted[0]) + dx
             total_dy = float(tmpl.shifted[1]) + dy
-            # sign convention: image is shifted, so we reverse shift the template
+            # sign convention: the template is resampled by +(dx, dy), moving
+            # its light in the same direction as the measured offset
             tmpl.data = nd_shift(
                 tmpl._data_unshifted,
                 (total_dy, total_dx),

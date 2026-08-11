@@ -2128,7 +2128,7 @@ class DrizzlePSF:
             suffix.
         auto_reconstruct
             If True (default) and the CSV is missing, regenerate it via
-            :func:`mophongo.wcs_recon.reconstruct_wcs` (fetches public
+            :func:`mophongo.utils.reconstruct_wcs` (fetches public
             MAST cal-file header ranges).
         """
         if csv_file is None:

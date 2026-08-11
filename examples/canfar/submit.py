@@ -206,7 +206,7 @@ def do_run(args: argparse.Namespace) -> None:
         if status == "Failed" and "RUN_DONE" not in text:
             print("  note: a failure with no traceback is usually the container "
                   "being OOM-killed. Memory scales with the mosaic size, not "
-                  "r_trial, so use --ram 32 even for a small patch.")
+                  "r_trial, so keep --ram at 64 even for a small patch.")
 
 
 def do_status(args: argparse.Namespace) -> None:
@@ -261,7 +261,10 @@ def main() -> None:
     p = sub.add_parser("run", help="run one job per config")
     p.add_argument("names", nargs="+")
     p.add_argument("--cores", type=int, default=8)
-    p.add_argument("--ram", type=int, default=32)
+    # 64 GB standard. Runs peak near 34 GB on the UDS trial patches and a 16 GB
+    # request is OOM-killed with no traceback; the headroom costs nothing, since
+    # the quota's 32 GB is only a default and the nodes are far larger.
+    p.add_argument("--ram", type=int, default=64)
     p.add_argument("--no-wait", action="store_true")
     p.set_defaults(func=do_run)
 

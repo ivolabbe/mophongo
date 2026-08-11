@@ -88,17 +88,20 @@ collaboration and should stay read-mostly.
    - **image**: `images.canfar.net/skaha/jwst-notebook:25.07.25`
    - **name**: anything, e.g. `mophongo`
    - **cores**: 8
-   - **memory**: 32 GB
+   - **memory**: 64 GB
 4. Launch, wait for it to turn green, and open it.
 5. In JupyterLab, **File → New → Terminal**.
 
 That terminal is a normal shell on a machine with `/arc` mounted and outbound
 internet. Everything below is typed there.
 
-On memory: 32 GB is not optional. The pipeline loads the full 3.3 GB F444W
-mosaic and the 3.3 GB segmap regardless of how small a trial patch you fit, and
-peaks near 34 GB. A 16 GB session is killed partway through with no Python
-traceback, which looks like a mysterious silent failure.
+On memory: ask for 64 GB and do not economise. The pipeline loads the full
+3.3 GB F444W mosaic and the 3.3 GB segmap regardless of how small a trial patch
+you fit, and the UDS runs peak near 34 GB. A 16 GB session is killed partway
+through with no Python traceback, which looks like a mysterious silent failure,
+and 32 GB leaves no headroom for a wider patch or a redder band. The portal
+offers a 32 GB default, but that is a default and not a cap — the menu goes far
+higher.
 
 ---
 
@@ -292,7 +295,7 @@ $P submit.py push                              # source, job scripts, PSF grids
 $P submit.py setup                             # build the venv on /arc
 $P arcify.py ../minerva/uds_f770w.json         # rewrite paths for arc
 $P submit.py stage uds_f770w
-$P submit.py run   uds_f770w --cores 8 --ram 32
+$P submit.py run   uds_f770w --cores 8 --ram 64
 $P submit.py fetch uds_f770w                   # bring the small outputs home
 ```
 
@@ -315,7 +318,7 @@ See `README.md` here for the details of what each step does.
 |---|---|
 | Cannot list `arc:projects/minerva` | not in the `minerva` group yet — ask `<adam>` |
 | `No such file or directory: /arc/home/<user>` | home not created yet; see Part 2 |
-| Job or session dies with no Python traceback | out of memory. Use 32 GB; memory scales with the mosaic, not `r_trial` |
+| Job or session dies with no Python traceback | out of memory. Use 64 GB; memory scales with the mosaic, not `r_trial` |
 | Nothing happens for three minutes at startup | importing mophongo off `/arc`; normal |
 | `ModuleNotFoundError` after install | you used the image's `python` instead of `./venv/bin/python` |
 | matplotlib font-cache warnings on every command | set `MPLCONFIGDIR` (Part 4.2) |

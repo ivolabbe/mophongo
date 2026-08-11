@@ -25,15 +25,19 @@ config-driven run fits one band, so its columns end in `_1`.
 
 `<name>_fit_table.fits` (in memory: `Pipeline.table`) holds one row per input
 catalog source that survived preprocessing (footprint and trial-region cuts).
-Fluxes are in the pixel units of the fitted image. Sources for which no
-template was fitted keep `FitConfig.bad_value` (default `NaN`) in every
-measurement column.
+Fluxes are in the pixel units of the fitted image — check the mosaic's
+`BUNIT` header keyword for the physical conversion (e.g. a mosaic in units
+of 10 nJy per pixel yields fluxes in the same 10 nJy unit). Sources for
+which no template was fitted keep `FitConfig.bad_value` (default `NaN`) in
+every measurement column.
 
 ### Identity and provenance columns
 
 `id`, `x`, `y`
 : Source id and position in pixels of the high-resolution reference image,
-  copied from the input catalog.
+  copied from the input catalog. Positions are 0-indexed (numpy/`origin=0`
+  convention); catalogs written by 1-indexed FITS tools are offset by one
+  pixel unless converted.
 
 `is_deblended`, `deblend_parent_label`, `deblend_nchildren`
 : Deblending provenance, copied through when present in the input catalog.
@@ -144,6 +148,12 @@ high-resolution science header. The matching model images are in
 and `ra`, `dec` of the scene center, plus a URL column linking each position
 to an external sky viewer. With `scene_plots` enabled, each scene also gets a
 `<name>_scene_<id>.png` diagnostic figure.
+
+Scene ids are labels of one run's fit partition, not stable source
+identifiers: membership depends on the scene-construction settings
+(`scene_coupling_thresh`, `scene_max_size`, `scene_max_merge_radius`), so
+scene-id-keyed products from runs with different settings are not comparable
+by id.
 
 ## The stamps file
 

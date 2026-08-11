@@ -340,7 +340,13 @@ All four are frozen dataclasses.
   `source_throughputs`/`target_throughputs` arrays.
 - `PipelineScenarioResult` — `scenario`, `pipeline`, `table`,
   `source_table`, `residuals`, `residual_native`, `model_native`,
-  `output_dir`, `summary`.
+  `output_dir`, `summary`. The `summary` dict carries the recovery
+  statistics downstream scripts consume: `med_hi`/`med_lo` and
+  `p16_lo`/`p84_lo` (recovered/true flux medians and quantiles),
+  `pull_lo_median`/`pull_lo_std` (error-normalized pulls),
+  `resid_std_over_noise`, plus run bookkeeping (`template_extension`,
+  `n_fit`, `n_position_mismatched`, `wiener_lambda`,
+  `n_source_diagnostics`).
 
 ### PSF shape and throughput helpers
 
@@ -441,7 +447,9 @@ Keyword parameters: `reg_grid` (`Sequence[float]`,
 (`int`, 1) — kept for older callers, must be 1; `source_pattern` /
 `target_pattern` (`str`, the F444W/F770W defaults above); `source_filter`
 (`str`, `"f444w"`); `target_filter` (`str`, `"f770w"`); `psf_size_arcsec`
-(`float`, 8.0) — PSF stamp size.
+(`float`, 8.0) — PSF stamp size; `target_label` (`str | None`, `None`) —
+display name of the target band used in figure captions and labels,
+defaulting to the internal band name.
 
 ### Truth matching and recovery tables
 
@@ -504,7 +512,9 @@ caption metadata only; `max_match_offset_pix` (`float`, 3.0) — maximum
 segment-centroid offset before a row is flagged position-mismatched and
 excluded from the recovery plots; `fit_overrides` (`dict | None`, `None`) —
 extra `FitConfig` keywords merged over the scenario defaults, e.g. a
-per-band `aperture_diam` matching a production run.
+per-band `aperture_diam` matching a production run; `target_label` (`str`,
+`"F770W"`) — display name of the fitted band used in captions and axis
+labels, so the F770W-keyed mock slots can carry another band's name.
 
 ### Diagnostic figure helpers
 

@@ -302,9 +302,9 @@ given; `FLT*` keys in the mosaic primary header; the
 `companion_csv` (or of an existing `<stem>_wcs.csv` next to the mosaic).
 When none of these is available the function raises.
 
-{func}`mophongo.utils.write_wcs_csv` builds the same table by reading the
-frame headers themselves, for the case where the stage-2 frames are on local
-disk:
+{func}`mophongo.utils.write_wcs_csv` is meant to build the same table by
+reading the frame headers themselves, for the case where the stage-2 frames
+are on local disk:
 
 - `mosaic_or_glob` (*Path | str*, required) — a glob pattern matching local
   stage-2 frames (e.g. `"data/*/F770W/stage2/*_cal.fits"`), or a mosaic
@@ -313,6 +313,11 @@ disk:
 - `out_csv` (*str | None*, default `None`) — output path; `None` derives
   `<stem>_wcs.csv` from the mosaic (or first matched frame) name by
   stripping any `_drz_wht`/`_drz_sci`/`_i2d`/`_wht`/`_sci` suffix.
+
+`write_wcs_csv` does not currently do that: a leftover debug `continue` in its
+per-frame loop skips every header read, so the CSV it writes holds the column
+header and no rows. Use {func}`~mophongo.utils.reconstruct_wcs` until that is
+fixed.
 
 **Auto-reconstruction.** The CSVs need not exist before a run.
 {meth}`mophongo.psf.DrizzlePSF.read_wcs_csv` derives the CSV path from the
@@ -325,8 +330,9 @@ missing file is reconstructed at the configured path on first use.
 
 ### Step methods
 
-Config-driven runs decompose into steps, each returning `self` so they chain;
-expensive products are cached in `out_dir`:
+Config-driven runs decompose into steps; the state-carrying ones return `self`
+so they chain (`run` returns `(table, residuals)` and `info` returns its
+summary text). Expensive products are cached in `out_dir`:
 
 - {meth}`~mophongo.pipeline.Pipeline.build_psfs` `(overwrite=False)` — build
   or reload the per-band PSF region maps, with PSFs drizzled at each map's own
@@ -349,8 +355,8 @@ expensive products are cached in `out_dir`:
 - {meth}`~mophongo.pipeline.Pipeline.write_outputs` — write
   `<name>_residual.fits` (on the hi-res reference grid, with the `sci_hi`
   header), `<name>_fit_table.fits`, the stamps file (when `save_stamps`),
-  a scene catalog CSV (`id`, `n_templates`, `is_bright`, `ra`, `dec`), and
-  optional per-scene PNGs.
+  a scene catalog CSV (`id`, `n_templates`, `is_bright`, `ra`, `dec`, and a
+  per-scene image-viewer URL), and optional per-scene PNGs.
 - {meth}`~mophongo.pipeline.Pipeline.run_all` — all of the above in
   order, with everything the run emits (logging, `print`, progress bars)
   captured to `<out_dir>/<name>.log`.
@@ -385,8 +391,8 @@ Solver:
   sources that were not fitted.
 - `cg_kwargs` (*dict*, default `{"M": None, "maxiter": 500, "atol": 1e-6}`) —
   keyword arguments for the conjugate-gradient solver.
-- `normal` (*str*, default `"tree"`) — normal-matrix assembly strategy,
-  `"loop"` or `"tree"`.
+- `normal` (*str*, default `"tree"`) — normal-matrix assembly strategy. Only
+  `"tree"` (STRtree overlap search) is implemented; any other value raises.
 - `multi_resolution_method` (*str*, default `"upsample"`) — `"upsample"`
   (block-replicate the lo-res image onto the reference grid) or
   `"downsample"` (downsample templates and kernels to the lo-res grid).

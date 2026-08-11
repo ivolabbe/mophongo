@@ -11,6 +11,7 @@ extensions = [
     "sphinx.ext.intersphinx",
     "sphinx.ext.viewcode",
     "myst_parser",
+    "sphinx_copybutton",
 ]
 
 # Only these documents are part of the rendered docs; the rest of docs/
@@ -52,5 +53,21 @@ intersphinx_mapping = {
     "photutils": ("https://photutils.readthedocs.io/en/stable/", None),
 }
 
-html_theme = "pydata_sphinx_theme"
+html_theme = "furo"
 html_title = "mophongo"
+html_theme_options = {
+    "light_css_variables": {
+        "color-brand-primary": "#1f5f8b",
+        "color-brand-content": "#1f5f8b",
+    },
+    "dark_css_variables": {
+        "color-brand-primary": "#6db3d9",
+        "color-brand-content": "#6db3d9",
+    },
+}
+# Every page gets the full section tree in the left sidebar plus its own
+# in-page table of contents on the right (furo defaults); show deeper
+# section levels in the sidebar.
+html_theme_options["navigation_with_keys"] = True
+copybutton_prompt_text = r">>> |\.\.\. |\$ "
+copybutton_prompt_is_regexp = True

@@ -60,7 +60,8 @@ fig, ax = prm.plot()               # colored region overview
 : One row per region, with at least a `geometry` column and an integer
   `psf_key` column. Factory-built maps also carry `frame_list` (contributing
   frame identifiers) and `pa_list`. Extra columns round-trip through GeoJSON,
-  which the pipeline uses for provenance stamping (see below).
+  which the pipeline uses for provenance stamping (see below); tuple-valued
+  columns such as `frame_list` come back as their string repr.
 
 `snap_tol` : `float`, default `0.2 / 3600` (degrees)
 : Snap grid passed to `shapely.set_precision` during footprint preprocessing.
@@ -90,9 +91,11 @@ fig, ax = prm.plot()               # colored region overview
   {attr}`~mophongo.psf_map.PSFRegionMap.r_lim`; encircled-energy fractions
   are unaffected.
 
-The spatial index (`tree`, a Shapely `STRtree`) is derived state: it is
-rebuilt in `__post_init__`, dropped on pickling, and restored on unpickling,
-so region maps deep-copy and pickle cleanly.
+The spatial index (`tree`, a Shapely `STRtree`) is derived state, rebuilt by
+`__post_init__` and again by every factory. `__getstate__` drops `tree` and
+`__setstate__` rebuilds it, but the prepared-geometry cache built alongside it
+is not dropped, so as of this writing pickling or deep-copying a region map
+raises `PicklingError: Prepared geometries cannot be pickled`.
 
 ### Constructors
 
@@ -302,19 +305,22 @@ each band it forms the region map from the exposure footprints of the
 band's {class}`mophongo.psf.DrizzlePSF`, clips it to the drizzled mosaic
 outline with `overlay_with`, and drizzles a PSF at every region centroid.
 The low-resolution cube optionally receives a Gaussian broadening (the
-`psf_blur_fwhm` run setting). Stamps keep their native sums: the finite
-stamp sum is filter-level throughput metadata, later applied by
-{meth}`mophongo.pipeline.Pipeline.run` to convert fitted amplitudes
-(`flux_<i>`) into totals (`flux_<i>_total`). The two maps are written to
+`psf_blur_fwhm` run setting). Stamps keep their native sums, so a stamp sum
+is a realized encircled energy: {meth}`mophongo.pipeline.Pipeline.run` divides
+each fitted amplitude (`flux_<i>`) by the encircled energy of the lo-res stamp
+at that source's position to get the total (`flux_<i>_total`), and falls back
+to the filter-level mean stamp sum for templates that never saw a PSF map.
+The two maps are written to
 `<name>_psf_hi.geojson` and `<name>_psf_lo.geojson` (plus the companion
 `.fits` cubes) in the output directory.
 
 {meth}`mophongo.pipeline.Pipeline.build_kernels` overlays the hi and lo
 geometry maps and computes one matching kernel per overlay region with
-{func}`mophongo.utils.matching_kernel` (default `method="wiener"`). Kernels
-are matched between unit-sum PSF *shapes*; for regularized methods, when the
-regularization parameter is not given it is optimized once on the median PSF
-shape with
+{func}`mophongo.utils.matching_kernel`, passing its own `method` argument,
+which defaults to `"wiener"` rather than the `"window"` default of
+`matching_kernel` itself. Kernels are matched between unit-sum PSF *shapes*;
+for regularized methods (anything but `"window"`), when the regularization
+parameter is not given it is optimized once on the median PSF shape with
 {meth}`mophongo.psf.PSF.optimize_matching_kernel_regularization` and reused
 for every region. The finished kernels are renormalized to unit sum, so the
 kernel carries no flux scale of its own, and the map is written to
@@ -324,9 +330,13 @@ During template preparation, template convolution
 ({meth}`mophongo.templates.Templates.convolve_templates`) accepts either a
 single kernel array or a kernel `PSFRegionMap`; in the map case each
 template's kernel is looked up at the template's sky position with
-`get_psf`. The hi-res PSF map serves template extension (analytic wings are
-matched to the local hi-res PSF), and the lo-res map provides the
-encircled-energy metadata recorded in the output catalog.
+`get_psf`. The hi-res PSF map serves template extension: with the default
+`extend_templates="psf_wings"`,
+{meth}`~mophongo.templates.Templates.extend_with_psf_wings` looks up the PSF at
+each source position and fills the template's zero-valued pixels with the
+template convolved by that local PSF. The lo-res map provides the
+encircled-energy metadata recorded in the output catalog, both the per-source
+`ee_psf_lo` and the filter-level values in `cat.meta`.
 
 ### Provenance and staleness
 

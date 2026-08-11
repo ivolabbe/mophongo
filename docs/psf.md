@@ -3,7 +3,7 @@
 Mophongo fits low-resolution images with templates derived from a
 high-resolution detection image, so every band needs a PSF model and a
 convolution kernel that transforms the high-resolution PSF into the
-low-resolution one. Three modules provide this machinery:
+low-resolution one. Three classes provide this machinery:
 
 - {class}`mophongo.psf.PSF` wraps a discrete PSF stamp and builds matching
   kernels (windowed Fourier ratio, Tikhonov, Wiener, ForWaRD), including
@@ -118,15 +118,17 @@ Return the convolution kernel `k` such that `psf_hi * k ≈ psf_lo`
 
 The underlying function is {func}`mophongo.utils.matching_kernel`, which
 accepts the same arguments plus `pixel_ratio` (*float*, default `1.0`): when
-the two PSFs are sampled on different pixel scales, the coarser one is
-resampled onto the finer grid by flux-conserving cubic interpolation
+the two PSFs are sampled on different pixel scales, one of them is rescaled by
+that factor with flux-conserving cubic interpolation
 ({func}`mophongo.utils.resize_flux_conserving_inter_cubic`) before Fourier
-inversion, using the same pixel-extent convention as the pipeline's nested
-block grids so integer scale ratios stay registered. Kernel convolution
-throughout mophongo uses {func}`mophongo.utils.fftconvolve`, which crops the
-full convolution from `kernel.shape // 2` so odd- and even-sized centered
-kernels follow the same convention (SciPy's `mode="same"` is offset by one
-pixel for even kernels).
+inversion. A ratio above one upsamples `psf_lo` onto the finer grid, which is
+how the pipeline passes it (the low-to-high pixel-scale ratio); a ratio below
+one downsamples `psf_hi` instead. The resize uses the same pixel-extent
+convention as the pipeline's nested block grids, so integer scale ratios stay
+registered. Kernel convolution throughout mophongo uses
+{func}`mophongo.utils.fftconvolve`, which crops the full convolution from
+`kernel.shape // 2` so odd- and even-sized centered kernels follow the same
+convention (SciPy's `mode="same"` is offset by one pixel for even kernels).
 
 ### Regularization methods
 
@@ -205,11 +207,11 @@ The underlying grid search; same search and weighting parameters, but with
   merit. `reg_grid` defaults to `np.logspace(-6, -1, 21)`. `pixel_ratio`
   brings the pair onto a common grid before scanning, exactly as
   `matching_kernel` would. Passing `diagnostic_path` writes the standard
-  `diagnostic_<method>.png`; use this rather than ad hoc diagnostic
-  figures. Returns a {class}`mophongo.psf.MatchingKernelRegFit` with
-  `method`, the best `reg`, `score`, `kernel`, `matched_psf`, the 1-D
-  scan grids, the profile vectors, and an `extra` dict recording the scan
-  configuration.
+  diagnostic figure, named `diagnostic_<method>.png` when the path is a
+  directory; use this rather than ad hoc diagnostic figures. Returns a
+  {class}`mophongo.psf.MatchingKernelRegFit` with `method`, the best `reg`,
+  `score`, `kernel`, `matched_psf`, the 1-D scan grids, the profile vectors,
+  and an `extra` dict recording the scan configuration.
 
 **`PSF.matching_kernel_basis(other, basis, *, method="lstsq", recenter=True)`**
 Alternative kernel from a linear Fourier-basis fit
@@ -263,8 +265,8 @@ Static helper that parses the WCS CSV into `(flt_keys, wcs_dict,
 
 `DrizzlePSF.load_jwst_stdpsf(...)` forwards to
 `EffectivePSF.load_jwst_stdpsf`, which fills the `epsf` dictionary keyed by
-STDPSF file basename. Parameters of the local-directory mode, which is what
-the pipeline uses:
+the STDPSF filename stem (basename without `.fits`). Parameters of the
+local-directory mode, which is what the pipeline uses:
 
 - `local_dir` (*str or None*) — directory searched recursively for
   `*.fits` STDPSF files.
@@ -278,15 +280,17 @@ the pipeline uses:
 - `use_astropy_cache` (*bool*, default `True`), `verbose` (*bool*, default
   `False`).
 
-Without `local_dir`, the loader downloads library STDPSF files from the
+Without both `local_dir` and `filter_pattern` (the local branch needs the two
+together), the loader downloads library STDPSF files from the
 STScI JWST1PASS archive; the filter/detector selection arguments
 (`miri_filters`, `nircam_sw_filters`, `nircam_sw_detectors`,
 `nircam_lw_filters`, `nircam_lw_detectors`, `miri_extended=True`) control
 which files are fetched.
 
 Each grid stores its spatial knot positions (`IPSFX*`/`JPSFY*` header
-keywords), oversampling factor (`OVERSAMP`, default 4), and epoch
-(`MJD-AVG`). `EffectivePSF.get_at_position(x, y, filter, rot90=0)`
+keywords) and oversampling factor (`OVERSAMP`, default 4); local-directory
+loads also record the epoch (`MJD-AVG`) that drives the lookup described
+below. `EffectivePSF.get_at_position(x, y, filter, rot90=0)`
 bilinearly interpolates the tile grid to a detector position, and
 `eval_ePSF` evaluates the oversampled stamp at sub-pixel offsets with cubic
 interpolation.
@@ -391,8 +395,8 @@ overridable per call):
   laid out across the detector.
 - `oversample` (*int*, default `4`) — pixel-space oversampling.
 - `fov_arcsec` (*float or None*, default `None`) — field of view per PSF;
-  `None` selects the backend's own default (4.09 arcsec for NIRCam, 8.10
-  for MIRI).
+  `None` omits the keyword so `stpsf` applies its own pixel-based default
+  (4.09 arcsec for NIRCam, 8.10 for MIRI).
 - `use_detsampled_psf` (*bool*, default `False`) — write detector-sampled
   rather than oversampled PSFs.
 - `date_mode` (*str, float, or astropy Time*, default `"modal"`) — default
@@ -415,10 +419,12 @@ Build one PSF grid explicitly. `date` may be an MJD float, ISO string, or
 
 **`PSFFactory.from_csv(csv_path, *, detector=None, date_mode=None, span=None, delta_day=None, num_psfs=None, oversample=None, fov_arcsec=None, use_detsampled_psf=None, save=True)`**
 Build every grid needed for a mosaic from its per-exposure `*_wcs.csv`
-  listing: the telescope, instrument, filter, and detector list are
-  inferred from the CSV, and one file is produced per `(detector, date)`
-  pair. Existing files are skipped unless `overwrite` is set. `date_mode`
-  may also be an iterable of modes to combine.
+  listing: the telescope and instrument are decoded from the exposure
+  filenames in the `file` column, the filter from the CSV filename, and the
+  detector list from the backend (every NIRCam SCA that sees the filter,
+  otherwise the detector decoded from the filenames). One file is produced
+  per `(detector, date)` pair. Existing files are skipped unless `overwrite`
+  is set. `date_mode` may also be an iterable of modes to combine.
 
 **`dates_from_csv(csv_path, mode="modal", *, span=5.0, delta_day=2.0, column="mjd-avg")`**
 Epoch selection from the `mjd-avg` column:

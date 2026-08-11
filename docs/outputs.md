@@ -48,18 +48,20 @@ copied through.
 ### Flux and error columns
 
 `flux_<i>`
-: Raw fitted template amplitude. Templates are built from unit-sum PSF shapes,
-  so this is the flux contained in the modeled PSF support, without any
-  correction for flux outside the finite PSF stamp. For catalog deblend
-  children, each child template's amplitude is accumulated onto its parent row
-  (`id_parent`).
+: Raw fitted template amplitude. Templates are normalized to unit sum and
+  convolved with unit-sum matching kernels, so this is the flux contained in
+  the modeled PSF support, without any correction for flux outside the finite
+  PSF stamp. Each amplitude is written to the catalog row carrying the
+  template's `id`; catalog deblend children are rows of their own, so a child
+  keeps its own flux instead of having it folded into its parent.
 
 `err_<i>`
 : 1-sigma uncertainty on `flux_<i>` from the solver:
   `sqrt(diag(A^-1))` of the scene's normal matrix (solved in whitened
   variables for conditioning, then unwhitened), so it includes the
-  covariance penalty from overlapping neighbors. Child contributions combine
-  in quadrature on the parent row.
+  covariance penalty from overlapping neighbors. When a scene also solves for
+  astrometric shifts, the shift block is marginalized out through its Schur
+  complement first.
 
 `err_pred_<i>`
 : Predicted uncertainty ignoring template covariance,
@@ -76,11 +78,10 @@ copied through.
 `flux_<i>_total`, `err_<i>_total`, `err_pred_<i>_total`
 : Total-flux versions of the three columns above: each template's amplitude
   (and errors) divided by `ee_psf_lo`, the encircled energy of the
-  low-resolution PSF stamp at that source's position, before accumulating onto
-  the parent row. Templates whose `ee_psf_lo` is unset fall back to
-  `throughput_<i>`. This is the number to use as a total flux; `flux_<i>`
-  deliberately keeps the uncorrected amplitude (see the shape-vs-throughput
-  convention in {doc}`psf`).
+  low-resolution PSF stamp at that source's position. Templates whose
+  `ee_psf_lo` is unset fall back to `throughput_<i>`. This is the number to
+  use as a total flux; `flux_<i>` deliberately keeps the uncorrected amplitude
+  (see the shape-vs-throughput convention in {doc}`psf`).
 
 ### Aperture columns
 
@@ -171,8 +172,7 @@ JSON file.
   : Source id and reference-grid position.
 
   `flux`, `err`
-  : Fitted amplitude and solver uncertainty (per template, not summed onto
-    parents as in the fit table).
+  : Fitted amplitude and solver uncertainty of this template.
 
   `tmpl_hi`, `ny_hi`, `nx_hi`, `x0_hi`, `y0_hi`, `xs_hi`, `ys_hi`
   : High-resolution template pixels as a flattened variable-length array
@@ -195,8 +195,10 @@ JSON file.
     (bit values below).
 
   `id_parent`, `id_scene`
-  : Parent catalog id (differs from `id` for deblend children) and the scene
-    the template was solved in.
+  : Catalog id the template's flux is booked under, and the scene it belongs
+    to. Both are placeholders as the pipeline stands: `id_parent` equals `id`
+    for every template it builds, and the scene builder does not stamp its
+    labels back onto the templates, so `id_scene` keeps its default of 1.
 
   `ee_psf_lo`
   : Encircled energy of the low-resolution PSF stamp at this position — the
@@ -233,6 +235,11 @@ constants:
 | 5 | 32 | `FLAG_SHIFTED` | an astrometric shift was applied |
 | 6 | 64 | `FLAG_DEBLENDED` | source is a catalog deblend child (provenance) |
 | 7 | 128 | `FLAG_SATURATED` | source carried a `FLAG_SATURATED_*` catalog flag (provenance) |
+
+`FLAG_HAS_NAN` and `FLAG_OUTSIDE_WEIGHT` are declared but nothing in the
+current code sets them: templates with no useful overlap with the weight map
+are dropped by `Templates.prune_outside_weight` before the fit rather than
+flagged, and never reach the stamps file at all.
 
 As of this writing these flags live in the stamps file (and on the in-memory
 `Template` objects), not as a column of the fit table.

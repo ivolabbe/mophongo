@@ -22,6 +22,7 @@ passed as environment variables instead.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -216,10 +217,31 @@ def tidy(text: str, lines: int = 40) -> str:
     return "\n".join(kept[-lines:])
 
 
+def cores_for(name: str, override: int | None) -> int:
+    """Cores to request for one config: 4 for a full field, 1 for a trial patch.
+
+    Measured utilisation is about 0.2 of a core - the runs wait on ``/arc``
+    rather than compute, and mophongo has no thread pool in the fitting path -
+    so a large request only idles allocation that another job could use. Full
+    fields get 4 because they carry many more sources through the solver.
+    """
+    if override is not None:
+        return override
+    cfg_path = HERE / f"{name}_canfar.json"
+    try:
+        r_trial = json.loads(cfg_path.read_text()).get("r_trial", 0.0)
+    except (OSError, ValueError):
+        return 4
+    return 1 if r_trial else 4
+
+
 def do_run(args: argparse.Namespace) -> None:
     do_upload_cfg(args.names)
-    ids = [launch(f"mophongo-{n.replace('_', '-')}", "run.sh", args.cores, args.ram,
-                  {"RUN": RUN, "CFG": n}) for n in args.names]
+    ids = []
+    for name in args.names:
+        cores = cores_for(name, args.cores)
+        ids.append(launch(f"mophongo-{name.replace('_', '-')}", "run.sh", cores, args.ram,
+                          {"RUN": RUN, "CFG": name}))
     if args.no_wait:
         return
     final = wait(ids)
@@ -284,9 +306,13 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("push", help="upload mophongo source and PSF grids")
+    # Every field's grids, not just UDS: a band with no matching grid falls back
+    # to building them on the node, which is slow and, run concurrently by
+    # several bands of a field, races on the same psf_dir. EGS has none locally
+    # and has to build them regardless.
     p.add_argument("--psf-glob", nargs="+",
-                   default=["UDS_NRC*_F444W_MJD*_GRID25_OS4.fits",
-                            "UDS_MIRI_*_MJD*_GRID9_OS4.fits"])
+                   default=["*_NRC*_F444W_MJD*_GRID25_OS4.fits",
+                            "*_MIRI_*_MJD*_GRID9_OS4.fits"])
     p.set_defaults(func=do_push)
 
     p = sub.add_parser("setup", help="build the venv on /arc")
@@ -298,7 +324,8 @@ def main() -> None:
 
     p = sub.add_parser("run", help="run one job per config")
     p.add_argument("names", nargs="+")
-    p.add_argument("--cores", type=int, default=8)
+    p.add_argument("--cores", type=int, default=None,
+                   help="override; default is 4 for a full field, 1 for a trial patch")
     # 64 GB standard. Runs peak near 34 GB on the UDS trial patches and a 16 GB
     # request is OOM-killed with no traceback; the headroom costs nothing, since
     # the quota's 32 GB is only a default and the nodes are far larger.

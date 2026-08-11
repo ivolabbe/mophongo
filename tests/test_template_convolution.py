@@ -5,6 +5,30 @@ from mophongo.templates import Template, Templates
 from mophongo.utils import fftconvolve
 
 
+def test_resampling_preserves_ee_metadata():
+    """ee_psf_lo/ee_tmpl must survive projection and downsampling: they feed
+    the per-source flux_<i>_total correction, and losing them silently reverts
+    every source to the filter-mean fallback (2026-08-10 audit)."""
+    parent = np.zeros((40, 40), dtype=np.float32)
+    tmpl = Template(parent, (20.0, 20.0), (8, 8), label=7)
+    tmpl.data = np.ones((8, 8), dtype=np.float32)
+    tmpl.ee_psf_lo = 0.917
+    tmpl.ee_tmpl = 0.88
+    tmpl.template_norm = 123.0
+    tmpl.id_scene = 3
+
+    proj = tmpl.project_to_block_replicated_grid(
+        2, parent_image=np.zeros((20, 20), np.byte)
+    )
+    low = tmpl.downsample(2)
+    for out in (proj, low):
+        assert out.ee_psf_lo == 0.917
+        assert out.ee_tmpl == 0.88
+        assert out.template_norm == 123.0
+        assert out.id_scene == 3
+        assert out.id_parent == 7
+
+
 def _paste_template(tmpl: Template, shape: tuple[int, int]) -> np.ndarray:
     image = np.zeros(shape, dtype=float)
     image[tmpl.slices_original] += tmpl.data[tmpl.slices_cutout]

@@ -781,6 +781,17 @@ class Template(Cutout2D):
         # print(dx, dy, ly, lx)
         low.data[:ly, :lx] = lo_block
 
+        low.flag = self.flag
+        low.deblend_parent_label = self.deblend_parent_label
+        low.deblend_nchildren = self.deblend_nchildren
+        # keep the EE metadata alive across resampling (see
+        # project_to_block_replicated_grid)
+        low.ee_psf_lo = self.ee_psf_lo
+        low.ee_tmpl = self.ee_tmpl
+        low.template_norm = self.template_norm
+        low.id_parent = self.id_parent
+        low.id_scene = self.id_scene
+        low.name = self.name
         return low
 
     def project_to_block_replicated_grid(
@@ -850,6 +861,15 @@ class Template(Cutout2D):
         out.flag = self.flag
         out.deblend_parent_label = self.deblend_parent_label
         out.deblend_nchildren = self.deblend_nchildren
+        # per-source PSF/template encircled energies feed the flux_<i>_total
+        # correction downstream; dropping them here silently reverts every
+        # source to the filter-mean fallback (TODO 2026-08-10 audit)
+        out.ee_psf_lo = self.ee_psf_lo
+        out.ee_tmpl = self.ee_tmpl
+        out.template_norm = self.template_norm
+        out.id_parent = self.id_parent
+        out.id_scene = self.id_scene
+        out.name = self.name
         return out
 
 

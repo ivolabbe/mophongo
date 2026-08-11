@@ -111,7 +111,12 @@ def n_frames(csv: Path) -> int:
         return sum(1 for _ in fh) - 1
 
 
-COVERAGE_STEPS = (0.999, 0.95, 0.9, 0.75, 0.5)
+# Coverage fractions accepted for the trial box, tried in order. The last two
+# are for the thin EGS MIRI strips: F560W, F1280W and F1800W cover 3-6% of their
+# mosaic and their best 6 arcmin box reaches only 0.24-0.31, so anything stricter
+# sends them to a full-field run. A sparse patch still beats the whole field,
+# since footprint_filter drops the uncovered sources anyway.
+COVERAGE_STEPS = (0.999, 0.95, 0.9, 0.75, 0.5, 0.3, 0.2)
 
 
 def deepest_patch(wht_path: Path, radius_arcmin: float) -> tuple[float, float] | None:

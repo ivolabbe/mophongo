@@ -703,7 +703,7 @@ def matching_kernel(
         Fourier-domain window function. Defaults to SplitCosineBellWindow.
     recenter : bool, optional
         If ``True`` the resulting kernel is shifted to its centroid using
-        bicubic interpolation. Defaults to ``True``.
+        bicubic interpolation. Defaults to ``False``.
 
     Returns
     -------

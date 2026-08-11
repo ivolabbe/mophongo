@@ -7,7 +7,7 @@ outside the photometry pipeline.
 
 This module is image-only: it depends on a drizzled science / weight pair
 and a :class:`mophongo.psf.DrizzlePSF`. It deliberately does **not** know
-about segmentation maps — the output table carries ``xc, yc, r_outer`` per
+about segmentation maps — the output table carries ``xc, yc, r_out`` per
 repaired source so a separate catalog routine (see
 :func:`mophongo.catalog.merge_segments_at_holes`) can relabel a segmap
 afterwards if needed.
@@ -16,8 +16,10 @@ Notes
 -----
 - Hole detection is parameter-free aside from a minimum-area cut: any
   zero-weight component that does not touch the image border is interior.
-- Donut fit is a single linear least-squares for amplitude only; sub-pixel
-  registration of the PSF stamp is handled by :func:`scipy.ndimage.shift`.
+- The donut fit is a joint amplitude + sub-pixel shift fit: each iteration
+  solves a linearised amplitude/gradient system (:func:`fit_amp_and_shift`),
+  applies the recovered shift, and re-drizzles the PSF stamp at the refined
+  center until the shift converges.
 - The PSF beyond the empirical stamp is unknown; pixels outside PSF support
   are excluded from the fit. If ``r_in`` exceeds the PSF half-width, the
   source is skipped.
@@ -255,7 +257,7 @@ def fit_psf_donut(
 ) -> dict[str, Any]:
     """Fit ``data ≈ A·psf [+ C]`` on ring ``r_in ≤ r ≤ r_out``.
 
-    Pixels with ``wht <= 0``, ``bad_mask == True``, or ``psf == 0`` are
+    Pixels with ``wht <= 0``, ``bad_mask == True``, or ``psf <= 0`` are
     excluded from the ring. With ``fit_pedestal=True`` an additive
     constant ``C`` is added.
 
@@ -263,12 +265,11 @@ def fit_psf_donut(
     subtracted/replaced; only ``A·psf`` is. They are reported so the
     caller can audit fit quality.
 
-    Also computes the PSF-weighted residual–model cross-correlation
-    ``ρ_psf = ⟨resid·ψ·w⟩ / √(⟨resid²·w⟩·⟨ψ²·w⟩)`` over the ring —
-    a dimensionless, amplitude-invariant quality metric. ``ρ_psf ≈ 0``
-    means the residual is orthogonal to the PSF (good fit); ``> 0`` =
-    model under-fits flux co-located with PSF (e.g. missing halo);
-    ``< 0`` = over-fits.
+    Also computes ``ρ_psf``, the weighted Pearson correlation between the
+    data and the PSF model over the ring — a dimensionless,
+    amplitude-invariant shape metric. ``ρ_psf ≈ 1`` means the ring data
+    follow the PSF shape (good fit); values well below one mean the light
+    on the ring is not PSF-like.
 
     Returns
     -------
@@ -993,9 +994,9 @@ def repair_saturated_holes(
         #   * mode='repair'   → fill the dilated saturation footprint
         #     with A·ψ; restore wht of those pixels to median-donut wht.
         #   * mode='subtract' → subtract A·ψ from the entire cutout
-        #     (PSF wings, spikes, halo). Pixels with wht == 0 stay
-        #     blanked (set to NaN) — they have no signal to subtract
-        #     from and any value there is meaningless.
+        #     (PSF wings, spikes, halo). Saturation cores and bad-residual
+        #     pixels are blanked by setting both sci and wht to zero, so
+        #     downstream photometry skips them.
         # Guard: if the residual fraction over the fit ring is >100%,
         # the model doesn't describe the data — leaving the image
         # untouched is safer than corrupting it. We still record the
@@ -1246,11 +1247,13 @@ def plot_repair_diagnostic(
     include_flux: bool = True,
     include_floor: bool = True,
 ):
-    """Eight-panel figure: shifted vs no-shift residuals side by side.
+    """Ten-panel repair diagnostic, shifted vs no-shift side by side.
 
-    Layout (2×4):
-        Row 0:  data/A | A·ψ shifted | residual shifted | repaired sci/A
-        Row 1:  hole+donut | A·ψ noshift | residual noshift | radial profile
+    Layout (2×5):
+        Row 0:  data/A | A·ψ shifted | residual shifted | residual SNR |
+                residual no-shift
+        Row 1:  hole+fit-ring overlay | subtracted/repaired | 2× zoom |
+                radial profile | SNR polar (r, θ)
 
     The 2D panels show the full source cutout as it was actually fit
     (already sized to the PSF FOV in subtract mode, donut-sized in

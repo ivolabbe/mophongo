@@ -101,7 +101,8 @@ class RunConfig:
     # --- fitting ----------------------------------------------------------
     fit: dict[str, Any] = field(default_factory=dict)  # FitConfig kwargs
     scene_plots: bool = True  # write per-scene diagnostic PNGs
-    # per-source stamps FITS: tmpl_hi/tmpl_lo at native sizes + PSF cubes
+    # per-source stamps FITS: tmpl_hi/tmpl_lo at native sizes + per-source PSF
+    # region keys (PSF stamps stay in the cached <name>_psf_*.geojson maps)
     save_stamps: bool = True
 
     @classmethod
@@ -2187,8 +2188,6 @@ class Pipeline:
             Catalog containing flux measurements for each image.
         list of ndarray
             Residual images corresponding to each fitted image.
-        SparseFitter
-            The fitter instance used for the final fit.
         """
         from .fit import SparseFitter
         from . import utils

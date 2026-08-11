@@ -14,11 +14,9 @@ This file tracks future desired features, checks, and investigations.
   it (checked 2026-08-11); this is about internal data layout, not secrets.
   Also in code: `Pipeline.write_outputs` writes a `minerva_link` column with
   hard-coded `https://minerva.colorado.edu` URLs into the scene-catalog CSV
-  (pipeline.py ~1119); drop or make it configurable before release. Two stale
-  docstrings found by the 2026-08-11 docs fact-check: `utils.matching_kernel`
-  says `recenter` defaults to True but the signature default is False, and
-  `Pipeline.run`'s docstring promises three return values while the method
-  returns `(table, residuals)`.
+  (pipeline.py ~1119); drop or make it configurable before release.
+  (The `matching_kernel.recenter` and `Pipeline.run` docstring staleness
+  noted here earlier was fixed on 2026-08-11.)
 - [ ] Code findings from the 2026-08-11 full docs verification (12 agents
   checked every docs page against source; these are source-side, docs already
   describe actual behavior). The seven actionable ones were FIXED on
@@ -49,21 +47,21 @@ This file tracks future desired features, checks, and investigations.
   * `FLAG_HAS_NAN`/`FLAG_OUTSIDE_WEIGHT` declared, never set.
   * `pipeline.py:2275` `astrom_shift_tol` getattr fallback 0.02 disagrees
     with the FitConfig default 0.05.
-  * Stale docstrings/comments contradicting behavior: `ee_tmpl`
-    (`templates.py:430`), shift-direction comment (`templates.py:988`),
-    `FitConfig.astrom_model` comment 'polynomial' (`fit.py:65`),
-    `saturate.py` module header (`r_outer`, amplitude-only fit, rho_psf
-    polarity), `read_wcs_csv` docstring module path (`psf.py:2129`).
+  * [x] ~~Stale docstrings/comments~~ all fixed 2026-08-11: `ee_tmpl`
+    comment, shift-direction comment, `FitConfig.astrom_model` comment,
+    `saturate.py` module header (`r_out`, joint amp+shift fit), `rho_psf`
+    polarity, ten-panel diagnostic layout, blank-to-zero comment,
+    `read_wcs_csv` docstring path, `matching_kernel.recenter` default,
+    `Pipeline.run` return arity, `RunConfig.save_stamps` "PSF cubes"
+    comment, `verification.py` mosaic-pixel error message.
   * Possibly dead: `refine_center_from_donut` (never called),
     `getattr(tmpl, "parent_id", ...)` branches (no Template has parent_id).
 - [ ] `utils.write_wcs_csv` is dead code: a leftover debug `continue` at
   `utils.py:1983` skips the row-building loop, so it writes a header-only CSV.
   Remove the `continue` (or the function; `reconstruct_wcs` is the working
-  path and the one `DrizzlePSF.read_wcs_csv` auto-calls). Related stale refs:
-  the `FitConfig.astrom_model` inline comment (`fit.py:65`) still says
-  `'polynomial'` though `AstroCorrect.fit` accepts only `'poly'|'gp'`, and the
-  `DrizzlePSF.read_wcs_csv` docstring cites nonexistent
-  `mophongo.wcs_recon.reconstruct_wcs` (lives in `mophongo.utils`).
+  path and the one `DrizzlePSF.read_wcs_csv` auto-calls). (The related stale
+  refs — `astrom_model` comment, `read_wcs_csv` docstring path — were fixed
+  on 2026-08-11.)
 
 - [ ] Multi-band pipeline stream. `run()` still fits multiple images
   sequentially (shared hi-res templates, per-band convolution/solve,

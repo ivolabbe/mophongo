@@ -3,6 +3,34 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Naming/metadata/guard hardening (2026-08-11), follow-ups to the EE fix:
+  * One name for the scheme selector: `extend_mode` everywhere.
+    `Pipeline(extend_mode=...)` and `run(extend_mode=...)` are canonical;
+    `extend_templates=` still accepted as a deprecated alias (logs a
+    warning, error if both given); the constructor override is stored as
+    `extend_mode_override`, the resolved scheme as `extend_mode`.
+    `verification.py` switched to the new kwarg.
+  * `Template._META_ATTRS` + `copy_meta_to()`: the full metadata contract
+    (ids, flags incl. star/deblend/saturated bits, EE corrections,
+    fit state, extension_* provenance, shift vectors). `downsample`,
+    `project_to_block_replicated_grid` and `convolve_cutout` now copy all
+    of it instead of hand-picked subsets — the mechanism behind the
+    ee_psf_lo audit bug. Regression test loops over `_META_ATTRS`.
+  * NaN guards with clear WARNINGs at the EE choke points: invalid filter
+    throughput (applies no correction), per-source `ee_psf_lo` fallback
+    count > 0, and invalid PSF stamp sums in `_filter_psf_throughput`.
+  Full suite 205 passed.
+- [x] `ee_psf_lo` now survives resampling (2026-08-11): the audit's headline
+  gap — `project_to_block_replicated_grid` and `Template.downsample` dropped
+  `ee_psf_lo`/`ee_tmpl`, so every `k>1` run (all MINERVA bands) silently fell
+  back to the filter-mean EE — is closed. Both methods now propagate
+  `ee_psf_lo`, `ee_tmpl`, `template_norm`, `id_parent`, `id_scene`, `name`,
+  so `flux_<i>_total` divides by the per-source encircled energy on the
+  default upsample path. Regression test
+  `test_template_convolution.py::test_resampling_preserves_ee_metadata`;
+  full suite 205 passed. Real-data validation of the divisor stays open in
+  TODO.md. Also confirmed the post-merge default build scheme is
+  `psf_wings` (FitConfig.extend_mode, both API and config paths).
 - [x] Docs updated to the template merge (2026-08-11, merge `6e6cec6`).
   Three verification agents brought every affected page to merged HEAD:
   pipeline.md's flow now documents the six-scheme template build

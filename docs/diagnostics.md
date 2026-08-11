@@ -9,6 +9,18 @@ helpers, the stamps file that persists them, run logging, and the standard
 PSF/kernel diagnostics in {mod}`mophongo.psf`. See {doc}`outputs` for the
 on-disk catalog products and {doc}`psf` for PSF construction itself.
 
+```{figure} images/scene_diagnostic.png
+:width: 100%
+:alt: Six-panel scene diagnostic: template, image, model with shift arrows, segmentation map, residual, and color composite.
+
+The scene diagnostic written by `write_outputs` shows the products the
+per-source helpers on this page cut their stamps from: the high-resolution
+template image, the fitted band, the best-fit model with the fitted
+astrometric shift drawn as an arrow grid, the segmentation map, the fit
+residual, and a color composite. The residual is flat down to the noise
+apart from the cores of the few brightest sources.
+```
+
 ## Inspecting the inputs
 
 ### `Pipeline.plot_inputs`
@@ -201,6 +213,18 @@ distance-sorted five-level grayscale segmentation coloring. The panels are:
 - `model` — full best-fit model, at `±nsig * prms`
 - `res` — masked `(img - model) / err`, at `±nsig`
 - `clean` — masked image minus neighbor models, at `±nsig * prms`
+
+```{figure} images/subphot_six_panel.png
+:width: 100%
+:alt: Six-panel plot_subphot diagnostic: low-resolution image, high-resolution stamp, segmentation map, model, residual, and neighbor-cleaned image.
+
+`plot_subphot` output for one source. The low-resolution stamp (`img`)
+resolves into separate sources in the high-resolution stamp (`tmpl`); the
+grayscale segmentation map (`seg`) carries the circular fit mask; the
+best-fit model reproduces both sources, leaving a residual (`res`)
+consistent with noise; the `clean` panel removes the neighbor models so
+only the target source remains.
+```
 
 It requires a completed run, and the fitting grid must match the reference
 grid (`NotImplementedError` otherwise). A `source_id` absent from the

@@ -377,6 +377,16 @@ as a separate pass after extraction, driven by their own methods.
 | `"psf"` | post-extraction | the template convolved with the detection PSF fills its zero pixels ({meth}`~mophongo.templates.Templates.extend_with_psf`) |
 | `"psf_model"` | post-extraction | the best-fitting PSF-convolved Gaussian ({meth}`~mophongo.templates.Templates.extend_with_psf_model`) |
 
+```{figure} images/template_psf_halo_anatomy.png
+:width: 100%
+:alt: A classic-scheme template split into segmentation map, full template, on-segment data, off-segment PSF halo, and the PSF used to build it.
+
+A build-time composite template from a real F770W run, decomposed into its
+parts: inside the source's segmentation footprint the template is the
+detection data, and outside it carries a flux-matched PSF halo, supplying the
+wing flux that a segment-truncated template would miss.
+```
+
 The build-time schemes are self-contained ports kept out of
 `mophongo.templates` so that the alternatives can be compared one to one and
 either can be adapted or dropped as a unit. Nothing in
@@ -431,6 +441,17 @@ map at any stage, so its low-SNR test used one scalar noise per tile; when a
 calibrated `detection_weight` is supplied the formal per-pixel noise
 $\sqrt{\sum_S 1/\mathrm{ivar}}$ is used instead. The two agree exactly where
 the noise is uniform.
+
+```{figure} images/classic_scheme_steps.png
+:width: 100%
+:alt: Step-by-step construction of a classic composite template, from segment core and scaled PSF wings to the convolved, normalized, aperture-masked stamp.
+
+Construction of a classic composite on a mid-SNR source. The segment core
+keeps the raw data with its negatives, the least-squares-scaled PSF supplies
+the wings over the whole tile including neighboring segments, and the
+convolved stamp is normalized before the circular mask is applied; the growth
+curves show the wing flux the composite adds over the bare segment.
+```
 
 #### wren
 

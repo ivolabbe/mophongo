@@ -52,6 +52,17 @@ psf = prm.get_psf(ra, dec)         # 2-D stamp for that region
 fig, ax = prm.plot()               # colored region overview
 ```
 
+```{figure} images/region_map_tiling.png
+:width: 100%
+:alt: Region maps for a hi-res and a lo-res band, their kernel overlay, and a zoom.
+
+Region maps built from exposure footprints. Top: a hi-res band map (F444W,
+1694 regions) and a lo-res band map (F770W, 294 regions), each polygon one
+distinct set of overlapping exposures. Bottom: the hi-by-lo overlay used for
+the kernel map (2911 regions), with a 2-arcminute zoom showing how the
+pairwise intersections tile the sky.
+```
+
 ## PSFRegionMap
 
 `PSFRegionMap` is a dataclass. Its fields:
@@ -325,6 +336,16 @@ parameter is not given it is optimized once on the median PSF shape with
 for every region. The finished kernels are renormalized to unit sum, so the
 kernel carries no flux scale of its own, and the map is written to
 `<name>_kernel.geojson`.
+
+```{figure} images/region_psf_kernels.png
+:width: 100%
+:alt: Per-region PSFs for three bands and the corresponding matching kernels.
+
+Per-region stamps from the built maps; each column is one region. The PSF
+drizzled at the region centroid changes with the number and roll angles of
+the contributing frames (top three rows: F444W, F770W, F1800W), and each
+region of the overlay carries its own matching kernel (bottom row).
+```
 
 During template preparation, template convolution
 ({meth}`mophongo.templates.Templates.convolve_templates`) accepts either a

@@ -213,6 +213,18 @@ The underlying grid search; same search and weighting parameters, but with
   `score`, `kernel`, `matched_psf`, the 1-D scan grids, the profile vectors,
   and an `extra` dict recording the scan configuration.
 
+```{figure} images/kernel_diagnostic.png
+:width: 100%
+:alt: Regularization-scan diagnostic with FOM scan, profiles, growth-curve ratio, PSF stamps, kernel, matched PSF, and residual
+
+The standard diagnostic written by `optimize_matching_kernel_regularization`
+(here a Wiener scan matching an F444W PSF to a blurred F770W target). The top
+row shows the figure-of-merit scan over lambda with the selected minimum, the
+matched versus target radial profiles, and their growth-curve ratio against
+the ±2% band; below are the source and target PSFs, the kernel, the matched
+PSF, and the residual, with the scan configuration and error terms listed.
+```
+
 **`PSF.matching_kernel_basis(other, basis, *, method="lstsq", recenter=True)`**
 Alternative kernel from a linear Fourier-basis fit
   ({func}`mophongo.utils.fit_kernel_fourier`); `basis` is a
@@ -465,6 +477,28 @@ keep this default blur on for MIRI bands; disable it (`psf_blur_fwhm=None`)
 only when deliberately testing the unblurred optical model, for example
 when comparing drizzled model PSFs against real stars to measure the
 broadening itself.
+
+```{figure} images/star_vs_model_f770w.png
+:width: 100%
+:alt: Real F770W star compared with the drizzled model PSF, with residuals, radial profiles, and growth curves
+
+A drizzled F770W model PSF compared with a real star: star cutout, model,
+and residuals before and after convolving the model with a small Gaussian
+diffusion kernel, with radial profiles and growth curves below. The
+unmodified model growth curve runs a few percent low in the core; the
+blurred model tracks the star to within a percent at all radii.
+```
+
+```{figure} images/miri_blur_growth_curves.png
+:width: 100%
+:alt: Stacked star-to-model growth-curve ratios per band, before and after a single per-band Gaussian blur
+
+Stacked star-to-model growth-curve ratios per band. Against the raw model
+(top) the ratio falls below one in the core, increasingly so toward longer
+MIRI wavelengths; a single per-band Gaussian blur (bottom, best-fit FWHM
+rising from 0.03 arcsec at F444W to 0.25 arcsec at F1800W) flattens the
+median ratio, which is what the per-filter blur defaults encode.
+```
 
 ## `jwst_psf` utilities
 

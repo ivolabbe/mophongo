@@ -40,6 +40,19 @@ The measurement proceeds in four stages:
    shifts per scene (see {doc}`fitting`). Outputs are per-source fluxes,
    uncertainties, and a full residual image per band (see {doc}`outputs`).
 
+```{figure} images/scene_fit.png
+:width: 100%
+:alt: Six-panel fitted scene: templates, science image, model with astrometric shift arrows, segmentation map, residual, and color composite.
+
+One fitted scene in a low-resolution band. The templates built from the
+high-resolution detection image (top left) are PSF-matched and fit
+simultaneously to the science image (top center); the best-fit model (top
+right) includes a per-scene astrometric shift, shown by the red arrows. The
+bottom row gives the segmentation map that defined the templates, the
+residual after subtracting the model, and a color composite of the same
+field.
+```
+
 The {class}`mophongo.pipeline.Pipeline` class orchestrates these stages,
 either from in-memory arrays or from a JSON run configuration
 (see {doc}`pipeline`); {doc}`quickstart` walks through a minimal run.

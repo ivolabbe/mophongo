@@ -37,18 +37,44 @@ log = logging.getLogger("arcify")
 # own home rather than the shared project space.
 RUN = "/arc/home/ilabbe/run"
 
-# arc subtrees searched for the config's input files, as VOSpace URIs.
-ARC_ROOTS = [
-    "arc:projects/minerva/uds/mosaics/nircam/n3.0/grizli",
-    "arc:projects/minerva/uds/mosaics/nircam/n3.0/bkgsub",
-    "arc:projects/minerva/uds/mosaics/miri/m3.1",
-    "arc:projects/minerva/uds/mosaics/miri/m3.0",
-    "arc:projects/minerva/uds/catalogs/n3.0_v1.2/ACS+WEBB_chi-mean/ancillary",
-    "arc:projects/minerva/uds/catalogs/n3.0_m3.1_v1.2.1/ACS+WEBB_chi-mean",
-]
+ARC = "arc:projects/minerva"
 
 # Config keys whose values are input file paths.
 PATH_KEYS = ["sci_hi", "wht_hi", "segmap", "catalog", "csv_hi", "sci_lo", "wht_lo", "csv_lo"]
+
+
+def roots_for(local_path: str) -> list[str]:
+    """arc subtrees that could hold the file named by a local staged path.
+
+    The staged tree mirrors the arc release versions as
+    ``.../data/<FIELD>/<version>/...``, so the field and version are read off
+    the path itself rather than hardcoded. That keeps this working when the
+    releases move on.
+
+    ``n3.0``   -> ``<field>/mosaics/nircam/n3.0/{grizli,bkgsub}``
+    ``m3.1``   -> ``<field>/mosaics/miri/m3.1``
+    ``n3.0_v1.2`` (or any ``*_v*``) -> ``<field>/catalogs/<version>/...``
+    """
+    parts = Path(local_path).parts
+    fields = {"UDS": "uds", "COSMOS": "cosmos", "EGS": "egs"}
+    for i, part in enumerate(parts):
+        if part in fields and i + 1 < len(parts):
+            field, version = fields[part], parts[i + 1]
+            break
+    else:
+        return []
+
+    # local-only suffix on some segmap directories
+    version = re.sub(r"_SEC$", "", version)
+
+    if re.fullmatch(r"n[\d.]+", version):
+        return [f"{ARC}/{field}/mosaics/nircam/{version}/grizli",
+                f"{ARC}/{field}/mosaics/nircam/{version}/bkgsub"]
+    if re.fullmatch(r"m[\d.]+", version):
+        return [f"{ARC}/{field}/mosaics/miri/{version}"]
+    return [f"{ARC}/{field}/catalogs/{version}",
+            f"{ARC}/{field}/catalogs/{version}/ACS+WEBB_chi-mean",
+            f"{ARC}/{field}/catalogs/{version}/ACS+WEBB_chi-mean/ancillary"]
 
 
 def arc_index(client: Client, roots: list[str]) -> dict[str, str]:
@@ -148,11 +174,21 @@ def main() -> None:
     cert = Path.home() / ".ssl/cadcproxy.pem"
     if not cert.exists():
         raise SystemExit(f"no CADC certificate at {cert}; run canfar-cert.sh first")
-    log.info("indexing arc:")
-    index = arc_index(Client(vospace_certfile=str(cert)), ARC_ROOTS)
 
-    for cfg in args.configs:
-        arcify(cfg, index, args.out_dir, args.r_trial, args.suffix)
+    # Collect the subtrees every config needs, then index each one once: the
+    # bands of a field overlap almost completely.
+    roots: list[str] = []
+    for cfg_path in args.configs:
+        cfg = json.loads(re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text()))
+        for key in PATH_KEYS:
+            for root in roots_for(cfg.get(key) or ""):
+                if root not in roots:
+                    roots.append(root)
+    log.info("indexing %d arc subtrees:", len(roots))
+    index = arc_index(Client(vospace_certfile=str(cert)), roots)
+
+    for cfg_path in args.configs:
+        arcify(cfg_path, index, args.out_dir, args.r_trial, args.suffix)
 
 
 if __name__ == "__main__":

@@ -360,6 +360,49 @@ def test_write_stamps_variable_size_single_file(tmp_path):
     assert (hdr["NX_LO"], hdr["NY_LO"]) == images[1].shape[::-1]
 
 
+def test_source_products_and_show_sources(tmp_path):
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=12, nsrc=12, size=101, ndilate=2, peak_snr=2.0
+    )
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+    _table, _residuals, pipe = pipeline.run(
+        images, segmap, catalog=catalog, weights=wht, kernels=[None, kernel], psfs=psfs
+    )
+
+    tmpl = pipe.all_templates[0][0]
+    sid = int(tmpl.id)
+    p = pipe.source_products(sid)
+
+    # window-aligned products on the fit grid
+    assert (
+        p["tmpl_lo"].shape == p["img_lo"].shape
+        == p["model"].shape == p["residual"].shape
+    )
+    np.testing.assert_allclose(
+        p["img_lo"] - p["model"], p["residual"], rtol=0, atol=1e-5
+    )
+    # hi-grid products present and window-aligned
+    assert p["tmpl_hi"].shape == p["img_hi"].shape == p["segmap"].shape
+    # scalars and PSFs come from the fitted template and band inputs
+    assert np.isclose(p["flux"], tmpl.flux)
+    assert np.isclose(p["err"], tmpl.err)
+    np.testing.assert_allclose(p["psf_hi"], psfs[0])
+    np.testing.assert_allclose(p["psf_lo"], psfs[1])
+    assert int(p["row"]["id"]) == sid
+
+    ids = [int(t.id) for t in pipe.all_templates[0][:2]]
+    fig_path = tmp_path / "show_sources.png"
+    fig, axes = pipe.show_sources(ids, save=fig_path)
+    plt.close(fig)
+    assert axes.shape == (2, 8)
+    assert fig_path.exists()
+
+    # scalar id works too
+    fig, axes = pipe.show_sources(ids[0])
+    plt.close(fig)
+    assert axes.shape == (1, 8)
+
+
 def test_load_fit_restores_post_run_state(tmp_path):
     from astropy.io import fits
     from mophongo.fit import FitConfig
@@ -447,6 +490,10 @@ def test_load_fit_restores_post_run_state(tmp_path):
     assert_matches_run(pipe2)
     for a, b in zip(pipe1.all_templates[0], pipe2.all_templates[0]):
         assert b.flag == a.flag
+    # restored state drives the visualization helpers directly
+    fig, axes = pipe2.show_sources(int(pipe2.all_templates[0][0].id))
+    plt.close(fig)
+    assert axes.shape == (1, 8)
 
     # --- delete the stamps file: load_fit regenerates it identically
     with fits.open(stamps_path) as hdul:

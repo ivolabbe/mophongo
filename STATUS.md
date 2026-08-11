@@ -50,6 +50,19 @@ This file records completed implementations, validation runs, and the current wo
   factor goes from 0.925 +- 0.02 to **0.999 +- 0.02** and Estimator 1 from
   +0.10 +- 0.03 to **+0.01 +- 0.05** mag. `tests/test_pipeline_config.py`
   passes (7).
+- [x] Fitted-product convenience access (2026-08-11).
+  `Pipeline.source_products(id)` collects everything the fit produced for
+  one source from the in-memory state (post-`run()` or post-`load_fit()`,
+  nothing recomputed): window-aligned `tmpl_hi/tmpl_lo` stamps and
+  `img_hi/segmap/img_lo/model/residual` cutouts, the band PSFs at the
+  source position, fitted scalars (`flux, err, err_pred, ee_psf_lo, flag,
+  shift`), the fit-table row, and the window slices for further slicing.
+  `Pipeline.show_sources(ids)` renders them one row per source (8 columns;
+  image/model/residual share one display scale so the subtraction is
+  judged by eye). Shared PSF resolution factored into `_band_psfs` (also
+  used by `write_stamps`). Tested in
+  `tests/test_pipeline.py::test_source_products_and_show_sources` plus a
+  post-`load_fit` smoke check; full suite 137 passed.
 - [x] Per-source stamp output + post-run restore (2026-08-11).
   `Pipeline.write_stamps()` writes one FITS per run,
   `<out_dir>/<name>_stamps.fits`, with stamps at native per-source sizes:

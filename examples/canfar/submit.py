@@ -142,13 +142,23 @@ def launch(name: str, script: str, cores: int, ram: int, env: dict[str, str]) ->
 
 
 def wait(ids: list[str], poll: int = 20) -> dict[str, str]:
-    """Block until every session reaches a terminal state."""
+    """Block until every session reaches a terminal state.
+
+    A session can disappear from the API entirely - reaped, or deleted by a
+    concurrent ``clean`` - in which case ``info`` returns an empty list. Treat
+    that as terminal rather than letting an IndexError kill a long campaign.
+    """
     pending = [i for i in ids if i]
     final: dict[str, str] = {}
     while pending:
         for sid in list(pending):
-            status = session().info([sid])[0].get("status")
-            if status in DONE:
+            try:
+                info = session().info([sid])
+            except Exception as exc:  # noqa: BLE001 - transient API errors
+                log.warning("  %s: info failed (%s), retrying", sid, type(exc).__name__)
+                continue
+            status = info[0].get("status") if info else "Gone"
+            if status in DONE or status == "Gone":
                 final[sid] = status
                 pending.remove(sid)
                 log.info("%s %s", sid, status)

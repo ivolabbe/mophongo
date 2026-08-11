@@ -130,6 +130,16 @@ aperture radius of 1.5 times the band PSF FWHM).
 `ap_flux_corr_<i>`
 : `ap_flux_<i> * ap_corr_<i>`, the aperture flux corrected to total.
 
+```{warning}
+The aperture columns are never divided by the finite-stamp encircled energy
+`ee_psf_lo`, so they are not on the same absolute scale as `flux_<i>_total`:
+for an isolated point source `ap_flux_corr_<i>` converges to `flux_<i>` (the
+amplitude), not to `flux_<i>_total`. The two families differ by exactly the
+per-source factor `1/ee_psf_lo` (a few per cent to ~15% depending on band and
+stamp size). Use `flux_<i>_total` as the total flux; treat `ap_flux_corr_<i>`
+as an aperture-based cross-check on the amplitude scale.
+```
+
 ### Header metadata
 
 The table's FITS header records the realized PSF encircled energies used for

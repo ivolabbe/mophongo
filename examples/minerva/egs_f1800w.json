@@ -31,8 +31,11 @@
   "psf_size": 4.0,
   "psf_blur_fwhm": "default",
   "footprint_filter": true,
-  "r_trial": 0.0,
-  "trial_center": null,
+  "r_trial": 3.0,
+  "trial_center": [
+    215.16973,
+    52.92725
+  ],
   "bg_filter_sigma": 64.0,
   "fit": {
     "fit_astrometry_joint": true,

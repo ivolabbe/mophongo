@@ -11,7 +11,7 @@ from photutils.segmentation import SegmentationImage
 from tqdm import tqdm
 from astropy.nddata import block_reduce
 
-from .utils import bin_remap, fftconvolve
+from .utils import as_label_array, bin_remap, fftconvolve
 from .psf_map import PSFRegionMap
 
 logger = logging.getLogger(__name__)
@@ -1437,7 +1437,7 @@ class Templates:
         """
 
         self.original_shape = hires_image.shape
-        segm = SegmentationImage(segmap)
+        segm = SegmentationImage(as_label_array(segmap))
         if dilate_segmap > 0:
             from .catalog import safe_dilate_segmentation
             from skimage.morphology import disk as _disk

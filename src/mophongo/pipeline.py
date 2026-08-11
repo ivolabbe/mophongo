@@ -1894,9 +1894,9 @@ class Pipeline:
             corr = F_cat(tmpl_ref_preconv) / F_img(tmpl_ref_postconv)
 
         Writes:
-        ap_flux_raw_{idx}  – raw aperture sum on model+residual
-        ap_corr_{idx}      – correction factor
-        ap_flux_{idx}      – corrected flux
+        ap_flux_{idx}       – raw aperture sum on model+residual
+        ap_corr_{idx}       – correction factor
+        ap_flux_corr_{idx}  – corrected flux
         """
         from photutils.aperture import CircularAperture, aperture_photometry
 

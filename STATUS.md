@@ -3,6 +3,30 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Wren cross-reference (2026-08-11). Twelve agents (analysis +
+  adversarial verification per script) cross-checked `scratch/wren/*.py`
+  against main `3d9e7d4` and the docs; full report in
+  `scratch/wren/CROSSREF_2026-08-11.md`. Two scripts were broken at main
+  and are repaired in place (`make_compare_subphot.py`: `diagnose_subphot`
+  renamed to `plot_subphot`, `from_config` now gets the JSON not the run
+  directory) and `fit.py`'s docstring/label no longer call the
+  template-branch `astrom_damping=0.8` "implemented"/"production default".
+  Docs additions driven by the findings: x/y are 0-indexed (outputs.md),
+  BUNIT pointer for flux units (outputs.md), scene ids are run-dependent
+  partition labels (outputs.md), `DrizzlePSF.footprint`/`driz_footprint`
+  attributes (psf.md), `target_label` on both verification entry points and
+  the scenario `summary` keys (simulation.md);
+  `_add_aperture_photometry`'s docstring now lists the columns actually
+  written. Open items (reopen-from-out_dir, CWD-relative config paths,
+  `plot_subphot` KeyError, astrom_damping-on-merge) recorded in TODO.md.
+- [x] Both verification legs folded into one entry point,
+  `scratch/wren/verification.py`: `mock` (injected-truth per-band mocks,
+  implementation in `examples/minerva/run_verification.py`) and `idl`
+  (subphot comparison, implementation in
+  `scratch/wren/make_compare_idl_python.py`), default both, optional band
+  list, combined summary in `scratch/wren/verification_summary.json`. Both
+  legs re-verified through it; the seeded F770W mock reproduced its 0.9998
+  median exactly. `verification.pdf` reproduction section updated.
 - [x] Seven bug fixes from the docs-verification findings (2026-08-11).
   (1) `(weights <= 0) | np.isnan(weights)` precedence fix in
   `SparseFitter.model_image` and `Scene.residual` — NaN-weight pixels are

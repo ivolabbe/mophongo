@@ -256,6 +256,11 @@ frame and drizzling the stamps onto the output WCS with the same kernel and
     as of this writing neither is used (exposure files come from the CSV,
     and per-frame weights come from the `EXPTIME` column).
 
+After construction two public attributes expose the exposure geometry:
+`DrizzlePSF.footprint`, a dict mapping each frame key to its sky-footprint
+`shapely` Polygon, and `DrizzlePSF.driz_footprint`, the mosaic outline
+Polygon. Region maps are built from these footprints ({doc}`psf_maps`).
+
 **`DrizzlePSF.read_wcs_csv(drz_file, csv_file=None, auto_reconstruct=True)`**
 Static helper that parses the WCS CSV into `(flt_keys, wcs_dict,
   footprints, headers)`. With `auto_reconstruct=True` (default) a missing

@@ -63,6 +63,16 @@ This file tracks future desired features, checks, and investigations.
   refs — `astrom_model` comment, `read_wcs_csv` docstring path — were fixed
   on 2026-08-11.)
 
+- [ ] From the 2026-08-11 wren cross-reference
+  (`scratch/wren/CROSSREF_2026-08-11.md`): (a) no documented way to reopen a
+  finished run from `out_dir` alone — wren's `from_config(run_dir)`
+  directory resolution was dropped; restore it or document the
+  keep-the-JSON convention; (b) relative config paths resolve against the
+  process CWD, not the config file's directory, forcing scripts to
+  `os.chdir` first — consider anchoring to the config's parent;
+  (c) `plot_subphot` raises an undocumented `KeyError` for a missing source
+  id; (d) if the template branch merges, document `astrom_damping` (0.8) in
+  fitting.md.
 - [ ] Multi-band pipeline stream. `run()` still fits multiple images
   sequentially (shared hi-res templates, per-band convolution/solve,
   `flux_<i>` columns), but the config/save/restore stream is one band per

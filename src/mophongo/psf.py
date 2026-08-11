@@ -819,6 +819,7 @@ class PSF:
         cls,
         size: int | tuple[int, int],
         fwhm: float | tuple[float, float] | None = None,
+        fwhm_y: float | None = None,
         theta: float = 0.0,
     ) -> "PSF":
         """Create a normalized Gaussian PSF.
@@ -827,10 +828,10 @@ class PSF:
         ----------
         size : int or tuple of int
             Size of the PSF array.
-        fwhm_x, fwhm_y : float, optional
-            FWHM along x and y axes.
-        fwhm : float or tuple, optional
-            If given, overrides fwhm_x and fwhm_y. If tuple, interpreted as (fwhm_x, fwhm_y).
+        fwhm : float or tuple
+            FWHM along x, or ``(fwhm_x, fwhm_y)``. Required.
+        fwhm_y : float, optional
+            FWHM along y; defaults to ``fwhm``.
         theta : float, optional
             Rotation angle in radians.
 
@@ -841,12 +842,13 @@ class PSF:
         """
         from .utils import gaussian
 
-        # Handle fwhm as tuple or float
-        if fwhm is not None:
-            if isinstance(fwhm, (tuple, list)) and len(fwhm) == 2:
-                fwhm_x, fwhm_y = fwhm
-            else:
-                fwhm_x = fwhm_y = fwhm
+        if fwhm is None:
+            raise ValueError("fwhm is required")
+        if isinstance(fwhm, (tuple, list)) and len(fwhm) == 2:
+            fwhm_x, fwhm_y = fwhm
+        else:
+            fwhm_x = fwhm
+            fwhm_y = fwhm if fwhm_y is None else fwhm_y
 
         return cls(gaussian(size, fwhm_x, fwhm_y, theta=theta))
 

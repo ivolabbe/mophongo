@@ -631,6 +631,8 @@ def generate_scenes(
 
         # subset
         ts = [templates[i] for i in idx]
+        for t in ts:
+            t.id_scene = int(sid)
         A_s = ATA[idx[:, None], idx].tocsr()
         b_s = ATb[idx]
 
@@ -1189,6 +1191,6 @@ class Scene:
         bb = self.bbox
         sl = _slices_from_bbox(bb)
         res_scene = self.image[sl] - self.model_image()
-        res_scene[self.weights[sl] <= 0 | np.isnan(self.weights[sl])] = 0.0
+        res_scene[(self.weights[sl] <= 0) | np.isnan(self.weights[sl])] = 0.0
         return res_scene
 

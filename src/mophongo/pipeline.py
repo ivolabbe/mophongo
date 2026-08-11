@@ -867,7 +867,10 @@ class Pipeline:
         tmpl_hi = fits.getdata(cfg.sci_hi)
         sci_lo = fits.getdata(cfg.sci_lo)
         wht_lo = fits.getdata(cfg.wht_lo)
-        segmap = fits.getdata(cfg.segmap)
+        # Normalise the label dtype once, here at the boundary: releases differ
+        # (MINERVA COSMOS ships float64 where UDS and EGS ship int32) and every
+        # downstream SegmentationImage would otherwise have to defend itself.
+        segmap = as_label_array(fits.getdata(cfg.segmap))
         cat = Table.read(cfg.catalog)
 
         if cfg.footprint_filter:
@@ -2105,6 +2108,15 @@ class Pipeline:
         k = bin_factor_from_wcs(wcs[0], wcs[ifilt]) if wcs is not None else 1
         self.fit_bin_factors.append(int(k))
 
+        # Native lo-band pixel scale, recorded before the upsample path
+        # rebinds wcs[ifilt] to the reference WCS: the delivered PSF stamps
+        # stay on the native grid, so PSFSZ/RCIRC metadata must use this.
+        if not hasattr(self, "native_pscales"):
+            self.native_pscales: dict[int, float | None] = {}
+        self.native_pscales[ifilt] = self._pixel_scale_arcsec(
+            wcs[ifilt] if wcs is not None else None
+        )
+
         if k > 1:
             if config.multi_resolution_method == "upsample":
                 print(f"upsampling image {ifilt} by factor {k}")
@@ -2163,7 +2175,6 @@ class Pipeline:
             The fitter instance used for the final fit.
         """
         from .fit import SparseFitter
-        from .astrometry import AstroCorrect
         from . import utils
         import warnings
 
@@ -2209,7 +2220,6 @@ class Pipeline:
 
         templates = self._prepare_hi_templates(cat, config)
 
-        astro = AstroCorrect(config)
         residuals: list[np.ndarray] = []
         self.all_templates: list[Template] = []
         self.all_scenes: list[Scene] = []
@@ -2310,7 +2320,8 @@ class Pipeline:
             _record_psf_ee(
                 cat,
                 psfs[ifilt] if psfs is not None else None,
-                self._pixel_scale_arcsec(
+                getattr(self, "native_pscales", {}).get(ifilt)
+                or self._pixel_scale_arcsec(
                     self.wcs[ifilt] if self.wcs is not None else None
                 ),
                 ifilt,

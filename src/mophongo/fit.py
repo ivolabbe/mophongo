@@ -268,7 +268,7 @@ class SparseFitter:
         model = np.zeros_like(self.image, dtype=float)
         for coeff, tmpl in zip(self.solution, self._orig_templates):
             model[tmpl.slices_original] += coeff * tmpl.data[tmpl.slices_cutout]
-        model[self.weights <= 0 | np.isnan(self.weights)] = 0.0
+        model[(self.weights <= 0) | np.isnan(self.weights)] = 0.0
         return model
 
     @property

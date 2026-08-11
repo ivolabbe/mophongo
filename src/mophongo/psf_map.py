@@ -119,7 +119,11 @@ class PSFRegionMap:
         and rebuild it in __setstate__.
         """
         state = self.__dict__.copy()
-        state["tree"] = None        # Prepared geometries → not picklable
+        # STRtree and prepared geometries are not picklable; __setstate__
+        # rebuilds all three from ``regions``.
+        state["tree"] = None
+        state["_prepared"] = None
+        state["_geoms"] = None
         return state
 
     def __setstate__(self, state):

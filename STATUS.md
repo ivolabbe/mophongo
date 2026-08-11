@@ -3,6 +3,25 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Seven bug fixes from the docs-verification findings (2026-08-11).
+  (1) `(weights <= 0) | np.isnan(weights)` precedence fix in
+  `SparseFitter.model_image` and `Scene.residual` — NaN-weight pixels are
+  zeroed again. (2) `Catalog._detect` no longer subtracts the estimated
+  background a second time (`run()` already rebinds `self.sci`); a
+  user-supplied background level still comes off. (3) `PSF.gaussian` takes
+  `(size, fwhm[, fwhm_y, theta])`: `fwhm` required (was UnboundLocalError),
+  second positional is `fwhm_y` — existing `gaussian(n, fx, fy)` call sites
+  had been silently passing `fy` into `theta`. (4) `PSFRegionMap` pickles
+  and deepcopies (`__getstate__` drops `_prepared`/`_geoms`).
+  (5) `AstroCorrect.fit` pops from a copy of `astrom_kwargs`; the dead
+  `AstroCorrect(config)` construction in `Pipeline.run` is gone.
+  (6) `PSFSZ<i>`/`RCIRC<i>` metadata now use the native lo-band pixel scale
+  recorded before the upsample path rebinds `wcs[ifilt]` (was k× too small;
+  no code reads the keys back). (7) `generate_scenes` assigns
+  `Template.id_scene`, so the stamps column and `plot_subphot`/`plot_result`
+  see real scene membership (was constant 1). Regression tests:
+  `tests/test_verification_fixes.py` (8 tests). fitting.md NaN wording
+  restored.
 - [x] Full independent verification of the docs set + theme (2026-08-11).
   Twelve agents re-checked every docs page claim-by-claim against source
   after the gap-fix round; 55 further corrections applied (wrong shift sign

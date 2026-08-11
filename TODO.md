@@ -21,30 +21,31 @@ This file tracks future desired features, checks, and investigations.
   returns `(table, residuals)`.
 - [ ] Code findings from the 2026-08-11 full docs verification (12 agents
   checked every docs page against source; these are source-side, docs already
-  describe actual behavior):
-  * **Operator precedence bug, verified by execution**: `fit.py:271` and
-    `scene.py:1192` compute `weights <= 0 | np.isnan(weights)`, which parses
-    as `weights <= (0 | isnan)`, so NaN-weight pixels are NOT zeroed
-    (`[-1,0,2,nan] -> [T,T,F,F]`). `scene.py:961` has the correct
-    parenthesized form. Fix and revert the matching docs softening in
-    fitting.md (fix 8 of the verify pass).
-  * **Double background subtraction, verified numerically**: with
-    `estimate_background=True`, `Catalog.run` rebinds `self.sci` to
-    bg-subtracted data and `_detect` subtracts `self.background` again
-    (`catalog.py:682`, `:633`); det image ends up `(sci - 2*BG)*sqrt(ivar)`.
-  * `PSF.gaussian(size)` without `fwhm` raises UnboundLocalError
-    (`psf.py:845-851`).
-  * `PSFRegionMap` cannot pickle/deepcopy: `__getstate__` drops `tree` but
-    not `_prepared` (`psf_map.py:114`); breaks multiprocessing use.
-  * `AstroCorrect.fit` mutates the caller's `FitConfig.astrom_kwargs` via
-    `.pop` (`astrometry.py:251-267`); second fit() silently falls back to
-    order 2 / box_size 7. Pipeline never calls it (dead path;
-    `pipeline.py:2212` constructs and drops it).
-  * `PSFSZ<i>`/`RCIRC<i>` header keys use the reference pixel scale on the
-    default upsample path (`pipeline.py:2116` overwrites `wcs[ifilt]`), so a
-    2x band reports half the true values.
-  * `id_scene` is never assigned by `generate_scenes`/`Scene`; stamps column
-    is constant 1 and `plot_subphot`/`plot_result` see a single scene.
+  describe actual behavior). The seven actionable ones were FIXED on
+  2026-08-11 (regression tests in `tests/test_verification_fixes.py`):
+  * [x] ~~Operator precedence bug~~: `(weights <= 0) | np.isnan(...)` now in
+    `fit.py` and `scene.py`; NaN-weight pixels zeroed again, fitting.md
+    wording restored.
+  * [x] ~~Double background subtraction~~: `_detect` no longer re-subtracts
+    when `estimate_background=True` (run() already rebinds `self.sci`);
+    user-supplied background levels still come off.
+  * [x] ~~`PSF.gaussian` UnboundLocalError~~: `fwhm` now required
+    (ValueError), second positional argument is `fwhm_y` (matches the
+    existing `PSF.gaussian(n, fx, fy)` call sites, which previously passed
+    `fy` into `theta`).
+  * [x] ~~`PSFRegionMap` unpicklable~~: `__getstate__` drops `_prepared`/
+    `_geoms` too; pickle and deepcopy round-trip. Nothing in the package
+    crosses a process boundary with one, so this only mattered for user-side
+    multiprocessing.
+  * [x] ~~`AstroCorrect.fit` mutating caller config~~: pops now act on a
+    copy; the dead `astro = AstroCorrect(config)` in `Pipeline.run` removed
+    (pipeline shifts come from the scene solver, never this class).
+  * [x] ~~`PSFSZ<i>`/`RCIRC<i>` wrong pixel scale~~: native lo-band scale is
+    recorded before the upsample path rebinds `wcs[ifilt]`. Metadata-only
+    bug — nothing in the package reads these keys back.
+  * [x] ~~`id_scene` never assigned~~: `generate_scenes` stamps each
+    template with its scene id; stamps column and `plot_subphot`/
+    `plot_result` scene loops now see real scene membership.
   * `FLAG_HAS_NAN`/`FLAG_OUTSIDE_WEIGHT` declared, never set.
   * `pipeline.py:2275` `astrom_shift_tol` getattr fallback 0.02 disagrees
     with the FitConfig default 0.05.

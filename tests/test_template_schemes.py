@@ -402,7 +402,8 @@ def test_pipeline_extend_mode_selects_the_build_scheme():
                 psf_wings_snrlo=0.0,
             ),
         )
-        assert pipe.extend_mode == mode
+        # 'psf' is the legacy alias of 'psf_convolution'
+        assert pipe.extend_mode == ("psf_convolution" if mode == "psf" else mode)
         pipe.run()
         tmpl = pipe.templates_extended.templates[0]
         modes[mode] = tmpl
@@ -411,7 +412,7 @@ def test_pipeline_extend_mode_selects_the_build_scheme():
 
     assert modes["none"].extension_mode == "none"
     assert modes["psf_wings"].extension_mode == "psf_wings"
-    assert modes["psf"].extension_mode == "psf"
+    assert modes["psf"].extension_mode == "psf_convolution"
     assert modes["wren"].extension_mode == "wren"
     assert modes["classic"].extension_mode == "classic"
     # every extending scheme puts light outside the segment

@@ -119,7 +119,7 @@ def test_psf_wing_completion_fills_zero_pixels_from_unit_psf_shape_convolution()
 
     np.testing.assert_allclose(model, expected, rtol=0, atol=1e-12)
     np.testing.assert_allclose(model.sum(), 1.0, rtol=0, atol=1e-12)
-    assert completed.extension_mode == "psf"
+    assert completed.extension_mode == "psf_convolution"
     np.testing.assert_allclose(completed.extension_psf_sum, 1.0, rtol=0, atol=1e-12)
     assert completed.extension_psf_throughput == psf.sum()
 
@@ -171,7 +171,7 @@ def test_psf_wing_completion_extends_deblended_templates_by_default():
     assert completed.flag & Template.FLAG_DEBLENDED
     assert completed.deblend_parent_label == 99
     assert completed.deblend_nchildren == 3
-    assert completed.extension_mode == "psf"
+    assert completed.extension_mode == "psf_convolution"
     assert completed.extension_skip_reason == ""
     assert completed.data.shape != before.shape or not np.array_equal(completed.data, before)
 

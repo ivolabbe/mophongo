@@ -169,22 +169,35 @@ def stage_job(name: str) -> str:
 
 
 def do_stage(args: argparse.Namespace) -> None:
-    """Stage inputs, first config alone then the rest concurrently.
+    """Stage inputs: one band per field first, then the rest concurrently.
 
-    Bands of the same field share the F444W mosaic and the segmap, several GB
-    each. Letting the first job finish first means the others find those already
-    present instead of decompressing them again.
+    Bands of a field share that field's F444W mosaic and segmap, several GB
+    each. Staging one band per field to completion first means every other band
+    finds those already present rather than decompressing them again. The
+    fields themselves share nothing, so their first bands run together.
     """
     do_upload_cfg(args.names)
     names = list(args.names)
-    ids = [stage_job(names[0])]
+
+    first: list[str] = []
+    rest: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        field = name.split("_")[0]
+        (rest if field in seen else first).append(name)
+        seen.add(field)
+
+    log.info("staging %d field leaders, then %d remaining bands",
+             len(first), len(rest))
+    ids = [stage_job(n) for n in first]
     wait(ids)
-    if len(names) > 1:
-        rest = [stage_job(n) for n in names[1:]]
-        wait(rest)
-        ids += rest
+    if rest:
+        later = [stage_job(n) for n in rest]
+        wait(later)
+        ids += later
     for sid, text in session().logs(ids).items():
-        print(f"--- {sid}\n{text[-1200:]}")
+        tail = tidy(text, 6)
+        print(f"--- {sid}\n{tail}")
 
 
 def tidy(text: str, lines: int = 40) -> str:
@@ -212,6 +225,21 @@ def do_run(args: argparse.Namespace) -> None:
 def do_status(args: argparse.Namespace) -> None:
     for info in session().fetch(kind="headless"):
         log.info("%-10s %-28s %s", info.get("id"), info.get("name"), info.get("status"))
+
+
+def do_clean(args: argparse.Namespace) -> None:
+    """Delete finished sessions so the listing stays readable.
+
+    Only terminal ones: a Running job is never touched. Logs die with the
+    session, so fetch anything you still want first.
+    """
+    sess = session()
+    stale = [i["id"] for i in sess.fetch(kind="headless") if i.get("status") in DONE]
+    if not stale:
+        log.info("nothing to clean")
+        return
+    sess.destroy(stale)
+    log.info("deleted %d finished session(s)", len(stale))
 
 
 def do_logs(args: argparse.Namespace) -> None:
@@ -270,6 +298,9 @@ def main() -> None:
 
     p = sub.add_parser("status", help="list headless sessions")
     p.set_defaults(func=do_status)
+
+    p = sub.add_parser("clean", help="delete finished sessions (never a running one)")
+    p.set_defaults(func=do_clean)
 
     p = sub.add_parser("logs", help="print session logs")
     p.add_argument("ids", nargs="+")

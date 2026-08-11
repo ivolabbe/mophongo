@@ -1153,6 +1153,27 @@ class Pipeline:
         hdr["NY_LO"] = (ny, "fitting-grid height [pix]")
         return hdr
 
+    def _band_psfs(
+        self, ifilt: int
+    ) -> tuple[np.ndarray | PSFRegionMap | None, np.ndarray | PSFRegionMap | None]:
+        """The hi/lo PSF inputs (map or static array) for band ``ifilt``.
+
+        Falls back to the cached hi-res geojson map for config-driven runs
+        whose in-memory ``psfs[0]`` is unset.
+        """
+        psfs = self.psfs if self.psfs is not None else []
+        psf_hi = psfs[0] if len(psfs) > 0 else None
+        if psf_hi is None:
+            psf_hi = getattr(self, "prm_hi", None)
+        if (
+            psf_hi is None
+            and getattr(self, "run_config", None) is not None
+            and self.f_psf_hi.exists()
+        ):
+            psf_hi = self.prm_hi = PSFRegionMap.from_geojson(str(self.f_psf_hi))
+        psf_lo = psfs[ifilt] if len(psfs) > ifilt else None
+        return psf_hi, psf_lo
+
     def write_stamps(
         self,
         path: str | os.PathLike | None = None,
@@ -1215,17 +1236,7 @@ class Pipeline:
             raise RuntimeError("no fitted templates to write stamps for")
         hi_by_id = {int(t.id): t for t in self.tmpls.templates}
 
-        psfs = self.psfs if self.psfs is not None else []
-        psf_hi = psfs[0] if len(psfs) > 0 else None
-        if psf_hi is None:
-            psf_hi = getattr(self, "prm_hi", None)
-        if (
-            psf_hi is None
-            and getattr(self, "run_config", None) is not None
-            and self.f_psf_hi.exists()
-        ):
-            psf_hi = self.prm_hi = PSFRegionMap.from_geojson(str(self.f_psf_hi))
-        psf_lo = psfs[ifilt] if len(psfs) > ifilt else None
+        psf_hi, psf_lo = self._band_psfs(ifilt)
         for band, p in (("hi", psf_hi), ("lo", psf_lo)):
             if p is None:
                 logger.warning("no %s-res PSF available; its stamp key is -1", band)
@@ -2739,6 +2750,181 @@ class Pipeline:
             half_size=half_size,
             save=save,
         )
+
+    def source_products(
+        self,
+        source_id: int,
+        *,
+        ifilt: int = 1,
+        half_size: int | None = None,
+    ) -> dict:
+        """Collect everything the fit produced for one source.
+
+        Works on the in-memory state after :meth:`run` or :meth:`load_fit` —
+        nothing is re-extracted or re-convolved.  The stamps and cutouts share
+        the source-centered window, so they overlay directly.
+
+        Args:
+            source_id: Catalog id.
+            ifilt: Fitted image index (1-based, as elsewhere).
+            half_size: Window half-size in pixels of each grid; None uses the
+                template footprint.
+
+        Returns:
+            Dict with the template stamps (``tmpl_hi``, ``tmpl_lo``), matching
+            cutouts (``img_hi``, ``segmap``, ``img_lo``, ``model``,
+            ``residual``), the band PSFs at the source position (``psf_hi``,
+            ``psf_lo``), fitted scalars (``flux``, ``err``, ``err_pred``,
+            ``ee_psf_lo``, ``flag``, ``shift``, ``position``), the fit-table
+            ``row``, and the window slices (``slices_hi``, ``slices_lo``).
+            Hi-grid entries are None when the source has no hi-res template.
+        """
+        if not getattr(self, "all_templates", None):
+            raise RuntimeError("run() or load_fit() first")
+        if ifilt <= 0 or ifilt >= len(self.images):
+            raise ValueError("ifilt must be between 1 and len(images)-1")
+        t_lo = next(
+            (t for t in self.all_templates[ifilt - 1] if int(t.id) == int(source_id)),
+            None,
+        )
+        if t_lo is None:
+            raise KeyError(f"source id {source_id} not found in fitted templates")
+        t_hi = next(
+            (t for t in self.tmpls.templates if int(t.id) == int(source_id)), None
+        )
+
+        out: dict[str, Any] = {"id": int(source_id), "ifilt": int(ifilt)}
+        sl_lo = self._stamp_slices_for_template(t_lo, self.images[ifilt].shape, half_size)
+        out["slices_lo"] = sl_lo
+        out["tmpl_lo"] = self._template_on_stamp(t_lo, sl_lo)
+        out["img_lo"] = np.asarray(self.images[ifilt][sl_lo])
+        out["model"] = (
+            np.asarray(self.model_images[ifilt - 1][sl_lo])
+            if len(self.model_images) >= ifilt
+            else None
+        )
+        out["residual"] = (
+            np.asarray(self.residuals[ifilt - 1][sl_lo])
+            if len(self.residuals) >= ifilt
+            else None
+        )
+        if t_hi is not None:
+            sl_hi = self._stamp_slices_for_template(t_hi, self.images[0].shape, half_size)
+            out["slices_hi"] = sl_hi
+            out["tmpl_hi"] = self._template_on_stamp(t_hi, sl_hi)
+            out["img_hi"] = np.asarray(self.images[0][sl_hi])
+            out["segmap"] = self._segmap_on_stamp(sl_hi)
+        else:
+            out["slices_hi"] = out["tmpl_hi"] = out["img_hi"] = out["segmap"] = None
+
+        psf_hi, psf_lo = self._band_psfs(ifilt)
+        src = t_hi if t_hi is not None else t_lo
+        x, y = (float(v) for v in src.input_position_original)
+        ra = dec = None
+        if self.wcs is not None and self.wcs[0] is not None and t_hi is not None:
+            ra, dec = (float(v) for v in self.wcs[0].wcs_pix2world(x, y, 0))
+
+        def stamp(p: np.ndarray | PSFRegionMap | None) -> np.ndarray | None:
+            if p is None:
+                return None
+            if isinstance(p, PSFRegionMap):
+                return p.get_psf(ra, dec)
+            return np.asarray(p)
+
+        out["psf_hi"] = stamp(psf_hi)
+        out["psf_lo"] = stamp(psf_lo)
+
+        out["position"] = (x, y)
+        out["flux"] = float(t_lo.flux)
+        out["err"] = float(t_lo.err)
+        out["err_pred"] = float(t_lo.err_pred)
+        out["ee_psf_lo"] = float(t_lo.ee_psf_lo)
+        out["flag"] = int(t_lo.flag)
+        out["shift"] = tuple(float(v) for v in np.asarray(t_lo.shifted))
+        out["row"] = None
+        table = getattr(self, "table", None)
+        if table is not None:
+            match = np.flatnonzero(np.asarray(table["id"], dtype=int) == int(source_id))
+            if match.size:
+                out["row"] = table[int(match[0])]
+        return out
+
+    def show_sources(
+        self,
+        source_ids: int | Sequence[int],
+        *,
+        ifilt: int = 1,
+        half_size: int | None = None,
+        save: str | os.PathLike | None = None,
+    ):
+        """Quicklook of the fitted products and stamps, one row per source.
+
+        Columns: hi-res image, hi-res template, convolved template, low-res
+        image, best-fit model, residual, and the two PSF stamps at the source
+        position.  Image, model, and residual share one display scale so the
+        subtraction is judged by eye.  Works after :meth:`run` or
+        :meth:`load_fit`.
+
+        Args:
+            source_ids: One id or a sequence of ids.
+            ifilt: Fitted image index (1-based, as elsewhere).
+            half_size: Window half-size in pixels; None uses each template's
+                footprint.
+            save: Optional path to save the figure to.
+
+        Returns:
+            Tuple of the created figure and its (nsrc, 8) axes array.
+        """
+        import matplotlib.pyplot as plt
+
+        ids = [int(s) for s in np.atleast_1d(source_ids)]
+        if not ids:
+            raise ValueError("source_ids must not be empty")
+
+        fig, axes = plt.subplots(
+            len(ids), 8, figsize=(20, 2.6 * len(ids)), squeeze=False
+        )
+        titles = [
+            "hi image", "tmpl_hi", "tmpl_lo", "lo image",
+            "model", "residual", "psf_hi", "psf_lo",
+        ]
+        for ax, title in zip(axes[0], titles):
+            ax.set_title(title)
+
+        for row, sid in enumerate(ids):
+            p = self.source_products(sid, ifilt=ifilt, half_size=half_size)
+            shared = self._diagnostic_display_scale(
+                [a for a in (p["img_lo"], p["model"], p["residual"]) if a is not None]
+            )
+            panels = [
+                (p["img_hi"], None),
+                (p["tmpl_hi"], None),
+                (p["tmpl_lo"], None),
+                (p["img_lo"], shared),
+                (p["model"], shared),
+                (p["residual"], shared),
+                (p["psf_hi"], None),
+                (p["psf_lo"], None),
+            ]
+            for col, (data, scale) in enumerate(panels):
+                ax = axes[row, col]
+                if data is None:
+                    ax.set_axis_off()
+                    continue
+                if scale is None:
+                    self._imshow_scaled(ax, data)
+                else:
+                    self._imshow_scaled(ax, data, center=scale[0], scale=scale[1])
+                ax.set_xticks([])
+                ax.set_yticks([])
+            axes[row, 0].set_ylabel(
+                f"id {sid}\nflux {p['flux']:.4g} ± {p['err']:.2g}", fontsize=8
+            )
+
+        fig.tight_layout()
+        if save is not None:
+            fig.savefig(save, dpi=150, bbox_inches="tight")
+        return fig, axes
 
     def plot_subphot(
         self,

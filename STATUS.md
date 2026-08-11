@@ -3,6 +3,57 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Docs updated to the template merge (2026-08-11, merge `6e6cec6`).
+  Three verification agents brought every affected page to merged HEAD:
+  pipeline.md's flow now documents the six-scheme template build
+  (`FitConfig.extend_mode`, default `"psf_wings"`, legacy `extend_templates`
+  as override) with the full new FitConfig block (scheme knobs +
+  `astrom_damping` 0.8); templates.md gained the full scheme reference
+  (composite formulas, params dataclasses, normalization order, new flag
+  bits) and api.rst lists `mophongo.template_schemes`; fitting.md documents
+  the damped shift iteration; outputs.md documents `scene_<i>`,
+  `<name>_templates.fits`, and the `<name>.json` config snapshot;
+  overview/quickstart no longer claim the array path defaults to truncated
+  templates (both entry points resolve to `"psf_wings"`; `psfs[0]` is
+  effectively required); quickstart's minimal config gained the now-required
+  `wht_hi`; repair.md verified line-by-line against `mophongo.repair` and
+  committed; psf_maps.md's stale extension paragraph rewritten. Migration
+  note added: old configs carrying `extend_templates` fail to load. Stale
+  source docstrings fixed (`_ensure_maps`, `repair_saturated_holes`
+  pre-filter/repair-footprint, `template_schemes` blank line). Executable
+  examples 3/3 pass at merged HEAD; build clean; sweep clean. Follow-ups
+  recorded in TODO (headline: `RunConfig.driz_hi` looks accidentally dropped
+  by the merge).
+- [x] `extend_mode` rename (2026-08-11): the convolution-fill scheme is now
+  `'psf_convolution'` (was `'psf'` — easily confused with the scaled-PSF
+  `'psf_wings'` scheme; the two produced separately-verified IDL agreement
+  and are different algorithms). `'psf'` stays as an alias in
+  `EXTEND_MODE_ALIASES` and the legacy constructor map, so existing scripts
+  and configs keep working; templates now stamp
+  `extension_mode='psf_convolution'`. `_resolve_extend_mode` also applies
+  the alias map to config values (previously `extend_mode='default'` via
+  config would have raised). Full suite 204 passed.
+- [x] Standalone saturation-repair entry point (2026-08-11). New
+  `mophongo/repair.py` wraps `saturate.repair_saturated_holes` +
+  `catalog.repair_saturated_catalog` into one runnable step for users who
+  only want repaired FITS images and a flagged catalog: console script
+  `mophongo-repair` / `python -m mophongo.repair sci.fits wht.fits
+  [--catalog cat --segmap seg]`. Builds the `DrizzlePSF` from the mosaic
+  (`_wcs.csv` auto-reconstructed; STDPSFs loaded from `--psf-dir` or built
+  on demand via `PSFFactory.from_csv`), measures the PSF FWHM from a
+  drizzled stamp when not given, writes `<sci>_repaired.fits` /
+  `<wht>_repaired.fits` (+ `SATREPAI/SATMODE/SATNFIX/SATFILT` provenance
+  keywords), the per-hole fit CSV, and optionally the repaired
+  catalog/segmap with `FLAG_SATURATED_<FILTER>`. Offline tests in
+  `tests/test_repair.py` (synthetic scene + fake ePSF, 9 tests).
+  Post-review hardening: `mode` validated in the Python API, fit CSV /
+  plot dir are mode-suffixed (`_saturate_repair.csv` vs
+  `_saturate_subtract.csv`) so two-pass runs don't overwrite, the CLI
+  refuses `--catalog` when no filter can be determined (no fabricated
+  flag name), backend probes catch only `ValueError`, and subtract-mode
+  output naming/weight semantics documented. New
+  readthedocs page `docs/repair.md` (User guide), wired into
+  `index.md`/`conf.py`/`api.rst`, cross-linked from `preprocessing.md`.
 - [x] Cross-reference follow-ups (2026-08-11). `Pipeline.from_config` now
   accepts a directory holding exactly one `*.json` (ambiguity raises
   FileNotFoundError naming the candidates) and config-driven `run()`

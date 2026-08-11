@@ -330,11 +330,11 @@ During template preparation, template convolution
 ({meth}`mophongo.templates.Templates.convolve_templates`) accepts either a
 single kernel array or a kernel `PSFRegionMap`; in the map case each
 template's kernel is looked up at the template's sky position with
-`get_psf`. The hi-res PSF map serves template extension: with the default
-`extend_templates="psf_wings"`,
-{meth}`~mophongo.templates.Templates.extend_with_psf_wings` looks up the PSF at
-each source position and fills the template's zero-valued pixels with the
-template convolved by that local PSF. The lo-res map provides the
+`get_psf`. The hi-res PSF map supplies the detection-band PSF that the
+template build scheme (`FitConfig.extend_mode`, default `"psf_wings"`)
+looks up at each source position — the composite schemes scale it into the
+template halo, and the `"psf"` post-pass fills zero-valued pixels with the
+template convolved by it (see {doc}`templates`). The lo-res map provides the
 encircled-energy metadata recorded in the output catalog, both the per-source
 `ee_psf_lo` and the filter-level values in `cat.meta`.
 

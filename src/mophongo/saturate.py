@@ -588,15 +588,15 @@ def repair_saturated_holes(
 
     The repair pipeline per hole is:
 
-    1. **Saturation pre-filter.** Compute median donut flux relative to
-       global sky and ``sky_noise = mad_std(sci[wht>0])``. If the inner
-       donut is not at least ``sat_significance``-σ above sky, skip
-       this hole (low-coverage "bay", not a saturated star).
+    1. **Buffer pre-filter.** Measure the SNR of the buffer ring around the
+       hole; holes whose buffer falls below ``min_buffer_snr`` are skipped
+       (low-coverage "bay", not a saturated star). ``sat_significance`` is
+       recorded per hole but not applied as a filter.
     2. **Joint amplitude + sub-pixel shift fit.** Drizzle the STPSF onto
        the cutout WCS at the current ``(RA, Dec)``. Run
        :func:`fit_amp_and_shift`; update the position by ``(dx, dy)``;
        re-drizzle. Iterate until ``|dx|, |dy| < shift_tol``.
-    3. **Repair.** Replace pixels at ``r < r_in`` with ``A * PSF``;
+    3. **Repair.** Fill the dilated saturation footprint with ``A * PSF``;
        restore the weight map to the median donut weight in those
        pixels.
 

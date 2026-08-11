@@ -9,6 +9,10 @@ independently of the {doc}`pipeline`.
 
 ## Saturation repair (`mophongo.saturate`)
 
+For the ready-to-run command-line front end (`mophongo-repair`), which
+wraps this module and the catalog flagging step, see {doc}`repair`. This
+section describes the underlying image-level algorithm.
+
 Saturated stars appear in drizzled JWST/HST mosaics as interior regions of
 zero weight ("holes") surrounded by bright PSF wings. `mophongo.saturate`
 detects these holes, fits the local PSF amplitude on a donut-shaped ring
@@ -18,10 +22,11 @@ around each hole, and either fills the core with the best-fit PSF model
 
 The module is image-only by design: its inputs are a science/weight pair, a
 WCS, and a {class}`mophongo.psf.DrizzlePSF`. It does not import segmentation
-maps or catalogs. The output table carries `xc, yc, r_out` per repaired
-source so a separate catalog step
-({func}`mophongo.catalog.merge_segments_at_holes`) can relabel a
-segmentation map afterwards. See {doc}`catalog` for that step and
+maps or catalogs. The output table carries `id, xc, yc, r_equiv` per hole,
+so a separate catalog step
+({func}`mophongo.catalog.merge_segments_at_holes`) can collect the
+segmentation labels around each repaired star and relabel the map
+afterwards. See {doc}`catalog` for that step and
 {doc}`psf` for building a `DrizzlePSF`.
 
 ```python

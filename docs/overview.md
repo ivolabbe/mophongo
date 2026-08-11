@@ -20,10 +20,13 @@ The measurement proceeds in four stages:
    (see {doc}`catalog`).
 2. **Template extraction.** For every source, the pixels inside its segment
    are cut from the detection image to form a template. Because segmentation
-   truncates the faint outer profile, templates are extended beyond the
-   segment with the high-resolution PSF wings (the default in config-driven
-   runs); without an extension the recovered total flux is biased low
-   (see {doc}`templates`).
+   truncates the faint outer profile, templates are by default extended
+   beyond the segment with the high-resolution PSF wings, scaled by their
+   least-squares fit to the segment data; without an extension the recovered
+   total flux is biased low. The extension is one of several selectable
+   build schemes (`FitConfig.extend_mode`, default `"psf_wings"`), and the
+   same default applies whether the run is driven by arrays or by a JSON
+   config (see {doc}`templates`).
 3. **PSF matching.** Each template is convolved with a convolution kernel
    that transforms the high-resolution PSF into the PSF of the measurement
    band. Kernels may be single arrays or spatially varying
@@ -156,12 +159,16 @@ parallel to `images` (index 0 = detection image).
 `psfs` (`Sequence[np.ndarray] | None`, default `None`)
 : Per-image PSFs, as arrays or {class}`mophongo.psf_map.PSFRegionMap`
   instances; must match `images` in length when given. The detection-image
-  PSF (`psfs[0]`) supplies the wings for template extension.
+  PSF (`psfs[0]`) supplies the wings for template extension, and every build
+  scheme except `"none"` requires it — with the default scheme a run without
+  it raises rather than substituting another band's PSF.
 
 `weights` (`Sequence[np.ndarray] | None`, default `None`)
 : Per-image inverse-variance maps. `wht_images` is an accepted alias. The
-  detection-image entry may be `None`, but every fitted image needs a map;
-  omitting both arguments is not supported and fails inside
+  detection-image entry may be `None` — the build schemes that grade data
+  against a PSF model by signal-to-noise then use a single scalar noise
+  estimate for the whole detection image — but every fitted image needs a
+  map; omitting both arguments is not supported and fails inside
   {meth}`mophongo.pipeline.Pipeline.run`.
 
 `wht_images` (`Sequence[np.ndarray] | None`, default `None`)
@@ -185,11 +192,14 @@ parallel to `images` (index 0 = detection image).
   annotated `Window` type is not defined in the package. Leave unset.
 
 `extend_templates` (`str | None`, default `None`)
-: Template extension mode: `"psf_wings"` adds the high-resolution PSF wings
-  beyond the segment, `"psf_model"` replaces the template with the
-  best-fitting PSF-convolved Gaussian model, and `None` leaves templates
-  truncated at the segment boundary. Config-driven runs default to
-  `"psf_wings"`.
+: Legacy selector for the template build scheme: `"psf_wings"` (the wings
+  scaled to the segment data), `"psf"` and `"psf_model"` (post-extraction
+  filling of the zero pixels), `"wren"` and `"classic"` (the reference
+  implementations), or `"none"` to leave templates truncated at the segment
+  boundary. When given it overrides `FitConfig.extend_mode`; `None` — the
+  default — leaves the choice to that field, which itself defaults to
+  `"psf_wings"`, so both entry points extend templates unless told
+  otherwise. {doc}`pipeline` describes each scheme.
 
 `templates` (`Templates | Sequence[Template] | None`, default `None`)
 : Pre-built templates to reuse instead of extracting them from `segmap`.

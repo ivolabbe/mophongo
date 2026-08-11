@@ -39,3 +39,7 @@ legacy/autopilot/*pdf
 .codex/
 .serena/
 .mcp.json
+
+# Sphinx build output
+docs/_build/
+docs/api/

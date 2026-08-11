@@ -6,9 +6,10 @@ footprint, normalized to unit sum, optionally extended beyond the footprint,
 and convolved with a PSF-matching kernel to the resolution of each measurement
 band. The fitter ({doc}`fitting`) then solves for one amplitude per template.
 This page documents {class}`mophongo.templates.Template`,
-{class}`mophongo.templates.Templates`, and the supporting cutout machinery in
-`mophongo.templates`. For where template construction sits in the full run, see
-{doc}`pipeline`; for kernel construction, see {doc}`psf`.
+{class}`mophongo.templates.Templates`, the supporting cutout machinery in
+`mophongo.templates`, and the alternative build schemes in
+{mod}`mophongo.template_schemes`. For where template construction sits in the
+full run, see {doc}`pipeline`; for kernel construction, see {doc}`psf`.
 
 ## Coordinate conventions
 
@@ -77,11 +78,28 @@ Beyond the Cutout2D geometry, a template records:
   this position, set by {meth}`~mophongo.templates.Templates.convolve_templates`;
   `NaN` until then.
 - `ee_tmpl` (`float`): the template's own sum, recorded at the end of
-  extraction and of PSF-wing extension. Both steps renormalize the stamp, so
-  it is 1.0 for any nonzero template and 0.0 for a zero-sum one, and it stays
-  `NaN` when neither ran (`extend_with_psf_model` never sets it). Wing flux
-  withheld from a neighboring segment is reported by `extension_blocked_sum`
-  instead. Diagnostic only: the fitted amplitude does not scale with it.
+  extraction and of the `"psf"` extension pass. Both steps renormalize the
+  stamp, so it is 1.0 for any nonzero template and 0.0 for a zero-sum one —
+  with one deliberate exception, the `"psf_wings"` build scheme, whose stamp
+  is normalized before neighbor-owned pixels are dropped and therefore sums to
+  slightly less than one (see [Template build schemes](#template-build-schemes)).
+  It stays `NaN` when neither step ran (`extend_with_psf_model` never sets it).
+  Wing flux withheld from a neighboring segment is reported by
+  `extension_blocked_sum` on the `"psf"` path and by `wing_frac_lost` in
+  `extend_info` on the `"psf_wings"` path. Diagnostic only: the fitted
+  amplitude does not scale with it.
+- `template_norm` (`float`): the stamp sum divided out by the unit-sum
+  normalization, so `template_norm * data` reconstructs the composite and the
+  implied detection-band flux stays known. Initialized to 0.0. On the `"psf"`
+  extension path it means something different: the input template is already
+  unit-sum there, so the recorded value is the multiplicative wing boost rather
+  than a detection-band flux.
+- `extension_mode` (`str`, default `"none"`): which build scheme or extension
+  pass produced the current pixels.
+- `extend_info` (`dict[str, float]`): per-source bookkeeping returned by an
+  alternative build scheme; empty for `extend_mode="none"` and for the
+  post-extraction passes, which record their diagnostics as individual
+  `extension_*` attributes instead.
 - `to_shift`, `shifted` (`np.ndarray`, length 2): pending and accumulated
   astrometric shifts in `(dx, dy)`.
 
@@ -90,11 +108,15 @@ Beyond the Cutout2D geometry, a template records:
 `Template.flag` is a bitmask built from class constants:
 `FLAG_VALID` (0x01), `FLAG_CONVOLVED` (0x02), `FLAG_SUM_ZERO` (0x04),
 `FLAG_HAS_NAN` (0x08), `FLAG_OUTSIDE_WEIGHT` (0x10), `FLAG_SHIFTED` (0x20),
-`FLAG_DEBLENDED` (0x40), and `FLAG_SATURATED` (0x80). Two properties wrap the
-provenance bits: `is_deblended` marks templates that come from deblended
-catalog children, and `is_saturated` marks saturated/repaired sources, which
-the scene builder isolates into their own scene so their PSF wings do not
-contaminate neighboring flux solutions.
+`FLAG_DEBLENDED` (0x40), `FLAG_SATURATED` (0x80), `FLAG_PSF_EXTENDED` (0x100),
+and `FLAG_EXTEND_FAILED` (0x200). Two properties wrap the provenance bits:
+`is_deblended` marks templates that come from deblended catalog children, and
+`is_saturated` marks saturated/repaired sources, which the scene builder
+isolates into their own scene so their PSF wings do not contaminate
+neighboring flux solutions. The last two bits are set by the build-time
+schemes: `FLAG_PSF_EXTENDED` when a scheme blended any PSF model into the
+template, `FLAG_EXTEND_FAILED` when extension was attempted but the PSF was
+unusable.
 
 ### Template.from_stamp
 
@@ -232,9 +254,12 @@ calls {meth}`~mophongo.templates.Templates.convolve_templates` with
 - `kernel` (`np.ndarray | None`, default `None`): PSF-matching kernel; when
   given, {meth}`~mophongo.templates.Templates.convolve_templates` is applied.
 - `extension` (`np.ndarray | str | None`, default `None`): accepted but
-  currently unused; call
-  {meth}`~mophongo.templates.Templates.extend_with_psf_wings` or
-  {meth}`~mophongo.templates.Templates.extend_with_psf_model` explicitly.
+  currently unused. `from_image` extracts with `extend_mode="none"`; to build
+  extended templates, call
+  {meth}`~mophongo.templates.Templates.extract_templates` directly with an
+  `extend_mode`, or apply
+  {meth}`~mophongo.templates.Templates.extend_with_psf` or
+  {meth}`~mophongo.templates.Templates.extend_with_psf_model` afterwards.
 - `wcs` (`WCS | None`, default `None`): WCS of the high-resolution image.
 
 #### Templates.extract_templates
@@ -242,7 +267,10 @@ calls {meth}`~mophongo.templates.Templates.convolve_templates` with
 ```python
 tmpls = Templates()
 templates = tmpls.extract_templates(hires_image, segmap, positions,
-                                    wcs=None, dilate_segmap=2)
+                                    wcs=None, dilate_segmap=0, *,
+                                    extend_mode="none", detection_psf=None,
+                                    detection_weight=None, wren=None,
+                                    classic=None, psf_wings=None)
 ```
 
 - `hires_image` (`np.ndarray`): high-resolution detection image.
@@ -250,22 +278,58 @@ templates = tmpls.extract_templates(hires_image, segmap, positions,
 - `positions` (iterable of `(x, y)`): source positions; non-finite or
   out-of-bounds positions, and positions falling on segmentation background,
   are skipped silently.
-- `wcs` (`WCS | None`, default `None`): image WCS.
-- `dilate_segmap` (`int`, default `2`): disk radius in pixels used to dilate
-  each segment into background only before cutting. Detection segmaps often
-  capture only the bright core of a point source; without dilation the
-  template misses the PSF wings and the fit biases low. Dilation never lets
-  segments overlap neighbors. Pass `0` to disable. This default applies only
-  to direct calls: pipeline runs pass `FitConfig.template_dilate_segmap`
-  instead, which defaults to `0` because wing recovery there is handled by
-  template extension (see {doc}`fitting`).
+- `wcs` (`WCS | None`, default `None`): image WCS. The `"wren"` scheme uses it
+  to convert its halo annulus width from arcsec to pixels.
+- `dilate_segmap` (`int`, default `0`): disk radius in pixels used to dilate
+  each segment into background only before cutting; dilation never lets
+  segments overlap neighbors. The default matches
+  `FitConfig.template_dilate_segmap`, so pipeline runs and direct calls agree.
+  Dilation is off because a dilated ring is mostly sky noise and its
+  contested-background tie-break is catalog-id ordered rather than geometric;
+  recovering the PSF wings is the job of the build scheme, and neither
+  reference scheme dilates.
+
+The keyword-only parameters select and configure the build scheme:
+
+- `extend_mode` (`str`, default `"none"`): one of `EXTEND_MODES`, or the alias
+  `"default"`. Any other value raises `ValueError`. See
+  [Template build schemes](#template-build-schemes) below. Note that the
+  default here is `"none"`, whereas `FitConfig.extend_mode` — what a pipeline
+  run uses — defaults to `"psf_wings"`.
+- `detection_psf` (`np.ndarray | PSFRegionMap | None`, default `None`):
+  high-resolution PSF on the detection grid. Required by every build-time
+  scheme; omitting it with one of those modes raises `ValueError`. A region
+  map is looked up per source at the template's sky position, so each source
+  gets its local PSF; a single derived template size is set from the *widest*
+  member of the map ({func}`~mophongo.template_schemes.representative_psf`).
+- `detection_weight` (`np.ndarray | None`, default `None`): detection-band
+  inverse variance on the detection grid. All three build-time schemes measure
+  a source SNR; with a weight map they use the formal per-pixel noise
+  `sqrt(sum 1/ivar)`, without one they fall back to a single scalar noise
+  measured once per extraction (below).
+- `wren`, `classic`, `psf_wings`
+  ({class}`~mophongo.template_schemes.WrenParams`,
+  {class}`~mophongo.template_schemes.ClassicParams`,
+  {class}`~mophongo.template_schemes.PsfWingsParams`, all default `None`):
+  per-scheme knobs, documented under
+  [Scheme parameters](#scheme-parameters). Defaults are used when omitted;
+  parameters of the schemes that are not selected are ignored.
 
 For each source the cutout size is the segment bounding box made symmetric
-about the source position, with a floor of `min_size`. Pixels outside the
-source's own (dilated) segment are zeroed, and the cutout is normalized to
-unit sum; a template whose sum is zero gets `FLAG_SUM_ZERO` instead. Because
-templates are unit-normalized, the fitted amplitude is directly the source
-flux in the modeled stamp (see the shape-versus-throughput convention in
+about the source position, with a floor of `min_size`. The build-time schemes
+raise that floor so the stamp holds the support they build over: `"classic"`
+and `"psf_wings"` floor it at the largest detection-PSF stamp dimension,
+`"wren"` at `2*ceil(r_fill) + 1`, each rounded up to an even value.
+
+With `extend_mode="none"` (and with the two post-extraction modes, which only
+differ after extraction) pixels outside the source's own segment are zeroed.
+A build-time scheme instead replaces the whole stamp with its composite before
+normalization. Either way the stamp is then normalized to unit sum and the
+pre-normalization total is kept as `template_norm`; a template whose sum is
+zero gets `FLAG_SUM_ZERO` instead. The single exception is `"psf_wings"`,
+listed in `PRENORMALISED_MODES`, which normalizes inside the scheme (below).
+Because templates are unit-normalized, the fitted amplitude is directly the
+source flux in the modeled stamp (see the shape-versus-throughput convention in
 {doc}`psf` and the `flux_<i>` vs `flux_<i>_total` columns in {doc}`outputs`).
 
 #### Templates.from_cutout_models
@@ -288,38 +352,217 @@ segmentation, for use with externally generated models.
 - `normalize` (`bool`, default `False`): normalize each cutout to unit sum.
   When `False`, cutouts are interpreted as per-unit-flux models as given.
 
-### Template extension
+### Template build schemes
 
-Extraction truncates each template at its segmentation footprint, so the
-template lacks the source's PSF wings. Two extension methods complete the
-missing support; the pipeline selects between them with the
-`extend_templates` option (`"psf_wings"` or `"psf_model"`). The run-level
-`RunConfig` defaults to `"psf_wings"`; the `Pipeline` constructor argument
-itself defaults to `None`, which leaves templates truncated
-({doc}`pipeline`). Both accept either a single
-PSF array or a spatially varying {class}`mophongo.psf_map.PSFRegionMap`
+Extraction on its own truncates each template at its segmentation footprint,
+so the template lacks the source's PSF wings and the fitted flux is biased low,
+worst for faint sources. `extend_mode` selects how the missing support is
+supplied. It takes one of the six values in
+`mophongo.templates.EXTEND_MODES` plus the alias `"default"`, which resolves
+to `"psf_wings"` (`EXTEND_MODE_ALIASES`).
+
+The modes split into two families. The three listed in `BUILD_TIME_MODES` are
+composites implemented in {mod}`mophongo.template_schemes` and built inside
+{meth}`~mophongo.templates.Templates.extract_templates`: they replace the
+segment-masked data before the unit-sum normalization, so `template_norm`
+covers the extended shape. The other two reshape the cutout and therefore run
+as a separate pass after extraction, driven by their own methods.
+
+| `extend_mode` | stage | what supplies the missing support |
+| --- | --- | --- |
+| `"none"` | — | nothing; the template stops at its segment |
+| `"psf_wings"` (alias `"default"`) | build | least-squares-scaled PSF outside the segment, smooth faint limit ({func}`~mophongo.template_schemes.composite_psf_wings`) |
+| `"wren"` | build | area-weighted ownership plus an SNR-graded blend towards a core-anchored PSF ({func}`~mophongo.template_schemes.composite_wren`) |
+| `"classic"` | build | exact segment data plus a least-squares-scaled PSF over the whole stamp ({func}`~mophongo.template_schemes.composite_classic`) |
+| `"psf"` | post-extraction | the template convolved with the detection PSF fills its zero pixels ({meth}`~mophongo.templates.Templates.extend_with_psf`) |
+| `"psf_model"` | post-extraction | the best-fitting PSF-convolved Gaussian ({meth}`~mophongo.templates.Templates.extend_with_psf_model`) |
+
+The build-time schemes are self-contained ports kept out of
+`mophongo.templates` so that the alternatives can be compared one to one and
+either can be adapted or dropped as a unit. Nothing in
+`mophongo.template_schemes` imports the fitting, catalog, or pipeline layers:
+every entry point takes plain numpy arrays and returns a composite stamp plus
+a flat dict of per-source bookkeeping, which
+{meth}`~mophongo.templates.Templates.extract_templates` stores on the template
+as `extend_info`.
+
+#### psf_wings
+
+The default. The halo amplitude is an ordinary least-squares fit of the PSF to
+the data inside the exact segment, $f_{\rm psf} = \sum_S P D / \sum_S P^2$
+floored at zero, the same amplitude the `"classic"` scheme uses. It differs
+from `"classic"` in two ways.
+
+The faint limit is smooth rather than a switch. One weight
+$W = w(S_{\rm seg};\ \texttt{snrlo\_psf})$ is computed for the whole stamp from
+the in-segment SNR and the composite is blended towards the bare scaled PSF:
+$m = W\,[S D + (1-S) f_{\rm psf} P] + (1-W)\,f_{\rm psf} P$. Outside the
+segment the two terms coincide, so the blend is a no-op there and the wings
+keep full strength at every SNR; as the SNR goes to zero the whole stamp,
+segment included, becomes $f_{\rm psf} P$, with no discontinuity on the way. A
+degenerate fit ($f_{\rm psf} \le 0$) falls back to a bare point source.
+
+The composite is also normalized before neighbor-owned pixels are dropped, as
+described under *Normalization order* below. `extend_info` records `fpsf`,
+`snr_seg`, `w_core`, `template_norm` (the whole-stamp sum before
+normalization), `wing_frac_lost` (the fraction zeroed as neighbor-owned), and
+`psf_extended`.
+
+#### classic
+
+A port of the IDL `subphot.pro::build_cube` template builder. The composite is
+$m = S D + f_{\rm psf} (1-S) P$ with the same least-squares halo amplitude:
+fitting the PSF to the data down-weights pixels where the PSF is faint, whereas
+the wren scheme uses a flux ratio. When the in-segment SNR falls below
+`tmpl_snrlo` the template is *replaced* by the scaled point source rather than
+blended towards one, reproducing IDL's hard switch; `force_psf` applies that
+replacement unconditionally, matching IDL's `/psf` keyword.
+
+Two properties of the original are preserved deliberately. The support is the
+whole stamp including pixels belonging to *other* segments, since $(1-S)$ does
+not exclude neighbors — which is why the cutout is floored at the
+detection-PSF stamp, beyond which the resampled PSF, and the composite with
+it, is identically zero. And there is no positivity clip: negative sky inside
+the segment is kept. `extend_info` records `fpsf`, `snr_seg`, `flux_in_seg`,
+`added_flux`, and `psf_replaced`.
+
+One deviation from the original is intentional. IDL carried no inverse-variance
+map at any stage, so its low-SNR test used one scalar noise per tile; when a
+calibrated `detection_weight` is supplied the formal per-pixel noise
+$\sqrt{\sum_S 1/\mathrm{ivar}}$ is used instead. The two agree exactly where
+the noise is uniform.
+
+#### wren
+
+A port of the wren fork's `_extended_composite`. It first partitions the
+background globally: each background pixel goes to the segment with the largest
+area inside a disk of radius `max_radius_pix` around it, and segment pixels
+always keep their own label, so the partition is disjoint by construction
+({func}`~mophongo.template_schemes.build_ownership`). This is area-weighted
+rather than a distance Voronoi, so a large segment wins more inter-source
+territory than a small one; ties go to the lowest label. The map is built once
+per extraction, restricted to the labels that can affect a pixel some retained
+cutout actually reads.
+
+Each template is then a single radial, SNR-weighted linear blend between the
+data and a core-anchored PSF model over the source's own territory,
+
+$$
+H = W D + (1 - W) M, \qquad M = A_{\rm src} P,
+\qquad A_{\rm src} = \frac{\sum_S \max(D, 0)}{\sum_S P},
+$$
+
+with one weight $w_{\rm core} = w(S_{\rm seg};\ 1.5\,\texttt{fit\_snrlo\_psf})$
+over the segment and one weight $w(S_k;\ \texttt{wings\_snr\_psf})$ per radial
+halo annulus over owned background. The halo ladder is forced monotone
+non-increasing outward and seeded at $w_{\rm core}$, so trust in the data never
+increases with radius and a faint core caps its own halo. The support is the
+segment plus owned background inside the encircled-energy radius; halo weights
+are measured out to `max_radius_pix`, which is at least that radius by
+construction, so the extra margin buys ownership reach only. Non-finite data
+pixels take the model whatever their annulus.
+
+The blend weight itself,
+{func}`~mophongo.template_schemes.blend_weight`, is 1 at and above its onset
+threshold and a power law of index `blend_p` below it, so the smooth rolloff
+reduces to the IDL hard switch as `blend_p` goes to infinity. Both `"wren"` and
+`"psf_wings"` use it.
+
+Unlike the other two composites, this one is returned unnormalized and without
+a positivity clip: {meth}`~mophongo.templates.Templates.extract_templates`
+clips it and then normalizes, in that order, which is what wren does (and which
+biases the stored norm high). Without a usable PSF the scheme falls back to raw
+data over the larger `max_radius_pix` support and sets `FLAG_EXTEND_FAILED`.
+`extend_info` records `snr_seg`, `w_core`, `A_src`, `f_cut`,
+`flux_beyond_stamp`, `flux_beyond_aper`, `apcor_from_psf`, `psf_extended`, and
+`extend_failed`.
+
+#### Noise for the scheme SNR
+
+Every build-time scheme grades data against a PSF model by SNR, so each needs a
+noise estimate. With `detection_weight` all three use the formal per-pixel
+noise. Without it:
+
+- `"classic"` and `"psf_wings"` measure a single scalar detection rms once per
+  extraction with {func}`~mophongo.template_schemes.detection_rms`, a biweight
+  scale estimate ported from IDL astrolib `robust_sigma` — sources included,
+  since the biweight downweights them, which is the original intent. The
+  scheme's own `rms` field overrides the measurement. It is only needed when
+  the faint-source onset (`tmpl_snrlo` or `snrlo_psf`) is above zero, and a
+  non-positive result raises `ValueError` rather than silently disabling the
+  faint branch.
+- `"wren"` measures a sigma-clipped sky sigma over unsegmented pixels
+  ({func}`~mophongo.template_schemes.sky_sigma`), overridable with
+  `WrenParams.bg_rms`. Every wren weight comes from an SNR, so a missing noise
+  estimate would drive every weight to zero and turn every template into a bare
+  point source; a non-positive value raises `ValueError`.
+
+Both estimators ignore exactly-zero pixels
+({func}`~mophongo.template_schemes.covered_mask`). In a drizzled mosaic those
+are the uncovered margin rather than sky, and once that spike at zero holds the
+median it collapses the median absolute deviation to zero. Both are also
+measured on a regular subsample, since these are global scalars that the
+reference codes measured on a single tile.
+
+#### Normalization order
+
+The `"psf_wings"` composite is normalized over the whole stamp *before*
+neighbor-owned pixels are zeroed, and that ordering is the point of the scheme.
+Wing flux landing on a neighboring segment is counted in the normalizer and
+only then dropped, so the template sums to slightly less than one, short by
+exactly that flux, and the neighbor's own template fits the light instead of it
+being counted twice. Renormalizing afterwards would undo that protection, which
+is why `"psf_wings"` is listed in `PRENORMALISED_MODES` and
+{meth}`~mophongo.templates.Templates.extract_templates` leaves its stamp alone,
+taking `template_norm` from the scheme's own bookkeeping. The ordering
+reproduces the effect of IDL's normalize-then-mask step while masking by
+segment ownership rather than by a circular aperture. Whether neighbor pixels
+are zeroed at all is controlled by `PsfWingsParams.background_only`.
+
+The other two composites never zero anything and are normalized to unit sum by
+{meth}`~mophongo.templates.Templates.extract_templates` in the usual way, but
+for opposite reasons. `"classic"` keeps its scaled PSF on neighboring segments,
+so that flux stays in the template and in its normalizer, and two blended
+neighbors can both model it. `"wren"` never claims those pixels: its support is
+restricted to the territory the ownership map assigns to the source, so the
+partition prevents the double counting up front.
+
+#### Post-extraction passes
+
+The two remaining modes run after extraction as method calls on the container.
+The pipeline applies them for `extend_mode="psf_convolution"` (legacy alias
+`"psf"`) and `"psf_model"`
+respectively, the latter with `mode="model"`. Both accept either a single PSF
+array or a spatially varying {class}`mophongo.psf_map.PSFRegionMap`
 ({doc}`psf_maps`), normalize the PSF to a unit-sum shape for the morphology
 operation, and record the native finite-stamp sum only as throughput metadata
 (`extension_psf_throughput`).
 
-Both methods treat deblended children specially through `skip_deblended`.
-By default deblended child templates are extended like any other template;
-setting `FitConfig(skip_template_extension_for_deblended=True)` makes the
-pipeline pass `skip_deblended=True`, leaving children unextended (they are
-copied through with `extension_mode = "none"` and
-`extension_skip_reason = "is_deblended"`).
+Both treat deblended children specially through `skip_deblended`. By default
+deblended child templates are extended like any other template; setting
+`FitConfig(skip_template_extension_for_deblended=True)` makes the pipeline pass
+`skip_deblended=True`, leaving children unextended (they are copied through
+with `extension_mode = "none"` and
+`extension_skip_reason = "is_deblended"`). The build-time schemes have no such
+opt-out: they apply to every source.
 
-#### Templates.extend_with_psf_wings
+#### Templates.extend_with_psf
 
 ```python
-Templates.extend_with_psf_wings(psf, *, skip_deblended=False,
-                                background_only=True, inplace=False)
+Templates.extend_with_psf(psf, *, skip_deblended=False,
+                          background_only=True, inplace=False)
 ```
 
 Fills zero-valued template pixels with the local high-resolution PSF response.
 Nonzero pixels are trusted measured source pixels; the sparse template is
 convolved with the local PSF, only the zero pixels receive the convolved
-values, and the completed stamp is renormalized to unit sum.
+values, and the completed stamp is renormalized to unit sum. The wings
+inserted here are therefore the template *convolved* with the detection PSF,
+not a scaled PSF model — contrast
+{func}`~mophongo.template_schemes.composite_classic`, which pastes a
+least-squares-scaled PSF, and
+{func}`~mophongo.template_schemes.composite_wren`, which blends towards a
+core-anchored one.
 
 - `psf` (`np.ndarray | PSFRegionMap`): high-resolution PSF or spatial PSF map.
 - `skip_deblended` (`bool`, default `False`): copy deblended-child templates
@@ -333,11 +576,16 @@ values, and the completed stamp is renormalized to unit sum.
 - `inplace` (`bool`, default `False`): replace the internal template list.
 
 Returns the list of completed templates. Each records diagnostics:
-`extension_mode` (`"psf_wings"`), `extension_psf_sum`,
+`extension_mode` (`"psf"`), `extension_psf_sum`,
 `extension_psf_throughput`, `extension_core_sum`, `extension_pre_norm_sum`,
 `extension_filled_sum`, `extension_filled_fraction` (wing flux inserted as a
 fraction of the pre-normalization total), and `extension_blocked_sum` (wing
 flux withheld because it fell on a neighbor's segment).
+
+`template_norm` means something different on this path than at extraction:
+the input template is already unit-sum, so the recorded pre-normalization sum
+is the multiplicative wing boost (IDL's `added_flux`) rather than the
+detection-band flux inside the segment.
 
 #### Templates.extend_with_psf_model
 
@@ -360,7 +608,9 @@ complete the template.
   PSF, and is padded to even dimensions.
 - `mode` (`str`, default `"wings"`): `"wings"` keeps the extracted segment
   pixels and fills only the pixels outside the segment with the scaled model;
-  `"model"` replaces the whole template by the best-fitting model.
+  `"model"` replaces the whole template by the best-fitting model. The
+  pipeline's `extend_mode="psf_model"` pass calls this method with
+  `mode="model"`.
 - `skip_deblended` (`bool`, default `False`): as above.
 - `inplace` (`bool`, default `False`): replace the internal template list.
 
@@ -370,6 +620,100 @@ template: `extension_mode` (the `mode` value, `"wings"` or `"model"` — not
 `extension_score` (residual sum of squares on segment pixels),
 `extension_segment_fraction` (model flux inside the segment), and
 `extension_psf_throughput`.
+
+### Scheme parameters
+
+Each build-time scheme carries its knobs in a dataclass, passed to
+{meth}`~mophongo.templates.Templates.extract_templates` through the `wren`,
+`classic`, and `psf_wings` keywords. Defaults are used when the keyword is
+omitted.
+
+#### PsfWingsParams
+
+{class}`mophongo.template_schemes.PsfWingsParams`.
+
+- `snrlo_psf` (`float`, default `5.0`): in-segment SNR at which the template is
+  pure data. Below it the core rolls off smoothly towards the scaled PSF,
+  reaching a pure point source as the SNR goes to zero. This replaces IDL's
+  hard switch at `tmpl_snrlo`.
+- `blend_p` (`float`, default `2.0`): rolloff exponent of that weight.
+- `background_only` (`bool`, default `True`): null pixels owned by a
+  *different* segment after normalization, so a neighbor's wings are not
+  counted twice.
+- `rms` (`float | None`, default `None`): fallback scalar detection noise for
+  the SNR when no inverse-variance map is supplied. `None` measures it with
+  {func}`~mophongo.template_schemes.detection_rms`.
+
+#### ClassicParams
+
+{class}`mophongo.template_schemes.ClassicParams`.
+
+- `tmpl_snrlo` (`float`, default `15.0`): in-segment SNR below which the
+  template is replaced by a pure point source; the IDL parameter file sets the
+  same value. Zero or negative disables the branch, matching IDL's
+  `keyword_set(tmpl_snrlo)` guard.
+- `rms` (`float | None`, default `None`): fallback detection-image noise, used
+  only when no inverse-variance map is supplied. `None` measures it once per
+  extraction with {func}`~mophongo.template_schemes.robust_sigma`, IDL's
+  `robust_sigma(ttmpl)`. A calibrated inverse-variance map supersedes it.
+- `force_psf` (`bool`, default `False`): IDL's `/psf` keyword — build every
+  template as a pure point source.
+
+#### WrenParams
+
+{class}`mophongo.template_schemes.WrenParams`.
+
+- `max_radius_pix` (`float`, default `0.0`): ownership-contest disk radius and
+  outer reach of the halo annuli, in detection pixels (wren's `r_fill`). Zero
+  or negative derives it from the detection PSF via
+  {func}`~mophongo.template_schemes.wren_fill_radius`, which returns
+  `max(R_ee, r_aper + kernel_half_width)`: the template must cover the
+  measurement aperture plus a convolution margin and never be smaller than the
+  encircled-energy cap.
+- `psf_ee_radius_pix` (`float | None`, default `None`): hard cap on the
+  composite support (wren's `R95`). `None` derives it from the detection PSF at
+  `ee_fraction`.
+- `aperture_radius_pix` (`float | None`, default `None`): measurement-aperture
+  radius on the detection grid, used only for the `flux_beyond_aper` crowding
+  bookkeeping. `None` disables that bookkeeping.
+- `ee_fraction` (`float`, default `0.95`): encircled-energy fraction defining
+  the support cap. The radius is computed against the *stamp* sum, not the true
+  total PSF ({func}`~mophongo.template_schemes.psf_ee_radius_pix`).
+- `fit_snrlo_psf` (`float`, default `10.0`): the core-weight onset is
+  `1.5 * fit_snrlo_psf`, the same SNR at which the IDL code switches to a pure
+  point source.
+- `wings_snr_psf` (`float`, default `3.0`): per-annulus weight onset.
+- `blend_p` (`float`, default `2.0`): rolloff exponent of the blend weight.
+- `blend_annulus` (`float`, default `0.15`): halo annulus width in arcsec,
+  converted with the cutout WCS; without a WCS it falls back to 4 detection
+  pixels.
+- `containment` (`float`, default `1.0`): detection-PSF stamp containment used
+  by the `flux_beyond_stamp` bookkeeping; 1.0 disables it.
+- `bg_rms` (`float | None`, default `None`): explicit detection-image sky rms,
+  used when no inverse-variance map is supplied. `None` measures it with
+  {func}`~mophongo.template_schemes.sky_sigma`.
+
+#### Selecting a scheme in a run
+
+A pipeline run selects the scheme with `FitConfig.extend_mode`, which defaults
+to `"psf_wings"`. The `Pipeline` constructor keeps an `extend_templates`
+argument that overrides it when given; left at `None`, the config field
+decides ({doc}`pipeline`). The pipeline builds the parameter dataclasses from
+`FitConfig` fields: `psf_wings_snrlo`, `psf_wings_blend_p`, `psf_wings_rms`,
+and `extend_wings_background_only` for `PsfWingsParams`; `classic_tmpl_snrlo`
+and `classic_rms` for `ClassicParams`; `wren_ee_fraction`,
+`wren_fit_snrlo_psf`, `wren_wings_snr_psf`, `wren_blend_p`,
+`wren_blend_annulus`, and `wren_bg_rms` for `WrenParams`, whose radii it
+derives from the configured measurement aperture and the widest matching
+kernel. `ClassicParams.force_psf` and `WrenParams.containment` have no config
+field and stay at their defaults. Settings belonging to a scheme the run did
+not select are dropped from the saved config snapshot.
+
+The detection PSF passed to the build-time schemes is strictly `psfs[0]`,
+the band the templates live on; no other index is substituted, because a
+lower-resolution PSF would silently produce wrong wings and wrong extension
+radii. The detection weight map is resolved on every run but its pixels are
+read only when the selected mode uses them.
 
 ### Convolution to a measurement band
 

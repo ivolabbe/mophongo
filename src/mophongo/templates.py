@@ -34,17 +34,20 @@ logger = logging.getLogger(__name__)
 #: ``wren``       :func:`mophongo.template_schemes.composite_wren`.
 #: ``classic``    :func:`mophongo.template_schemes.composite_classic` (IDL).
 #:
-#: ``psf``/``psf_model`` reshape the cutout, so they run after extraction; the
-#: build-time modes replace the masked data before the unit-sum normalisation.
-EXTEND_MODES = ("none", "psf_wings", "psf", "psf_model", "wren", "classic")
+#: ``psf_convolution``/``psf_model`` reshape the cutout, so they run after
+#: extraction; the build-time modes replace the masked data before the
+#: unit-sum normalisation.
+EXTEND_MODES = ("none", "psf_wings", "psf_convolution", "psf_model", "wren", "classic")
 BUILD_TIME_MODES = ("psf_wings", "wren", "classic")
 #: Build-time modes whose composite is already normalised. ``psf_wings``
 #: normalises over the whole stamp and *then* zeroes neighbour-owned pixels, so
 #: its template deliberately sums to less than one; renormalising would undo
 #: exactly the double-counting protection that ordering buys.
 PRENORMALISED_MODES = ("psf_wings",)
-#: Accepted spellings that resolve onto :data:`EXTEND_MODES`.
-EXTEND_MODE_ALIASES = {"default": "psf_wings"}
+#: Accepted spellings that resolve onto :data:`EXTEND_MODES`. ``psf`` is the
+#: pre-rename spelling of ``psf_convolution`` (wings = template convolved with
+#: the detection PSF, easily confused with the scaled-PSF ``psf_wings``).
+EXTEND_MODE_ALIASES = {"default": "psf_wings", "psf": "psf_convolution"}
 
 try:
     from astropy.wcs import WCS, Sip
@@ -1289,7 +1292,7 @@ class Templates:
     ) -> list[Template]:
         """Fill zero-valued template pixels with the local high-resolution PSF response.
 
-        This is the ``extend_mode='psf'`` scheme: the wings inserted here are
+        This is the ``extend_mode='psf_convolution'`` scheme: the wings inserted here are
         the template *convolved* with the detection PSF, not a scaled PSF
         model (contrast :func:`mophongo.template_schemes.composite_classic`,
         which pastes a least-squares-scaled PSF, and ``composite_wren``, which
@@ -1383,7 +1386,7 @@ class Templates:
             smeared.wnorm = tmpl.wnorm
             smeared.to_shift = tmpl.to_shift.copy()
             smeared.shifted = tmpl.shifted.copy()
-            smeared.extension_mode = "psf"
+            smeared.extension_mode = "psf_convolution"
             smeared.extension_skip_reason = ""
             smeared.extension_psf_sum = float(np.sum(psf_arr))
             smeared.extension_psf_throughput = float(psf_throughput)

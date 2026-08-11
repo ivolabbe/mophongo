@@ -889,8 +889,9 @@ class Pipeline:
     def _ensure_maps(self) -> None:
         """Load the cached PSF maps and build the kernel map if missing.
 
-        The hi-res map is needed as well as the lo-res one: it is the PSF that
-        :meth:`run` extends the templates with when ``extend_templates`` is set.
+        The hi-res map is needed as well as the lo-res one: it is the
+        detection-band PSF the template build scheme reads from ``psfs[0]``
+        (every ``extend_mode`` except ``'none'``).
         """
         if self.prm_lo is None and self.f_psf_lo.exists():
             self.prm_lo = PSFRegionMap.from_geojson(str(self.f_psf_lo))
@@ -932,7 +933,7 @@ class Pipeline:
         if there is none), but its pixels are read only by the build schemes
         that weight real data against a PSF model by SNR: ``'wren'`` for every
         weight, ``'classic'`` for its low-SNR point-source branch.
-        ``'default'`` and ``'psf'`` never touch ``weights[0]``, and a
+        ``'default'`` and ``'psf_convolution'`` never touch ``weights[0]``, and a
         full-field hi-res weight map costs as much memory as the mosaic itself.
         """
         from astropy.io import fits
@@ -2005,7 +2006,8 @@ class Pipeline:
         "none": "none",
         "default": "psf_wings",
         "psf_wings": "psf_wings",
-        "psf": "psf",
+        "psf": "psf_convolution",
+        "psf_convolution": "psf_convolution",
         "psf_model": "psf_model",
         "wren": "wren",
         "classic": "classic",
@@ -2024,6 +2026,7 @@ class Pipeline:
                 raise ValueError(f"Unknown template extension mode {self.extend_templates!r}")
             return self._LEGACY_EXTEND_MODES[key]
         mode = str(getattr(config, "extend_mode", "default") or "default").lower()
+        mode = EXTEND_MODE_ALIASES.get(mode, mode)
         if mode not in EXTEND_MODES:
             raise ValueError(f"Unknown extend_mode {mode!r}; expected one of {EXTEND_MODES}")
         return mode
@@ -2117,8 +2120,8 @@ class Pipeline:
         return kwargs
 
     def _apply_extension_pass(self, tmpls: Templates, mode: str, config: FitConfig) -> None:
-        """Run the post-extraction extension for ``'psf'``/``'psf_model'``."""
-        if mode == "psf":
+        """Run the post-extraction extension for ``'psf_convolution'``/``'psf_model'``."""
+        if mode == "psf_convolution":
             tmpls.extend_with_psf(
                 self._psf_for_template_extension(),
                 skip_deblended=bool(config.skip_template_extension_for_deblended),

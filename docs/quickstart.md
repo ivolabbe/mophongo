@@ -23,6 +23,21 @@ or install in editable mode with pip:
 pip install -e .
 ```
 
+## Choosing an entry point
+
+Both paths share the fitting engine; they differ in what you supply and what
+gets built for you.
+
+| | Arrays: {func}`mophongo.pipeline.run` | Config: {meth}`mophongo.pipeline.Pipeline.from_config` |
+|---|---|---|
+| Inputs | in-memory numpy arrays + `astropy` Table | FITS/CSV paths in a JSON `RunConfig` |
+| PSFs | one static stamp per band, supplied by you | drizzled, position-dependent ePSFs built from the per-frame WCS CSVs |
+| Kernels | you build them ({func}`mophongo.utils.matching_kernel`), or pass a prebuilt {class}`mophongo.psf_map.PSFRegionMap` | per-region kernel map, built and geojson-cached automatically |
+| Template extension | off by default (`extend_templates=None`, templates stay truncated) | `"psf_wings"` by default |
+| Preprocessing | none — you supply inverse-variance weights | background/ivar estimation, footprint and trial-patch cuts |
+| Products | in-memory `(table, residuals, pipe)` only | residual FITS, fit table, per-source stamps, scene diagnostics, run log; restore later with `load_fit()` |
+| Suits | simulations, mocks, method experiments | real mosaics |
+
 ## Config-driven runs
 
 For runs on real mosaics — with drizzled, spatially varying PSFs, cached

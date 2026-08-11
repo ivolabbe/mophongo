@@ -129,6 +129,11 @@ table, residuals, pipe = pipeline.run(
 band to measure. The returned table gains `flux_<i>` and `err_<i>` columns
 for image index `i`.
 
+This array interface takes static PSF stamps and suits simulations and
+experiments; runs on real mosaics use the JSON config path, which builds
+drizzled position-dependent PSFs, per-region kernels, and file outputs. The
+"Choosing an entry point" table in {doc}`quickstart` lists the differences.
+
 ### Parameters of `pipeline.run` (and `Pipeline.__init__`)
 
 All arguments after `segmap` are keyword-only. Sequence arguments run

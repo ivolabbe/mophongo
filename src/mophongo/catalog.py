@@ -630,7 +630,11 @@ class Catalog:
         return obj
 
     def _detect(self) -> None:
-        self.det_img = (self.sci - self.background) * np.sqrt(self.ivar)
+        # run() already subtracted the estimated background from self.sci;
+        # subtracting it here again would remove it twice. Only a
+        # user-supplied background level still needs to come off.
+        bg = 0.0 if self.estimate_background else self.background
+        self.det_img = (self.sci - bg) * np.sqrt(self.ivar)
         kernel_pix = int(2 * self.params["kernel_size"]) | 1  # ensure odd size
         kernel = Gaussian2DKernel(
             self.params["kernel_size"] / 2.355, x_size=kernel_pix, y_size=kernel_pix

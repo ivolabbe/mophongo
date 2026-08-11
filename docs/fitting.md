@@ -78,7 +78,7 @@ Public methods:
 
 `model_image()` / `residual()`
 : Full-frame model $\sum_i \alpha_i T_i$ from the stored `solution`, and
-  `image - model`. Model pixels with non-positive weight are zeroed.
+  `image - model`. Model pixels with non-positive or NaN weight are zeroed.
 
 `quick_flux(templates=None)`
 : Per-template estimate $\sum I\,T_i / \sum T_i^2$ over each template's own
@@ -346,7 +346,7 @@ Methods:
 
 `model_image()` / `residual()`
 : Scene model and image-minus-model over the scene bounding box; residual
-  pixels with non-positive weight are zeroed.
+  pixels with non-positive or NaN weight are zeroed.
 
 `plot(tmpl_image, seg_image, display_sig=3.0, display_sig_by_title=None,
 residual_image=None, ax=None, **imshow_kwargs)`

@@ -248,7 +248,8 @@ class AstroCorrect:
         residual: np.ndarray,
         coeffs: np.ndarray,
     ) -> None:
-        astrom_kw = self.cfg.astrom_kwargs.get(self.cfg.astrom_model.lower(), {})
+        # copy: .pop() below must not mutate the caller's FitConfig
+        astrom_kw = dict(self.cfg.astrom_kwargs.get(self.cfg.astrom_model.lower(), {}))
         pos, dx, dy, w = measure_template_shifts(
             templates,
             coeffs,

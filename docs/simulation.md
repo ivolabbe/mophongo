@@ -320,7 +320,7 @@ psf_maps = ver.build_wiener_psf_maps(
     mock, paths, dpsfs, "verify_out", psf_dir="data/PSF",
 )
 result = ver.run_pipeline_extension_scenario(
-    "psf", out_dir="verify_out", paths=paths, noise_info=noise_info,
+    "psf_convolution", out_dir="verify_out", paths=paths, noise_info=noise_info,
     truth=truth, psf_maps=psf_maps,
 )
 ```
@@ -492,9 +492,9 @@ bands, per-source stage diagnostics
 diagnostics. The `summary` dict includes median flux ratios, pull statistics,
 and (when a position shift was injected) recovered-vs-expected shift fields.
 
-Parameters: `scenario` (`str`, required) — template-extension mode passed to
-`Pipeline(extend_templates=...)`: `"psf"`, `"psf_wings"`, or `"psf_model"`,
-with `"none"` disabling extension;
+Parameters: `scenario` (`str`, required) — template build scheme passed to
+`Pipeline(extend_mode=...)`: `"psf_convolution"`, `"psf_wings"`, or
+`"psf_model"`, with `"none"` disabling extension;
 `out_dir`, `paths`, `noise_info`, `truth`, `psf_maps` (required,
 keyword-only) — products of the builders above. Optional keywords:
 `mock_dilate_segmap` (`int`, 2) — dilation when building the truth

@@ -78,19 +78,19 @@ Beyond the Cutout2D geometry, a template records:
   this position, set by {meth}`~mophongo.templates.Templates.convolve_templates`;
   `NaN` until then.
 - `ee_tmpl` (`float`): the template's own sum, recorded at the end of
-  extraction and of the `"psf"` extension pass. Both steps renormalize the
+  extraction and of the `"psf_convolution"` extension pass. Both steps renormalize the
   stamp, so it is 1.0 for any nonzero template and 0.0 for a zero-sum one —
   with one deliberate exception, the `"psf_wings"` build scheme, whose stamp
   is normalized before neighbor-owned pixels are dropped and therefore sums to
   slightly less than one (see [Template build schemes](#template-build-schemes)).
   It stays `NaN` when neither step ran (`extend_with_psf_model` never sets it).
   Wing flux withheld from a neighboring segment is reported by
-  `extension_blocked_sum` on the `"psf"` path and by `wing_frac_lost` in
+  `extension_blocked_sum` on the `"psf_convolution"` path and by `wing_frac_lost` in
   `extend_info` on the `"psf_wings"` path. Diagnostic only: the fitted
   amplitude does not scale with it.
 - `template_norm` (`float`): the stamp sum divided out by the unit-sum
   normalization, so `template_norm * data` reconstructs the composite and the
-  implied detection-band flux stays known. Initialized to 0.0. On the `"psf"`
+  implied detection-band flux stays known. Initialized to 0.0. On the `"psf_convolution"`
   extension path it means something different: the input template is already
   unit-sum there, so the recorded value is the multiplicative wing boost rather
   than a detection-band flux.
@@ -696,9 +696,9 @@ omitted.
 #### Selecting a scheme in a run
 
 A pipeline run selects the scheme with `FitConfig.extend_mode`, which defaults
-to `"psf_wings"`. The `Pipeline` constructor keeps an `extend_templates`
-argument that overrides it when given; left at `None`, the config field
-decides ({doc}`pipeline`). The pipeline builds the parameter dataclasses from
+to `"psf_wings"`. The `Pipeline` constructor takes an `extend_mode`
+argument that overrides it when given (`extend_templates` is its deprecated
+alias); left at `None`, the config field decides ({doc}`pipeline`). The pipeline builds the parameter dataclasses from
 `FitConfig` fields: `psf_wings_snrlo`, `psf_wings_blend_p`, `psf_wings_rms`,
 and `extend_wings_background_only` for `PsfWingsParams`; `classic_tmpl_snrlo`
 and `classic_rms` for `ClassicParams`; `wren_ee_fraction`,

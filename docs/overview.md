@@ -191,15 +191,17 @@ parallel to `images` (index 0 = detection image).
 : Stored on the instance but not consumed by the fit as of this writing; the
   annotated `Window` type is not defined in the package. Leave unset.
 
-`extend_templates` (`str | None`, default `None`)
-: Legacy selector for the template build scheme: `"psf_wings"` (the wings
-  scaled to the segment data), `"psf"` and `"psf_model"` (post-extraction
+`extend_mode` (`str | None`, default `None`)
+: Selector for the template build scheme: `"psf_wings"` (the wings scaled to
+  the segment data), `"psf_convolution"` and `"psf_model"` (post-extraction
   filling of the zero pixels), `"wren"` and `"classic"` (the reference
   implementations), or `"none"` to leave templates truncated at the segment
   boundary. When given it overrides `FitConfig.extend_mode`; `None` — the
   default — leaves the choice to that field, which itself defaults to
   `"psf_wings"`, so both entry points extend templates unless told
-  otherwise. {doc}`pipeline` describes each scheme.
+  otherwise. `extend_templates` is a deprecated alias for this argument, and
+  the spelling `"psf"` a deprecated alias for `"psf_convolution"`.
+  {doc}`pipeline` describes each scheme.
 
 `templates` (`Templates | Sequence[Template] | None`, default `None`)
 : Pre-built templates to reuse instead of extracting them from `segmap`.

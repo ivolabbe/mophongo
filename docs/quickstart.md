@@ -380,17 +380,19 @@ are keyword-only.
 : Accepted and stored on the pipeline for backward compatibility; as of
   this writing it is not consumed by the fitting path.
 
-`extend_templates` (`str | None`, default `None`)
-: Legacy selector for the template build scheme, kept from before the
-  setting moved into `FitConfig`. When given it names a scheme (`"none"`,
-  `"psf_wings"`, `"psf"`, `"psf_model"`, `"wren"`, `"classic"`) and
-  overrides the config field; `None` leaves the choice to
-  `FitConfig.extend_mode`, which itself defaults to `"psf_wings"`. `None` is
-  therefore not "no extension" — that is `"none"`, which leaves templates
-  truncated at the segment boundary and biases total fluxes low, badly so
-  for faint sources. Prefer setting `extend_mode` on the `FitConfig`; both
-  entry points then read the same field. The schemes are described in
-  {doc}`pipeline` and {doc}`templates`.
+`extend_mode` (`str | None`, default `None`)
+: Constructor override for the template build scheme. When given it names a
+  scheme (`"none"`, `"psf_wings"`, `"psf_convolution"`, `"psf_model"`,
+  `"wren"`, `"classic"`) and overrides the config field; `None` leaves the
+  choice to `FitConfig.extend_mode`, which itself defaults to
+  `"psf_wings"`. `None` is therefore not "no extension" — that is
+  `"none"`, which leaves templates truncated at the segment boundary and
+  biases total fluxes low, badly so for faint sources. Prefer setting
+  `extend_mode` on the `FitConfig`; both entry points then read the same
+  field. `extend_templates` is a deprecated alias for this argument
+  (logs a warning), and `"psf"` a deprecated alias for
+  `"psf_convolution"`. The schemes are described in {doc}`pipeline` and
+  {doc}`templates`.
 
 `templates` (`Templates | Sequence[Template] | None`, default `None`)
 : Prebuilt {class}`mophongo.templates.Templates` to use instead of

@@ -333,7 +333,7 @@ template's kernel is looked up at the template's sky position with
 `get_psf`. The hi-res PSF map supplies the detection-band PSF that the
 template build scheme (`FitConfig.extend_mode`, default `"psf_wings"`)
 looks up at each source position — the composite schemes scale it into the
-template halo, and the `"psf"` post-pass fills zero-valued pixels with the
+template halo, and the `"psf_convolution"` post-pass fills zero-valued pixels with the
 template convolved by it (see {doc}`templates`). The lo-res map provides the
 encircled-energy metadata recorded in the output catalog, both the per-source
 `ee_psf_lo` and the filter-level values in `cat.meta`.

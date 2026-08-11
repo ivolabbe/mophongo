@@ -17,9 +17,24 @@ extensions = [
 # holds internal development notes that are not published.
 include_patterns = [
     "index.md",
+    "overview.md",
+    "quickstart.md",
+    "pipeline.md",
+    "diagnostics.md",
+    "outputs.md",
+    "psf.md",
+    "psf_maps.md",
+    "templates.md",
+    "fitting.md",
+    "catalog.md",
+    "preprocessing.md",
+    "simulation.md",
     "api.rst",
     "api/**",
 ]
+
+myst_heading_anchors = 3
+myst_enable_extensions = ["dollarmath", "amsmath"]
 
 autosummary_generate = True
 autodoc_default_options = {

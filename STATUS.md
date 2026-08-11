@@ -3,6 +3,65 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Full Read the Docs documentation set (2026-08-11). Twelve pages under
+  `docs/`: overview, quickstart, pipeline (full `run()`/`Pipeline`/`RunConfig`/
+  `FitConfig` parameter reference incl. per-frame WCS CSV generation),
+  outputs (complete column glossary), diagnostics (`source_products`,
+  `show_sources`, `diagnose_sources`, `plot_inputs`, `plot_subphot`,
+  `log_run`, PSF diagnostic scans), and component pages for psf, psf_maps,
+  templates, fitting (+shifts), catalog, preprocessing (saturate +
+  astrometry), simulation (MockMosaic + verification). Every page was
+  fact-checked against source by an independent verification pass (~30
+  corrections applied: wrong defaults, wrong column semantics, examples that
+  would not run) and a completeness critique closed 4 major/8 minor gaps
+  (undocumented diagnostics methods, `point_like` vs `flag_star` bridge,
+  WCS-CSV creation path, `astrom_model` "poly" not "polynomial").
+  `conf.py`: `include_patterns` whitelist keeps internal dev notes
+  unpublished; `myst_heading_anchors=3`; `dollarmath`+`amsmath` enabled
+  (unparsed `$$` math previously produced setext-heading artifacts).
+  Local build clean of page-level warnings; built HTML swept for internal
+  names (none). Code-side findings routed to TODO: dead `continue` in
+  `utils.write_wcs_csv`, `minerva_link` column in `write_outputs`, stale
+  docstrings (`matching_kernel.recenter`, `Pipeline.run` return arity,
+  `FitConfig.astrom_model` comment).
+- [x] All scratch/wren reports scanned and verified against the code at
+  `2ba747b` (canfar-toolkit), stale claims fixed, five PDFs rebuilt
+  (2026-08-11). Versioned `_vN` files left untouched as history;
+  `docs/ENCIRCLED_ENERGY.pdf` mirror refreshed.
+  * `encircled_energy.pdf`: kernel-cache sentence was stale (maps ARE stamped
+    with method/reg/psf_size since `bfa76d6`); flow-table `ee_tmpl <= 1` row
+    corrected to `= 1` on the default path (normalise-then-blank is the
+    template-branch scheme, stated); added the open `k>1` defect - projection
+    drops `ee_psf_lo`, so the per-source divisor is inactive on MINERVA-like
+    runs and every source falls back to the filter mean.
+  * `fit.pdf`: documented solver is current except `astrom_damping=0.8`, which
+    exists only on the `template` branch - stated at both mentions; product
+    table corrected `<run>_templates.fits` -> `<run>_stamps.fits` (write_stamps/
+    load_fit landed here in `b1cac9b`); author line rebranded off `flux-bug`.
+  * `noise_background.pdf`: the "calibration factor is now logged" claim is
+    template-branch only - `get_bg_and_ivar` on this line still reports
+    nothing; `_load_detection_ivar` likewise (here `load_data` passes
+    `weights=[None, ivar]`).
+  * `psf.pdf`: practical-notes default list gains `f2100w = 0.30"`
+    (extrapolated along F1280W-F1800W; re-measure on COSMOS/EGS).
+  * `template_comparison.pdf`: status box added - the "ivo" column describes
+    the `template` branch (`template_schemes.composite_psf_wings`,
+    `template_norm`, native-sum kernels); on canfar-toolkit
+    `extend_templates='psf_wings'` is now the RunConfig default but dispatches
+    into the self-convolution `extend_with_psf_wings`, and `build_kernels`
+    uses unit-sum shapes + unit-sum kernels, so the native-sum kernel
+    discussion does not apply on that line.
+  * `flux_estimator_comparison.pdf`: "Status at 2ba747b" paragraph - four
+    audit findings resolved by the parallel commits (`extend_templates` in
+    RunConfig defaulting to psf_wings and threaded with
+    `psfs=[prm_hi, prm_lo]`; `_ensure_maps` reloads `prm_hi`;
+    `generate_scenes` callable with its own defaults, `minimum_bright=10`;
+    `scene_max_size=800`/`scene_max_merge_radius=1000`), the rest confirmed
+    still live (ee_psf_lo projection loss, aperture/total scale split,
+    absolute ridge, two aperture frames, weight-mask precedence bug, dead
+    R_cat resolver, catalogue-column cut).
+  * `verification.pdf`: verified current, no changes needed - its config-path
+    and scene-limit claims match HEAD.
 - [x] Read the Docs scaffold. Sphinx 8 + pydata-sphinx-theme + myst-parser as a
   `docs` extra in `pyproject.toml` (`poetry install --extras docs`). New
   `docs/conf.py` (autodoc/autosummary/napoleon, `include_patterns` limits the
@@ -13,6 +72,19 @@ This file records completed implementations, validation runs, and the current wo
   pre-existing docstring formatting nits. `docs/_build/` and generated
   `docs/api/` stubs are gitignored. Remaining manual step: import the repo at
   readthedocs.org.
+- [x] Verification report written: `scratch/wren/verification.pdf`
+  (`verification.tex`, 7 pages, the four comparison figures included). Records
+  scope, inputs/settings, the four measured comparison conventions, the two
+  fixes (apertures, psf_wings wiring), the two rejected hypotheses (scene
+  limits, magnitude-cut metric), the final r < 3' table, caveats and the
+  reproduction commands.
+- [x] Confirmed at r < 3' (~17.5k matched sources per band, 10x the 1'
+  sample, ~1 h for the four bands): Estimator 1 vs IDL at SNR > 25 is
+  +0.02/+0.01/+0.01/+0.03 mag with sigma 0.05-0.09. F1500W's mag < 24 median
+  fell from +0.06 to +0.03, confirming the residual was small-sample noise;
+  F1800W's magnitude-cut column stays inflated (shallow band, noise-dominated
+  selection) while its SNR-cut number is clean. Generated configs now default
+  to `r_trial` = 3.0.
 - [x] IDL agreement closed in all four UDS MIRI bands. With the `psf_wings`
   extension wired in (below) and the comparison read at the median over
   SNR > 25 sources, Estimator 1 agrees with classic IDL subphot to

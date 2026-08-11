@@ -87,6 +87,12 @@ class RunConfig:
     psf_blur_fwhm: float | str | None = "default"
     # optional [n_frames_hi, n_frames_lo] sanity assert on the WCS csvs
     expect_frames: list[int] | None = None
+    # --- templates --------------------------------------------------------
+    # how to fill the template outside its segment: "psf_wings" (default) adds
+    # the high-resolution PSF beyond the segmentation footprint, "psf_model"
+    # replaces the template by the PSF, None leaves it truncated. Without an
+    # extension the total flux is biased low, badly so for faint sources.
+    extend_templates: str | None = "psf_wings"
     # --- preprocessing ----------------------------------------------------
     bg_filter_sigma: float = 64.0  # get_bg_and_ivar background filter
     footprint_filter: bool = True  # keep only sources with wht_lo > 0
@@ -95,6 +101,8 @@ class RunConfig:
     # --- fitting ----------------------------------------------------------
     fit: dict[str, Any] = field(default_factory=dict)  # FitConfig kwargs
     scene_plots: bool = True  # write per-scene diagnostic PNGs
+    # per-source stamps FITS: tmpl_hi/tmpl_lo at native sizes + PSF cubes
+    save_stamps: bool = True
 
     @classmethod
     def from_json(cls, path: str | Path) -> "RunConfig":
@@ -829,9 +837,15 @@ class Pipeline:
         return self
 
     def _ensure_maps(self) -> None:
-        """Load the cached lo-res PSF map and build the kernel map if missing."""
+        """Load the cached PSF maps and build the kernel map if missing.
+
+        The hi-res map is needed as well as the lo-res one: it is the PSF that
+        :meth:`run` extends the templates with when ``extend_templates`` is set.
+        """
         if self.prm_lo is None and self.f_psf_lo.exists():
             self.prm_lo = PSFRegionMap.from_geojson(str(self.f_psf_lo))
+        if self.prm_hi is None and self.f_psf_hi.exists():
+            self.prm_hi = PSFRegionMap.from_geojson(str(self.f_psf_hi))
         if self.prm_kern is None:
             self.build_kernels()
 
@@ -893,17 +907,21 @@ class Pipeline:
         if kernels:
             self._ensure_maps()
 
-        # finish construction: regular __init__ on the loaded products
+        # finish construction: regular __init__ on the loaded products.
+        # psfs[0] is the hi-res map, which template extension needs; it is None
+        # only when the maps were skipped (``kernels=False``), and `run` builds
+        # them before it reaches the extension.
         Pipeline.__init__(
             self,
             [tmpl_hi, sci_fit],
             segmap,
             weights=[None, ivar],
             catalog=cat,
-            psfs=[None, self.prm_lo],
+            psfs=[self.prm_hi, self.prm_lo],
             kernels=[None, self.prm_kern],
             wcs=[wcs_hi, wcs_lo],
             config=_FitConfig(**cfg.fit),
+            extend_templates=cfg.extend_templates,
         )
         return self
 
@@ -1081,6 +1099,8 @@ class Pipeline:
             overwrite=True,
         )
         self.table.write(f"{stem}_fit_table.fits", overwrite=True)
+        if cfg.save_stamps:
+            self.write_stamps()
 
         rows = []
         for s in self.scenes:
@@ -1104,6 +1124,404 @@ class Pipeline:
             f"{stem}_scene_catalog.csv", format="ascii.csv", overwrite=True
         )
         logger.info("outputs written to %s", self.out_dir)
+        return self
+
+    def _stamps_header(self, ifilt: int, nsrc: int) -> "fits.Header":
+        """Primary header of a stamps file: minimal pointers, no duplication.
+
+        Everything else already has its own save data — the run config in its
+        JSON file, the PSF/kernel maps in ``<name>_*.geojson``, WCS and grids
+        in the input images, fit results in ``<name>_fit_table.fits``.  The
+        header only names the run (to locate those files) and records the grid
+        shapes :meth:`load_fit` uses to reject a stale stamps file.
+        """
+        from astropy.io import fits
+
+        hdr = fits.Header()
+        hdr["NSRC"] = (nsrc, "number of SOURCES rows")
+        hdr["IFILT"] = (ifilt, "fitted image index of the *_lo columns")
+        if getattr(self, "run_config", None) is not None:
+            hdr["RUNNAME"] = (
+                self.run_config.name,
+                "run whose json/geojson save data these stamps use",
+            )
+        ny, nx = self.images[0].shape
+        hdr["NX_HI"] = (nx, "reference-grid width [pix]")
+        hdr["NY_HI"] = (ny, "reference-grid height [pix]")
+        ny, nx = self.images[ifilt].shape
+        hdr["NX_LO"] = (nx, "fitting-grid width [pix]")
+        hdr["NY_LO"] = (ny, "fitting-grid height [pix]")
+        return hdr
+
+    def write_stamps(
+        self,
+        path: str | os.PathLike | None = None,
+        *,
+        ifilt: int = 1,
+    ) -> Path:
+        """Write the per-source template stamps to one FITS file.
+
+        Stamps keep their native, per-source sizes: the ``SOURCES`` binary
+        table stores each template flattened in a variable-length array column
+        (``tmpl_hi``, ``tmpl_lo``) next to its shape, grid origin, and source
+        position, so nothing is padded to a common size.  Data that already
+        have their own save files are not duplicated here: PSFs stay in the
+        cached ``<name>_psf_*.geojson`` region maps and each source only
+        carries its region key (``key_psf_hi``/``key_psf_lo``; 0 for a static
+        PSF, -1 when the band has none), the run/fit configuration stays in
+        the run's JSON, and the primary header holds just the pointers and
+        grid shapes (:meth:`_stamps_header`).  Together with the fit table
+        and residual this file restores the post-run state via
+        :meth:`load_fit`; :meth:`read_stamps` gets the stamps back as 2D
+        arrays.
+
+        ``SOURCES`` columns:
+
+        - ``id, x, y``: source id and reference-grid position
+        - ``flux, err``: fitted amplitude and uncertainty
+        - ``tmpl_hi, ny_hi, nx_hi, x0_hi, y0_hi, xs_hi, ys_hi``: hi-res
+          template pixels (flattened, reshape to ``(ny, nx)``), the
+          original-grid pixel of ``data[0, 0]`` (``x0, y0``), and the source
+          position on that grid (``xs, ys``)
+        - ``tmpl_lo, ny_lo, nx_lo, x0_lo, y0_lo, xs_lo, ys_lo``: same for the
+          convolved template on the fitting grid
+        - ``key_psf_hi, key_psf_lo``: psf_key into the band's PSF region map
+        - ``flag_hi, flag, id_parent, id_scene, ee_psf_lo, ee_tmpl,
+          err_pred, shift_x, shift_y``: per-template fit metadata, restored
+          by :meth:`load_fit`
+
+        Args:
+            path: Output file.  Defaults to ``<out_dir>/<name>_stamps.fits``
+                for config-driven runs.
+            ifilt: Fitted image index (1-based, as elsewhere).
+
+        Returns:
+            Path of the written file.
+        """
+        from astropy.io import fits
+
+        if not getattr(self, "all_templates", None):
+            raise RuntimeError("run() first")
+        if ifilt <= 0 or ifilt >= len(self.images):
+            raise ValueError("ifilt must be between 1 and len(images)-1")
+        if path is None:
+            if getattr(self, "run_config", None) is None:
+                raise ValueError("path is required when not running from a config")
+            path = self.out_dir / f"{self.run_config.name}_stamps.fits"
+        path = Path(path)
+
+        conv = self.all_templates[ifilt - 1]
+        if not conv:
+            raise RuntimeError("no fitted templates to write stamps for")
+        hi_by_id = {int(t.id): t for t in self.tmpls.templates}
+
+        psfs = self.psfs if self.psfs is not None else []
+        psf_hi = psfs[0] if len(psfs) > 0 else None
+        if psf_hi is None:
+            psf_hi = getattr(self, "prm_hi", None)
+        if (
+            psf_hi is None
+            and getattr(self, "run_config", None) is not None
+            and self.f_psf_hi.exists()
+        ):
+            psf_hi = self.prm_hi = PSFRegionMap.from_geojson(str(self.f_psf_hi))
+        psf_lo = psfs[ifilt] if len(psfs) > ifilt else None
+        for band, p in (("hi", psf_hi), ("lo", psf_lo)):
+            if p is None:
+                logger.warning("no %s-res PSF available; its stamp key is -1", band)
+
+        def psf_key(
+            p: np.ndarray | PSFRegionMap | None, ra: float | None, dec: float | None
+        ) -> int:
+            if p is None:
+                return -1
+            if isinstance(p, PSFRegionMap):
+                key = p.lookup_key(ra, dec) if ra is not None and dec is not None else None
+                return int(key) if key is not None else 0
+            return 0
+
+        wcs_hi = self.wcs[0] if self.wcs is not None else None
+        rows: dict[str, list] = defaultdict(list)
+        vla = {"hi": [], "lo": []}
+        for t_lo in conv:
+            t_hi = hi_by_id.get(int(t_lo.id))
+            if t_hi is None:
+                logger.warning(
+                    "no hi-res template for source id %d; tmpl_hi is empty", int(t_lo.id)
+                )
+            src = t_hi if t_hi is not None else t_lo
+            x, y = src.input_position_original
+            ra = dec = None
+            if wcs_hi is not None and t_hi is not None:
+                ra, dec = (float(v) for v in wcs_hi.wcs_pix2world(x, y, 0))
+            for tag, t in (("hi", t_hi), ("lo", t_lo)):
+                if t is None:
+                    data = np.zeros((0, 0), dtype=np.float32)
+                    x0 = y0 = -1
+                    xs = ys = np.nan
+                else:
+                    data = np.asarray(t.data, dtype=np.float32)
+                    # data[0, 0] sits at this original-grid pixel (may be
+                    # negative for cutouts padded past the image edge)
+                    x0, y0 = (int(v) for v in t._origin_original_true)
+                    xs, ys = (float(v) for v in t.input_position_original)
+                vla[tag].append(data.ravel())
+                rows[f"ny_{tag}"].append(data.shape[0])
+                rows[f"nx_{tag}"].append(data.shape[1])
+                rows[f"x0_{tag}"].append(x0)
+                rows[f"y0_{tag}"].append(y0)
+                rows[f"xs_{tag}"].append(xs)
+                rows[f"ys_{tag}"].append(ys)
+            flux = getattr(t_lo, "flux", None)
+            err = getattr(t_lo, "err", None)
+            rows["id"].append(int(t_lo.id))
+            rows["x"].append(float(x))
+            rows["y"].append(float(y))
+            rows["flux"].append(float(flux) if flux is not None else np.nan)
+            rows["err"].append(float(err) if err is not None else np.nan)
+            rows["key_psf_hi"].append(psf_key(psf_hi, ra, dec))
+            rows["key_psf_lo"].append(psf_key(psf_lo, ra, dec))
+            # per-template fit metadata, so load_fit restores the full state
+            rows["flag_hi"].append(int(getattr(t_hi, "flag", 0)) if t_hi is not None else 0)
+            rows["flag"].append(int(getattr(t_lo, "flag", 0)))
+            rows["id_parent"].append(int(getattr(t_lo, "id_parent", None) or t_lo.id))
+            rows["id_scene"].append(int(getattr(t_lo, "id_scene", 1)))
+            rows["ee_psf_lo"].append(float(getattr(t_lo, "ee_psf_lo", np.nan)))
+            rows["ee_tmpl"].append(float(getattr(t_lo, "ee_tmpl", np.nan)))
+            rows["err_pred"].append(float(getattr(t_lo, "err_pred", np.nan)))
+            shift = np.asarray(getattr(t_lo, "shifted", (0.0, 0.0)), dtype=float)
+            rows["shift_x"].append(float(shift[0]))
+            rows["shift_y"].append(float(shift[1]))
+
+        def vla_column(name: str, stamps: list[np.ndarray]) -> fits.Column:
+            arr = np.empty(len(stamps), dtype=object)
+            arr[:] = stamps
+            return fits.Column(name=name, format="PE()", array=arr)
+
+        int_fmt = {"id", "ny", "nx", "x0", "y0", "key", "flag"}
+        columns = [vla_column(f"tmpl_{tag}", vla[tag]) for tag in ("hi", "lo")]
+        columns += [
+            fits.Column(
+                name=name,
+                format="K" if name.split("_")[0] in int_fmt else "D",
+                array=np.asarray(values),
+            )
+            for name, values in rows.items()
+        ]
+        src_hdu = fits.BinTableHDU.from_columns(columns, name="SOURCES")
+
+        hdr = self._stamps_header(ifilt, len(conv))
+        fits.HDUList([fits.PrimaryHDU(header=hdr), src_hdu]).writeto(
+            path, overwrite=True
+        )
+        npix = sum(a.size for a in vla["hi"]) + sum(a.size for a in vla["lo"])
+        logger.info(
+            "wrote %d sources (%.1f MB of template pixels) to %s",
+            len(conv), npix * 4 / 1e6, path,
+        )
+        return path
+
+    @staticmethod
+    def read_stamps(path: str | os.PathLike) -> list[dict]:
+        """Read a :meth:`write_stamps` file back into per-source dicts.
+
+        Each dict holds the scalar ``SOURCES`` columns plus the 2D
+        ``tmpl_hi``/``tmpl_lo`` arrays.  PSF stamps are not stored in the
+        file; ``key_psf_hi``/``key_psf_lo`` index ``psfs`` of the band's
+        cached PSF region map (``<name>_psf_*.geojson``).
+        """
+        from astropy.io import fits
+
+        out: list[dict] = []
+        with fits.open(path) as hdul:
+            data = hdul["SOURCES"].data
+            for row in data:
+                rec = {
+                    name: row[name]
+                    for name in data.names
+                    if not name.startswith("tmpl_")
+                }
+                for tag in ("hi", "lo"):
+                    rec[f"tmpl_{tag}"] = np.array(
+                        row[f"tmpl_{tag}"], dtype=np.float32
+                    ).reshape(int(row[f"ny_{tag}"]), int(row[f"nx_{tag}"]))
+                out.append(rec)
+        return out
+
+    def _templates_from_stamps(self, path: Path, ifilt: int) -> None:
+        """Rebuild ``tmpls`` and ``all_templates`` from a stamps file.
+
+        Applies :meth:`run`'s grid transform (image upsampling) first, then
+        reconstructs every template with :meth:`Template.from_stamp` and
+        restores its fit metadata from the ``SOURCES`` columns.
+        """
+        from astropy.io import fits
+
+        config = self.config
+        # replicate run()'s pre-fit grid transform so shapes and coordinates
+        # match the templates the stamps were written from
+        k = bin_factor_from_wcs(self.wcs[0], self.wcs[ifilt]) if self.wcs is not None else 1
+        self.fit_bin_factors.append(int(k))
+        if k > 1 and config.multi_resolution_method == "upsample":
+            print(f"upsampling image {ifilt} by factor {k}")
+            self.images[ifilt], _ = _upsample_flux_conserving_image_and_ivar(
+                self.images[ifilt], None, k
+            )
+            self.wcs[ifilt] = self.wcs[0]
+
+        shape_hi = self.images[0].shape
+        shape_lo = self.images[ifilt].shape
+        wcs_hi = self.wcs[0] if self.wcs is not None else None
+        wcs_lo = self.wcs[ifilt] if self.wcs is not None else None
+
+        with fits.open(path) as hdul:
+            hdr = hdul[0].header
+            if int(hdr.get("IFILT", ifilt)) != int(ifilt):
+                raise ValueError(
+                    f"stamps file {path.name} was written for ifilt={hdr['IFILT']}"
+                )
+            if (hdr.get("NX_HI"), hdr.get("NY_HI")) != (shape_hi[1], shape_hi[0]) or (
+                hdr.get("NX_LO"), hdr.get("NY_LO")
+            ) != (shape_lo[1], shape_lo[0]):
+                raise ValueError(
+                    f"stamps file {path.name} grids do not match the loaded "
+                    "images; stale file? Delete it to regenerate."
+                )
+            src = hdul["SOURCES"].data
+            buf_hi = np.zeros(shape_hi, dtype=np.float32)
+            buf_lo = np.zeros(shape_lo, dtype=np.float32)
+            hi_templates: list[Template] = []
+            lo_templates: list[Template] = []
+            for row in src:
+                sid = int(row["id"])
+                ny, nx = int(row["ny_hi"]), int(row["nx_hi"])
+                if ny and nx:
+                    t_hi = Template.from_stamp(
+                        np.array(row["tmpl_hi"], dtype=np.float32).reshape(ny, nx),
+                        (int(row["x0_hi"]), int(row["y0_hi"])),
+                        (float(row["xs_hi"]), float(row["ys_hi"])),
+                        shape_hi,
+                        wcs=wcs_hi,
+                        label=sid,
+                        parent_image=buf_hi,
+                    )
+                    t_hi.flag = int(row["flag_hi"])
+                    hi_templates.append(t_hi)
+                ny, nx = int(row["ny_lo"]), int(row["nx_lo"])
+                t_lo = Template.from_stamp(
+                    np.array(row["tmpl_lo"], dtype=np.float32).reshape(ny, nx),
+                    (int(row["x0_lo"]), int(row["y0_lo"])),
+                    (float(row["xs_lo"]), float(row["ys_lo"])),
+                    shape_lo,
+                    wcs=wcs_lo,
+                    label=sid,
+                    parent_image=buf_lo,
+                )
+                t_lo.flux = float(row["flux"])
+                t_lo.err = float(row["err"])
+                t_lo.err_pred = float(row["err_pred"])
+                t_lo.flag = int(row["flag"])
+                t_lo.id_parent = int(row["id_parent"])
+                t_lo.id_scene = int(row["id_scene"])
+                t_lo.ee_psf_lo = float(row["ee_psf_lo"])
+                t_lo.ee_tmpl = float(row["ee_tmpl"])
+                t_lo.shifted = np.array(
+                    [float(row["shift_x"]), float(row["shift_y"])], dtype=float
+                )
+                lo_templates.append(t_lo)
+
+        tmpls = Templates()
+        tmpls.original_shape = shape_hi
+        tmpls.wcs = wcs_hi
+        tmpls._templates = hi_templates
+        self.tmpls = tmpls
+        self.templates_extracted = deepcopy(tmpls)
+        self.templates_extended = deepcopy(tmpls)
+        self.templates = lo_templates
+        self.all_templates = [lo_templates]
+        logger.info(
+            "restored %d hi-res + %d fitted templates from %s",
+            len(hi_templates), len(lo_templates), path.name,
+        )
+
+    def load_fit(self, ifilt: int = 1) -> "Pipeline":
+        """Restore the post-run state from written outputs without refitting.
+
+        Counterpart of :meth:`load_data` (pre-run state): reads
+        ``<name>_fit_table.fits`` and ``<name>_residual.fits`` written by
+        :meth:`write_outputs`, rebuilds the fitted templates from
+        ``<name>_stamps.fits``, and recreates the derived state (grid
+        upsampling, model image) so the instance matches a completed
+        :meth:`run`.  When the stamps file is missing it is regenerated
+        through the same template path :meth:`run` uses — fluxes then come
+        from the fit table — and written back to disk.
+
+        Not restored: ``all_scenes`` (scenes are not persisted), and the
+        pre-extension pixels of ``templates_extracted`` when loading from a
+        stamps file (it then equals ``templates_extended``).  Regenerated
+        stamps reproduce the fitted templates exactly only when the run
+        applied no astrometric shifts.
+
+        Args:
+            ifilt: Fitted image index (1-based, as elsewhere).
+
+        Returns:
+            self, in the post-run state.
+        """
+        from astropy.io import fits
+
+        if getattr(self, "run_config", None) is None:
+            raise RuntimeError("load_fit requires a config-driven pipeline")
+        cfg = self.run_config
+        stem = self.out_dir / cfg.name
+        f_table = Path(f"{stem}_fit_table.fits")
+        f_residual = Path(f"{stem}_residual.fits")
+        if not f_table.exists() or not f_residual.exists():
+            raise FileNotFoundError(
+                f"run outputs not found under {self.out_dir}; expected "
+                f"{f_table.name} and {f_residual.name} — run() and "
+                "write_outputs() first"
+            )
+        if self.images is None:
+            self.load_data()
+        if ifilt <= 0 or ifilt >= len(self.images):
+            raise ValueError("ifilt must be between 1 and len(images)-1")
+        config = self.config
+
+        self.table = Table.read(f_table)
+        residual = np.asarray(fits.getdata(f_residual), dtype=np.float32)
+
+        self.fit_bin_factors = []
+        self.all_scenes = []
+        f_stamps = Path(f"{stem}_stamps.fits")
+        if f_stamps.exists():
+            self._templates_from_stamps(f_stamps, ifilt)
+        else:
+            logger.warning(
+                "stamps file %s not found; regenerating templates through the "
+                "run() template path", f_stamps.name,
+            )
+            cat = self._fit_catalog(config)
+            self._prepare_hi_templates(cat, config)
+            templates, weights_i = self._convolved_templates(ifilt, config)
+            flux_col, err_col = f"flux_{ifilt}", f"err_{ifilt}"
+            by_id = {int(i): j for j, i in enumerate(self.table["id"])}
+            for t in templates:
+                row = by_id.get(int(t.id))
+                if row is None:
+                    continue
+                if flux_col in self.table.colnames:
+                    t.flux = float(self.table[flux_col][row])
+                if err_col in self.table.colnames:
+                    t.err = float(self.table[err_col][row])
+            # populate err_pred the same way run() does
+            Templates.predicted_errors(templates, weights_i)
+            self.all_templates = [templates]
+            self.write_stamps(ifilt=ifilt)
+
+        self.residuals = [residual]
+        self.model_images = [self.images[ifilt] - residual]
+        logger.info("post-run state restored from %s", self.out_dir)
         return self
 
     @contextmanager
@@ -1474,77 +1892,40 @@ class Pipeline:
             cat[f"ap_corr_{idx}"][row] = corr
             cat[f"ap_flux_corr_{idx}"][row] = ap_corr
 
-    def run(self, config: FitConfig | None = None) -> tuple[Table, list[np.ndarray]]:
-        """Run photometry on the configured images.
-
-        Returns
-        -------
-        Table
-            Catalog containing flux measurements for each image.
-        list of ndarray
-            Residual images corresponding to each fitted image.
-        SparseFitter
-            The fitter instance used for the final fit.
-        """
-        from .fit import SparseFitter
-        from .astrometry import AstroCorrect
-        from . import utils
-        import warnings
-
-        # config-driven construction: load data + maps on first run()
-        if getattr(self, "run_config", None) is not None:
-            if self.images is None:
-                self.load_data()
-            elif self.kernels[-1] is None:
-                # data pre-loaded with load_data(kernels=False): finish the maps
-                self._ensure_maps()
-                self.psfs[-1] = self.prm_lo
-                self.kernels[-1] = self.prm_kern
-
-        images = self.images
-        segmap = self.segmap
+    def _fit_catalog(self, config: _FitConfig) -> Table:
+        """Output-catalog skeleton :meth:`run` fits into: id/x/y + provenance."""
         catalog = self.catalog
-        psfs = self.psfs
-        weights = self.weights
-        kernels = self.kernels
-        psf_throughputs = self.psf_throughputs
-        if kernels is None:
-            kernels = [None] * len(images)
-        if psfs is None:
-            psfs = [None] * len(images)
-        wcs = self.wcs
-        if config is None:
-            config = self.config
-        else:
-            self.config = config
-
-        print(f"Pipeline (start) memory: {memory():.1f} GB")
-        print(f"Pipeline config: {config}")
-
-        # test for NaN values in images and weights
-        for i in range(len(images)):
-            if images[i] is None:
-                assert np.all(np.isfinite(images[i])), "Image contains NaN values"
-            if weights[i] is not None:
-                assert np.all(np.isfinite(weights[i])), "Weights contain NaN values"
-
         if catalog is None:
             # use astropy to make catalog from image[0] + segmap
             print("No catalog provided, generating from segmap")
             raise NotImplementedError("Catalog generation not implemented yet")
-        else:
-            cat = catalog.copy()
-            keep_cols = ["id", "x", "y"]
-            keep_cols.extend(
-                col
-                for col in ("is_deblended", "deblend_parent_label", "deblend_nchildren")
-                if col in catalog.colnames
-            )
-            sat_cols = [c for c in catalog.colnames if c.startswith("FLAG_SATURATED_")]
-            keep_cols.extend(sat_cols)
-            cat = cat[keep_cols]
-            if config.aperture_catalog is not None:
-                cat[config.aperture_catalog] = catalog[config.aperture_catalog]
+        cat = catalog.copy()
+        keep_cols = ["id", "x", "y"]
+        keep_cols.extend(
+            col
+            for col in ("is_deblended", "deblend_parent_label", "deblend_nchildren")
+            if col in catalog.colnames
+        )
+        sat_cols = [c for c in catalog.colnames if c.startswith("FLAG_SATURATED_")]
+        keep_cols.extend(sat_cols)
+        cat = cat[keep_cols]
+        if config.aperture_catalog is not None:
+            cat[config.aperture_catalog] = catalog[config.aperture_catalog]
+        return cat
+
+    def _prepare_hi_templates(self, cat: Table, config: _FitConfig) -> list[Template]:
+        """Build the hi-res templates: extract (or adopt prebuilt), flag, extend.
+
+        Factored out of :meth:`run` so :meth:`load_fit` can regenerate stamps
+        through the identical code path.  Sets ``tmpls``,
+        ``templates_extracted`` and ``templates_extended`` on the instance and
+        returns the template list.
+        """
+        images = self.images
+        segmap = self.segmap
+        wcs = self.wcs
+        catalog = self.catalog
+        psfs = self.psfs if self.psfs is not None else [None] * len(images)
 
         if self.input_templates is None:
             self.tmpls = Templates()
@@ -1595,6 +1976,14 @@ class Pipeline:
                 # Template extension is a shape operation. The extension code
                 # normalizes finite PSF stamps to unit-sum shapes and keeps
                 # native finite-support sums only as throughput metadata.
+                logger.info(
+                    "extending %d templates with PSF wings (%s, background_only=%s, "
+                    "skip_deblended=%s)",
+                    len(self.tmpls.templates),
+                    getattr(psf_hi, "name", type(psf_hi).__name__),
+                    bool(config.extend_wings_background_only),
+                    bool(config.skip_template_extension_for_deblended),
+                )
                 self.tmpls.extend_with_psf_wings(
                     psf_hi,
                     skip_deblended=bool(config.skip_template_extension_for_deblended),
@@ -1647,6 +2036,135 @@ class Pipeline:
         source = "prebuilt" if self.input_templates is not None else "extracted"
         print(f"Pipepline: {len(templates)} {source} templates, dropped {ndropped}.")
         print(f"Pipeline (templates) memory: {memory():.1f} GB")
+        return templates
+
+    def _convolved_templates(
+        self, ifilt: int, config: _FitConfig
+    ) -> tuple[list[Template], np.ndarray | None]:
+        """Convolve/project the hi templates onto band ``ifilt``'s fitting grid.
+
+        Factored out of :meth:`run` for reuse by :meth:`load_fit`.  Appends
+        the band's bin factor to ``fit_bin_factors`` and, on the upsample
+        path, replaces ``images[ifilt]``/``wcs[ifilt]`` with their
+        reference-grid versions, exactly as :meth:`run` always did.  Returns
+        the convolved templates and the (possibly upsampled) weight image.
+        """
+        images = self.images
+        weights = self.weights
+        wcs = self.wcs
+        kernels = self.kernels if self.kernels is not None else [None] * len(images)
+
+        weights_i = weights[ifilt] if weights is not None else None
+        kernel = kernels[ifilt]
+        if isinstance(kernel, PSFRegionMap):
+            print(f"Using kernel lookup table {kernel.name}")
+
+        k = bin_factor_from_wcs(wcs[0], wcs[ifilt]) if wcs is not None else 1
+        self.fit_bin_factors.append(int(k))
+
+        if k > 1:
+            if config.multi_resolution_method == "upsample":
+                print(f"upsampling image {ifilt} by factor {k}")
+                images[ifilt], weights_i = _upsample_flux_conserving_image_and_ivar(
+                    images[ifilt],
+                    weights_i,
+                    k,
+                )
+                wcs[ifilt] = wcs[0]
+            else:
+                print(f"Downsampling templates and kernels by factor {k}")
+                tmpls_lo = Templates()
+                tmpls_lo.original_shape = images[ifilt].shape
+                tmpls_lo.wcs = wcs[ifilt]
+                tmpls_lo._templates = [
+                    t.downsample(k, wcs_lo=wcs[ifilt]) for t in self.tmpls._templates
+                ]
+
+                if isinstance(kernel, PSFRegionMap):
+                    kernel.psfs = np.array([downsample_psf(psf, k) for psf in kernel.psfs])
+                else:
+                    kernel = downsample_psf(kernel, k)
+
+        if k == 1 or config.multi_resolution_method == "upsample":
+            tmpls_lo = deepcopy(self.tmpls)
+
+        if weights_i is not None:
+            tmpls_lo.prune_outside_weight(weights_i)
+
+        templates = tmpls_lo.convolve_templates(
+            kernel, inplace=False, psf_lo=getattr(self, "prm_lo", None)
+        )
+        if k > 1 and config.multi_resolution_method == "upsample":
+            dummy_image = np.zeros(images[ifilt].shape, dtype=np.byte)
+            templates = [
+                t.project_to_block_replicated_grid(k, parent_image=dummy_image)
+                for t in templates
+            ]
+        self.templates = templates
+        print(f"Pipeline (convolved) memory: {memory():.1f} GB")
+
+        for t in templates:
+            assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
+        return templates, weights_i
+
+    def run(self, config: FitConfig | None = None) -> tuple[Table, list[np.ndarray]]:
+        """Run photometry on the configured images.
+
+        Returns
+        -------
+        Table
+            Catalog containing flux measurements for each image.
+        list of ndarray
+            Residual images corresponding to each fitted image.
+        SparseFitter
+            The fitter instance used for the final fit.
+        """
+        from .fit import SparseFitter
+        from .astrometry import AstroCorrect
+        from . import utils
+        import warnings
+
+        # config-driven construction: load data + maps on first run()
+        if getattr(self, "run_config", None) is not None:
+            if self.images is None:
+                self.load_data()
+            elif self.kernels[-1] is None:
+                # data pre-loaded with load_data(kernels=False): finish the maps
+                self._ensure_maps()
+                self.psfs[0] = self.prm_hi  # template extension reads psfs[0]
+                self.psfs[-1] = self.prm_lo
+                self.kernels[-1] = self.prm_kern
+
+        images = self.images
+        segmap = self.segmap
+        catalog = self.catalog
+        psfs = self.psfs
+        weights = self.weights
+        kernels = self.kernels
+        psf_throughputs = self.psf_throughputs
+        if kernels is None:
+            kernels = [None] * len(images)
+        if psfs is None:
+            psfs = [None] * len(images)
+        wcs = self.wcs
+        if config is None:
+            config = self.config
+        else:
+            self.config = config
+
+        print(f"Pipeline (start) memory: {memory():.1f} GB")
+        print(f"Pipeline config: {config}")
+
+        # test for NaN values in images and weights
+        for i in range(len(images)):
+            if images[i] is None:
+                assert np.all(np.isfinite(images[i])), "Image contains NaN values"
+            if weights[i] is not None:
+                assert np.all(np.isfinite(weights[i])), "Weights contain NaN values"
+
+        cat = self._fit_catalog(config)
+
+        templates = self._prepare_hi_templates(cat, config)
 
         astro = AstroCorrect(config)
         residuals: list[np.ndarray] = []
@@ -1655,60 +2173,8 @@ class Pipeline:
         self.fit_bin_factors: list[int] = []
         self.model_images = []
         for ifilt in range(1, len(images)):
-            weights_i = weights[ifilt] if weights is not None else None
             scenes = []
-
-            kernel = kernels[ifilt]
-            if isinstance(kernel, PSFRegionMap):
-                print(f"Using kernel lookup table {kernel.name}")
-
-            k = bin_factor_from_wcs(wcs[0], wcs[ifilt]) if wcs is not None else 1
-            self.fit_bin_factors.append(int(k))
-
-            if k > 1:
-                if config.multi_resolution_method == "upsample":
-                    print(f"upsampling image {ifilt} by factor {k}")
-                    images[ifilt], weights_i = _upsample_flux_conserving_image_and_ivar(
-                        images[ifilt],
-                        weights_i,
-                        k,
-                    )
-                    wcs[ifilt] = wcs[0]
-                else:
-                    print(f"Downsampling templates and kernels by factor {k}")
-                    tmpls_lo = Templates()
-                    tmpls_lo.original_shape = images[ifilt].shape
-                    tmpls_lo.wcs = wcs[ifilt]
-                    tmpls_lo._templates = [
-                        t.downsample(k, wcs_lo=wcs[ifilt]) for t in self.tmpls._templates
-                    ]
-
-                    if isinstance(kernel, PSFRegionMap):
-                        kernel.psfs = np.array([downsample_psf(psf, k) for psf in kernel.psfs])
-                    else:
-                        kernel = downsample_psf(kernel, k)
-
-            if k == 1 or config.multi_resolution_method == "upsample":
-                tmpls_lo = deepcopy(self.tmpls)
-
-            if weights_i is not None:
-                tmpls_lo.prune_outside_weight(weights_i)
-
-            templates = tmpls_lo.convolve_templates(
-                kernel, inplace=False, psf_lo=getattr(self, "prm_lo", None)
-            )
-            if k > 1 and config.multi_resolution_method == "upsample":
-                dummy_image = np.zeros(images[ifilt].shape, dtype=np.byte)
-                templates = [
-                    t.project_to_block_replicated_grid(k, parent_image=dummy_image)
-                    for t in templates
-                ]
-            self.templates = templates
-            print(f"Pipeline (convolved) memory: {memory():.1f} GB")
-
-            for t in templates:
-                assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
-
+            templates, weights_i = self._convolved_templates(ifilt, config)
             # @@@ split scenes here
             if not getattr(config, "run_scene_solver", True):
                 raise ValueError(
@@ -2635,6 +3101,7 @@ STEPS = {
     "psfs": "build_psfs",
     "kernels": "build_kernels",
     "load": "load_data",
+    "loadfit": "load_fit",
     "info": "info",
     "fit": "run",
     "outputs": "write_outputs",
@@ -2650,16 +3117,25 @@ def main(argv: list[str] | None = None) -> None:
         description="Config-driven mophongo photometry run (see pipeline.RunConfig)"
     )
     ap.add_argument("config", help="JSON run config (see mophongo.pipeline.RunConfig)")
+    # No `choices=` here: with nargs="*" argparse checks the collected list
+    # against choices as a single value, so a bare invocation dies with
+    # "invalid choice: []". Validate the steps by hand instead.
     ap.add_argument(
         "steps",
         nargs="*",
-        choices=list(STEPS),
-        help="steps to run (default: all)",
+        metavar="step",
+        help=f"steps to run, any of {', '.join(STEPS)} (default: all)",
     )
     args = ap.parse_args(argv)
+    steps = args.steps or ["all"]
+    unknown = [s for s in steps if s not in STEPS]
+    if unknown:
+        ap.error(
+            f"invalid step: {', '.join(unknown)} (choose from {', '.join(STEPS)})"
+        )
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     pipe = Pipeline.from_config(args.config)
-    for step in args.steps or ["all"]:
+    for step in steps:
         getattr(pipe, STEPS[step])()
 
 

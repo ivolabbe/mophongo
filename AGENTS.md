@@ -89,6 +89,8 @@ Key components:
 - `PSFFactory` (`psf_factory.py`): telescope-backend registry and MJD-aware
   PSF generation.
 - `saturate.py`: saturated-pixel repair (see Module Boundaries).
+- `template_schemes.py`: self-contained ports of the alternative template build
+  schemes (wren fork, IDL classic) selected by `FitConfig.extend_mode`.
 - `astrometry.py`, `jwst_psf.py`: astrometric corrections and JWST PSF
   utilities. Deblending uses `photutils.segmentation.deblend_sources`,
   re-exported from `mophongo/__init__.py`.
@@ -116,6 +118,11 @@ Guiding rules:
   utilities.
 - `verification.py` owns reusable validation and diagnostic helpers. Keep
   survey/instrument-specific orchestration in examples or scripts.
+- `template_schemes.py` holds the alternative build schemes and must stay a
+  leaf: pure numpy in, `(composite, info)` dict out, no imports from
+  `templates.py`, `fit.py`, `catalog.py` or `pipeline.py`. Dispatch lives in
+  `Templates.extract_templates` and `Pipeline._extend_scheme_kwargs` so a
+  scheme can be adapted or removed as a unit.
 
 Concrete rule: if module A needs information that module B owns, prefer passing
 the result through a flat structure B already exposes rather than importing A

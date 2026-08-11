@@ -31,7 +31,8 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 
 from .psf_map import PSFRegionMap
 from .utils import as_label_array, bin_factor_from_wcs, downsample_psf, bin_remap
-from .templates import Templates, Template, _slices_from_bbox
+from .templates import EXTEND_MODE_ALIASES, EXTEND_MODES, Templates, Template, _slices_from_bbox
+from . import template_schemes
 from .fit import FitConfig as _FitConfig
 from .scene import generate_scenes
 
@@ -69,9 +70,14 @@ class RunConfig:
     wht_lo: str  # low-resolution weight map
     csv_hi: str  # per-frame WCS csv of the hi-res mosaic
     csv_lo: str  # per-frame WCS csv of the lo-res mosaic
-    # mosaic used for DrizzlePSF footprints/grid of the hi-res side
-    # (defaults to sci_hi; set when sci_hi is a derived template image)
-    driz_hi: str | None = None
+    # High-resolution weight map: the detection-band counterpart of wht_lo, and
+    # what turns the detection image into a calibrated inverse variance. Every
+    # run must have one, so the path is resolved (and its absence raised) on
+    # every run; the pixels are read only when the selected extend_mode uses
+    # them, since a full-field hi-res weight map costs as much memory as the
+    # mosaic itself. None means "derive from sci_hi by the standard
+    # '_sci' -> '_wht' naming" (see :meth:`Pipeline.resolve_wht_hi`).
+    wht_hi: str | None = None
     # --- PSFs -------------------------------------------------------------
     psf_dir: str = "data/PSF"
     pattern_hi: str = ""  # STDPSF filename regex for the hi-res band
@@ -88,11 +94,9 @@ class RunConfig:
     # optional [n_frames_hi, n_frames_lo] sanity assert on the WCS csvs
     expect_frames: list[int] | None = None
     # --- templates --------------------------------------------------------
-    # how to fill the template outside its segment: "psf_wings" (default) adds
-    # the high-resolution PSF beyond the segmentation footprint, "psf_model"
-    # replaces the template by the PSF, None leaves it truncated. Without an
-    # extension the total flux is biased low, badly so for faint sources.
-    extend_templates: str | None = "psf_wings"
+    # The template build scheme is selected by ``fit["extend_mode"]``
+    # (FitConfig.extend_mode): 'default' -> 'psf_wings'. Without an extension
+    # the total flux is biased low, badly so for faint sources.
     # --- preprocessing ----------------------------------------------------
     bg_filter_sigma: float = 64.0  # get_bg_and_ivar background filter
     footprint_filter: bool = True  # keep only sources with wht_lo > 0
@@ -479,9 +483,12 @@ class Pipeline:
         self.psf_throughputs = psf_throughputs
         self.wcs = wcs
         self.window = window
+        # Legacy selector; None -> FitConfig.extend_mode decides (see
+        # _resolve_extend_mode). Resolved once per run() into self.extend_mode.
         self.extend_templates = extend_templates
         self.input_templates = templates
         self.config = config
+        self.extend_mode = self._resolve_extend_mode(config)
 
         if kernels is None:
             kernels = [None] * len(images)
@@ -518,28 +525,39 @@ class Pipeline:
     # region centroids (safe for position lookups), while matching kernels
     # are built from PSF pairs drizzled at the hi/lo overlay centroids.
     # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_config_path(path: str | Path) -> Path:
+        """Resolve a config argument that may be a JSON file or a run directory.
+
+        A directory resolves to ``<dir>/<dirname>.json`` (the snapshot written
+        by :meth:`save_config`), or to the single ``*.json`` file it contains.
+        """
+        p = Path(path)
+        if not p.is_dir():
+            return p
+        named = p / f"{p.name}.json"
+        if named.exists():
+            return named
+        candidates = sorted(p.glob("*.json"))
+        if len(candidates) == 1:
+            return candidates[0]
+        found = [f.name for f in candidates] or "none"
+        raise FileNotFoundError(
+            f"expected one run config JSON in {p}, found {found}"
+        )
+
     @classmethod
     def from_config(cls, path: str | Path | RunConfig) -> "Pipeline":
         """Create a deferred Pipeline from a JSON run config.
 
-        ``path`` may be the config JSON, a directory holding exactly one
-        ``*.json`` (e.g. a finished run's ``out_dir``, which carries a copy
-        of its config), or a :class:`RunConfig`. Data are loaded lazily:
-        :meth:`run` (or :meth:`load_data`) reads the images and finishes
-        construction. Relative paths inside the config still resolve
-        against the process working directory.
+        ``path`` may be the config JSON, a run directory containing one (see
+        :meth:`_resolve_config_path`; e.g. a finished run's ``out_dir``), or
+        a :class:`RunConfig`. Data are loaded lazily: :meth:`run` (or
+        :meth:`load_data`) reads the images and finishes construction;
+        :meth:`load_outputs` resumes a finished run. Relative paths inside
+        the config still resolve against the process working directory.
         """
-        if not isinstance(path, RunConfig):
-            p = Path(path)
-            if p.is_dir():
-                candidates = sorted(p.glob("*.json"))
-                if len(candidates) != 1:
-                    found = [c.name for c in candidates] or "none"
-                    raise FileNotFoundError(
-                        f"expected exactly one run config JSON in {p}, found {found}"
-                    )
-                path = candidates[0]
-        cfg = path if isinstance(path, RunConfig) else RunConfig.from_json(path)
+        cfg = path if isinstance(path, RunConfig) else RunConfig.from_json(cls._resolve_config_path(path))
         obj = cls.__new__(cls)
         obj.run_config = cfg
         obj.out_dir = Path(cfg.out_dir)
@@ -567,6 +585,23 @@ class Pipeline:
     def f_kernel(self) -> Path:
         return self.out_dir / f"{self.run_config.name}_kernel.geojson"
 
+    # -- output paths ------------------------------------------------------
+    @property
+    def f_config(self) -> Path:
+        return self.out_dir / f"{self.run_config.name}.json"
+
+    @property
+    def f_fit_table(self) -> Path:
+        return self.out_dir / f"{self.run_config.name}_fit_table.fits"
+
+    @property
+    def f_residual(self) -> Path:
+        return self.out_dir / f"{self.run_config.name}_residual.fits"
+
+    @property
+    def f_templates(self) -> Path:
+        return self.out_dir / f"{self.run_config.name}_templates.fits"
+
     @property
     def scenes(self):
         """Scenes of the (first) fitted band, once :meth:`run` has completed."""
@@ -593,7 +628,7 @@ class Pipeline:
         cfg = self.run_config
         if self.dpsf_hi is None:
             self.dpsf_hi = DrizzlePSF(
-                driz_image=str(cfg.driz_hi or cfg.sci_hi), csv_file=str(cfg.csv_hi)
+                driz_image=str(cfg.sci_hi), csv_file=str(cfg.csv_hi)
             )
             self.dpsf_lo = DrizzlePSF(
                 driz_image=str(cfg.sci_lo), csv_file=str(cfg.csv_lo)
@@ -864,6 +899,65 @@ class Pipeline:
         if self.prm_kern is None:
             self.build_kernels()
 
+    def resolve_wht_hi(self) -> Path:
+        """Resolve the detection-band weight map, raising if there is none.
+
+        ``RunConfig.wht_hi`` when set, else ``sci_hi`` with the standard
+        ``_sci.fits`` -> ``_wht.fits`` substitution. A run without a detection
+        weight map has no calibrated detection noise, so this raises rather
+        than degrading: the SNR-weighted build schemes would silently fall back
+        to one sky-sigma scalar for the whole mosaic.
+        """
+        cfg = self.run_config
+        if cfg.wht_hi is not None:
+            path = Path(cfg.wht_hi)
+            if not path.exists():
+                raise FileNotFoundError(f"wht_hi does not exist: {path}")
+            return path
+        guess = Path(str(cfg.sci_hi).replace("_sci.fits", "_wht.fits"))
+        if guess == Path(cfg.sci_hi) or not guess.exists():
+            raise FileNotFoundError(
+                "no detection-band weight map: wht_hi is unset and the standard "
+                f"'_sci.fits' -> '_wht.fits' sibling of sci_hi does not exist ({guess}). "
+                "Set wht_hi in the run config -- without it the detection noise is "
+                "uncalibrated and the SNR-weighted build schemes fall back to a "
+                "single sky-sigma scalar for the whole mosaic."
+            )
+        return guess
+
+    def _load_detection_ivar(self, sci_hi: np.ndarray) -> np.ndarray | None:
+        """Detection-band inverse variance, or None when the run does not read it.
+
+        The weight map is always resolved (:meth:`resolve_wht_hi`, which raises
+        if there is none), but its pixels are read only by the build schemes
+        that weight real data against a PSF model by SNR: ``'wren'`` for every
+        weight, ``'classic'`` for its low-SNR point-source branch.
+        ``'default'`` and ``'psf'`` never touch ``weights[0]``, and a
+        full-field hi-res weight map costs as much memory as the mosaic itself.
+        """
+        from astropy.io import fits
+        from .catalog import get_bg_and_ivar
+
+        cfg = self.run_config
+        path = self.resolve_wht_hi()
+        mode = str(cfg.fit.get("extend_mode", _FitConfig.extend_mode) or "none").lower()
+        mode = EXTEND_MODE_ALIASES.get(mode, mode)
+        if mode not in ("psf_wings", "wren", "classic"):
+            logger.info("detection weight map %s (not read: extend_mode=%r)", path.name, mode)
+            return None
+
+        bg_hi, ivar_hi = get_bg_and_ivar(
+            sci_hi, fits.getdata(path), bg_filter_sigma=cfg.bg_filter_sigma
+        )
+        # The detection background is measured but NOT subtracted: that would
+        # change 'default' templates too. It matters for the extended schemes,
+        # which blend raw data over a large halo, so report it (see TODO.md).
+        logger.info(
+            "detection ivar from %s (median background %.4g; not subtracted)",
+            path.name, float(np.median(bg_hi)),
+        )
+        return ivar_hi
+
     # -- step 3: data ------------------------------------------------------
     def load_data(self, kernels: bool = True) -> "Pipeline":
         """Load images/segmap/catalog, preprocess, and finish construction.
@@ -920,7 +1014,13 @@ class Pipeline:
         sci_fit[bad] = 0.0
         ivar[bad] = 0.0
         ivar[~np.isfinite(ivar)] = 0.0
+
+        ivar_hi = self._load_detection_ivar(tmpl_hi)
+        bad_hi = ~np.isfinite(tmpl_hi)
         np.nan_to_num(tmpl_hi, copy=False)
+        if ivar_hi is not None:
+            ivar_hi[bad_hi] = 0.0
+            ivar_hi[~np.isfinite(ivar_hi)] = 0.0
 
         if kernels:
             self._ensure_maps()
@@ -933,24 +1033,115 @@ class Pipeline:
             self,
             [tmpl_hi, sci_fit],
             segmap,
-            weights=[None, ivar],
+            weights=[ivar_hi, ivar],
             catalog=cat,
+            # psfs[0] is the detection-band map: template extension / the
+            # 'wren' and 'classic' build schemes look up their detection PSF
+            # there. Only fitted bands (ifilt >= 1) feed the throughput and
+            # PSF-EE bookkeeping, so index 0 is inert for those.
             psfs=[self.prm_hi, self.prm_lo],
             kernels=[None, self.prm_kern],
             wcs=[wcs_hi, wcs_lo],
             config=_FitConfig(**cfg.fit),
-            extend_templates=cfg.extend_templates,
         )
         return self
+
+    # -- config snapshot + resume ------------------------------------------
+    def save_config(self, path: str | Path | None = None) -> Path:
+        """Write the fully-explicit run config to ``out_dir/<name>.json``.
+
+        Every :class:`RunConfig` field and every *used* :class:`FitConfig`
+        setting is written with its resolved value, so the run stays
+        repeatable even if code defaults change later. Settings of template
+        build schemes the run did not select (``wren_*``/``classic_*`` for
+        other ``extend_mode`` values) are omitted. :meth:`run` calls this
+        automatically; :meth:`from_config` accepts the snapshot (or its
+        directory) back.
+        """
+        from dataclasses import asdict, replace
+        from datetime import date
+
+        if getattr(self, "config", None) is not None:
+            fit = asdict(self.config)
+        else:
+            fit = asdict(_FitConfig(**self.run_config.fit))
+        # drop settings of template build schemes this run did not use
+        mode = fit.get("extend_mode", "default")
+        for prefix in {"wren": "classic_", "classic": "wren_"}.get(
+            mode, ("wren_", "classic_")
+        ):
+            fit = {k: v for k, v in fit.items() if not k.startswith(prefix)}
+        cfg = replace(self.run_config, fit=fit)
+        out = Path(path) if path is not None else self.f_config
+        header = (
+            f"# full '{cfg.name}' run config snapshot, {date.today()}: all\n"
+            "# RunConfig and FitConfig settings explicit (Pipeline.save_config)\n"
+        )
+        out.write_text(header + json.dumps(asdict(cfg), indent=2) + "\n")
+        logger.info("wrote full run config to %s", out)
+        return out
+
+    def load_outputs(self) -> "Pipeline":
+        """Load a previous run's products from ``out_dir`` (fresh-session resume).
+
+        Reads the fit table and residual image written by :meth:`write_outputs`.
+        Catalog-level diagnostics work directly on ``self.table``; image-based
+        diagnostics additionally need :meth:`load_data`.
+        """
+        from astropy.io import fits
+
+        if getattr(self, "run_config", None) is None:
+            raise RuntimeError("load_outputs requires a config-driven Pipeline")
+        if self.f_fit_table.exists():
+            self.table = Table.read(self.f_fit_table)
+            logger.info("loaded %s (%d rows)", self.f_fit_table.name, len(self.table))
+        else:
+            logger.warning("no fit table %s", self.f_fit_table)
+        if self.f_residual.exists():
+            self.residuals = [fits.getdata(self.f_residual)]
+            logger.info("loaded %s", self.f_residual.name)
+        else:
+            logger.warning("no residual image %s", self.f_residual)
+        if self.f_templates.exists():
+            self.template_table = Table.read(self.f_templates)
+            logger.info(
+                "loaded %s (%d templates)", self.f_templates.name, len(self.template_table)
+            )
+        else:
+            self.template_table = None
+            logger.warning("no template table %s (older run?)", self.f_templates)
+        return self
+
+    def _template_fit_table(self) -> Table:
+        """Per-template fit state of the first fitted band as a flat table.
+
+        Records what a deterministic template rebuild cannot re-derive:
+        per-component fitted amplitudes/errors, the applied astrometric
+        shifts, and scene membership.
+        """
+        scene_of = {id(t): s.id for s in (self.scenes or []) for t in s.templates}
+        rows = []
+        for t in self.all_templates[0]:
+            pid = t.id_parent if getattr(t, "parent_id", None) is not None else t.id
+            x, y = t.position_original
+            dx, dy = (float(v) for v in t.shifted[:2])
+            rows.append(
+                (int(t.id), int(pid), float(x), float(y), dx, dy,
+                 float(t.flux), float(t.err), int(scene_of.get(id(t), 0)))
+            )
+        return Table(
+            rows=rows,
+            names=["id", "id_parent", "x", "y", "dx", "dy", "flux", "err", "id_scene"],
+        )
 
     # -- inspection --------------------------------------------------------
     def __repr__(self) -> str:
         cfg = getattr(self, "run_config", None)
         name = f" {cfg.name!r}" if cfg is not None else ""
-        if getattr(self, "images", None) is None:
-            stage = "configured"
-        elif getattr(self, "table", None) is not None:
+        if getattr(self, "table", None) is not None:
             stage = "fitted"
+        elif getattr(self, "images", None) is None:
+            stage = "configured"
         else:
             stage = "loaded"
         nimg = len(self.images) if getattr(self, "images", None) is not None else 0
@@ -972,8 +1163,17 @@ class Pipeline:
         cfg = getattr(self, "run_config", None)
         if cfg is not None:
             lines.append(f"config: out_dir={self.out_dir}")
-            for key in ("sci_hi", "segmap", "catalog", "sci_lo", "wht_lo", "csv_hi", "csv_lo"):
-                path = Path(getattr(cfg, key))
+            keys = ["sci_hi", "wht_hi", "segmap", "catalog", "sci_lo", "wht_lo",
+                    "csv_hi", "csv_lo"]
+            for key in keys:
+                if key == "wht_hi":
+                    try:  # unset -> derived from sci_hi; report what will be used
+                        path = self.resolve_wht_hi()
+                    except FileNotFoundError:
+                        lines.append(f"  {key:8s} MISSING  (unset, no '_wht' sibling of sci_hi)")
+                        continue
+                else:
+                    path = Path(getattr(cfg, key))
                 if not path.exists():
                     lines.append(f"  {key:8s} MISSING  {path}")
                     continue
@@ -996,9 +1196,16 @@ class Pipeline:
             ):
                 state = "cached" if f.exists() else "not built"
                 lines.append(f"  map {label:6s} {state}  {f.name}")
+            for label, f in (
+                ("config", self.f_config),
+                ("table", self.f_fit_table),
+                ("residual", self.f_residual),
+            ):
+                state = "present" if f.exists() else "absent"
+                lines.append(f"  out {label:8s} {state}  {f.name}")
 
         if getattr(self, "images", None) is None:
-            lines.append("data: not loaded — load_data() reads images and catalog")
+            lines.append("data: not loaded (load_data() reads images and catalog)")
         else:
             lines.append("data:")
             for i, img in enumerate(self.images):
@@ -1033,7 +1240,7 @@ class Pipeline:
             fluxcols = [c for c in table.colnames if c.startswith("flux_")]
             lines.append(
                 f"results: table {len(table)} rows ({', '.join(fluxcols)}); "
-                f"{len(self.residuals)} residual image(s)"
+                f"{len(getattr(self, 'residuals', []))} residual image(s)"
             )
             if getattr(self, "all_scenes", None):
                 lines.append(f"  scenes per band: {[len(s) for s in self.all_scenes]}")
@@ -1061,7 +1268,7 @@ class Pipeline:
         from photutils.segmentation import SegmentationImage
 
         if getattr(self, "images", None) is None:
-            raise RuntimeError("no data loaded — call load_data() first")
+            raise RuntimeError("no data loaded; call load_data() first")
 
         img_hi = self.images[0]
         img_lo = self.images[-1]
@@ -1111,12 +1318,17 @@ class Pipeline:
         stem = self.out_dir / cfg.name
         # residual is on the hi-res reference grid (upsample path)
         fits.writeto(
-            f"{stem}_residual.fits",
+            self.f_residual,
             self.residuals[0],
             fits.getheader(cfg.sci_hi),
             overwrite=True,
         )
-        self.table.write(f"{stem}_fit_table.fits", overwrite=True)
+        self.table.write(self.f_fit_table, overwrite=True)
+
+        # per-template fit state: everything the solve produced that a rebuild
+        # cannot re-derive (component amplitudes, astrometric shifts, scenes)
+        if getattr(self, "all_templates", None):
+            self._template_fit_table().write(self.f_templates, overwrite=True)
         if cfg.save_stamps:
             self.write_stamps()
 
@@ -1485,11 +1697,14 @@ class Pipeline:
         through the same template path :meth:`run` uses — fluxes then come
         from the fit table — and written back to disk.
 
-        Not restored: ``all_scenes`` (scenes are not persisted), and the
-        pre-extension pixels of ``templates_extracted`` when loading from a
-        stamps file (it then equals ``templates_extended``).  Regenerated
-        stamps reproduce the fitted templates exactly only when the run
-        applied no astrometric shifts.
+        Not restored: ``all_scenes`` (scene objects are not persisted; scene
+        membership survives as ``id_scene``), and the pre-extension pixels of
+        ``templates_extracted`` when loading from a stamps file (it then
+        equals ``templates_extended``).  Regeneration reapplies the fitted
+        per-template amplitudes and astrometric shifts from
+        ``<name>_templates.fits`` when present; without it, fluxes come from
+        the fit table and the rebuild is exact only for runs that applied no
+        shifts.
 
         Args:
             ifilt: Fitted image index (1-based, as elsewhere).
@@ -1497,32 +1712,27 @@ class Pipeline:
         Returns:
             self, in the post-run state.
         """
-        from astropy.io import fits
-
         if getattr(self, "run_config", None) is None:
             raise RuntimeError("load_fit requires a config-driven pipeline")
-        cfg = self.run_config
-        stem = self.out_dir / cfg.name
-        f_table = Path(f"{stem}_fit_table.fits")
-        f_residual = Path(f"{stem}_residual.fits")
-        if not f_table.exists() or not f_residual.exists():
+        if not self.f_fit_table.exists() or not self.f_residual.exists():
             raise FileNotFoundError(
                 f"run outputs not found under {self.out_dir}; expected "
-                f"{f_table.name} and {f_residual.name} — run() and "
-                "write_outputs() first"
+                f"{self.f_fit_table.name} and {self.f_residual.name} — run() "
+                "and write_outputs() first"
             )
+        # data first: load_data() finishes construction via __init__, which
+        # resets the product lists that load_outputs() fills
         if self.images is None:
             self.load_data()
         if ifilt <= 0 or ifilt >= len(self.images):
             raise ValueError("ifilt must be between 1 and len(images)-1")
         config = self.config
-
-        self.table = Table.read(f_table)
-        residual = np.asarray(fits.getdata(f_residual), dtype=np.float32)
+        self.load_outputs()
+        residual = np.asarray(self.residuals[0], dtype=np.float32)
 
         self.fit_bin_factors = []
         self.all_scenes = []
-        f_stamps = Path(f"{stem}_stamps.fits")
+        f_stamps = self.out_dir / f"{self.run_config.name}_stamps.fits"
         if f_stamps.exists():
             self._templates_from_stamps(f_stamps, ifilt)
         else:
@@ -1533,21 +1743,44 @@ class Pipeline:
             cat = self._fit_catalog(config)
             self._prepare_hi_templates(cat, config)
             templates, weights_i = self._convolved_templates(ifilt, config)
-            flux_col, err_col = f"flux_{ifilt}", f"err_{ifilt}"
-            by_id = {int(i): j for j, i in enumerate(self.table["id"])}
-            for t in templates:
-                row = by_id.get(int(t.id))
-                if row is None:
-                    continue
-                if flux_col in self.table.colnames:
-                    t.flux = float(self.table[flux_col][row])
-                if err_col in self.table.colnames:
-                    t.err = float(self.table[err_col][row])
+            # fitted amplitudes/errors/shifts: the saved per-template table is
+            # exact (per component, pre-aggregation); the fit table is the
+            # fallback for runs that predate it
+            ttab = getattr(self, "template_table", None)
+            if ttab is not None:
+                by_id = {int(i): j for j, i in enumerate(ttab["id"])}
+                for t in templates:
+                    row = by_id.get(int(t.id))
+                    if row is None:
+                        continue
+                    t.flux = float(ttab["flux"][row])
+                    t.err = float(ttab["err"][row])
+                    t.id_scene = int(ttab["id_scene"][row])
+                    t.to_shift = np.array(
+                        [float(ttab["dx"][row]), float(ttab["dy"][row])], dtype=float
+                    )
+                Templates.apply_template_shifts(templates)
+            else:
+                flux_col, err_col = f"flux_{ifilt}", f"err_{ifilt}"
+                by_id = {int(i): j for j, i in enumerate(self.table["id"])}
+                for t in templates:
+                    row = by_id.get(int(t.id))
+                    if row is None:
+                        continue
+                    if flux_col in self.table.colnames:
+                        t.flux = float(self.table[flux_col][row])
+                    if err_col in self.table.colnames:
+                        t.err = float(self.table[err_col][row])
             # populate err_pred the same way run() does
             Templates.predicted_errors(templates, weights_i)
             self.all_templates = [templates]
             self.write_stamps(ifilt=ifilt)
 
+        if self.images[ifilt].shape != residual.shape:
+            raise ValueError(
+                f"residual shape {residual.shape} does not match "
+                f"image shape {self.images[ifilt].shape}"
+            )
         self.residuals = [residual]
         self.model_images = [self.images[ifilt] - residual]
         logger.info("post-run state restored from %s", self.out_dir)
@@ -1762,6 +1995,143 @@ class Pipeline:
             cat[f"err_pred_{idx}_total"][ci] = err_pred_total_sum[pid]
             cat[f"throughput_{idx}"][ci] = throughput
             cat[f"scene_{idx}"][ci] = scene_of_parent.get(pid, -1)
+
+    # ------------------------------------------------------------------
+    # template build scheme (extend_mode) resolution
+    # ------------------------------------------------------------------
+    #: Legacy ``Pipeline(extend_templates=...)`` values -> ``extend_mode``.
+    _LEGACY_EXTEND_MODES = {
+        None: "none",
+        "none": "none",
+        "default": "psf_wings",
+        "psf_wings": "psf_wings",
+        "psf": "psf",
+        "psf_model": "psf_model",
+        "wren": "wren",
+        "classic": "classic",
+    }
+
+    def _resolve_extend_mode(self, config: FitConfig) -> str:
+        """Return the active build scheme.
+
+        ``Pipeline(extend_templates=...)`` still selects it when given (it
+        predates the config field and is used by tests and verification runs);
+        otherwise ``FitConfig.extend_mode`` decides.
+        """
+        if self.extend_templates is not None:
+            key = str(self.extend_templates).lower()
+            if key not in self._LEGACY_EXTEND_MODES:
+                raise ValueError(f"Unknown template extension mode {self.extend_templates!r}")
+            return self._LEGACY_EXTEND_MODES[key]
+        mode = str(getattr(config, "extend_mode", "default") or "default").lower()
+        if mode not in EXTEND_MODES:
+            raise ValueError(f"Unknown extend_mode {mode!r}; expected one of {EXTEND_MODES}")
+        return mode
+
+    def _extend_scheme_kwargs(self, mode: str, config: FitConfig) -> dict:
+        """``extract_templates`` kwargs for the ``'wren'``/``'classic'`` schemes.
+
+        The two reference codes size their stamps globally before extraction.
+        ``classic`` needs only the detection PSF; ``wren`` also needs the fill
+        radius ``r_fill = max(R_ee, r_aper + kernel_half_width)`` so the
+        template covers the measurement aperture plus a convolution margin.
+        """
+        if mode not in ("psf_wings", "wren", "classic"):
+            return {}
+
+        weights = self.weights if self.weights is not None else []
+        det_weight = weights[0] if len(weights) > 0 else None
+        kwargs: dict = {
+            "extend_mode": mode,
+            "detection_psf": self._psf_for_template_extension(),
+            "detection_weight": det_weight,
+        }
+        if mode == "psf_wings":
+            kwargs["psf_wings"] = template_schemes.PsfWingsParams(
+                snrlo_psf=float(config.psf_wings_snrlo),
+                blend_p=float(config.psf_wings_blend_p),
+                background_only=bool(config.extend_wings_background_only),
+                rms=None if config.psf_wings_rms is None else float(config.psf_wings_rms),
+            )
+            return kwargs
+        if mode == "classic":
+            kwargs["classic"] = template_schemes.ClassicParams(
+                tmpl_snrlo=float(config.classic_tmpl_snrlo),
+                rms=None if config.classic_rms is None else float(config.classic_rms),
+            )
+            return kwargs
+
+        # Detection-grid aperture radius (scalar apertures only; a per-band
+        # array leaves it None, which only disables the flux_beyond_aper
+        # crowding bookkeeping).
+        r_ap = None
+        scalar_ap = np.isscalar(config.aperture_diam) and not isinstance(config.aperture_diam, str)
+        if scalar_ap:
+            if config.aperture_units == "arcsec":
+                pscale = self._pixel_scale_arcsec(self.wcs[0] if self.wcs is not None else None)
+                if pscale:
+                    r_ap = 0.5 * float(config.aperture_diam) / pscale
+            else:
+                r_ap = 0.5 * float(config.aperture_diam)
+
+        # Largest matching-kernel effective half-width over the fitted bands
+        # (95% encircled radius of |K|, not the zero-padded array size).
+        kernel_hw = 0.0
+        for kern in (self.kernels or []):
+            arr = None
+            if isinstance(kern, PSFRegionMap):
+                arr = np.asarray(kern.psfs[0], dtype=float) if len(kern.psfs) else None
+            elif kern is not None:
+                arr = np.asarray(kern, dtype=float)
+            if arr is not None and arr.ndim == 2 and np.abs(arr).sum() > 0:
+                try:
+                    kernel_hw = max(kernel_hw, template_schemes.psf_ee_radius_pix(np.abs(arr), 0.95))
+                except ValueError:  # pragma: no cover - degenerate kernel
+                    pass
+
+        psf_rep = template_schemes.representative_psf(
+            kwargs["detection_psf"], float(config.wren_ee_fraction)
+        )
+        ee_reach = template_schemes.psf_ee_radius_pix(psf_rep, float(config.wren_ee_fraction))
+        r_fill = template_schemes.wren_fill_radius(
+            psf_rep,
+            ee_fraction=float(config.wren_ee_fraction),
+            aperture_radius_pix=r_ap,
+            kernel_half_width=kernel_hw,
+        )
+        logger.info(
+            "Template build scheme 'wren': fill radius %.1f pix, PSF-wing reach "
+            "%.1f pix @ %.0f%% EE", r_fill, ee_reach, 100.0 * float(config.wren_ee_fraction)
+        )
+        kwargs["wren"] = template_schemes.WrenParams(
+            max_radius_pix=float(r_fill),
+            psf_ee_radius_pix=float(ee_reach),
+            aperture_radius_pix=None if r_ap is None else float(r_ap),
+            ee_fraction=float(config.wren_ee_fraction),
+            fit_snrlo_psf=float(config.wren_fit_snrlo_psf),
+            wings_snr_psf=float(config.wren_wings_snr_psf),
+            blend_p=float(config.wren_blend_p),
+            blend_annulus=float(config.wren_blend_annulus),
+            bg_rms=None if config.wren_bg_rms is None else float(config.wren_bg_rms),
+        )
+        return kwargs
+
+    def _apply_extension_pass(self, tmpls: Templates, mode: str, config: FitConfig) -> None:
+        """Run the post-extraction extension for ``'psf'``/``'psf_model'``."""
+        if mode == "psf":
+            tmpls.extend_with_psf(
+                self._psf_for_template_extension(),
+                skip_deblended=bool(config.skip_template_extension_for_deblended),
+                background_only=bool(config.extend_wings_background_only),
+                inplace=True,
+            )
+        elif mode == "psf_model":
+            tmpls.extend_with_psf_model(
+                self._psf_for_template_extension(),
+                mode="model",
+                skip_deblended=bool(config.skip_template_extension_for_deblended),
+                inplace=True,
+            )
 
     def _pixel_scale_arcsec(self, w: WCS | None) -> float | None:
         try:
@@ -2005,6 +2375,11 @@ class Pipeline:
         psfs = self.psfs if self.psfs is not None else [None] * len(images)
 
         if self.input_templates is None:
+            # One selector over the four build schemes (see EXTEND_MODES):
+            # 'wren'/'classic' build their composite inside extract_templates,
+            # 'psf'/'psf_model' run as a post-pass below.
+            extend_mode = self._resolve_extend_mode(config)
+            self.extend_mode = extend_mode
             self.tmpls = Templates()
             self.tmpls.extract_templates(
                 images[0],
@@ -2012,6 +2387,7 @@ class Pipeline:
                 list(zip(cat["x"], cat["y"])),
                 wcs=wcs[0] if wcs is not None else None,
                 dilate_segmap=config.template_dilate_segmap,
+                **self._extend_scheme_kwargs(extend_mode, config),
             )
             if "is_deblended" in cat.colnames:
                 is_deblended_by_id = {
@@ -2042,48 +2418,10 @@ class Pipeline:
                 for tmpl in self.tmpls.templates:
                     tmpl.is_saturated = sat_by_id.get(int(tmpl.id), False)
             self.templates_extracted = deepcopy(self.tmpls)
-            if self.extend_templates in {"psf", "psf_wings"}:
-                psf_hi = psfs[0] if psfs is not None and psfs[0] is not None else None
-                if psf_hi is None and psfs is not None and len(psfs) > 1:
-                    psf_hi = psfs[1]
-                if psf_hi is None:
-                    raise ValueError(
-                        f"extend_templates={self.extend_templates!r} requires a high-resolution PSF in psfs[0]"
-                    )
-                # Template extension is a shape operation. The extension code
-                # normalizes finite PSF stamps to unit-sum shapes and keeps
-                # native finite-support sums only as throughput metadata.
-                logger.info(
-                    "extending %d templates with PSF wings (%s, background_only=%s, "
-                    "skip_deblended=%s)",
-                    len(self.tmpls.templates),
-                    getattr(psf_hi, "name", type(psf_hi).__name__),
-                    bool(config.extend_wings_background_only),
-                    bool(config.skip_template_extension_for_deblended),
-                )
-                self.tmpls.extend_with_psf_wings(
-                    psf_hi,
-                    skip_deblended=bool(config.skip_template_extension_for_deblended),
-                    background_only=bool(config.extend_wings_background_only),
-                    inplace=True,
-                )
-            elif self.extend_templates == "psf_model":
-                psf_hi = psfs[0] if psfs is not None and psfs[0] is not None else None
-                if psf_hi is None and psfs is not None and len(psfs) > 1:
-                    psf_hi = psfs[1]
-                if psf_hi is None:
-                    raise ValueError(
-                        "extend_templates='psf_model' requires a high-resolution PSF in psfs[0]"
-                    )
-                # Keep the same shape-vs-throughput convention as psf_wings.
-                self.tmpls.extend_with_psf_model(
-                    psf_hi,
-                    mode="model",
-                    skip_deblended=bool(config.skip_template_extension_for_deblended),
-                    inplace=True,
-                )
-            elif self.extend_templates not in {None, "none"}:
-                raise ValueError(f"Unknown template extension mode {self.extend_templates!r}")
+            # Template extension is a shape operation. The extension code
+            # normalizes finite PSF stamps to unit-sum shapes and keeps
+            # native finite-support sums only as throughput metadata.
+            self._apply_extension_pass(self.tmpls, extend_mode, config)
             self.templates_extended = deepcopy(self.tmpls)
         else:
             if isinstance(self.input_templates, Templates):
@@ -2209,9 +2547,6 @@ class Pipeline:
 
         # config-driven construction: load data + maps on first run()
         if getattr(self, "run_config", None) is not None:
-            # record the executed config in out_dir so a finished run can be
-            # reopened later with from_config(out_dir)
-            self.run_config.to_json(self.out_dir / f"{self.run_config.name}.json")
             if self.images is None:
                 self.load_data()
             elif self.kernels[-1] is None:
@@ -2237,6 +2572,11 @@ class Pipeline:
             config = self.config
         else:
             self.config = config
+
+        # snapshot the fully-explicit config next to the outputs, so a
+        # finished run reopens later with from_config(out_dir)
+        if getattr(self, "run_config", None) is not None:
+            self.save_config()
 
         print(f"Pipeline (start) memory: {memory():.1f} GB")
         print(f"Pipeline config: {config}")
@@ -2527,14 +2867,31 @@ class Pipeline:
         return float(self.table["x"][row]), float(self.table["y"][row])
 
     def _psf_for_template_extension(self):
-        """Return the high-resolution PSF object used by template extension."""
-        psfs = self.psfs if self.psfs is not None else []
-        psf_hi = psfs[0] if len(psfs) > 0 and psfs[0] is not None else None
-        if psf_hi is None and len(psfs) > 1:
-            psf_hi = psfs[1]
+        """Return the detection-band PSF used to build/extend templates.
+
+        Strictly ``psfs[0]``: templates live on the ``images[0]`` grid, so
+        anything else is the wrong band on the wrong pixel scale. There is
+        deliberately no fallback to another index -- substituting the low-res
+        PSF produces plausible-looking templates with silently wrong wings and
+        radii (reaches derived in lo-res pixels applied as hi-res ones).
+        """
+        if getattr(self, "run_config", None) is not None and (
+            self.psfs is None or len(self.psfs) == 0 or self.psfs[0] is None
+        ):
+            # config-driven run: the detection map is cached, but only
+            # build_psfs() loads it.
+            if self.prm_hi is None:
+                self.build_psfs()
+            if self.psfs is not None and len(self.psfs) > 0:
+                self.psfs[0] = self.prm_hi
+
+        psf_hi = self.psfs[0] if self.psfs is not None and len(self.psfs) > 0 else None
         if psf_hi is None:
             raise ValueError(
-                f"extend_templates={self.extend_templates!r} requires a high-resolution PSF"
+                f"extend_mode={getattr(self, 'extend_mode', self.extend_templates)!r} "
+                "requires the detection-band PSF in psfs[0] (the images[0] grid). "
+                "No other index is substituted: a lower-resolution PSF would "
+                "silently produce wrong template wings and wrong extension radii."
             )
         return psf_hi
 
@@ -2551,6 +2908,7 @@ class Pipeline:
         later in-place mutations cannot change the diagnostic panels.
         """
         pos = self._source_position(source_id)
+        extend_mode = self._resolve_extend_mode(self.config)
         rebuilt = Templates()
         rebuilt.extract_templates(
             self.images[0],
@@ -2558,6 +2916,7 @@ class Pipeline:
             [pos],
             wcs=self.wcs[0] if self.wcs is not None else None,
             dilate_segmap=int(self.config.template_dilate_segmap),
+            **self._extend_scheme_kwargs(extend_mode, self.config),
         )
         if not rebuilt.templates:
             raise KeyError(f"could not re-extract source id {source_id} for diagnostics")
@@ -2583,26 +2942,10 @@ class Pipeline:
         work.wcs = getattr(rebuilt, "wcs", self.wcs[0] if self.wcs is not None else None)
         work.segmap = rebuilt.segmap
         work._templates = [tmpl]
-        if self.extend_templates in {"psf", "psf_wings"}:
-            work.extend_with_psf_wings(
-                self._psf_for_template_extension(),
-                skip_deblended=bool(self.config.skip_template_extension_for_deblended),
-                background_only=bool(self.config.extend_wings_background_only),
-                inplace=True,
-            )
-            tmpl_ext = work.templates[0]
-        elif self.extend_templates == "psf_model":
-            work.extend_with_psf_model(
-                self._psf_for_template_extension(),
-                mode="model",
-                skip_deblended=bool(self.config.skip_template_extension_for_deblended),
-                inplace=True,
-            )
-            tmpl_ext = work.templates[0]
-        elif self.extend_templates in {None, "none"}:
-            tmpl_ext = tmpl
-        else:
-            raise ValueError(f"Unknown template extension mode {self.extend_templates!r}")
+        # 'wren'/'classic' already built their composite in extract_templates
+        # above, so only the post-pass modes do anything here.
+        self._apply_extension_pass(work, extend_mode, self.config)
+        tmpl_ext = work.templates[0]
         after = self._snapshot_template(tmpl_ext)
 
         kernels = self.kernels if self.kernels is not None else [None] * len(self.images)
@@ -2647,12 +2990,13 @@ class Pipeline:
 
         if ifilt <= 0 or ifilt >= len(self.images):
             raise ValueError("ifilt must be between 1 and len(images)-1")
-        if self.templates_extracted is None or self.templates_extended is None:
-            raise RuntimeError("run the pipeline before calling diagnose_sources")
-        if len(self.all_templates) < ifilt:
-            raise RuntimeError("run the pipeline before calling diagnose_sources")
+        if len(getattr(self, "residuals", [])) < ifilt:
+            raise RuntimeError("run() or load_fit() before calling diagnose_sources")
 
-        final_templates = self.all_templates[ifilt - 1]
+        # in a resumed session (load_fit) there are no in-memory fit templates;
+        # every source is rebuilt through the primary per-source path instead
+        all_templates = getattr(self, "all_templates", None) or []
+        final_templates = all_templates[ifilt - 1] if len(all_templates) >= ifilt else []
         residual = self.residuals[ifilt - 1]
         model = (
             self.model_images[ifilt - 1]
@@ -2977,7 +3321,7 @@ class Pipeline:
             fig.savefig(save, dpi=150, bbox_inches="tight")
         return fig, axes
 
-    def plot_subphot(
+    def diagnose_subphot(
         self,
         source_id: int,
         *,
@@ -2997,7 +3341,10 @@ class Pipeline:
         same panel layout (2x3 at 2x nearest-neighbour zoom), byte scalings,
         background/rms estimator (aperture-scale block sums, 2-sigma clipped,
         ``prms = rms/na``), circular ``rlim`` fit mask on res/clean, and the
-        distance-sorted 5-level grayscale segmap colouring.
+        distance-sorted 5-level grayscale segmap colouring. Works in-session
+        after :meth:`run` and in a fresh session after :meth:`load_fit`
+        (the source's template is rebuilt and the saved fitted flux/shift
+        applied from the template table).
 
         Panels: ``img`` = low-res stamp at ``+-nsig*prms``; ``tmpl`` = hi-res
         template at ``median +- 8*robust_sigma``; ``seg`` = colour-cycled
@@ -3028,24 +3375,44 @@ class Pipeline:
         from astropy.stats import sigma_clipped_stats
         from PIL import Image, ImageDraw, ImageFont
 
-        if not getattr(self, "all_templates", None):
-            raise RuntimeError("run the pipeline before calling plot_subphot")
         if ifilt <= 0 or ifilt >= len(self.images):
             raise ValueError("ifilt must be between 1 and len(images)-1")
+        have_run = bool(getattr(self, "all_templates", None))
+        if not have_run and len(getattr(self, "model_images", [])) < ifilt:
+            raise RuntimeError("run() or load_fit() before calling diagnose_subphot")
         if self.images[ifilt].shape != self.images[0].shape:
             raise NotImplementedError(
-                "plot_subphot requires the fit grid to match the reference grid"
+                "diagnose_subphot requires the fit grid to match the reference grid"
             )
 
-        templates = self.all_templates[ifilt - 1]
-        own = [
-            t
-            for t in templates
-            if int(t.id_parent if getattr(t, "parent_id", None) is not None else t.id)
-            == int(source_id)
-        ]
-        if not own:
-            raise KeyError(f"source id {source_id} not found in fitted templates")
+        if have_run:
+            templates = self.all_templates[ifilt - 1]
+            own = [
+                t
+                for t in templates
+                if int(t.id_parent if getattr(t, "parent_id", None) is not None else t.id)
+                == int(source_id)
+            ]
+            if not own:
+                raise KeyError(f"source id {source_id} not found in fitted templates")
+        else:
+            # resumed session: rebuild this source's convolved template and
+            # apply the saved fitted shift/flux from the template table
+            templates = None
+            _, _, final = self._rebuild_source_stage_templates(source_id, ifilt=ifilt)
+            flux = None
+            ttab = getattr(self, "template_table", None)
+            if ttab is not None:
+                rows = ttab[np.asarray(ttab["id_parent"], dtype=int) == int(source_id)]
+                if len(rows):
+                    final.to_shift[:] = [float(rows["dx"][0]), float(rows["dy"][0])]
+                    Templates.apply_template_shifts([final])
+                    flux = float(np.sum(rows["flux"]))
+            if flux is None:
+                idx = np.flatnonzero(np.asarray(self.table["id"], dtype=int) == int(source_id))
+                flux = float(self.table[f"flux_{ifilt}"][int(idx[0])])
+            final.flux = flux
+            own = [final]
 
         if size is None:
             size = max(own[0].data.shape)
@@ -3114,21 +3481,29 @@ class Pipeline:
         mask = ((d >= rlim) | zero0).astype(float)
 
         # segmap colouring: cycle 5 gray levels through fitted ids by distance
+        if templates is not None:
+            src = [(int(t.id), *t.position_original) for t in templates]
+        else:
+            tt = getattr(self, "template_table", None)
+            tab = tt if tt is not None else self.table
+            src = list(
+                zip(
+                    np.asarray(tab["id"], dtype=int),
+                    np.asarray(tab["x"], dtype=float),
+                    np.asarray(tab["y"], dtype=float),
+                )
+            )
         in_stamp = [
-            t
-            for t in templates
-            if x1 <= t.position_original[0] < x1 + size
-            and y1 <= t.position_original[1] < y1 + size
+            s for s in src if x1 <= s[1] < x1 + size and y1 <= s[2] < y1 + size
         ]
         order = sorted(
             in_stamp,
-            key=lambda t: (t.position_original[0] - xc_full) ** 2
-            + (t.position_original[1] - yc_full) ** 2,
+            key=lambda s: (s[1] - xc_full) ** 2 + (s[2] - yc_full) ** 2,
         )
         lv = [0.2, 0.8, 0.4, 0.6, 1.0]
         tvseg = tseg.astype(float)
-        for i, t in enumerate(order):
-            tvseg[tseg == int(t.id)] = lv[i % 5]
+        for i, (sid, _, _) in enumerate(order):
+            tvseg[tseg == sid] = lv[i % 5]
 
         panels = [
             _fptv_panel(tphot, mm=(-scl, scl), bin=photbin),

@@ -241,6 +241,9 @@ def test_scene_solver_recovers_known_shift():
         scene_minimum_bright=2,
         scene_coupling_thresh=0.01,
         astrom_kwargs={"poly": {"order": 0}, "gp": {"length_scale": 400}},
+        # synthetic data with a known shift: measure the solver undamped, so the
+        # assertion is on the recovered shift and not on the damping schedule
+        astrom_damping=1.0,
     )
 
     scenes = _run_scenes(tmpls.templates, science, weight, cfg)
@@ -298,6 +301,9 @@ def test_scene_shift_uncertainty_scales_with_psf_width():
         scene_minimum_bright=2,
         scene_coupling_thresh=0.01,
         astrom_kwargs={"poly": {"order": 0}, "gp": {"length_scale": 400}},
+        # synthetic data with a known shift: measure the solver undamped, so the
+        # assertion is on the recovered shift and not on the damping schedule
+        astrom_damping=1.0,
     )
 
     positions = list(zip(catalog["x"], catalog["y"]))
@@ -450,6 +456,9 @@ def test_scene_shift_iteration_converges():
         scene_minimum_bright=2,
         scene_coupling_thresh=0.01,
         astrom_kwargs={"poly": {"order": 0}, "gp": {"length_scale": 400}},
+        # synthetic data with a known shift: measure the solver undamped, so the
+        # assertion is on the recovered shift and not on the damping schedule
+        astrom_damping=1.0,
     )
 
     # --- Pass 1: solve, record to_shift, then apply ---

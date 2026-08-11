@@ -107,7 +107,7 @@ def test_psf_wing_completion_fills_zero_pixels_from_unit_psf_shape_convolution()
     templates = Templates()
     templates._templates = [tmpl]
 
-    [completed] = templates.extend_with_psf_wings(psf, inplace=False)
+    [completed] = templates.extend_with_psf(psf, inplace=False)
     model = _paste_template(completed, parent.shape)
 
     core = _paste_template(tmpl, parent.shape)
@@ -119,7 +119,7 @@ def test_psf_wing_completion_fills_zero_pixels_from_unit_psf_shape_convolution()
 
     np.testing.assert_allclose(model, expected, rtol=0, atol=1e-12)
     np.testing.assert_allclose(model.sum(), 1.0, rtol=0, atol=1e-12)
-    assert completed.extension_mode == "psf_wings"
+    assert completed.extension_mode == "psf"
     np.testing.assert_allclose(completed.extension_psf_sum, 1.0, rtol=0, atol=1e-12)
     assert completed.extension_psf_throughput == psf.sum()
 
@@ -138,8 +138,8 @@ def test_psf_wing_completion_uses_psf_shape_not_native_throughput():
     tmpls_a._templates = [tmpl_a]
     tmpls_b._templates = [tmpl_b]
 
-    [completed_a] = tmpls_a.extend_with_psf_wings(psf, inplace=False)
-    [completed_b] = tmpls_b.extend_with_psf_wings(2.0 * psf, inplace=False)
+    [completed_a] = tmpls_a.extend_with_psf(psf, inplace=False)
+    [completed_b] = tmpls_b.extend_with_psf(2.0 * psf, inplace=False)
 
     model_a = _paste_template(completed_a, parent.shape)
     model_b = _paste_template(completed_b, parent.shape)
@@ -165,13 +165,13 @@ def test_psf_wing_completion_extends_deblended_templates_by_default():
     tmpls = Templates()
     tmpls._templates = [tmpl]
 
-    [completed] = tmpls.extend_with_psf_wings(psf, inplace=False)
+    [completed] = tmpls.extend_with_psf(psf, inplace=False)
 
     assert completed.is_deblended
     assert completed.flag & Template.FLAG_DEBLENDED
     assert completed.deblend_parent_label == 99
     assert completed.deblend_nchildren == 3
-    assert completed.extension_mode == "psf_wings"
+    assert completed.extension_mode == "psf"
     assert completed.extension_skip_reason == ""
     assert completed.data.shape != before.shape or not np.array_equal(completed.data, before)
 
@@ -189,7 +189,7 @@ def test_psf_wing_completion_can_skip_deblended_templates():
     tmpls = Templates()
     tmpls._templates = [tmpl]
 
-    [completed] = tmpls.extend_with_psf_wings(psf, skip_deblended=True, inplace=False)
+    [completed] = tmpls.extend_with_psf(psf, skip_deblended=True, inplace=False)
 
     np.testing.assert_allclose(completed.data, before, rtol=0, atol=0)
     assert completed.is_deblended
@@ -287,8 +287,8 @@ def test_psf_wing_completion_background_only_blocks_neighbor_segments():
     templates.extract_templates(image, segmap, [(40.0, 40.0)], dilate_segmap=0)
     assert templates.segmap is not None
 
-    [blocked] = templates.extend_with_psf_wings(psf, background_only=True, inplace=False)
-    [filled] = templates.extend_with_psf_wings(psf, background_only=False, inplace=False)
+    [blocked] = templates.extend_with_psf(psf, background_only=True, inplace=False)
+    [filled] = templates.extend_with_psf(psf, background_only=False, inplace=False)
 
     model_blocked = _paste_template(blocked, image.shape)
     model_filled = _paste_template(filled, image.shape)

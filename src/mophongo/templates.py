@@ -524,6 +524,34 @@ class Template(Cutout2D):
         (ymin, ymax), (xmin, xmax) = self.bbox_original
         return int(ymin), int(ymax), int(xmin), int(xmax)
 
+    #: Every non-geometry metadata attribute a Template carries. Resampling
+    #: and reshaping operations must copy ALL of them: a hand-picked subset
+    #: rots as attributes are added (ee_psf_lo was silently dropped by
+    #: project_to_block_replicated_grid for months — the 2026-08-10 audit's
+    #: headline bug). Geometry (slices/positions/wcs) is deliberately absent:
+    #: the reshaping operation itself defines it.
+    _META_ATTRS = (
+        "id", "id_parent", "id_scene", "name", "flag",
+        "deblend_parent_label", "deblend_nchildren", "is_star",
+        "ee_psf_lo", "ee_tmpl", "template_norm",
+        "flux", "err", "err_pred", "wnorm",
+        "extension_mode", "extension_skip_reason", "extension_psf_sum",
+        "extension_psf_throughput", "extension_core_sum",
+        "extension_pre_norm_sum", "extension_filled_sum",
+        "extension_filled_fraction", "extension_blocked_sum",
+        "extension_sigma_pix", "extension_score",
+    )
+
+    def copy_meta_to(self, other: "Template") -> "Template":
+        """Copy all metadata in :data:`_META_ATTRS` (plus shift vectors) onto
+        ``other``, skipping attributes this template does not carry."""
+        for attr in self._META_ATTRS:
+            if hasattr(self, attr):
+                setattr(other, attr, getattr(self, attr))
+        other.to_shift = np.array(self.to_shift, dtype=float, copy=True)
+        other.shifted = np.array(self.shifted, dtype=float, copy=True)
+        return other
+
     @classmethod
     def from_stamp(
         cls,
@@ -705,14 +733,8 @@ class Template(Cutout2D):
             _round_half_up(new_cut.input_position_cutout[1]),
         )
         #        new_cut.base_data = data  # also store it in base data
+        self.copy_meta_to(new_cut)
         new_cut.flag = self.flag | Template.FLAG_CONVOLVED
-        new_cut.id_parent = self.id_parent
-        new_cut.id_scene = self.id_scene
-        new_cut.deblend_parent_label = self.deblend_parent_label
-        new_cut.deblend_nchildren = self.deblend_nchildren
-        new_cut.name = self.name
-        new_cut.ee_tmpl = self.ee_tmpl
-        new_cut.ee_psf_lo = self.ee_psf_lo
 
         return new_cut
 
@@ -781,17 +803,9 @@ class Template(Cutout2D):
         # print(dx, dy, ly, lx)
         low.data[:ly, :lx] = lo_block
 
-        low.flag = self.flag
-        low.deblend_parent_label = self.deblend_parent_label
-        low.deblend_nchildren = self.deblend_nchildren
-        # keep the EE metadata alive across resampling (see
-        # project_to_block_replicated_grid)
-        low.ee_psf_lo = self.ee_psf_lo
-        low.ee_tmpl = self.ee_tmpl
-        low.template_norm = self.template_norm
-        low.id_parent = self.id_parent
-        low.id_scene = self.id_scene
-        low.name = self.name
+        # all metadata (flags, EE corrections, fit state) must survive
+        # resampling; see _META_ATTRS
+        self.copy_meta_to(low)
         return low
 
     def project_to_block_replicated_grid(
@@ -858,18 +872,10 @@ class Template(Cutout2D):
             _round_half_up(out.input_position_cutout[0]),
             _round_half_up(out.input_position_cutout[1]),
         )
-        out.flag = self.flag
-        out.deblend_parent_label = self.deblend_parent_label
-        out.deblend_nchildren = self.deblend_nchildren
-        # per-source PSF/template encircled energies feed the flux_<i>_total
-        # correction downstream; dropping them here silently reverts every
-        # source to the filter-mean fallback (TODO 2026-08-10 audit)
-        out.ee_psf_lo = self.ee_psf_lo
-        out.ee_tmpl = self.ee_tmpl
-        out.template_norm = self.template_norm
-        out.id_parent = self.id_parent
-        out.id_scene = self.id_scene
-        out.name = self.name
+        # all metadata (flags, EE corrections, fit state) must survive
+        # projection; dropping ee_psf_lo here silently reverted every source
+        # to the filter-mean EE fallback (2026-08-10 audit)
+        self.copy_meta_to(out)
         return out
 
 

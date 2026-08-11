@@ -440,7 +440,7 @@ def test_pipeline_legacy_extend_templates_still_selects_the_mode():
     assert pipeline.Pipeline([image, image], segmap, extend_templates="psf_wings", **kwargs).extend_mode == "psf_wings"
     assert pipeline.Pipeline([image, image], segmap, extend_templates="none", **kwargs).extend_mode == "none"
     assert pipeline.Pipeline([image, image], segmap, **kwargs).extend_mode == "psf_wings"  # config default
-    with pytest.raises(ValueError, match="Unknown template extension mode"):
+    with pytest.raises(ValueError, match="Unknown extend_mode"):
         pipeline.Pipeline([image, image], segmap, extend_templates="bogus", **kwargs)
 
 

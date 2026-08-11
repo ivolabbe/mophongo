@@ -65,9 +65,10 @@ fit.
      template fits that light.
    - `"none"`: segment-masked detection data only, left truncated at the
      segment boundary.
-   - `"psf"`: `"none"` followed by
+   - `"psf_convolution"` (deprecated alias `"psf"`): `"none"` followed by
      {meth}`mophongo.templates.Templates.extend_with_psf`, which fills the
-     zero-valued pixels with the template convolved with the detection PSF.
+     zero-valued pixels with the template convolved with the detection PSF —
+     not the least-squares scaled-PSF wings of `"psf_wings"`.
    - `"psf_model"`: `"none"` followed by
      {meth}`mophongo.templates.Templates.extend_with_psf_model`, replacing
      the template by the PSF model.
@@ -76,8 +77,8 @@ fit.
      `"psf_wings"`. See {doc}`templates`.
 
    `"psf_wings"`, `"wren"` and `"classic"` build their composite inside
-   `extract_templates`; `"psf"` and `"psf_model"` reshape the cutout
-   afterwards. Every scheme except `"none"` needs the detection-band PSF in
+   `extract_templates`; `"psf_convolution"` and `"psf_model"` reshape the
+   cutout afterwards. Every scheme except `"none"` needs the detection-band PSF in
    `psfs[0]` (an array or a {class}`mophongo.psf_map.PSFRegionMap`), and no
    other index is substituted for it: a lower-resolution PSF would give wrong
    wings and wrong extension radii without failing. The schemes that grade
@@ -90,11 +91,12 @@ fit.
    the native finite-support sum is kept only as throughput metadata (see
    below).
 
-   The legacy constructor argument `extend_templates` still names a scheme
-   when it is given, and then overrides the config field. Left at `None` (its
-   default) the scheme is whatever `FitConfig.extend_mode` says, which is how
-   both entry points end up at `"psf_wings"` unless told otherwise. The
-   resolved scheme is stored as `Pipeline.extend_mode`.
+   The constructor argument `extend_mode` names a scheme when given, and
+   then overrides the config field (`extend_templates` is its deprecated
+   alias and logs a warning). Left at `None` (its default) the scheme is
+   whatever `FitConfig.extend_mode` says, which is how both entry points end
+   up at `"psf_wings"` unless told otherwise. The resolved scheme is stored
+   as `Pipeline.extend_mode`.
 
 4. **Per-band loop.** For each fitted image `i >= 1`:
 
@@ -202,14 +204,15 @@ All arguments after `images` and `segmap` are keyword-only:
   position, and arcsec apertures.
 - `window` (default `None`) — accepted and stored, but not used anywhere in
   the pipeline as of this writing.
-- `extend_templates` (*str | None*, default `None`) — legacy selector for the
-  template build scheme, predating `FitConfig.extend_mode` and kept for tests
-  and verification runs. When given it names a scheme (`"none"`,
-  `"psf_wings"`, `"psf"`, `"psf_model"`, `"wren"`, `"classic"`, or
-  `"default"` for `"psf_wings"`; anything else raises) and overrides the
-  config field. `None` leaves the choice to `FitConfig.extend_mode`, whose
-  own default is `"psf_wings"` — so `None` does *not* mean "no extension",
-  which is `"none"`. The resolved scheme is stored as `Pipeline.extend_mode`.
+- `extend_mode` (*str | None*, default `None`) — constructor override for
+  the template build scheme. When given it names a scheme (`"none"`,
+  `"psf_wings"`, `"psf_convolution"`, `"psf_model"`, `"wren"`, `"classic"`,
+  or the aliases `"default"` for `"psf_wings"` and `"psf"` for
+  `"psf_convolution"`; anything else raises) and overrides the config field.
+  `None` leaves the choice to `FitConfig.extend_mode`, whose own default is
+  `"psf_wings"` — so `None` does *not* mean "no extension", which is
+  `"none"`. `extend_templates` is a deprecated alias for this argument and
+  logs a warning. The resolved scheme is stored as `Pipeline.extend_mode`.
 - `templates` (*Templates | Sequence[Template] | None*, default `None`) —
   prebuilt templates; skips extraction and the build scheme when given.
 - `config` (*FitConfig | None*, default `None`) — fitting configuration; a

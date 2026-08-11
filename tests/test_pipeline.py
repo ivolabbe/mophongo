@@ -683,3 +683,52 @@ def test_pipeline_prebuilt_native_templates_recover_scalar_fluxes():
     np.testing.assert_allclose(recovered_total, flux_true / 0.95, rtol=0, atol=2e-5)
     np.testing.assert_allclose(table["throughput_1"], 0.95)
     np.testing.assert_allclose(residuals[0], 0.0, rtol=0, atol=2e-5)
+
+
+def test_plot_result_uses_run_scenes(tmp_path):
+    """plot_result must work off a completed run.
+
+    It previously reached for ``self.fit``, which no Pipeline ever sets, and
+    guarded its scene map on ``hasattr(self, "scenes")`` — permanently true
+    since ``scenes`` became a property — so the map was never built and the
+    lookup below it raised NameError. Nothing called it, so nothing caught this.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import pytest
+    from mophongo.fit import FitConfig
+
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=12, nsrc=12, size=101, ndilate=2, peak_snr=2.0
+    )
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+    pipe = pipeline.Pipeline(
+        [im.copy() for im in images], segmap, catalog=catalog,
+        weights=[w.copy() for w in wht], kernels=[None, kernel], psfs=psfs,
+        config=FitConfig(fit_astrometry_niter=0),
+    )
+    pipe.run_config = pipeline.RunConfig(
+        name="t", out_dir=str(tmp_path), sci_hi="hi.fits", segmap="seg.fits",
+        catalog="cat.fits", sci_lo="lo.fits", wht_lo="wht.fits",
+        csv_hi="hi.csv", csv_lo="lo.csv",
+    )
+    pipe.out_dir = tmp_path
+    pipe.run()
+
+    fig, ax = pipe.plot_result()
+    plt.close(fig)
+    assert ax.size >= 6
+
+    # zooming to a scene exercises the scene map and the id labels
+    scene_id = pipe.all_scenes[0][0].id
+    fig, ax = pipe.plot_result(scene_id=scene_id)
+    plt.close(fig)
+
+    # without a run there are no scenes to plot, and it must say so
+    bare = pipeline.Pipeline(
+        [im.copy() for im in images], segmap, catalog=catalog,
+        weights=[w.copy() for w in wht], kernels=[None, kernel], psfs=psfs,
+    )
+    with pytest.raises(RuntimeError, match="completed run"):
+        bare.plot_result()

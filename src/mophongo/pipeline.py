@@ -3188,7 +3188,14 @@ class Pipeline:
         if ifilt <= 0 or ifilt >= len(self.images):
             raise ValueError("idx must be between 1 and len(images)-1")
 
-        nscenes = len(np.unique(self.fit[ifilt - 1].scene_ids))
+        all_scenes = getattr(self, "all_scenes", None)
+        scene_list = all_scenes[ifilt - 1] if all_scenes else None
+        if not scene_list:
+            raise RuntimeError(
+                "plot_result needs the scenes of a completed run(); load_fit does "
+                "not restore them (see its docstring)"
+            )
+        nscenes = len(scene_list)
 
         segmap = self.segmap
         segm = SegmentationImage(as_label_array(segmap))
@@ -3196,23 +3203,26 @@ class Pipeline:
         scene_cmap = deepcopy(segmap_cmap)
         scene_cmap.colors[0] = (1.0, 1.0, 1.0, 0.0)
 
-        fitter = self.fit[ifilt - 1]
-
-        if not hasattr(self, "scenes"):
-            logger.info("Building scene map for diagnostics")
-            scenes = np.zeros_like(segmap, dtype=int)
-            # fitter.scene_ids
-            for tmpl in fitter.templates:
-                iseg = segm.get_index(tmpl.id)
+        # Scene id per segment, painted onto the segmentation grid. Built
+        # unconditionally: the old guard tested `hasattr(self, "scenes")`, which
+        # has been permanently true since `scenes` became a property, so the map
+        # was never built and the lookup below raised NameError.
+        logger.info("Building scene map for diagnostics")
+        scene_map = np.zeros_like(segmap, dtype=int)
+        for scene in scene_list:
+            for tmpl in scene.templates:
+                try:
+                    iseg = segm.get_index(tmpl.id)
+                except (KeyError, ValueError):
+                    continue  # template with no surviving segment
                 sl = segm.segments[iseg].slices
-                scenes_slice = scenes[sl]
-                scenes_slice[segm.data[sl] == tmpl.id] = tmpl.id_scene
+                scene_map[sl][segm.data[sl] == tmpl.id] = scene.id
 
         logger.info(f"Plotting image {ifilt} with {nscenes} scenes")
 
         mask: np.ndarray | None = None
         if scene_id is not None:
-            mask = scenes == scene_id
+            mask = scene_map == scene_id
         elif source_id is not None:
             mask = segmap == source_id
 
@@ -3226,7 +3236,13 @@ class Pipeline:
             y1, x1 = segmap.shape
 
         sl_hi = (slice(y0, y1), slice(x0, x1))
-        kbin = bin_factor_from_wcs(self.wcs[0], self.wcs[ifilt])
+        # A pipeline built straight from arrays has no WCS; fall back to the
+        # shape ratio, which is the same integer factor for block-aligned grids.
+        wcs_list = getattr(self, "wcs", None)
+        if wcs_list is not None and wcs_list[0] is not None and wcs_list[ifilt] is not None:
+            kbin = bin_factor_from_wcs(wcs_list[0], wcs_list[ifilt])
+        else:
+            kbin = max(1, int(round(self.images[0].shape[0] / self.images[ifilt].shape[0])))
         y0_lo, y1_lo, x0_lo, x1_lo = np.round(bin_remap([y0, y1, x0, x1], kbin)).astype(int)
         sl_lo = (slice(y0_lo, y1_lo), slice(x0_lo, x1_lo))
 
@@ -3234,11 +3250,13 @@ class Pipeline:
         img_lo = self.images[ifilt]
 
         img_cut = img_lo[sl_lo]
-        model_cut = fitter.model_image()[sl_lo]
+        # run() and load_fit both populate model_images; the old fitter
+        # object this used to reach through never existed on Pipeline.
+        model_cut = self.model_images[ifilt - 1][sl_lo]
 
         tmpl_cut = img_hi[sl_hi]
         seg_cut = segmap[sl_hi]
-        scenes_cut = scenes[sl_hi]
+        scenes_cut = scene_map[sl_hi]
         # @@@ for now assume upsampled residual image
         res_cut = self.residuals[ifilt - 1][sl_hi]
 
@@ -3276,8 +3294,10 @@ class Pipeline:
                 ax[i].imshow(im, origin="lower", cmap=segmap_cmap, interpolation="nearest")
                 # if plotting a scene, overplot template id as text
                 if scene_id is not None or source_id is not None:
-                    for tmpl in fitter.templates:
-                        if tmpl.id_scene == scene_id:
+                    for scene in scene_list:
+                        if scene.id != scene_id:
+                            continue
+                        for tmpl in scene.templates:
                             x, y = tmpl.position_original - np.array([x0, y0])
                             ax[i].text(
                                 x,

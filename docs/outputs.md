@@ -7,10 +7,12 @@ file prefixed with the run `name` from the JSON config:
 | --- | --- | --- |
 | `<name>_fit_table.fits` | {meth}`~mophongo.pipeline.Pipeline.write_outputs` | the photometry catalog (see below) |
 | `<name>_residual.fits` | `write_outputs` | data minus model on the reference grid |
+| `<name>_templates.fits` | `write_outputs` | per-template fit state: amplitudes, applied shifts, scene membership |
 | `<name>_stamps.fits` | {meth}`~mophongo.pipeline.Pipeline.write_stamps` (when `save_stamps` is set) | per-source template stamps and fit metadata |
 | `<name>_scene_catalog.csv` | `write_outputs` | one row per fitted scene |
 | `<name>_scene_<id>.png` | `write_outputs` (when `scene_plots` is set) | per-scene diagnostic figures |
 | `<name>_psf_hi.geojson`, `<name>_psf_lo.geojson`, `<name>_kernel.geojson` | `build_psfs` / `build_kernels` | cached PSF and kernel region maps ({doc}`psf_maps`) |
+| `<name>.json` | {meth}`~mophongo.pipeline.Pipeline.save_config`, called by `run` | fully explicit snapshot of the executed config |
 | `<name>.log` | {meth}`~mophongo.pipeline.Pipeline.run_all` | full log of the run |
 
 In-memory runs return the same products directly:
@@ -55,9 +57,14 @@ copied through.
 : Raw fitted template amplitude. Templates are normalized to unit sum and
   convolved with unit-sum matching kernels, so this is the flux contained in
   the modeled PSF support, without any correction for flux outside the finite
-  PSF stamp. Each amplitude is written to the catalog row carrying the
-  template's `id`; catalog deblend children are rows of their own, so a child
-  keeps its own flux instead of having it folded into its parent.
+  PSF stamp. Under the default `"psf_wings"` build scheme a template sums to
+  slightly less than one, because the wing flux that fell on a neighbouring
+  segment is dropped after the normalization and fitted by that neighbour's
+  own template; the amplitude is not rescaled for it (the blanked pixels
+  carry flux but almost no fitting weight — see `ee_tmpl` below). Each
+  amplitude is written to the catalog row carrying the template's `id`;
+  catalog deblend children are rows of their own, so a child keeps its own
+  flux instead of having it folded into its parent.
 
 `err_<i>`
 : 1-sigma uncertainty on `flux_<i>` from the solver:
@@ -86,6 +93,18 @@ copied through.
   `ee_psf_lo` is unset fall back to `throughput_<i>`. This is the number to
   use as a total flux; `flux_<i>` deliberately keeps the uncorrected amplitude
   (see the shape-vs-throughput convention in {doc}`psf`).
+
+`scene_<i>`
+: Id of the scene the source was fitted in, taken from the scene objects
+  themselves rather than from the partitioning labels, so it names the scene
+  that actually held the fitted template. Sources with no template keep `-1`,
+  and when several templates book their flux under one catalog id, the first
+  of them names the scene. The scene objects are not persisted, so this
+  column (with `id_scene` in the stamps and per-template files) is how scene
+  membership survives a run: without it,
+  {meth}`~mophongo.pipeline.Pipeline.load_fit` could only recover it by
+  refitting. Scene ids label one run's partition and are not stable across
+  runs with different scene settings.
 
 ### Aperture columns
 
@@ -155,6 +174,18 @@ identifiers: membership depends on the scene-construction settings
 scene-id-keyed products from runs with different settings are not comparable
 by id.
 
+## The per-template fit table
+
+`<name>_templates.fits` is one row per fitted template of the first fitted
+band, holding what a deterministic rebuild of the templates cannot re-derive:
+`id` and `id_parent`, the reference-grid position `x`, `y`, the applied
+astrometric shift `dx`, `dy`, the fitted `flux` and `err`, and `id_scene`.
+The fit table aggregates per catalog source, so a source split into several
+fitted components appears there once; this file keeps the components
+separate. {meth}`~mophongo.pipeline.Pipeline.load_outputs` reads it into
+`Pipeline.template_table`, and `load_fit` uses it to reapply the exact
+amplitudes and shifts when it has to regenerate the stamps.
+
 ## The stamps file
 
 `<name>_stamps.fits` stores every fitted template at its native, per-source
@@ -206,9 +237,10 @@ JSON file.
 
   `id_parent`, `id_scene`
   : Catalog id the template's flux is booked under, and the scene it belongs
-    to. Both are placeholders as the pipeline stands: `id_parent` equals `id`
-    for every template it builds, and the scene builder does not stamp its
-    labels back onto the templates, so `id_scene` keeps its default of 1.
+    to. `id_parent` is a placeholder as the pipeline stands: it equals `id`
+    for every template it builds. `id_scene` is the real scene id, stamped
+    onto each template by {func}`mophongo.scene.generate_scenes`, and matches
+    the `scene_<i>` column of the fit table.
 
   `ee_psf_lo`
   : Encircled energy of the low-resolution PSF stamp at this position — the
@@ -245,6 +277,14 @@ constants:
 | 5 | 32 | `FLAG_SHIFTED` | an astrometric shift was applied |
 | 6 | 64 | `FLAG_DEBLENDED` | source is a catalog deblend child (provenance) |
 | 7 | 128 | `FLAG_SATURATED` | source carried a `FLAG_SATURATED_*` catalog flag (provenance) |
+| 8 | 256 | `FLAG_PSF_EXTENDED` | the build scheme blended PSF wings into the template |
+| 9 | 512 | `FLAG_EXTEND_FAILED` | extension was attempted but the PSF was unusable |
+
+`FLAG_PSF_EXTENDED` and `FLAG_EXTEND_FAILED` are set by the build-time
+schemes only (`"psf_wings"`, `"wren"`, `"classic"`). A template is flagged as
+PSF-extended when its blend weight fell below one, that is, when the scheme
+mixed a scaled PSF into the data rather than keeping the data alone; the
+post-extraction modes `"psf"` and `"psf_model"` set neither flag.
 
 `FLAG_HAS_NAN` and `FLAG_OUTSIDE_WEIGHT` are declared but nothing in the
 current code sets them: templates with no useful overlap with the weight map
@@ -259,9 +299,9 @@ As of this writing these flags live in the stamps file (and on the in-memory
 ### `Pipeline.write_outputs()`
 
 No parameters. Requires a completed {meth}`~mophongo.pipeline.Pipeline.run`
-on a config-driven pipeline. Writes the residual FITS, fit table, scene
-catalog and plots, and (when the config's `save_stamps` is true) the stamps
-file. Returns `self`.
+on a config-driven pipeline. Writes the residual FITS, fit table,
+per-template fit table, scene catalog and plots, and (when the config's
+`save_stamps` is true) the stamps file. Returns `self`.
 
 ### `Pipeline.write_stamps(path=None, *, ifilt=1)`
 
@@ -288,20 +328,23 @@ through `key_psf_hi` / `key_psf_lo` in the cached PSF region maps.
 `ifilt` : `int`, default `1`
 : Fitted image index (1-based).
 
-Counterpart of `load_data` for the post-run state: reads
-`<name>_fit_table.fits` and `<name>_residual.fits`, rebuilds the fitted
+Counterpart of `load_data` for the post-run state: loads the data when
+needed, reads the written products through
+{meth}`~mophongo.pipeline.Pipeline.load_outputs`, rebuilds the fitted
 templates from `<name>_stamps.fits`, and recreates the derived state (grid
 upsampling, model image) so the instance matches a completed `run()` without
 refitting — the diagnostic methods in {doc}`diagnostics` then work as usual.
 Requires a config-driven pipeline; returns `self`.
 
-Not restored: the scenes (`all_scenes` is not persisted), and the
-pre-extension template pixels (`templates_extracted` then equals
-`templates_extended`). When the stamps file is missing, the templates are
-regenerated through the same code path `run()` uses, fluxes are filled in
-from the fit table, and the stamps file is written back; regenerated stamps
-reproduce the fitted templates exactly only when the run applied no
-astrometric shifts.
+Not restored: the scene objects (`all_scenes` stays empty; membership
+survives as `id_scene` and the `scene_<i>` column), and the pre-extension
+template pixels (`templates_extracted` then equals `templates_extended`).
+When the stamps file is missing, the templates are regenerated through the
+same code path `run()` uses and the stamps file is written back. The fitted
+amplitudes, uncertainties and shifts are then reapplied per component from
+`<name>_templates.fits`; for runs written before that file existed they come
+from the fit table instead, and the rebuild reproduces the fitted templates
+exactly only when the run applied no astrometric shifts.
 
 ## Provenance
 
@@ -315,6 +358,12 @@ silently mixing configurations:
   reuses cached PSF maps only when all their recorded fields match the
   current config; `build_kernels` reuses a cached kernel map only when its
   recorded method matches the requested one. Otherwise the map is rebuilt.
+- **The config snapshot** (`<name>.json`) is written by `run()` before it
+  fits, with every `RunConfig` field and every used `FitConfig` setting at
+  its resolved value, so the run stays reproducible when code defaults change
+  later. Settings belonging to template build schemes the run did not select
+  are left out. It is a valid input config: `Pipeline.from_config(out_dir)`
+  reopens the run from it.
 - **The fit table header** carries the `EEBOX` / `PSFSZ` / `EECIRC` / `RCIRC`
   encircled-energy cards described above, keeping the aperture-correction
   reference with the catalog that used it.

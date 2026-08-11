@@ -332,7 +332,8 @@ Methods:
   `fit_astrometry_niter <= 0`) or the joint flux+shift system. Results are
   stored on the scene (`solution`, `shifts`) and on each template
   (`tmpl.flux`, `tmpl.err`, `tmpl.is_bright`). After a joint solve the fitted
-  shift field is always evaluated at each template position and stored on
+  shift field is always evaluated at each template position, scaled by
+  `config.astrom_damping`, and stored on
   `tmpl.to_shift`; `apply_shifts=True` additionally resamples the templates
   (see below) and clears `A`/`b` so the next pass rebuilds them against the
   shifted templates.
@@ -463,8 +464,9 @@ templates unshifted (logged as a warning).
 ### Applying fitted shifts and iterating
 
 After a joint solve, `Scene.solve` evaluates the polynomial at every template
-position (via {func}`mophongo.astrometry.AstroCorrect.build_poly_predictor`)
-and stores `(dx, dy)` on `tmpl.to_shift`. The fitted shift is the offset of
+position (via {func}`mophongo.astrometry.AstroCorrect.build_poly_predictor`),
+scales the result by `FitConfig.astrom_damping`, and stores the damped
+`(dx, dy)` on `tmpl.to_shift`. The fitted shift is the offset of
 the source in the band image relative to its template — the linearized model
 is $T_i(\mathbf{r} - \boldsymbol{\delta})$, the template displaced by
 $+\boldsymbol{\delta}$ — so with `apply_shifts=True`
@@ -478,9 +480,21 @@ on `tmpl.shifted` and `FLAG_SHIFTED` is set. Passes whose increment is below
 The linearization only captures part of a large offset per pass, so the
 pipeline iterates: up to `FitConfig.fit_astrometry_niter` solve/apply passes
 per band, stopping early once the largest change in accumulated per-template
-shift falls below `FitConfig.astrom_shift_tol` (in fit-grid pixels). The loop
-always runs at least once, so `fit_astrometry_niter = 0` still gives each band
-a single flux-only pass.
+shift falls below `FitConfig.astrom_shift_tol` (in fit-grid pixels; the test
+measures the applied, i.e. damped, increment). The loop always runs at least
+once, so `fit_astrometry_niter = 0` still gives each band a single flux-only
+pass.
+
+Each pass is also damped, because the same linearization can err in the other
+direction. The gradients $\partial_x T_i$, $\partial_y T_i$ are central
+differences of the template stamp, which underestimate the gradient of
+structure near the sampling limit: a mode of wavenumber $k$ (radians per pixel)
+has its gradient underestimated by $\sin k / k$, so the shift solved from it is
+too large by $k / \sin k$. A scene dominated by marginally sampled cores can
+therefore step past the true offset and oscillate instead of converging.
+`FitConfig.astrom_damping` (default `0.8`) scales each pass's increment before
+it is applied, which keeps the iteration contracting at the cost of roughly one
+extra pass; `1.0` recovers the undamped step.
 
 ## Fitting-related FitConfig fields
 
@@ -497,6 +511,7 @@ page.
 | `cg_kwargs` | `dict` | `{"M": None, "maxiter": 500, "atol": 1e-6}` | Iterative-solver options; unused by the current direct solver. |
 | `fit_astrometry_niter` | `int` | `5` | Maximum astrometry solve/apply passes per band; `0` disables shift fitting. |
 | `astrom_shift_tol` | `float` | `0.05` | Stop iterating once the largest per-template shift increment (fit-grid pixels) drops below this. |
+| `astrom_damping` | `float` | `0.8` | Factor applied to each pass's fitted shift increment before it is applied to the templates; `1.0` is undamped. |
 | `fit_astrometry_joint` | `bool` | `True` | Fit shifts jointly with fluxes inside each scene; if `False`, shifts come from the separate {class}`mophongo.astrometry.AstroCorrect` step. |
 | `reg_astrom` | `float` | `1e-4` | Ridge on the shift block, relative to its diagonal scale. |
 | `snr_thresh_astrom` | `float` | `15.0` | Minimum SNR proxy $b_i/\sqrt{A_{ii}}$ for a bright astrometric anchor; `0` keeps all. |
@@ -514,10 +529,12 @@ page.
 | `scene_max_merge_radius` | `float` | `1000.0` | Maximum distance (pixels) over which underfilled scenes merge. |
 | `generate_scene_catalog` | `bool` | `False` | Write `scene_catalog_<i>.ecsv` and exit without fitting. |
 
-Aperture fields (`aperture_diam`, `aperture_catalog`, `aperture_units`) and
+Aperture fields (`aperture_diam`, `aperture_catalog`, `aperture_units`),
 template-extraction fields (`template_dilate_segmap`,
-`skip_template_extension_for_deblended`, `extend_wings_background_only`) are
-documented on the {doc}`pipeline` and {doc}`templates` pages.
+`skip_template_extension_for_deblended`, `extend_wings_background_only`) and
+the template build-scheme fields (`extend_mode` and the per-scheme knobs it
+selects between) are documented on the {doc}`pipeline` and {doc}`templates`
+pages.
 
 ## Relation to catalog outputs
 

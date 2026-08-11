@@ -29,6 +29,7 @@ quickstart
 :caption: User guide
 
 pipeline
+repair
 outputs
 diagnostics
 ```

@@ -21,6 +21,7 @@ include_patterns = [
     "overview.md",
     "quickstart.md",
     "pipeline.md",
+    "repair.md",
     "diagnostics.md",
     "outputs.md",
     "psf.md",

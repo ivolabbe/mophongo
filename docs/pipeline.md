@@ -43,26 +43,58 @@ fit.
    stars (`flag_star` catalog column) or saturated are marked on their
    templates; saturated sources are later isolated into their own scenes. A
    prebuilt `Templates` collection can be passed instead via the `templates`
-   argument, in which case extraction and extension are skipped. See
+   argument, in which case extraction and the build scheme are skipped. See
    {doc}`templates`.
 
-3. **Template extension** (optional, controlled by `extend_templates`).
-   Segment-truncated templates miss PSF-wing flux, which biases total fluxes
-   low, most severely for faint sources.
+3. **Template build scheme** (`FitConfig.extend_mode`, default
+   `"psf_wings"`). Segment-truncated templates miss PSF-wing flux, which
+   biases total fluxes low, most severely for faint sources. One selector
+   chooses among the schemes, so they can be compared on identical inputs:
 
-   - `"psf_wings"` (the config-driven default): add the high-resolution PSF
-     wings beyond the segmentation footprint
-     ({meth}`mophongo.templates.Templates.extend_with_psf_wings`). By default
-     only background pixels are filled, so blended neighbours keep ownership
-     of their own segment pixels (`FitConfig.extend_wings_background_only`).
-   - `"psf_model"`: replace the template entirely by the PSF
-     ({meth}`mophongo.templates.Templates.extend_with_psf_model`).
-   - `None`: leave templates truncated at the segment boundary.
+   - `"psf_wings"` (the default; `"default"` is an accepted spelling for it):
+     {func}`mophongo.template_schemes.composite_psf_wings` builds the
+     template during extraction. The halo is the detection PSF scaled by its
+     least-squares fit to the segment data; the in-segment data are blended
+     towards that scaled PSF as the segment signal-to-noise falls below
+     `FitConfig.psf_wings_snrlo`, reaching a pure PSF profile at zero
+     signal-to-noise. The composite is normalized over the whole stamp
+     *before* pixels owned by a neighbouring segment are zeroed
+     (`FitConfig.extend_wings_background_only`), so wing flux landing on a
+     neighbour is dropped rather than counted twice — such a template
+     deliberately sums to slightly less than one, and the neighbour's own
+     template fits that light.
+   - `"none"`: segment-masked detection data only, left truncated at the
+     segment boundary.
+   - `"psf"`: `"none"` followed by
+     {meth}`mophongo.templates.Templates.extend_with_psf`, which fills the
+     zero-valued pixels with the template convolved with the detection PSF.
+   - `"psf_model"`: `"none"` followed by
+     {meth}`mophongo.templates.Templates.extend_with_psf_model`, replacing
+     the template by the PSF model.
+   - `"wren"` and `"classic"`: ports of the wren fork's composite and of the
+     IDL `subphot.pro` build, kept for one-to-one comparison against
+     `"psf_wings"`. See {doc}`templates`.
 
-   Both modes require a high-resolution PSF in `psfs[0]` (an array or a
-   {class}`mophongo.psf_map.PSFRegionMap`). Extension is a shape operation:
-   PSF stamps are normalized to unit sum internally and the native
-   finite-support sum is kept only as throughput metadata (see below).
+   `"psf_wings"`, `"wren"` and `"classic"` build their composite inside
+   `extract_templates`; `"psf"` and `"psf_model"` reshape the cutout
+   afterwards. Every scheme except `"none"` needs the detection-band PSF in
+   `psfs[0]` (an array or a {class}`mophongo.psf_map.PSFRegionMap`), and no
+   other index is substituted for it: a lower-resolution PSF would give wrong
+   wings and wrong extension radii without failing. The schemes that grade
+   data against a PSF model by signal-to-noise (`"psf_wings"`, `"wren"`,
+   `"classic"`) additionally read the detection-band inverse variance from
+   `weights[0]`; without one they fall back to a single scalar noise estimate
+   for the whole detection image, which `FitConfig.psf_wings_rms`,
+   `classic_rms` and `wren_bg_rms` can set explicitly. Building a template is
+   a shape operation: PSF stamps are normalized to unit sum internally and
+   the native finite-support sum is kept only as throughput metadata (see
+   below).
+
+   The legacy constructor argument `extend_templates` still names a scheme
+   when it is given, and then overrides the config field. Left at `None` (its
+   default) the scheme is whatever `FitConfig.extend_mode` says, which is how
+   both entry points end up at `"psf_wings"` unless told otherwise. The
+   resolved scheme is stored as `Pipeline.extend_mode`.
 
 4. **Per-band loop.** For each fitted image `i >= 1`:
 
@@ -85,14 +117,16 @@ fit.
      `scene_minimum_bright`, and `scene_max_merge_radius`. See {doc}`fitting`.
    - **Fitting.** Each scene is solved for template amplitudes, iterating up
      to `FitConfig.fit_astrometry_niter` passes with per-template astrometric
-     shifts applied between passes, stopping early once the largest shift
-     increment falls below `FitConfig.astrom_shift_tol` (fit-grid pixels).
+     shifts applied between passes, damped by `FitConfig.astrom_damping` and
+     stopping early once the largest applied shift increment falls below
+     `FitConfig.astrom_shift_tol` (fit-grid pixels).
    - **Residual and model.** The summed scene models are subtracted from the
      band image to form the residual; the model image is kept as well.
    - **Flux columns.** Fitted amplitudes, uncertainties, predicted errors,
-     the filter throughput, and throughput-corrected totals are written into
-     the catalog (see {doc}`outputs`). Aperture photometry on model+residual
-     follows, using the configured aperture or its FWHM-based default.
+     the filter throughput, throughput-corrected totals, and the scene each
+     source was fitted in are written into the catalog (see {doc}`outputs`).
+     Aperture photometry on model+residual follows, using the configured
+     aperture or its FWHM-based default.
 
 5. **Return.** `Pipeline.run()` returns `(table, residuals)`; the module-level
    {func}`mophongo.pipeline.run` returns `(table, residuals, pipeline)`. The
@@ -129,11 +163,10 @@ table, residuals, pipe = mophongo.pipeline.run(
     segmap,                   # segmentation map on the hi-res grid
     catalog=cat,              # astropy Table with id, x, y
     psfs=[psf_hi, psf_lo],    # per-image PSFs (arrays or PSFRegionMaps)
-    weights=[None, ivar_lo],  # inverse-variance maps
+    weights=[ivar_hi, ivar_lo],  # inverse-variance maps
     kernels=[None, kernel],   # matching kernels for images[1:]
     wcs=[wcs_hi, wcs_lo],
-    extend_templates="psf_wings",
-    config=mophongo.fit.FitConfig(),
+    config=mophongo.fit.FitConfig(extend_mode="psf_wings"),
 )
 ```
 
@@ -148,8 +181,10 @@ All arguments after `images` and `segmap` are keyword-only:
   catalog generation from the segmentation map is not implemented as of this
   writing.
 - `psfs` (*Sequence[np.ndarray | PSFRegionMap] | None*, default `None`) — one
-  PSF per image; `psfs[0]` is the high-resolution PSF used for template
-  extension. Must match `len(images)` when given.
+  PSF per image; `psfs[0]` is the high-resolution PSF the template build
+  scheme uses. Every scheme but `"none"` requires it, so with the default
+  `extend_mode` an array-level run without `psfs[0]` raises. Must match
+  `len(images)` when given.
 - `weights` (*Sequence[np.ndarray] | None*, default `None`) — inverse-variance
   maps, one per image (`None` entries allowed). Must match `len(images)`.
 - `wht_images` (*Sequence[np.ndarray] | None*, default `None`) — alias for
@@ -167,11 +202,16 @@ All arguments after `images` and `segmap` are keyword-only:
   position, and arcsec apertures.
 - `window` (default `None`) — accepted and stored, but not used anywhere in
   the pipeline as of this writing.
-- `extend_templates` (*str | None*, default `None`) — `"psf_wings"`,
-  `"psf_model"`, or `None` (see the flow above; `"psf"` is accepted as a
-  synonym for `"psf_wings"`).
+- `extend_templates` (*str | None*, default `None`) — legacy selector for the
+  template build scheme, predating `FitConfig.extend_mode` and kept for tests
+  and verification runs. When given it names a scheme (`"none"`,
+  `"psf_wings"`, `"psf"`, `"psf_model"`, `"wren"`, `"classic"`, or
+  `"default"` for `"psf_wings"`; anything else raises) and overrides the
+  config field. `None` leaves the choice to `FitConfig.extend_mode`, whose
+  own default is `"psf_wings"` — so `None` does *not* mean "no extension",
+  which is `"none"`. The resolved scheme is stored as `Pipeline.extend_mode`.
 - `templates` (*Templates | Sequence[Template] | None*, default `None`) —
-  prebuilt templates; skips extraction and extension when given.
+  prebuilt templates; skips extraction and the build scheme when given.
 - `config` (*FitConfig | None*, default `None`) — fitting configuration; a
   default {class}`mophongo.fit.FitConfig` is created when `None`.
 
@@ -187,16 +227,25 @@ optional argument:
 hi-res + one lo-res band). It loads from JSON with
 {meth}`~mophongo.pipeline.RunConfig.from_json` (lines starting with `#` are
 stripped, so the file can carry comments); unknown keys raise an error.
+Configs written before the scheme merge that carry the removed
+`extend_templates` key fail to load for that reason — move the value into
+the `fit` dict as `"fit": {"extend_mode": "psf_wings"}`.
 {meth}`Pipeline.from_config <mophongo.pipeline.Pipeline.from_config>` accepts
 a config JSON path, a directory containing exactly one `*.json`, or a
 `RunConfig` instance, and defers data loading until
 {meth}`~mophongo.pipeline.Pipeline.run` or
-{meth}`~mophongo.pipeline.Pipeline.load_data`. `run()` writes a copy of the
-executed config to `<out_dir>/<name>.json`, so a finished run reopens with
-`Pipeline.from_config(out_dir)` followed by
-{meth}`~mophongo.pipeline.Pipeline.load_fit`. Relative paths inside a
-config resolve against the process working directory, not the config file's
-location, so reopen from the same working directory as the original run.
+{meth}`~mophongo.pipeline.Pipeline.load_data`. `run()` first writes a fully
+explicit snapshot of the executed config to `<out_dir>/<name>.json`
+({meth}`~mophongo.pipeline.Pipeline.save_config`): every `RunConfig` field
+and every used `FitConfig` setting with its resolved value, so the run stays
+repeatable when code defaults change later (knobs of the build schemes the
+run did not select are omitted). A finished run therefore reopens from its
+output directory alone, with `Pipeline.from_config(out_dir)` followed by
+{meth}`~mophongo.pipeline.Pipeline.load_outputs` for the catalog-level
+products or {meth}`~mophongo.pipeline.Pipeline.load_fit` for the full
+post-run state. Relative paths inside a config resolve against the process
+working directory, not the config file's location, so reopen from the same
+working directory as the original run.
 
 ```python
 from mophongo.pipeline import Pipeline
@@ -225,9 +274,17 @@ Required fields:
 
 Optional fields:
 
-- `driz_hi` (*str | None*, default `None`) — mosaic used for `DrizzlePSF`
-  footprints of the hi-res side; defaults to `sci_hi`. Set it when `sci_hi`
-  is a derived template image.
+- `wht_hi` (*str | None*, default `None`) — detection-band weight map, the
+  counterpart of `wht_lo` and what turns the detection image into a
+  calibrated inverse variance. `None` derives it from `sci_hi` by the
+  standard `_sci.fits` -> `_wht.fits` substitution. The path is resolved on
+  every run and its absence raises
+  ({meth}`~mophongo.pipeline.Pipeline.resolve_wht_hi`), but the pixels are
+  read only by the build schemes that weight data against a PSF model by
+  signal-to-noise (`"psf_wings"`, `"wren"`, `"classic"`), since a full-field
+  high-resolution weight map costs as much memory as the mosaic. The
+  detection background is measured alongside it but, unlike the low-resolution
+  side, not subtracted.
 - `psf_dir` (*str*, default `"data/PSF"`) — directory of STDPSF grid files.
 - `pattern_hi`, `pattern_lo` (*str*, default `""`) — STDPSF filename regex
   for each band, of the form
@@ -247,8 +304,6 @@ Optional fields:
 - `expect_frames` (*list[int] | None*, default `None`) — optional
   `[n_frames_hi, n_frames_lo]` sanity check against the WCS csvs; a mismatch
   raises.
-- `extend_templates` (*str | None*, default `"psf_wings"`) — template
-  extension mode, as above.
 - `bg_filter_sigma` (*float*, default `64.0`) — background filter scale
   passed to {func}`mophongo.catalog.get_bg_and_ivar`; the fitted image is the
   lo-res science image minus this background.
@@ -259,7 +314,8 @@ Optional fields:
 - `trial_center` (*list[float] | None*, default `None`) — `[ra, dec]` in
   degrees of the trial patch.
 - `fit` (*dict*, default `{}`) — keyword arguments forwarded to
-  {class}`mophongo.fit.FitConfig`.
+  {class}`mophongo.fit.FitConfig`. The template build scheme is one of them
+  (`fit: {"extend_mode": ...}`); there is no separate config field for it.
 - `scene_plots` (*bool*, default `True`) — write per-scene diagnostic PNGs
   in {meth}`~mophongo.pipeline.Pipeline.write_outputs`.
 - `save_stamps` (*bool*, default `True`) — write the per-source stamps FITS
@@ -354,25 +410,39 @@ summary text). Expensive products are cached in `out_dir`:
   unit-sum PSF shapes and renormalized to unit sum, so the kernel carries no
   flux scale of its own.
 - {meth}`~mophongo.pipeline.Pipeline.load_data` `(kernels=True)` — read
-  images, segmentation map, and catalog; subtract the background; zero
-  non-finite pixels in both image and weight; apply the footprint and trial
-  filters. With `kernels=False` the PSF/kernel maps are skipped for quick
+  images, segmentation map, and catalog; subtract the low-resolution
+  background; zero non-finite pixels in both image and weight; apply the
+  footprint and trial filters. The detection-band weight map is resolved
+  here as well, and read into `weights[0]` when the selected build scheme
+  uses it. With `kernels=False` the PSF/kernel maps are skipped for quick
   inspection and built later by `run()`.
 - {meth}`~mophongo.pipeline.Pipeline.run` — the fit itself (loads data
-  and maps first when needed).
+  and maps first when needed, after snapshotting the config).
 - {meth}`~mophongo.pipeline.Pipeline.write_outputs` — write
   `<name>_residual.fits` (on the hi-res reference grid, with the `sci_hi`
-  header), `<name>_fit_table.fits`, the stamps file (when `save_stamps`),
-  a scene catalog CSV (`id`, `n_templates`, `is_bright`, `ra`, `dec`, and a
-  per-scene image-viewer URL), and optional per-scene PNGs.
+  header), `<name>_fit_table.fits`, `<name>_templates.fits` (the per-template
+  fit state: component amplitudes, applied shifts, scene membership), the
+  stamps file (when `save_stamps`), a scene catalog CSV (`id`,
+  `n_templates`, `is_bright`, `ra`, `dec`, and a per-scene image-viewer URL),
+  and optional per-scene PNGs.
 - {meth}`~mophongo.pipeline.Pipeline.run_all` — all of the above in
   order, with everything the run emits (logging, `print`, progress bars)
   captured to `<out_dir>/<name>.log`.
-- {meth}`~mophongo.pipeline.Pipeline.load_fit` `(ifilt=1)` — restore the
-  post-run state from written outputs without refitting: reads the fit
-  table and residual, rebuilds fitted templates from the stamps file
-  (regenerating and rewriting it through the run's template path when
-  missing). Scenes are not persisted and are not restored.
+- {meth}`~mophongo.pipeline.Pipeline.load_outputs` — reload a finished run's
+  catalog-level products into a fresh session: the fit table, the residual
+  image, and the per-template fit table when present. Pixel data are not
+  read, so catalog diagnostics work but image-based ones still need
+  `load_data`.
+- {meth}`~mophongo.pipeline.Pipeline.load_fit` `(ifilt=1)` — restore the full
+  post-run state without refitting: calls `load_data` and `load_outputs`,
+  then rebuilds the fitted templates from the stamps file. When the stamps
+  file is missing the templates are regenerated through the run's own
+  template path, the fitted amplitudes and shifts are reapplied from
+  `<name>_templates.fits` (falling back to the fit table for runs written
+  before that file existed), and the stamps file is written back. The scene
+  objects themselves are not persisted, so `all_scenes` stays empty; scene
+  membership survives per template as `id_scene` and per source as the
+  `scene_<i>` catalog column.
 - {meth}`~mophongo.pipeline.Pipeline.info` — print a summary of config,
   inputs, cache state, loaded data, and results at any stage.
 
@@ -387,7 +457,7 @@ Inspection and diagnostic helpers
 ## `FitConfig` reference
 
 {class}`mophongo.fit.FitConfig` configures the solver, astrometry, apertures,
-template extension behavior, and scene processing. In config-driven runs its
+the template build scheme, and scene processing. In config-driven runs its
 fields come from the `fit` dict of the JSON config.
 
 Solver:
@@ -412,7 +482,14 @@ Astrometry:
   runs).
 - `astrom_shift_tol` (*float*, default `0.05`) — stop iterating once the
   largest per-template shift increment of a pass drops below this tolerance
-  (fit-grid pixels).
+  (fit-grid pixels). The increment compared is the damped one that was
+  actually applied.
+- `astrom_damping` (*float*, default `0.8`) — factor applied to each pass's
+  predicted shift before it moves the templates. The central-difference
+  shift basis underestimates the gradients of sharp structure, so the
+  linearized step can overshoot; damping keeps the iteration contracting for
+  scenes dominated by marginally sampled cores, at the cost of roughly one
+  extra pass. `1.0` is undamped.
 - `fit_astrometry_joint` (*bool*, default `True`) — solve shifts jointly
   with fluxes rather than as a separate step.
 - `reg_astrom` (*float*, default `1e-4`) — regularization of the astrometric
@@ -453,15 +530,52 @@ Templates:
 
 - `template_dilate_segmap` (*int*, default `0`) — dilate each segment by
   this disk radius (pixels) before extraction. Off by default: dilation
-  mostly adds a ring of sky noise, and wing recovery is the job of template
-  extension.
+  mostly adds a ring of sky noise, and wing recovery is the job of the
+  build scheme.
 - `skip_template_extension_for_deblended` (*bool*, default `False`) — leave
-  catalog deblend children unextended; by default extension applies to every
-  source.
-- `extend_wings_background_only` (*bool*, default `True`) — PSF-wing
-  completion fills only background pixels of the (dilated) segmentation map,
-  so blended neighbours keep ownership of their own pixels. `False` fills
-  every zero template pixel.
+  catalog deblend children unextended. Applies to the post-extraction modes
+  `"psf"` and `"psf_model"` only; the build-time schemes ignore it.
+- `extend_wings_background_only` (*bool*, default `True`) — wing completion
+  keeps only pixels that no other segment owns, so blended neighbours keep
+  their own pixels and the wing flux that falls on them is fitted once, by
+  their own template. `False` keeps every filled pixel. Used by
+  `"psf_wings"` and `"psf"`.
+
+Template build scheme (see the flow above; the per-scheme knobs are ignored
+by the other schemes):
+
+- `extend_mode` (*str*, default `"psf_wings"`) — one of `"none"`,
+  `"psf_wings"`, `"psf"`, `"psf_model"`, `"wren"`, `"classic"`, with
+  `"default"` accepted as a spelling of `"psf_wings"`. Any other value
+  raises.
+- `psf_wings_snrlo` (*float*, default `5.0`) — in-segment signal-to-noise at
+  which a `"psf_wings"` template is pure data; below it the core rolls off
+  towards the scaled PSF, reaching a pure point source at zero.
+- `psf_wings_blend_p` (*float*, default `2.0`) — rolloff exponent of that
+  blend weight.
+- `psf_wings_rms` (*float | None*, default `None`) — scalar detection-image
+  noise used for the signal-to-noise when no detection weight map is
+  available; `None` measures it from the detection image itself. A run with
+  neither a weight map nor a positive measured value raises rather than
+  evaluating the faint limit against zero noise.
+- `wren_ee_fraction` (*float*, default `0.95`) — encircled-energy fraction
+  setting the support cap of a `"wren"` template.
+- `wren_fit_snrlo_psf` (*float*, default `10.0`) — core-weight onset of
+  `"wren"` is 1.5 times this value.
+- `wren_wings_snr_psf` (*float*, default `3.0`) — per-annulus weight onset.
+- `wren_blend_p` (*float*, default `2.0`) — rolloff exponent of the wren
+  blend weight.
+- `wren_blend_annulus` (*float*, default `0.15`) — halo annulus width in
+  arcsec (four detection pixels when no WCS is available).
+- `wren_bg_rms` (*float | None*, default `None`) — detection-image sky rms
+  for `"wren"` when no detection weight map is given; `None` measures it.
+  Every wren weight comes from a signal-to-noise, so a run with neither
+  raises instead of turning every template into a bare point source.
+- `classic_tmpl_snrlo` (*float*, default `15.0`) — in-segment
+  signal-to-noise below which the IDL scheme replaces the template by a pure
+  point source; `0` disables the branch, as in the original.
+- `classic_rms` (*float | None*, default `None`) — the same scalar-noise
+  fallback for `"classic"`.
 
 Scenes:
 

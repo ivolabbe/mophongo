@@ -74,6 +74,18 @@ This file tracks future desired features, checks, and investigations.
   the template branch merges — checked 2026-08-11: `git log main..template`
   still shows unmerged commits and `astrom_damping` is absent at main HEAD,
   so nothing to document yet.
+- [ ] Post-merge follow-ups from the 2026-08-11 docs update of the template
+  merge (`6e6cec6`): (a) `RunConfig.driz_hi` looks accidentally dropped by
+  the merge — `6e6cec6^1` had it and passed `driz_image=str(cfg.driz_hi or
+  cfg.sci_hi)` in `_ensure_dpsfs`; merged HEAD passes `str(cfg.sci_hi)` and
+  the name is gone from `src/`. Restore or confirm intentional (docs
+  document HEAD, no `driz_hi` entry). (b) `scene_<i>` fit-table fallback is
+  `-1` for templates without a scene while `_template_fit_table` writes `0`
+  — unify. (c) `ClassicParams.force_psf` and `WrenParams.containment` have
+  no FitConfig knob and stay at defaults on every pipeline run — wire
+  through or drop. (d) `Templates.from_image` accepts an `extension`
+  argument it never uses. (e) `mophongo-repair` console script missing from
+  the current env until the next `poetry install`.
 - [ ] Multi-band pipeline stream. `run()` still fits multiple images
   sequentially (shared hi-res templates, per-band convolution/solve,
   `flux_<i>` columns), but the config/save/restore stream is one band per

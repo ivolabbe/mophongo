@@ -33,7 +33,7 @@ gets built for you.
 | Inputs | in-memory numpy arrays + `astropy` Table | FITS/CSV paths in a JSON `RunConfig` |
 | PSFs | one static stamp per band, supplied by you | drizzled, position-dependent ePSFs built from the per-frame WCS CSVs |
 | Kernels | you build them ({func}`mophongo.utils.matching_kernel`), or pass a prebuilt {class}`mophongo.psf_map.PSFRegionMap` | per-region kernel map, built and geojson-cached automatically |
-| Template extension | off by default (`extend_templates=None`, templates stay truncated) | `"psf_wings"` by default |
+| Template build scheme | `"psf_wings"` by default, from the PSF stamp you pass as `psfs[0]` | the same default, from the drizzled detection-band PSF map |
 | Preprocessing | none — you supply inverse-variance weights | background/ivar estimation, footprint and trial-patch cuts |
 | Products | in-memory `(table, residuals, pipe)` only | residual FITS, fit table, per-source stamps, scene diagnostics, run log; restore later with `load_fit()` |
 | Suits | simulations, mocks, method experiments | real mosaics |
@@ -85,6 +85,7 @@ A minimal config:
   "catalog": "catalog.fits",
   "sci_lo": "image_lo.fits",
   "wht_lo": "wht_lo.fits",
+  "wht_hi": "wht_hi.fits",
   "csv_hi": "frames_hi.csv",
   "csv_lo": "frames_lo.csv",
   "pattern_hi": "STDPSF_NRCA._F444W.*fits",
@@ -94,10 +95,16 @@ A minimal config:
 ```
 
 Lines starting with `#` are treated as comments and stripped, so configs can
-be annotated. Unknown keys raise an error, so typos fail loudly. A realistic
-config for a JWST field — 40 mas F444W detection mosaic, 80 mas MIRI F770W
-band, MJD-tagged ePSF grids, a trial patch for testing before the full-field
-run — looks like:
+be annotated. Unknown keys raise an error, so typos fail loudly.
+
+One input stays implicit above: every run needs a detection-band weight map,
+the source of the calibrated detection noise. `wht_hi` names it; left unset,
+the run looks for the standard `_sci.fits` -> `_wht.fits` sibling of `sci_hi`
+and raises when there is none.
+
+A realistic config for a JWST field — 40 mas F444W detection mosaic, 80 mas
+MIRI F770W band, MJD-tagged ePSF grids, a trial patch for testing before the
+full-field run — looks like:
 
 ```text
 {
@@ -171,10 +178,13 @@ required.
   {doc}`pipeline` describes what they contain and how to generate them with
   {func}`mophongo.utils.reconstruct_wcs`.
 
-`driz_hi` (`str | None`, default `None`)
-: Mosaic providing the DrizzlePSF footprints/grid of the high-resolution
-  side; defaults to `sci_hi`. Set when `sci_hi` is a derived template
-  image.
+`wht_hi` (`str | None`, default `None`)
+: Detection-band weight map, the counterpart of `wht_lo`. `None` derives it
+  from `sci_hi` by the standard `_sci.fits` -> `_wht.fits` substitution; a
+  run with neither raises. Its pixels are read only by the build schemes
+  that weight data against a PSF model by signal-to-noise (`"psf_wings"`,
+  `"wren"`, `"classic"`), because a full-field high-resolution weight map
+  costs as much memory as the mosaic itself.
 
 `psf_dir` (`str`, default `"data/PSF"`)
 : Directory holding STDPSF grid files.
@@ -204,9 +214,6 @@ required.
 `expect_frames` (`list[int] | None`, default `None`)
 : Optional `[n_frames_hi, n_frames_lo]` sanity assertion on the WCS CSVs.
 
-`extend_templates` (`str | None`, default `"psf_wings"`)
-: Template extension mode, as in the array interface below.
-
 `bg_filter_sigma` (`float`, default `64.0`)
 : Background filter scale for the background/inverse-variance
   preprocessing step (see {doc}`preprocessing`).
@@ -222,7 +229,8 @@ required.
 
 `fit` (`dict`, default `{}`)
 : Keyword arguments forwarded to {class}`mophongo.fit.FitConfig`
-  (see {doc}`fitting`).
+  (see {doc}`fitting`). The template build scheme is selected here, with
+  `"extend_mode"`; there is no separate config field for it.
 
 `scene_plots` (`bool`, default `True`)
 : Write per-scene diagnostic PNGs during `write_outputs()`.
@@ -248,7 +256,9 @@ images and PSF stamps directly. It needs, at minimum:
 - a source catalog (`astropy.table.Table`) with columns `id`, `x`, `y`
   (positions in detection-image pixels);
 - per-image weight maps in inverse-variance units;
-- one PSF-matching kernel per fitted band (see below).
+- one PSF-matching kernel per fitted band (see below);
+- the detection-band PSF as `psfs[0]`, which the default template build
+  scheme needs (see below).
 
 ```python
 from astropy.io import fits
@@ -333,13 +343,17 @@ are keyword-only.
   not implemented, so build the catalog first (see {doc}`catalog`).
 
 `psfs` (`Sequence[np.ndarray] | None`, default `None`)
-: One PSF stamp per image. `psfs[0]` supplies the shape used for template
-  extension; the others provide per-band PSF metadata and, when
-  `psf_throughputs` is not given, the fallback throughput from the stamp
-  sum. Pass unit-sum shapes for fitting.
+: One PSF stamp per image. `psfs[0]` supplies the shape the template build
+  scheme extends with, and every scheme but `"none"` requires it, so with
+  the default scheme a run without it raises; the others provide per-band
+  PSF metadata and, when `psf_throughputs` is not given, the fallback
+  throughput from the stamp sum. Pass unit-sum shapes for fitting.
 
 `weights` (`Sequence[np.ndarray] | None`, default `None`)
-: Inverse-variance maps, one per image.
+: Inverse-variance maps, one per image. `weights[0]` is the detection-band
+  map: the `"psf_wings"`, `"wren"` and `"classic"` build schemes measure
+  each segment's signal-to-noise from it, and fall back to one scalar noise
+  estimate for the whole detection image when it is `None`.
 
 `wht_images` (`Sequence[np.ndarray] | None`, default `None`)
 : Backward-compatible alias for `weights`; used only when `weights` is
@@ -367,11 +381,16 @@ are keyword-only.
   this writing it is not consumed by the fitting path.
 
 `extend_templates` (`str | None`, default `None`)
-: How to fill each template outside its segment: `"psf_wings"` adds the
-  detection-band PSF wings beyond the segmentation footprint, `"psf_model"`
-  replaces the template with the PSF, `None` leaves it truncated.
-  Truncated templates bias total fluxes low, badly so for faint sources;
-  config-driven runs default to `"psf_wings"`.
+: Legacy selector for the template build scheme, kept from before the
+  setting moved into `FitConfig`. When given it names a scheme (`"none"`,
+  `"psf_wings"`, `"psf"`, `"psf_model"`, `"wren"`, `"classic"`) and
+  overrides the config field; `None` leaves the choice to
+  `FitConfig.extend_mode`, which itself defaults to `"psf_wings"`. `None` is
+  therefore not "no extension" — that is `"none"`, which leaves templates
+  truncated at the segment boundary and biases total fluxes low, badly so
+  for faint sources. Prefer setting `extend_mode` on the `FitConfig`; both
+  entry points then read the same field. The schemes are described in
+  {doc}`pipeline` and {doc}`templates`.
 
 `templates` (`Templates | Sequence[Template] | None`, default `None`)
 : Prebuilt {class}`mophongo.templates.Templates` to use instead of
@@ -390,8 +409,9 @@ error, and weight-map-predicted error), `throughput_i`, and the
 throughput-corrected totals `flux_i_total`, `err_i_total`,
 `err_pred_i_total`. When per-source encircled energies of the
 low-resolution PSF are available they are used in place of the filter-level
-throughput. Aperture and diagnostic columns are described in
-{doc}`outputs`.
+throughput. A `scene_i` column records which scene each source was fitted
+in, `-1` for sources that had no template. Aperture and diagnostic columns
+are described in {doc}`outputs`.
 
 ### `matching_kernel()` parameters
 

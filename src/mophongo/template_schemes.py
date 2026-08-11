@@ -40,6 +40,7 @@ IDL   ``subphot.pro::build_cube``, driven by ``legacy/autopilot/old/dophot.pro``
       (``phot.param`` sets ``tmpl_snrlo = 15.0``).
 wren  ``wren/dev-wren:src/mophongo/templates.py::_extended_composite`` plus its
       sizing preamble in ``pipeline.py``.
+
 Both are described in ``scratch/wren/template_comparison.tex``.
 """
 

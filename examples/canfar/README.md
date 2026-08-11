@@ -11,6 +11,26 @@ they already exist locally. That is an optimisation, not a requirement:
 grids from the exposure lists on arc and caches them there. Uploading just skips
 a slow first run.
 
+## Everything at once
+
+```bash
+P=~/.venvs/canfar/bin/python
+$P campaign.py                      # every config in ../minerva
+$P campaign.py --fields uds cosmos  # only those fields
+$P campaign.py --from stage         # already pushed and built
+$P campaign.py --dry-run            # print the plan, run nothing
+```
+
+It runs upload, environment, config rewrite, staging and submission in order,
+and encodes three things worth not rediscovering: runs are submitted without
+waiting, so nothing depends on a local process surviving; staging does one band
+per field first, since bands share their field's mosaic and segmap; and a field
+with no F444W grids sends one band alone to build them, because bands of a field
+would otherwise build the same grids concurrently into one `psf_dir`.
+
+Then watch with `submit.py status` / `logs` / `fetch`. The steps below are the
+same thing done by hand.
+
 ## Prerequisites
 
 A CADC proxy certificate, valid 10 days:

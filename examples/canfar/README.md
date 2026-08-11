@@ -42,7 +42,7 @@ rather than `--system-site-packages`.
 ```bash
 $P arcify.py ../minerva/uds_f770w.json        # rewrite paths for arc
 $P submit.py stage uds_f770w                  # decompress its inputs on arc
-$P submit.py run   uds_f770w --cores 8 --ram 64
+$P submit.py run   uds_f770w --ram 64
 $P submit.py fetch uds_f770w                  # pull the small outputs down
 ```
 
@@ -60,7 +60,7 @@ A cheap smoke run on a small patch, without touching the source config:
 
 ```bash
 $P arcify.py ../minerva/uds_f770w.json --r-trial 0.25 --suffix _test
-$P submit.py run uds_f770w_test --cores 4 --ram 64
+$P submit.py run uds_f770w_test --ram 64
 ```
 
 `submit.py status` lists sessions, `submit.py logs <id>` prints one job's output
@@ -107,8 +107,11 @@ is read-mostly for the collaboration.
 - Job `args` are whitespace-split into a YAML sequence server side and quotes
   cause a 500, so the command must be a single token. Parameters go through
   environment variables (`RUN`, `CFG`) instead.
-- Up to 16 cores. The quota page reports a 32 GB default, but that is a default
-  and not a cap: 64 GB is an allowed request and is what these scripts use.
+- Cores are chosen per config: 4 for a full field, 1 for a trial patch, since
+  measured CPU use is about 0.2 of a core and the runs wait on `/arc`. Pass
+  `--cores` to override. Up to 16 are available.
+- The quota page reports a 32 GB memory default, but that is a default and not a
+  cap: 64 GB is an allowed request and is what these scripts use.
 - Importing mophongo from the NFS-backed venv costs about three minutes before
   any work starts. That is not a hang.
 - For a single trial patch CANFAR is not faster than a laptop; the gain is that

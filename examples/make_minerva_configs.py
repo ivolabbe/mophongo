@@ -63,12 +63,17 @@ class Release:
     miri: str  # MIRI mosaic version directory, e.g. "m3.1"
     seg_dir: str  # release prefix of the directory holding the segmap
     cat_dir: str  # release prefix of the directory holding the SUPER catalog
+    # Put every band on one trial patch instead of each band's own deepest spot.
+    # Set for EGS, where the MIRI strips are so thin that per-band centres land
+    # in different places and no source is measured in all seven bands.
+    common_center: bool = False
 
 
 RELEASES = [
     Release("uds", "UDS", "n3.0", "m3.1", "n3.0_v1.2", "n3.0_m3.1_v1.2.1"),
     Release("cosmos", "COSMOS", "n3.0", "m3.0", "n3.0_v1.0", "n3.0_m3.0_v1.0.1"),
-    Release("egs", "EGS", "n2.0", "m2.1", "n2.0_v1.3", "n2.0_m2.1_v1.3.1"),
+    Release("egs", "EGS", "n2.0", "m2.1", "n2.0_v1.3", "n2.0_m2.1_v1.3.1",
+            common_center=True),
 ]
 
 
@@ -163,6 +168,54 @@ def deepest_patch(wht_path: Path, radius_arcmin: float) -> tuple[float, float] |
     return float(ra), float(dec)
 
 
+def common_patch(wht_paths: list[Path], radius_arcmin: float) -> tuple[float, float] | None:
+    """Return ``(ra, dec)`` of the best patch covered by *every* band.
+
+    Per-band centres put each band on its own deepest spot, which is fine in
+    isolation but means no source is measured in all of them. This scores the
+    intersection of the bands' footprints instead, so one patch serves the whole
+    field and the bands are directly comparable.
+
+    The bands of a MIRI release share a mosaic grid, so the intersection is a
+    plain AND. Depth is normalised per band before scoring and the worst band is
+    taken, so the centre is one that every band covers well rather than one a
+    single deep band drags around. Returns None if the bands share no pixels.
+    """
+    masks, depths, wcs, binf, scale = [], [], None, 1, 1.0
+    for path in wht_paths:
+        with fits.open(path, memmap=True) as hdul:
+            hdu = hdul[0] if hdul[0].data is not None else hdul[1]
+            wht = np.nan_to_num(hdu.data.astype(np.float32))
+            if wcs is None:
+                wcs = WCS(hdu.header)
+                scale = abs(wcs.pixel_scale_matrix[1, 1]) * 3600.0
+                binf = max(1, int(round(2.0 / scale)))
+        small = block_reduce(wht, binf, func=np.mean)
+        masks.append(small > 0)
+        nonzero = small[small > 0]
+        if nonzero.size == 0:
+            return None
+        depths.append(small / np.median(nonzero))
+
+    overlap = np.logical_and.reduce(masks)
+    if not overlap.any():
+        log.warning("  bands share no covered pixels: per-band centres")
+        return None
+
+    box = max(3, int(round(2 * radius_arcmin * 60.0 / (scale * binf))))
+    worst = np.min(np.stack(depths), axis=0) * overlap
+    score = uniform_filter(worst.astype(np.float32), box, mode="constant", cval=0.0)
+    coverage = uniform_filter(overlap.astype(np.float32), box, mode="constant", cval=0.0)
+    iy, ix = np.unravel_index(int(np.argmax(score)), score.shape)
+    ra, dec = wcs.all_pix2world([[(ix + 0.5) * binf - 0.5, (iy + 0.5) * binf - 0.5]], 0)[0]
+    log.info(
+        "  common centre %.5f %.5f  (%.1f%% of the box covered by all %d bands; "
+        "the field's all-band overlap is %.2f%% of the mosaic)",
+        ra, dec, 100 * coverage[iy, ix], len(wht_paths), 100 * overlap.mean(),
+    )
+    return float(ra), float(dec)
+
+
 def band_configs(rel: Release) -> list[dict]:
     """Build one config dict per staged MIRI band of ``rel``."""
     root = DATA / rel.local
@@ -183,6 +236,17 @@ def band_configs(rel: Release) -> list[dict]:
         log.warning("  no MIRI directory %s", miri_dir)
         return []
 
+    # One centre for the whole field when asked for, so every band measures the
+    # same sources. Only worth it where the bands overlap poorly enough that
+    # per-band centres would land in disjoint places.
+    shared = None
+    if rel.common_center:
+        wht_all = [
+            sci.with_name(sci.name.replace("_drz_sci_extrabkg", "_drz_wht"))
+            for sci in sorted(miri_dir.glob("*_drz_sci_extrabkg.fits"))
+        ]
+        shared = common_patch([w for w in wht_all if w.exists()], R_TRIAL_ARCMIN)
+
     configs = []
     for sci_lo in sorted(miri_dir.glob("*_drz_sci_extrabkg.fits")):
         band = sci_lo.name.split("-80mas-")[1].split("_")[0]  # e.g. "f770w"
@@ -192,7 +256,7 @@ def band_configs(rel: Release) -> list[dict]:
             log.warning("  %s: missing weight or wcs csv, skipped", band)
             continue
         log.info("  %s", band)
-        patch = deepest_patch(wht_lo, R_TRIAL_ARCMIN)
+        patch = shared or deepest_patch(wht_lo, R_TRIAL_ARCMIN)
         configs.append(
             {
                 "name": f"{rel.field}_{band}",

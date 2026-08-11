@@ -87,13 +87,18 @@ collaboration and should stay read-mostly.
    - **type**: `notebook`
    - **image**: `images.canfar.net/skaha/jwst-notebook:25.07.25`
    - **name**: anything, e.g. `mophongo`
-   - **cores**: 8
+   - **cores**: 4
    - **memory**: 64 GB
 4. Launch, wait for it to turn green, and open it.
 5. In JupyterLab, **File → New → Terminal**.
 
 That terminal is a normal shell on a machine with `/arc` mounted and outbound
 internet. Everything below is typed there.
+
+On cores: 4 is plenty for a full field and 1 is enough for a trial patch.
+Measured CPU use is about 0.2 of a core — the run waits on `/arc` rather than
+computing, and the fitting path has no thread pool — so asking for 8 or 16 only
+idles allocation someone else could use.
 
 On memory: ask for 64 GB and do not economise. The pipeline loads the full
 3.3 GB F444W mosaic and the 3.3 GB segmap regardless of how small a trial patch
@@ -295,7 +300,7 @@ $P submit.py push                              # source, job scripts, PSF grids
 $P submit.py setup                             # build the venv on /arc
 $P arcify.py ../minerva/uds_f770w.json         # rewrite paths for arc
 $P submit.py stage uds_f770w
-$P submit.py run   uds_f770w --cores 8 --ram 64
+$P submit.py run   uds_f770w --ram 64
 $P submit.py fetch uds_f770w                   # bring the small outputs home
 ```
 

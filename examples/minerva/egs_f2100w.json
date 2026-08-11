@@ -33,8 +33,8 @@
   "footprint_filter": true,
   "r_trial": 3.0,
   "trial_center": [
-    214.93752,
-    52.90127
+    215.12577,
+    53.0162
   ],
   "bg_filter_sigma": 64.0,
   "fit": {

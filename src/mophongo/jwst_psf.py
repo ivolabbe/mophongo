@@ -167,14 +167,21 @@ def build_jwst_psf(
     else:
         date_obj = None
 
-    grid = inst.psf_grid(
+    # Omit fov_arcsec entirely when unset rather than passing None: stpsf
+    # computes fov_pixels as fov_arcsec / pixelscale whenever the key is
+    # present, so a None divides and raises. Leaving it out selects stpsf's own
+    # pixel-based default, which is what the shipped grids were built with
+    # (4.09 arcsec for NIRCam, 8.10 for MIRI).
+    grid_kwargs = dict(
         num_psfs=num_psfs,
         oversample=oversample,
-        fov_arcsec=fov_arcsec,
         all_detectors=False,
         use_detsampled_psf=use_detsampled_psf,
         verbose=verbose,
     )
+    if fov_arcsec is not None:
+        grid_kwargs["fov_arcsec"] = fov_arcsec
+    grid = inst.psf_grid(**grid_kwargs)
     if date_obj is not None:
         grid.meta["DATE-OBS"] = date_obj.isot
         grid.meta["MJD-AVG"] = float(date_obj.mjd)

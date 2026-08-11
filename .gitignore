@@ -10,6 +10,22 @@ examples/*
 !examples/verify_pipeline.ipynb
 !examples/run_*.py
 !examples/*.json
+!examples/make_minerva_configs.py
+# generated MINERVA run configs: track the configs and the README, not the
+# per-band output directories they write next to themselves
+!examples/minerva/
+examples/minerva/*
+!examples/minerva/*.json
+!examples/minerva/*.md
+# CANFAR toolkit: track the scripts and docs, not the generated arc configs
+# (they carry a hardcoded username), the uploads, or the fetched outputs
+!examples/canfar/
+examples/canfar/*
+!examples/canfar/*.py
+!examples/canfar/*.md
+!examples/canfar/jobs/
+examples/canfar/jobs/*
+!examples/canfar/jobs/*.sh
 legacy/autopilot/*png
 legacy/autopilot/*pdf
 !data/*test*

@@ -1,0 +1,274 @@
+#!/usr/bin/env python
+"""Drive mophongo runs on the CANFAR Science Platform.
+
+CANFAR compute is a REST API (`skaha`), not ssh: the transfer endpoint on port
+64022 is SFTP only and cannot execute anything. Jobs are containers with `/arc`
+mounted, so the MINERVA data are already there and nothing is uploaded except
+the mophongo source and the PSF grids.
+
+    python submit.py push                    # upload src + PSF grids (small)
+    python submit.py setup                   # build the venv on /arc
+    python submit.py stage  uds_f770w        # decompress that config's inputs
+    python submit.py run    uds_f770w ...    # one job per config, concurrent
+    python submit.py status                  # all sessions
+    python submit.py logs   <session-id>
+    python submit.py fetch  uds_f770w        # pull the small outputs down
+
+Two API quirks are handled here: the installed client defaults to API v0, which
+404s (hence ``version='v1'``), and ``args`` is whitespace-split into a YAML
+sequence server side, so the command must be a single token. Parameters are
+passed as environment variables instead.
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import re
+import subprocess
+import sys
+import tarfile
+import time
+from pathlib import Path
+
+from skaha.session import Session
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+log = logging.getLogger("submit")
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent.parent                     # mophongo/
+
+
+def canfar_user() -> str:
+    """CADC username, from $CANFAR_USER or scratch/canfar/canfar.conf."""
+    user = os.environ.get("CANFAR_USER")
+    if user:
+        return user
+    conf = REPO / "scratch" / "canfar" / "canfar.conf"
+    if conf.exists():
+        match = re.search(r'^\s*CANFAR_USER\s*=\s*"?([^"\s]+)', conf.read_text(), re.M)
+        if match and match.group(1) != "your_cadc_username":
+            return match.group(1)
+    sys.exit("set CANFAR_USER to your CADC username, or fill in "
+             "scratch/canfar/canfar.conf")
+
+
+USER = canfar_user()
+RUN = f"/arc/home/{USER}/run"                 # run tree on arc (POSIX form)
+RUN_VOS = f"arc:home/{USER}/run"              # same, VOSpace form
+IMAGE = "images.canfar.net/skaha/jwst-notebook:25.07.25"
+VCP = Path.home() / ".venvs/canfar/bin/vcp"
+DONE = ("Succeeded", "Failed", "Completed", "Terminating")
+
+
+def session() -> Session:
+    return Session(version="v1")
+
+
+def vcp(src: Path | str, dst: str, tries: int = 3) -> None:
+    """Copy one file to arc. VOSpace transfers fail intermittently, so retry."""
+    for attempt in range(1, tries + 1):
+        proc = subprocess.run([str(VCP), str(src), dst], capture_output=True, text=True)
+        if proc.returncode == 0:
+            return
+        log.warning("  vcp attempt %d/%d failed (%d): %s",
+                    attempt, tries, proc.returncode,
+                    (proc.stderr or proc.stdout).strip().splitlines()[-1:] or "")
+        time.sleep(5)
+    raise SystemExit(f"vcp failed after {tries} attempts: {src} -> {dst}")
+
+
+def do_push(args: argparse.Namespace) -> None:
+    """Upload the mophongo source and the PSF grids the configs reference.
+
+    Only these two: every science input is already on arc. Tarred first because
+    many small files over VOSpace are slow (about 3 MB/s).
+    """
+    tmp = HERE / "_upload"
+    tmp.mkdir(exist_ok=True)
+
+    src_tar = tmp / "mophongo_src.tgz"
+    with tarfile.open(src_tar, "w:gz") as tar:
+        for item in ["src", "pyproject.toml", "README.md"]:
+            tar.add(REPO / item, arcname=item,
+                    filter=lambda t: None if "__pycache__" in t.name else t)
+    log.info("src  %.1f MB", src_tar.stat().st_size / 1e6)
+
+    psf_tar = tmp / "psf.tar"
+    grids = sorted(set(sum((list((REPO / "data" / "PSF").glob(pat))
+                            for pat in args.psf_glob), [])))
+    if not grids:
+        raise SystemExit(f"no PSF grids matched {args.psf_glob}")
+    with tarfile.open(psf_tar, "w") as tar:
+        for grid in grids:
+            tar.add(grid, arcname=grid.name)
+    log.info("psf  %d grids, %.1f MB", len(grids), psf_tar.stat().st_size / 1e6)
+
+    for path in (src_tar, psf_tar):
+        log.info("uploading %s", path.name)
+        vcp(path, f"{RUN_VOS}/{path.name}")
+
+    subprocess.run([str(VCP.parent / "vmkdir"), f"{RUN_VOS}/jobs"], capture_output=True)
+    for script in sorted((HERE / "jobs").glob("*.sh")):
+        log.info("uploading jobs/%s", script.name)
+        vcp(script, f"{RUN_VOS}/jobs/{script.name}")
+
+
+def do_upload_cfg(names: list[str]) -> None:
+    """Push the rewritten configs and their staging lists to arc."""
+    for name in names:
+        for suffix in (f"{name}_canfar.json", f"{name}_stage.tsv"):
+            path = HERE / suffix
+            if not path.exists():
+                raise SystemExit(f"missing {path}; run arcify.py first")
+            vcp(path, f"{RUN_VOS}/{suffix}")
+
+
+def launch(name: str, script: str, cores: int, ram: int, env: dict[str, str]) -> str:
+    """Start one headless job and return its session id."""
+    ids = session().create(
+        name=name, image=IMAGE, cores=cores, ram=ram, kind="headless",
+        cmd="/bin/bash", args=f"{RUN}/jobs/{script}", env=env,
+    )
+    log.info("%-24s %s", name, ids[0] if ids else "FAILED")
+    return ids[0] if ids else ""
+
+
+def wait(ids: list[str], poll: int = 20) -> dict[str, str]:
+    """Block until every session reaches a terminal state."""
+    pending = [i for i in ids if i]
+    final: dict[str, str] = {}
+    while pending:
+        for sid in list(pending):
+            status = session().info([sid])[0].get("status")
+            if status in DONE:
+                final[sid] = status
+                pending.remove(sid)
+                log.info("%s %s", sid, status)
+        if pending:
+            time.sleep(poll)
+    return final
+
+
+def do_setup(args: argparse.Namespace) -> None:
+    ids = [launch("mophongo-setup", "setup_env.sh", 4, 16, {"RUN": RUN})]
+    wait(ids)
+    print(next(iter(session().logs(ids).values()))[-2000:])
+
+
+def stage_job(name: str) -> str:
+    return launch(f"mophongo-stage-{name.replace('_', '-')}", "stage.sh", 2, 8,
+                  {"RUN": RUN, "CFG": name})
+
+
+def do_stage(args: argparse.Namespace) -> None:
+    """Stage inputs, first config alone then the rest concurrently.
+
+    Bands of the same field share the F444W mosaic and the segmap, several GB
+    each. Letting the first job finish first means the others find those already
+    present instead of decompressing them again.
+    """
+    do_upload_cfg(args.names)
+    names = list(args.names)
+    ids = [stage_job(names[0])]
+    wait(ids)
+    if len(names) > 1:
+        rest = [stage_job(n) for n in names[1:]]
+        wait(rest)
+        ids += rest
+    for sid, text in session().logs(ids).items():
+        print(f"--- {sid}\n{text[-1200:]}")
+
+
+def tidy(text: str, lines: int = 40) -> str:
+    """Drop tqdm progress spam, which otherwise buries the real output."""
+    kept = [ln for ln in text.splitlines() if "it/s]" not in ln and "s/it]" not in ln]
+    return "\n".join(kept[-lines:])
+
+
+def do_run(args: argparse.Namespace) -> None:
+    do_upload_cfg(args.names)
+    ids = [launch(f"mophongo-{n.replace('_', '-')}", "run.sh", args.cores, args.ram,
+                  {"RUN": RUN, "CFG": n}) for n in args.names]
+    if args.no_wait:
+        return
+    final = wait(ids)
+    for sid, text in session().logs(ids).items():
+        status = final.get(sid)
+        print(f"--- {sid} [{status}]\n{tidy(text)}")
+        if status == "Failed" and "RUN_DONE" not in text:
+            print("  note: a failure with no traceback is usually the container "
+                  "being OOM-killed. Memory scales with the mosaic size, not "
+                  "r_trial, so use --ram 32 even for a small patch.")
+
+
+def do_status(args: argparse.Namespace) -> None:
+    for info in session().fetch(kind="headless"):
+        log.info("%-10s %-28s %s", info.get("id"), info.get("name"), info.get("status"))
+
+
+def do_logs(args: argparse.Namespace) -> None:
+    for _, text in session().logs(args.ids).items():
+        print(text)
+
+
+def do_fetch(args: argparse.Namespace) -> None:
+    """Pull the small outputs down; the residual mosaics stay on arc."""
+    for name in args.names:
+        dest = HERE / "out" / name
+        dest.mkdir(parents=True, exist_ok=True)
+        for suffix in ["fit_table.fits", "scene_catalog.csv", ".log"]:
+            stem = name.split("_")[0] if suffix == ".log" else name
+            remote = f"{RUN_VOS}/out/{name}/{stem}_{suffix}".replace("_.log", ".log")
+            try:
+                vcp(remote, str(dest))
+            except subprocess.CalledProcessError:
+                log.warning("  missing: %s", remote)
+        log.info("%s -> %s", name, dest)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("push", help="upload mophongo source and PSF grids")
+    p.add_argument("--psf-glob", nargs="+",
+                   default=["UDS_NRC*_F444W_MJD*_GRID25_OS4.fits",
+                            "UDS_MIRI_*_MJD*_GRID9_OS4.fits"])
+    p.set_defaults(func=do_push)
+
+    p = sub.add_parser("setup", help="build the venv on /arc")
+    p.set_defaults(func=do_setup)
+
+    p = sub.add_parser("stage", help="decompress a config's inputs on /arc")
+    p.add_argument("names", nargs="+")
+    p.set_defaults(func=do_stage)
+
+    p = sub.add_parser("run", help="run one job per config")
+    p.add_argument("names", nargs="+")
+    p.add_argument("--cores", type=int, default=8)
+    p.add_argument("--ram", type=int, default=32)
+    p.add_argument("--no-wait", action="store_true")
+    p.set_defaults(func=do_run)
+
+    p = sub.add_parser("status", help="list headless sessions")
+    p.set_defaults(func=do_status)
+
+    p = sub.add_parser("logs", help="print session logs")
+    p.add_argument("ids", nargs="+")
+    p.set_defaults(func=do_logs)
+
+    p = sub.add_parser("fetch", help="download the small outputs")
+    p.add_argument("names", nargs="+")
+    p.set_defaults(func=do_fetch)
+
+    args = ap.parse_args()
+    if not (Path.home() / ".ssl/cadcproxy.pem").exists():
+        sys.exit("no CADC certificate; run scratch/canfar/canfar-cert.sh first")
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

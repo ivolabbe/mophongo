@@ -3,6 +3,32 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Concept figures in the docs (2026-08-11). Sixteen PNGs under
+  `docs/images/`, drawn from the wren report material (tmplfig, fitfig
+  PDFs converted, ee_report, psf_check_figs, mock verification) and
+  embedded across eight pages: scene fit example (overview, diagnostics),
+  template composite anatomy + classic build steps (templates), shift
+  linearization anatomy + damped-iteration convergence (fitting), kernel
+  regularization diagnostic + star-vs-model blur + MIRI growth curves
+  (psf), region tiling + per-region PSF/kernel montage (psf_maps), flux
+  scale flow + stamp encircled energy (pipeline), mock flux recovery +
+  mock kernel scan (simulation), subphot six-panel (diagnostics). Every
+  candidate was viewed before selection; figures with internal tags
+  ('ivo'/'wren'/'ifl' labels, run filenames) were rejected, filenames with
+  survey ids renamed on copy. An independent verifier re-viewed all 16
+  embedded figures: captions accurate, all under 400 KB, no internal text;
+  build clean, sweep clean.
+- [x] Scene diagnostic PNGs moved to `out_dir/scenes/` (2026-08-11).
+  `write_outputs` wrote one `<name>_scene_<id>.png` per scene straight into
+  `out_dir`, which for a full field is a few hundred files drowning the real
+  products. They now go to a `scenes/` subdirectory, created only when
+  `scene_plots` is set and there are scenes to plot; the scene catalog CSV
+  stays in `out_dir`. Docs updated (`docs/outputs.md`, `alma.md`,
+  `examples/canfar/MANUAL.md`); regression test
+  `test_pipeline.py::test_write_outputs_puts_scene_plots_in_scenes_subdir`
+  checks both the new location and that no `scenes/` dir appears when the
+  plots are off. `tests/test_pipeline.py` + `test_pipeline_config.py`:
+  29 passed.
 - [x] Naming/metadata/guard hardening (2026-08-11), follow-ups to the EE fix:
   * One name for the scheme selector: `extend_mode` everywhere.
     `Pipeline(extend_mode=...)` and `run(extend_mode=...)` are canonical;

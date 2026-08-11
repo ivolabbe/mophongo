@@ -150,6 +150,28 @@ fit.
   the 1-based FITS convention must be shifted by one pixel on input;
   templates carry both original-image and cutout coordinate systems.
 
+```{figure} images/flux_scale_flow.png
+:width: 100%
+:alt: Flow diagram of the flux scale through the pipeline, from PSF grid to fit
+
+The flux-scale path through a run. The native stamp sum measured after
+drizzling is stored untouched, while everything that enters the fit — PSF
+copies, matching kernels, templates, convolved cutouts — is normalized to
+unit sum; the stored encircled energy is applied once at the end, converting
+the fitted amplitude into a total flux.
+```
+
+```{figure} images/stamp_encircled_energy.png
+:width: 100%
+:alt: Cumulative PSF flux versus radius from the stamp centre
+
+Cumulative flux of a PSF stamp against radius from the stamp centre. The
+curve flattens well inside the stamp, and the full stamp sum (dashed) sits
+slightly above the encircled energy at the largest enclosed circle (dotted)
+because the stamp corners hold flux outside that radius. This finite stamp
+sum is the throughput that `flux_<i>_total` divides out.
+```
+
 ## `pipeline.run()` and the `Pipeline` constructor
 
 {func}`mophongo.pipeline.run` and `Pipeline.__init__` take the same

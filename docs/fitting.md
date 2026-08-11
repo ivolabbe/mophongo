@@ -427,6 +427,21 @@ directly. Only bright anchors — templates passing the SNR, isolation, and
 optional star cuts — contribute to the coupling and shift blocks, using their
 diagonal-only flux estimates as the amplitude scale.
 
+```{figure} images/shift_linearization.png
+:width: 100%
+:alt: Six panels showing a template, its x-gradient basis, the linear shift model, the spline-shifted template, and the residuals of both against the exactly shifted template.
+
+Anatomy of one linearized shift step, for a 0.5-pixel offset in $x$. The
+solver models the shifted template as the template (top left) plus the
+gradient basis $-\partial T/\partial x$ (top center) scaled by $\delta x$
+(top right); the approximation error against the exactly shifted template is
+a few per cent of the peak (bottom center, stretched $\times 100$). The
+cubic-spline resampling that then applies the accumulated shift (bottom
+left) is accurate to about $2\times10^{-3}$ of the peak (bottom right), so
+the linear step only steers the iteration while the applied shift is
+effectively exact.
+```
+
 ### Building the blocks
 
 {func}`mophongo.scene.make_scene_basis`, called as
@@ -495,6 +510,18 @@ therefore step past the true offset and oscillate instead of converging.
 `FitConfig.astrom_damping` (default `0.8`) scales each pass's increment before
 it is applied, which keeps the iteration contracting at the cost of roughly one
 extra pass; `1.0` recovers the undamped step.
+
+```{figure} images/shift_iteration_damping.png
+:width: 100%
+:alt: Two panels showing the per-pass shift increment and the flux error of the joint solve, for damped and undamped iterations recovering a 1.5-pixel offset.
+
+Solve/apply iteration recovering a true offset of $(1.5, -0.8)$ pixels. The
+per-pass shift increment shrinks geometrically until it crosses
+`astrom_shift_tol` (left, dashed line), after which the loop stops; the flux
+error of the joint solve (right) reaches its floor within two or three
+passes. On this well-sampled source damping (0.8, the production default)
+costs about one extra pass relative to the undamped step.
+```
 
 ## Fitting-related FitConfig fields
 

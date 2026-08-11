@@ -325,6 +325,19 @@ result = ver.run_pipeline_extension_scenario(
 )
 ```
 
+```{figure} images/mock_flux_recovery.png
+:width: 100%
+:alt: Four-panel flux-recovery diagnostic comparing recovered and true fluxes on an injected-truth mock
+
+Flux-recovery diagnostic for an F770W fit on the standard two-detector mock,
+as written by `save_flux_recovery_plot`: recovered versus true flux, the
+recovered/true ratio against true flux with a matched-filter SNR axis, the
+distribution of error-normalized residuals with MAD Gaussian fits split at
+SNR 20, and residuals against recovered flux. Recovery tracks the one-to-one
+line across the full flux range, with scatter growing toward low SNR as the
+orange predicted-error envelope indicates.
+```
+
 ### Result dataclasses
 
 All four are frozen dataclasses.
@@ -441,6 +454,18 @@ finite-stamp sums are preserved as throughput metadata; the maps carry only
 unit-sum shapes and matching kernels. It writes `diagnostic_wiener.png`,
 `psf_kernel_wiener_lambda_scan.csv`, `psf_kernel_wiener_results.csv`, and
 three GeoJSON region maps, and returns a `WienerPSFMaps`.
+
+```{figure} images/mock_kernel_diagnostic.png
+:width: 100%
+:alt: Wiener matching-kernel diagnostic with regularization scan, radial profiles, and PSF, kernel, and residual images
+
+The `diagnostic_wiener.png` product for the F444W-to-F770W kernel of the
+two-detector mock: figure-of-merit scan over the Wiener regularization with
+the selected lambda marked, radial profiles and encircled-energy ratio of the
+matched versus target PSF, and images of the source PSF, target PSF, kernel,
+convolved source, and convolution residual. The matched growth curve stays
+within the 2% tolerance band at all radii.
+```
 
 Keyword parameters: `reg_grid` (`Sequence[float]`,
 `DEFAULT_WIENER_REG_GRID`) — regularization scan grid; `kernel_grid_nside`

@@ -367,7 +367,8 @@ def gaussian_blur_fourier(arr: np.ndarray, sigma_pix: float) -> np.ndarray:
 # (mock or real) must apply the same broadening before kernel construction.
 # Values adopted from the MINERVA-UDS star test (scratch/wren/psf.pdf): the
 # measured per-band widths (0.088, 0.116, 0.189, 0.246" for F770W-F1800W),
-# rounded, with F560W set to the F770W value and F1000W interpolated.
+# rounded, with F560W set to the F770W value, F1000W interpolated and F2100W
+# extrapolated along the F1280W-F1800W trend (no star test at 21 um yet).
 DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC: dict[str, float] = {
     "f560w": 0.08,
     "f770w": 0.08,
@@ -375,6 +376,7 @@ DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC: dict[str, float] = {
     "f1280w": 0.12,
     "f1500w": 0.18,
     "f1800w": 0.24,
+    "f2100w": 0.30,
 }
 
 # FWHM/sigma conversion used by every blur path (mock painting, verification

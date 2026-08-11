@@ -310,6 +310,183 @@ def test_pipeline_flux_recovery(tmp_path):
     assert len(loaded) == len(table)
 
 
+def test_write_stamps_variable_size_single_file(tmp_path):
+    from astropy.io import fits
+
+    images, segmap, catalog, psfs, _truth_img, wht = make_simple_data(
+        seed=12, nsrc=12, size=101, ndilate=2, peak_snr=2.0
+    )
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+    _table, _residuals, pipe = pipeline.run(
+        images, segmap, catalog=catalog, weights=wht, kernels=[None, kernel], psfs=psfs
+    )
+
+    path = tmp_path / "stamps.fits"
+    out = pipe.write_stamps(path)
+    assert out == path
+
+    conv = pipe.all_templates[0]
+    hi_by_id = {int(t.id): t for t in pipe.tmpls.templates}
+
+    with fits.open(path) as hdul:
+        src = hdul["SOURCES"].data
+        assert hdul[0].header["NSRC"] == len(conv)
+        assert len(src) == len(conv)
+        # PSFs are not duplicated into the file: static PSFs carry key 0
+        assert np.all(src["key_psf_hi"] == 0)
+        assert np.all(src["key_psf_lo"] == 0)
+        for row, t_lo in zip(src, conv):
+            t_hi = hi_by_id[int(t_lo.id)]
+            assert int(row["id"]) == int(t_lo.id)
+            # native per-source sizes, no padding
+            assert (row["ny_hi"], row["nx_hi"]) == t_hi.data.shape
+            assert (row["ny_lo"], row["nx_lo"]) == t_lo.data.shape
+            np.testing.assert_allclose(
+                np.asarray(row["tmpl_lo"], dtype=np.float32).reshape(t_lo.data.shape),
+                np.asarray(t_lo.data, dtype=np.float32),
+                rtol=1e-6,
+            )
+            assert np.isclose(row["flux"], t_lo.flux)
+
+    # reader helper reshapes templates and attaches the PSF stamps
+    recs = pipeline.Pipeline.read_stamps(path)
+    assert len(recs) == len(conv)
+    rec = recs[0]
+    assert rec["tmpl_hi"].shape == hi_by_id[int(conv[0].id)].data.shape
+
+    # primary header holds only the pointers load_fit needs
+    hdr = fits.getheader(path)
+    assert (hdr["NX_HI"], hdr["NY_HI"]) == images[0].shape[::-1]
+    assert (hdr["NX_LO"], hdr["NY_LO"]) == images[1].shape[::-1]
+
+
+def test_load_fit_restores_post_run_state(tmp_path):
+    from astropy.io import fits
+    from mophongo.fit import FitConfig
+
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=12, nsrc=12, size=101, ndilate=2, peak_snr=2.0
+    )
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+
+    run_cfg = pipeline.RunConfig(
+        name="t", out_dir=str(tmp_path), sci_hi="hi.fits", segmap="seg.fits",
+        catalog="cat.fits", sci_lo="lo.fits", wht_lo="wht.fits",
+        csv_hi="hi.csv", csv_lo="lo.csv",
+    )
+
+    def fresh_pipe():
+        pipe = pipeline.Pipeline(
+            [im.copy() for im in images],
+            segmap,
+            catalog=catalog,
+            weights=[w.copy() for w in wht],
+            kernels=[None, kernel],
+            psfs=psfs,
+            config=FitConfig(fit_astrometry_niter=0),
+        )
+        pipe.run_config = run_cfg
+        pipe.out_dir = tmp_path
+        return pipe
+
+    pipe1 = fresh_pipe()
+    pipe1.run()
+    # solver errors stay on the templates; predictions live in err_pred only
+    for t in pipe1.all_templates[0]:
+        row = pipe1.table[pipe1.table["id"] == int(t.id)][0]
+        assert np.isclose(t.err, row["err_1"], rtol=1e-8)
+        assert np.isclose(t.err_pred, row["err_pred_1"], rtol=1e-8)
+    # write the outputs load_fit reads (write_outputs needs real input FITS
+    # files for headers/scene plots, so write the three products directly)
+    stem = tmp_path / "t"
+    fits.writeto(f"{stem}_residual.fits", pipe1.residuals[0], overwrite=True)
+    pipe1.table.write(f"{stem}_fit_table.fits", overwrite=True)
+    stamps_path = pipe1.write_stamps()
+
+    def assert_matches_run(pipe2):
+        np.testing.assert_allclose(pipe2.residuals[0], pipe1.residuals[0], rtol=1e-6)
+        np.testing.assert_allclose(
+            pipe2.model_images[0], pipe1.model_images[0], rtol=1e-5, atol=1e-5
+        )
+        assert pipe2.fit_bin_factors == pipe1.fit_bin_factors
+        for col in pipe1.table.colnames:
+            if pipe1.table[col].dtype.kind in "fc":
+                np.testing.assert_allclose(
+                    pipe2.table[col], pipe1.table[col], rtol=1e-6, equal_nan=True
+                )
+            else:
+                assert np.all(pipe2.table[col] == pipe1.table[col])
+        live, rest = pipe1.all_templates[0], pipe2.all_templates[0]
+        assert len(rest) == len(live)
+        for a, b in zip(live, rest):
+            assert int(b.id) == int(a.id)
+            assert b.slices_original == a.slices_original
+            assert b.slices_cutout == a.slices_cutout
+            assert b._origin_original_true == a._origin_original_true
+            assert b.input_position_original == a.input_position_original
+            np.testing.assert_allclose(
+                b.data, np.asarray(a.data, np.float32), rtol=1e-6, atol=1e-8
+            )
+            np.testing.assert_allclose(b.flux, a.flux, rtol=1e-6)
+            np.testing.assert_allclose(b.err, a.err, rtol=1e-6)
+            np.testing.assert_allclose(b.err_pred, a.err_pred, rtol=1e-6)
+            np.testing.assert_allclose(b.shifted, a.shifted)
+            np.testing.assert_allclose(b.ee_psf_lo, a.ee_psf_lo, equal_nan=True)
+        hi_live = {int(t.id): t for t in pipe1.tmpls.templates}
+        assert len(pipe2.tmpls.templates) == len(hi_live)
+        for b in pipe2.tmpls.templates:
+            a = hi_live[int(b.id)]
+            assert b.slices_original == a.slices_original
+            np.testing.assert_allclose(
+                b.data, np.asarray(a.data, np.float32), rtol=1e-6, atol=1e-8
+            )
+
+    # --- restore from the stamps file: state matches the live run
+    pipe2 = fresh_pipe()
+    pipe2.load_fit()
+    assert_matches_run(pipe2)
+    for a, b in zip(pipe1.all_templates[0], pipe2.all_templates[0]):
+        assert b.flag == a.flag
+
+    # --- delete the stamps file: load_fit regenerates it identically
+    with fits.open(stamps_path) as hdul:
+        src1 = Table(hdul["SOURCES"].data)
+        tmpl1 = {
+            tag: [np.asarray(row[f"tmpl_{tag}"], np.float32) for row in hdul["SOURCES"].data]
+            for tag in ("hi", "lo")
+        }
+        hdr1 = hdul[0].header
+    stamps_path.unlink()
+
+    pipe3 = fresh_pipe()
+    pipe3.load_fit()
+    assert_matches_run(pipe3)
+    assert stamps_path.exists()
+
+    with fits.open(stamps_path) as hdul:
+        src3 = Table(hdul["SOURCES"].data)
+        hdr3 = hdul[0].header
+        assert len(src3) == len(src1)
+        for name in src1.colnames:
+            if name.startswith("tmpl_"):
+                continue
+            if src1[name].dtype.kind in "fc":
+                np.testing.assert_allclose(
+                    src3[name], src1[name], rtol=1e-6, equal_nan=True, err_msg=name
+                )
+            else:
+                assert np.all(src3[name] == src1[name]), name
+        for tag in ("hi", "lo"):
+            for row, ref in zip(hdul["SOURCES"].data, tmpl1[tag]):
+                np.testing.assert_allclose(
+                    np.asarray(row[f"tmpl_{tag}"], np.float32), ref, rtol=1e-6, atol=1e-8
+                )
+    assert hdr3["RUNNAME"] == hdr1["RUNNAME"] == "t"
+    assert (hdr3["NX_HI"], hdr3["NY_HI"], hdr3["NX_LO"], hdr3["NY_LO"]) == (
+        hdr1["NX_HI"], hdr1["NY_HI"], hdr1["NX_LO"], hdr1["NY_LO"]
+    )
+
+
 def test_pipeline_accepts_prebuilt_templates(tmp_path):
     images, segmap, catalog, psfs, _truth_img, wht = make_simple_data(
         seed=12, nsrc=12, size=101, ndilate=2, peak_snr=2.0

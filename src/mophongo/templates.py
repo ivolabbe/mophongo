@@ -478,6 +478,64 @@ class Template(Cutout2D):
         (ymin, ymax), (xmin, xmax) = self.bbox_original
         return int(ymin), int(ymax), int(xmin), int(xmax)
 
+    @classmethod
+    def from_stamp(
+        cls,
+        data: np.ndarray,
+        origin: tuple[int, int],
+        input_position_original: tuple[float, float],
+        shape_original: tuple[int, int],
+        *,
+        wcs: WCS | None = None,
+        label: int | None = None,
+        parent_image: np.ndarray | None = None,
+    ) -> "Template":
+        """Rebuild a template from stored stamp pixels and geometry.
+
+        Inverse of the stamp serialization in ``pipeline.write_stamps``:
+        ``origin`` is the original-grid pixel (x, y) of ``data[0, 0]``
+        (``_origin_original_true``, may be negative for padded cutouts) and
+        ``shape_original`` the full image shape the cutout belongs to, which
+        sets the clipped ``slices_original``/``slices_cutout`` pair.
+
+        Args:
+            data: Stamp pixels, shape ``(ny, nx)``.
+            origin: Original-grid pixel (x, y) of ``data[0, 0]``.
+            input_position_original: Source position (x, y) on the original grid.
+            shape_original: Shape of the full parent image.
+            wcs: WCS of the full parent image.
+            label: Source id.
+            parent_image: Optional zero array of ``shape_original`` reused
+                across calls to avoid per-source allocations.
+
+        Returns:
+            Template with the same geometry the stamp was written from.
+        """
+        ny, nx = data.shape
+        x0, y0 = (int(v) for v in origin)
+        if parent_image is None:
+            parent_image = np.zeros(shape_original, dtype=data.dtype)
+        # position chosen so the aligned bounds land exactly on origin:
+        # ceil((x0 + nx/2) - nx/2) == x0
+        tmpl = cls(
+            parent_image,
+            position=(x0 + nx / 2.0, y0 + ny / 2.0),
+            size=(ny, nx),
+            wcs=wcs,
+            label=label,
+            copy=False,
+        )
+        tmpl.data = np.array(data, copy=True)
+        x, y = (float(v) for v in input_position_original)
+        tmpl.input_position_original = (x, y)
+        tmpl.position_original = (_round_half_up(x), _round_half_up(y))
+        tmpl.input_position_cutout = (x - x0, y - y0)
+        tmpl.position_cutout = (
+            _round_half_up(tmpl.input_position_cutout[0]),
+            _round_half_up(tmpl.input_position_cutout[1]),
+        )
+        return tmpl
+
     def pad(
         self,
         padding: Tuple[int, int],
@@ -1292,7 +1350,12 @@ class Templates:
 
     @staticmethod
     def predicted_errors(templates: List[Template], weights: np.ndarray) -> np.ndarray:
-        """Return per-source uncertainties ignoring template covariance."""
+        """Return per-source uncertainties ignoring template covariance.
+
+        Stores the prediction on ``tmpl.err_pred`` only.  ``tmpl.err`` is the
+        solver error and must never be overwritten by a prediction; callers
+        that want predicted values as pre-fit seeds use the returned array.
+        """
         pred = np.empty(len(templates), dtype=float)
         for i, tmpl in enumerate(templates):
             w = weights[tmpl.slices_original]
@@ -1304,8 +1367,11 @@ class Templates:
                     f"error for template {i}: {inverse_epred} FLAG_SUM_ZERO {tmpl.flag & Template.FLAG_SUM_ZERO}"
                 )
                 tmpl.flag |= Template.FLAG_SUM_ZERO
+                # np.empty left this slot uninitialized; zero weight means
+                # the template carries no information, so the error is infinite
+                pred[i] = np.inf
 
-            tmpl.err = pred[i]  # Store RMS in the template for later use
+            tmpl.err_pred = pred[i]
         return pred
 
     def prune_outside_weight(self, weight: np.ndarray, rtol: float = 1e-8) -> List[Template]:

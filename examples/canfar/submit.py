@@ -179,6 +179,18 @@ def stage_job(name: str) -> str:
                   {"RUN": RUN, "CFG": name})
 
 
+def do_sync(args: argparse.Namespace) -> None:
+    """Ship a code change without rebuilding the venv.
+
+    ``setup`` deletes and recreates the venv, which breaks every run currently
+    using it. mophongo is installed editable, so replacing the source is enough
+    and is safe while other jobs are in flight.
+    """
+    ids = [launch("mophongo-sync", "update_src.sh", 1, 4, {"RUN": RUN})]
+    wait(ids)
+    print(tidy(next(iter(session().logs(ids).values())), 10))
+
+
 def do_stage(args: argparse.Namespace) -> None:
     """Stage inputs: one band per field first, then the rest concurrently.
 
@@ -317,6 +329,9 @@ def main() -> None:
 
     p = sub.add_parser("setup", help="build the venv on /arc")
     p.set_defaults(func=do_setup)
+
+    p = sub.add_parser("sync", help="replace the source in place, leaving the venv alone")
+    p.set_defaults(func=do_sync)
 
     p = sub.add_parser("stage", help="decompress a config's inputs on /arc")
     p.add_argument("names", nargs="+")

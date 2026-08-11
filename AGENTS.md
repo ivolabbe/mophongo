@@ -89,6 +89,8 @@ Key components:
 - `PSFFactory` (`psf_factory.py`): telescope-backend registry and MJD-aware
   PSF generation.
 - `saturate.py`: saturated-pixel repair (see Module Boundaries).
+- `repair.py`: standalone saturation-repair entry point (`mophongo-repair`
+  console script / `python -m mophongo.repair`).
 - `template_schemes.py`: self-contained ports of the alternative template build
   schemes (wren fork, IDL classic) selected by `FitConfig.extend_mode`.
 - `astrometry.py`, `jwst_psf.py`: astrometric corrections and JWST PSF
@@ -118,6 +120,9 @@ Guiding rules:
   utilities.
 - `verification.py` owns reusable validation and diagnostic helpers. Keep
   survey/instrument-specific orchestration in examples or scripts.
+- `repair.py` is an entry-point orchestrator (like `pipeline.py`): it may
+  import both `saturate` and `catalog` to chain image repair and catalog
+  flagging, but must hold no algorithmic logic of its own.
 - `template_schemes.py` holds the alternative build schemes and must stay a
   leaf: pure numpy in, `(composite, info)` dict out, no imports from
   `templates.py`, `fit.py`, `catalog.py` or `pipeline.py`. Dispatch lives in

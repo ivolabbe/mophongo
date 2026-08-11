@@ -67,14 +67,20 @@ def session() -> Session:
 
 
 def vcp(src: Path | str, dst: str, tries: int = 3) -> None:
-    """Copy one file to arc. VOSpace transfers fail intermittently, so retry."""
+    """Copy one file with ``vcp``. VOSpace flakes, so transient errors retry.
+
+    A missing source is not transient: it raises ``FileNotFoundError`` at once
+    rather than burning the retries.
+    """
     for attempt in range(1, tries + 1):
         proc = subprocess.run([str(VCP), str(src), dst], capture_output=True, text=True)
         if proc.returncode == 0:
             return
-        log.warning("  vcp attempt %d/%d failed (%d): %s",
-                    attempt, tries, proc.returncode,
-                    (proc.stderr or proc.stdout).strip().splitlines()[-1:] or "")
+        message = (proc.stderr or proc.stdout).strip()
+        if "NodeNotFound" in message:
+            raise FileNotFoundError(str(src))
+        log.warning("  vcp attempt %d/%d failed (%d): %s", attempt, tries,
+                    proc.returncode, message.splitlines()[-1:] or "")
         time.sleep(5)
     raise SystemExit(f"vcp failed after {tries} attempts: {src} -> {dst}")
 
@@ -214,18 +220,24 @@ def do_logs(args: argparse.Namespace) -> None:
 
 
 def do_fetch(args: argparse.Namespace) -> None:
-    """Pull the small outputs down; the residual mosaics stay on arc."""
+    """Pull the small outputs down; the multi-GB residuals stay on arc.
+
+    Outputs are named after the run: ``<name>_fit_table.fits`` and ``<name>.log``.
+    A file that is absent is reported and skipped rather than aborting the rest.
+    """
+    wanted = ["{name}_fit_table.fits", "{name}_scene_catalog.csv", "{name}.log"]
     for name in args.names:
         dest = HERE / "out" / name
         dest.mkdir(parents=True, exist_ok=True)
-        for suffix in ["fit_table.fits", "scene_catalog.csv", ".log"]:
-            stem = name.split("_")[0] if suffix == ".log" else name
-            remote = f"{RUN_VOS}/out/{name}/{stem}_{suffix}".replace("_.log", ".log")
+        got = 0
+        for template in wanted:
+            remote = f"{RUN_VOS}/out/{name}/{template.format(name=name)}"
             try:
                 vcp(remote, str(dest))
-            except subprocess.CalledProcessError:
-                log.warning("  missing: %s", remote)
-        log.info("%s -> %s", name, dest)
+                got += 1
+            except FileNotFoundError:
+                log.warning("  not on arc: %s", remote.rsplit("/", 1)[-1])
+        log.info("%s -> %s (%d/%d files)", name, dest, got, len(wanted))
 
 
 def main() -> None:

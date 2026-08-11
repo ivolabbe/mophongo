@@ -2,6 +2,49 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [x] ~~`scene_max_size` = 500 costs F1800W its photometry~~ -- tested and
+  rejected (2026-08-11). Reran all four UDS bands with `scene_max_size` = 800,
+  `scene_max_merge_radius` = 1000 px: every comparison number unchanged to the
+  second decimal, even though the F1800W bisection threshold *rose* to 0.381
+  (the whole r < 1' patch is one coupled component at the 1e-3 floor). The
+  apparent red-band disagreement with IDL was a selection artefact instead:
+  cutting at IDL mag < 24 in a shallow band selects SNR-of-a-few sources, and
+  the mean over that asymmetric tail inflates (F1800W raw-aperture mean +0.48,
+  median +0.25, and +0.02 at SNR > 25). At SNR > 25 all four bands agree with
+  IDL to 1-3%. `make_compare_idl_python.py` now quotes medians and adds an
+  SNR > 25 line. Still open, moved to its own items: `psf_size` = 4" at 18 um,
+  and whether the generated configs should keep 800/1000 (photometry is
+  insensitive; solve time was not).
+- [ ] Confirm the photometric aperture for F560W, F1000W and F2100W. The
+  generated MINERVA configs take `aperture_diam` from the classic IDL subphot
+  values (0.70, 1.20, 1.20, 1.50" for F770W/F1280W/F1500W/F1800W, from
+  `examples/run_uds_770_wren.py`), which is what makes the raw aperture fluxes
+  comparable between the two codes. The other three bands have no IDL
+  counterpart and are interpolated on the same trend (0.60, 0.90, 1.70"); ask
+  what COSMOS/EGS actually use.
+- [ ] Measure the extra Gaussian broadening at F2100W. The COSMOS and EGS
+  releases have F2100W, but the MINERVA-UDS star test only reached F1800W, so
+  `DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC["f2100w"] = 0.30"` is an extrapolation
+  along the F1280W-F1800W trend. Repeat the star test in COSMOS or EGS.
+- [ ] The generated MINERVA configs (`examples/make_minerva_configs.py`) fix
+  `psf_size` at 4.0" for every MIRI band because the same value sets the
+  hi-res support and the F444W grids are only 4.09" across. At F1800W/F2100W
+  the MIRI PSF FWHM is ~0.6-0.7", so 4" is only ~6 FWHM and the wings are cut
+  well inside where they still carry flux. Regenerate the NIRCam grids at a
+  larger FOV before running the reddest bands, or land the decoupling of PSF
+  support from kernel support below.
+
+- [ ] **`ee_psf_lo` never survives to the catalogue in the default path.**
+  `multi_resolution_method` defaults to `upsample`; at `k>1` `Pipeline.run` calls
+  `convolve_templates` (which sets `ee_psf_lo`) and then rebuilds every template through
+  `project_to_block_replicated_grid`, which copies only `flag`, `deblend_parent_label`
+  and `deblend_nchildren` (`templates.py:746-748`). Confirmed by execution: 0.917 in,
+  nan out; `Template.downsample` loses it too. So every source falls back to the
+  filter-level mean and `flux_<i>_total` silently reverts to the pre-encircled-energy
+  behaviour. MINERVA (40 mas ref, 80 mas MIRI, k=2) is exactly this case, so the whole
+  encircled-energy chain is inactive on those runs. Fix: propagate `ee_psf_lo`/`ee_tmpl`
+  in `project_to_block_replicated_grid` and `downsample`, and add a test that a projected
+  template keeps them. Found by the 2026-08-10 main audit (`scratch/wren/flux_estimator_comparison.pdf` §7.6).
 - [ ] Validate the `ee_psf_lo` divisor on a real rerun. `flux_<i>_total` now
   divides by the per-source `ee_psf_lo` recorded by `convolve_templates`,
   falling back to the filter mean only where it is missing. Against the old
@@ -66,7 +109,15 @@ This file tracks future desired features, checks, and investigations.
 - [ ] Scene partitioning is not reproducible run to run (from wren's
   `CHECKLIST.md`; the mechanism is live here and recorded nowhere else).
 - [ ] The flux-block ridge biases faint sources low: -33% at
-  `d_i/median = 1e-6` (also from wren's `CHECKLIST.md`).
+  `d_i/median = 1e-6` (also from wren's `CHECKLIST.md`). **Confirmed still
+  live** (2026-08-10): the `flux-bug` fix removed `reg_astrom=1e-4` leaking
+  into the photometric normal matrix, a different and larger term. What
+  remains at `scene_fitter.py:178-181` is `lam_A = 1e-6 * median(diag(A))`,
+  one absolute value per scene added *before* whitening, which is exactly the
+  configuration wren measured. Quiet today because truncated templates keep
+  `sum(T^2)` concentrated; extended composites reach those ratios. Fix and
+  regression test in `docs/WREN_MERGE_PATH.md` §5 — must land before the
+  estimator work.
 - [ ] Wing deficit in the drizzled PSF, found by `examples/check_psf.ipynb`:
   the azimuthally averaged model/star ratio sits at 0.83-0.95 (F444W, F770W)
   and 0.72-0.76 (F1500W) outside the core, so the drizzled ePSF is missing
@@ -136,7 +187,17 @@ This file tracks future desired features, checks, and investigations.
   `EECIRC1` are correct (`i_circ` is scale-free). Fix: capture the native
   pixel scales before the fit loop.
 - [ ] flux-estimator work from `docs/FLUX_ESTIMATORS.md` and
-  `scratch/wren/flux_estimator_comparison_v2.pdf` (ordered by impact):
+  `scratch/wren/flux_estimator_comparison_v2.pdf` (ordered by impact).
+  Sequenced against the dev-wren fork in `docs/WREN_MERGE_PATH.md`, which
+  decides which of `docs/FORK_AUDIT_WREN.md` is still wanted now that the
+  encircled-energy chain is settled. All four estimators are kept, renamed
+  `est3int -> est3` and `est3cat -> est4`, with the algebra translated from
+  wren's `c_det`/`c_b` to `S_hi`/`S_lo` (transcribing it verbatim
+  double-corrects by 4.6% on UDS). `PSFRegionMap.containment` is dropped in
+  favour of a per-region curve of growth (`refresh_cog`/`get_ee_at`), since our
+  stamps are absolutely calibrated; the catalogue's own
+  `ee_kron_cat = (fauto_KRON/faper_KRON)/tot_cor` is a 288k-row per-source
+  acceptance gate for it:
   - [ ] bound the composite EEs by the PSF EEs: `ap_F <= EE_psf_hi(R_cat)`,
     `ap_B <= EE_psf_lo(R_img)`. Two numbers per band, kills the 40x correction
     tail without touching templates; report the clip rate as a template-quality
@@ -293,6 +354,20 @@ This file tracks future desired features, checks, and investigations.
 - [ ]  wavelength dependent morphology: only where residuals are significant.
   - [ ] Add point source, if PSF not given start with marginally sampled Gaussian?  
   - [ ] add second bluer band
+- [x] packaging / CLI defects found installing on a clean environment (CANFAR,
+  2026-08-10; fixed same day, see `scratch/canfar/RUNNING_ON_CANFAR.md`)
+  - [x] `psutil`, `photutils`, `matplotlib`, `pysiaf` and `pillow` are all
+    imported directly but were declared nowhere in `pyproject.toml`. Four
+    arrived transitively, which hid the problem until pip resolved `photutils`
+    to 3.0.0 and broke `drizzlepac` 3.9.1 (`IntegratedGaussianPRF` removed).
+    Added with `poetry add`, `photutils` bounded `>=2.2.0,<3.0.0`.
+  - [x] `python -m mophongo.pipeline <cfg>` with no steps failed with
+    `invalid choice: []`. `nargs="*"` makes argparse check the collected list
+    against `choices` as one value, so neither an empty default nor `["all"]`
+    passes; dropped `choices` and validate the steps explicitly instead.
+  - Verified by building a fresh venv on CANFAR from `pyproject.toml` alone,
+    with no manual pins: resolves photutils 2.3.0 / psutil 7.2.2, all pipeline
+    imports succeed, and the bare CLI runs.
 - [ ] refactoring for readibility and modularity
   - [ ] split off PSF map / drizzle PSF / PSFs module, make submodule
   - [ ] split off real data as submodule?

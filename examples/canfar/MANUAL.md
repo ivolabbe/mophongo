@@ -238,7 +238,19 @@ Expect roughly three minutes of silence at the start while Python imports
 mophongo off the network filesystem. That is normal, not a hang.
 
 When it works, set `r_trial` back to `1.0` (or `0` for the full field) and run
-again. For reference, the 0.6 arcmin trial patch took 14 minutes on 8 cores.
+again.
+
+Measured on 8 cores, for reference:
+
+| patch | sources fitted | wall time | peak memory |
+|---|---|---|---|
+| `r_trial` 0.25 | 810 | 8 min | 33.6 GB |
+| `r_trial` 0.6 | 2242 | 14 min | 34 GB |
+
+Most of the small run is fixed cost — loading the mosaics, building or loading
+the PSF and kernel maps — which is why a quarter-size patch is not four times
+faster. The PSF and kernel maps are cached in `out_dir` and reused by later runs
+of the same configuration, so repeat runs skip that part.
 
 ### 4.6 Look at the results
 

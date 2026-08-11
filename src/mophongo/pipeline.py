@@ -1536,6 +1536,7 @@ class Pipeline:
         import platform
         import sys
         import time
+        import warnings
 
         path = Path(path) if path is not None else self.out_dir / f"{self.run_config.name}.log"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1548,15 +1549,39 @@ class Pipeline:
 
         old_out, old_err = sys.stdout, sys.stderr
         sys.stdout, sys.stderr = _Tee(old_out, handle), _Tee(old_err, handle)
-        # attach a handler only if nothing else is consuming package logs, so
-        # records are not written twice when the caller configured logging
+
+        fmt = logging.Formatter(
+            "%(asctime)s %(levelname)-7s %(name)s: %(message)s", "%H:%M:%S"
+        )
+        # Everything, not just mophongo: astropy, drizzlepac and stpsf log
+        # through their own loggers, and a caller that ran basicConfig before
+        # this point holds a handler bound to the *original* stderr, so those
+        # records would never reach the file. One handler on the root logger
+        # catches the lot, and captureWarnings routes warnings.warn there too.
+        root = logging.getLogger()
+        file_handler = logging.StreamHandler(handle)
+        file_handler.setFormatter(fmt)
+        root.addHandler(file_handler)
+        old_root_level = root.level
+        if root.level == logging.NOTSET or root.level > logging.INFO:
+            root.setLevel(logging.INFO)
+        old_showwarning = warnings.showwarning
+        # captureWarnings is a latch: if some earlier code in this process left
+        # it on, another True call is a no-op and whatever hook is currently
+        # installed (e.g. pytest's) stays in place. Reset it first so the
+        # logging hook is installed now, over the current showwarning.
+        logging.captureWarnings(False)
+        logging.captureWarnings(True)
+
+        # Console output for package records, but only when nothing else is
+        # consuming them. It writes to the real stdout rather than the tee:
+        # the file copy already arrives through the root handler above, and
+        # teeing here would duplicate every line in the file.
         pkg = logging.getLogger("mophongo")
         handler = None
         if not pkg.handlers:
-            handler = logging.StreamHandler(sys.stdout)
-            handler.setFormatter(
-                logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s", "%H:%M:%S")
-            )
+            handler = logging.StreamHandler(old_out)
+            handler.setFormatter(fmt)
             pkg.addHandler(handler)
             if pkg.level == logging.NOTSET:
                 pkg.setLevel(logging.INFO)
@@ -1571,6 +1596,13 @@ class Pipeline:
         finally:
             if handler is not None:
                 pkg.removeHandler(handler)
+            root.removeHandler(file_handler)
+            root.setLevel(old_root_level)
+            # captureWarnings(False) first: it clears logging's internal "already
+            # capturing" flag. Restoring showwarning alone leaves that flag set,
+            # and the *next* run's captureWarnings(True) silently does nothing.
+            logging.captureWarnings(False)
+            warnings.showwarning = old_showwarning
             sys.stdout, sys.stderr = old_out, old_err
             handle.close()
 

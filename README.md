@@ -1,6 +1,10 @@
 # Mophongo
 
-A lightweight photometry pipeline.
+Template-fitting photometry for multi-band imaging: per-source templates from
+a high-resolution detection image are PSF-matched to each low-resolution band
+and fit simultaneously for fluxes.
+
+Documentation: https://mophongo.readthedocs.io
 
 ## Installation
 
@@ -24,13 +28,20 @@ from astropy.table import Table
 
 from mophongo import pipeline
 
-images = [fits.getdata("image1.fits"), fits.getdata("image2.fits")]
-segmap = fits.getdata("segmap.fits")
-catalog = Table.read("catalog.fits")
-psfs = [fits.getdata("psf1.fits"), fits.getdata("psf2.fits")]
+images = [fits.getdata("detection.fits"), fits.getdata("image.fits")]
+segmap = fits.getdata("segmap.fits")      # labels match catalog "id"
+catalog = Table.read("catalog.fits")      # columns: id, x, y
+psfs = [fits.getdata("psf_hi.fits"), fits.getdata("psf_lo.fits")]
+weights = [None, fits.getdata("weight.fits")]  # inverse variance
 
-table, residual, fit = pipeline.run(images, segmap, catalog, psfs)
+table, residuals, pipe = pipeline.run(
+    images, segmap, catalog=catalog, psfs=psfs, weights=weights
+)
 ```
 
-The function returns the catalog table with new flux columns and the residual image
-from the fit.
+`images[0]` is the high-resolution detection image; every later entry is a
+band to measure. The returned `table` carries `flux_<i>` and `err_<i>`
+columns for image index `i`, `residuals` holds one residual image per fitted
+band, and `pipe` is the `Pipeline` instance for further inspection. See the
+[quickstart](https://mophongo.readthedocs.io/en/latest/quickstart.html) for
+the full example including PSF-matching kernels and throughput handling.

@@ -27,9 +27,9 @@ $$
 $A$ is sparse: only templates with overlapping footprints couple. Overlaps are
 found with an STRtree spatial index over template bounding boxes, and each
 $A_{ij}$ is accumulated over the pixel intersection of the two cutouts.
-$A_{ij}$ is the integral of $T_i T_j$, so off-diagonal terms measure how much
-flux from one source leaks into the footprint of another — the same quantity
-later reused to partition the field into scenes.
+$A_{ij}$ is the weighted integral of $T_i T_j$, so off-diagonal terms measure
+how much flux from one source leaks into the footprint of another — the same
+quantity later reused to partition the field into scenes.
 
 ### SparseFitter
 
@@ -66,16 +66,19 @@ Public methods:
   logged but kept.
 
 `add_flux_priors(idx, mu, sigma, *, floor=1e-12)`
-: Adds Gaussian flux priors $(x_i-\mu_i)^2/\sigma_i^2$ for the templates in
-  integer index array `idx`: each selected diagonal gains a precision
+: Adds Gaussian flux priors $(x_i-\mu_i)^2/\sigma_i^2$ for the templates
+  selected by `idx`: each selected diagonal gains a precision
   $\lambda_i = 1/\sigma_i^2$ and the right-hand side gains
   $\lambda_i \mu_i$. `mu` and `sigma` may be scalars or arrays; `floor`
-  bounds `sigma` away from zero.
+  bounds `sigma` away from zero. Pass `idx` as a boolean mask of length
+  $n$ — the internal broadcasting assumes a mask, so an integer index array
+  raises `IndexError` unless every index is smaller than the number of
+  selected templates. Nothing in the package calls this method; it is a hook
+  for interactive use.
 
 `model_image()` / `residual()`
 : Full-frame model $\sum_i \alpha_i T_i$ from the stored `solution`, and
-  `image - model`. Model pixels where the weight is non-positive or NaN are
-  zeroed.
+  `image - model`. Model pixels with non-positive weight are zeroed.
 
 `quick_flux(templates=None)`
 : Per-template estimate $\sum I\,T_i / \sum T_i^2$ over each template's own
@@ -95,15 +98,18 @@ Public methods:
 Two uncertainty estimates are produced for every source, and both appear in
 the output catalog (`err_<i>` and `err_pred_<i>`; see {doc}`outputs`):
 
-- **`err`** — the solver error, $\sqrt{[\hat A^{-1}]_{ii}}$ computed from
-  the (whitened) normal matrix of the source's scene. It includes the
+- **`err`** — the solver error, $\sqrt{[\hat A^{-1}]_{ii}}\,/\,d_i$ with
+  $d_i = \sqrt{A_{ii}}$, computed from the whitened normal matrix
+  $\hat A = D^{-1} A D^{-1}$ of the source's scene. It includes the
   covariance with overlapping neighbors: blended sources get larger `err`
   than isolated ones of the same brightness. When astrometric shift
-  parameters are fit jointly, the shift block is marginalized out first via
-  the Schur complement $S = A - A_B B^{-1} A_B^\top$, so `err` also accounts
-  for the flux–shift covariance. For scenes up to 500 templates the inverse
-  diagonal is obtained by dense inversion; larger scenes use one sparse LU
-  factorization and per-column back-solves.
+  parameters are fit jointly, the shift block is marginalized out first:
+  $\hat A$ is replaced by the Schur complement
+  $S = A - A_B B^{-1} A_B^\top$, formed in the whitened basis where $B$
+  becomes the identity, so `err` also accounts for the flux–shift covariance.
+  For scenes up to 500 templates the inverse diagonal is obtained by dense
+  inversion; larger scenes use one sparse LU factorization and per-column
+  back-solves.
 - **`err_pred`** — the isolated-source prediction
   $1/\sqrt{\sum_\mathrm{pix} w\,T_i^2}$, which ignores template covariance
   entirely. It is a depth map in disguise: it depends only on the weight map
@@ -152,7 +158,7 @@ s_{ij} = \max\!\left(
 $$
 
 i.e. the neighbor's flux inside source $i$'s footprint relative to $i$'s own.
-An edge connects $i$ and $j$ when $s_{ij}$ exceeds the coupling threshold;
+An edge connects $i$ and $j$ when $s_{ij}$ reaches the coupling threshold;
 scenes are the connected components. A lower threshold merges more sources
 into fewer, larger scenes.
 
@@ -297,7 +303,9 @@ fit state. Fields:
 : `[basis, (x0, y0), (Sx, Sy)]` stored by `solve()` for shift evaluation.
 
 `flux`, `err`, `shifts` (`np.ndarray | None`, default `None`)
-: Solution arrays (fluxes and errors are also written onto the templates).
+: `shifts` holds the fitted Chebyshev coefficients after a joint solve.
+  `flux` and `err` are declared but never filled by `solve()`: per-source
+  results are written onto `solution` and onto each template.
 
 `is_bright` (`np.ndarray | None`, default `None`)
 : Per-template bright-anchor mask.
@@ -322,18 +330,23 @@ Methods:
   `config.astrom_isolation_thresh`, optional star exclusion), then either
   solves flux-only (when `config.fit_astrometry_joint` is false or
   `fit_astrometry_niter <= 0`) or the joint flux+shift system. Results are
-  stored on the scene and on each template (`tmpl.flux`, `tmpl.err`,
-  `tmpl.is_bright`). With `apply_shifts=True` the fitted shift field is
-  evaluated at each template position and applied (see below), and `A`/`b`
-  are cleared so the next pass rebuilds them against the shifted templates.
+  stored on the scene (`solution`, `shifts`) and on each template
+  (`tmpl.flux`, `tmpl.err`, `tmpl.is_bright`). After a joint solve the fitted
+  shift field is always evaluated at each template position and stored on
+  `tmpl.to_shift`; `apply_shifts=True` additionally resamples the templates
+  (see below) and clears `A`/`b` so the next pass rebuilds them against the
+  shifted templates.
 
 `shift_at(x, y)`
-: Evaluate the applied shift at positions `(x, y)` by nearest-template
-  lookup; returns `(dx, dy)` arrays (zeros when no shift fit exists).
+: Evaluate the already-applied shift at positions `(x, y)` by nearest-template
+  lookup; returns `(dx, dy)` arrays. It returns zeros unless the scene has both
+  a shift fit and a spatial index, and `tree` is only populated when `solve()`
+  rebuilds `A`/`b` itself — so a scene straight out of `generate_scenes`
+  returns zeros on its first pass.
 
 `model_image()` / `residual()`
 : Scene model and image-minus-model over the scene bounding box; residual
-  pixels with non-positive or NaN weight are zeroed.
+  pixels with non-positive weight are zeroed.
 
 `plot(tmpl_image, seg_image, display_sig=3.0, display_sig_by_title=None,
 residual_image=None, ax=None, **imshow_kwargs)`
@@ -343,8 +356,8 @@ residual_image=None, ax=None, **imshow_kwargs)`
   segmentation map; `display_sig` scales the grayscale stretch (per-panel
   overrides via `display_sig_by_title`); `residual_image`, if given, is a
   full-frame residual with all scenes subtracted (otherwise the panel shows
-  `self.residual()`, which still contains other scenes' sources). See
-  {doc}`diagnostics`.
+  `self.residual()` with the segment pixels of other scenes blanked, so their
+  unsubtracted wings still show). See {doc}`diagnostics`.
 
 `create_scene_graph(templates)` / `overlay_scene_graph(templates, shape)`
 : Static helpers that label connected components by bounding-box overlap
@@ -364,8 +377,8 @@ cg_kwargs=None)`
   `config.reg_flux` if positive, else `1e-6` times the median positive
   diagonal of `A`. When shift blocks `AB`, `BB`, `bB` are supplied and
   non-empty, the shift block is regularized by `config.reg_astrom` times the
-  median diagonal of `BB` and solved jointly; empty shift blocks (a scene
-  with fewer than two bright members) fall back to flux-only. Despite the
+  median positive diagonal of `BB` and solved jointly; empty shift blocks (a
+  scene with fewer than two bright members) fall back to flux-only. Despite the
   name, `cg_kwargs` is unused as of this writing: the solve is a direct
   sparse factorization (`scipy.sparse.linalg.spsolve`), not conjugate
   gradients, and `info` is always the dict `{"cg_info": 0}`.
@@ -451,17 +464,23 @@ templates unshifted (logged as a warning).
 
 After a joint solve, `Scene.solve` evaluates the polynomial at every template
 position (via {func}`mophongo.astrometry.AstroCorrect.build_poly_predictor`)
-and stores `(dx, dy)` on `tmpl.to_shift`. With `apply_shifts=True`,
+and stores `(dx, dy)` on `tmpl.to_shift`. The fitted shift is the offset of
+the source in the band image relative to its template — the linearized model
+is $T_i(\mathbf{r} - \boldsymbol{\delta})$, the template displaced by
+$+\boldsymbol{\delta}$ — so with `apply_shifts=True`
 {func}`mophongo.templates.Templates.apply_template_shifts` resamples each
-template by $(-dx, -dy)$ — the fitted shift moves the image onto the
-template, so the template moves the opposite way — always interpolating from
-the original unshifted stamp so repeated passes do not accumulate
-interpolation smoothing. Shifts below 0.01 pixel are skipped.
+template by $(+dx, +dy)$ onto the image, always interpolating from the
+original unshifted stamp with the accumulated total shift so repeated passes
+do not accumulate interpolation smoothing. The accumulated offset is tracked
+on `tmpl.shifted` and `FLAG_SHIFTED` is set. Passes whose increment is below
+0.01 pixel in both axes are skipped.
 
 The linearization only captures part of a large offset per pass, so the
 pipeline iterates: up to `FitConfig.fit_astrometry_niter` solve/apply passes
-per band, stopping early once the largest per-template shift increment falls
-below `FitConfig.astrom_shift_tol` (in fit-grid pixels).
+per band, stopping early once the largest change in accumulated per-template
+shift falls below `FitConfig.astrom_shift_tol` (in fit-grid pixels). The loop
+always runs at least once, so `fit_astrometry_niter = 0` still gives each band
+a single flux-only pass.
 
 ## Fitting-related FitConfig fields
 
@@ -506,5 +525,7 @@ For each band `i`, {meth}`mophongo.pipeline.Pipeline.run` writes the raw
 fitted template amplitudes as `flux_<i>` with solver errors `err_<i>` and
 predicted errors `err_pred_<i>`. Because fitting uses unit-sum PSF shapes,
 these are modeled-stamp fluxes; the throughput-corrected totals
-(`flux_<i>_total`, divided by the filter-level finite-stamp PSF throughput)
-and the fitted shifts (`shift_x`, `shift_y`) are described in {doc}`outputs`.
+(`flux_<i>_total`, divided by the per-source encircled energy `ee_psf_lo` of
+the low-resolution PSF stamp, or by the filter-level throughput where that is
+missing) and the fitted shifts (`shift_x`, `shift_y`) are described in
+{doc}`outputs`.

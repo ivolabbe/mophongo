@@ -3,10 +3,11 @@
 Mophongo measures fluxes in low-resolution images by fitting per-source
 templates extracted from a high-resolution detection image, after convolving
 each template with a PSF-matching kernel. This page shows the two ways to run
-it: passing arrays directly to {func}`mophongo.pipeline.run`, and driving a
-full run from a JSON config with
-{meth}`mophongo.pipeline.Pipeline.from_config`. See {doc}`overview` for the
-method itself.
+it: driving a full run from a JSON config with
+{meth}`mophongo.pipeline.Pipeline.from_config` — the standard path for real
+mosaics — and passing in-memory arrays directly to
+{func}`mophongo.pipeline.run`, which suits simulations and experiments. See
+{doc}`overview` for the method itself.
 
 ## Installation
 
@@ -22,9 +23,208 @@ or install in editable mode with pip:
 pip install -e .
 ```
 
-## A minimal array-level run
+## Config-driven runs
 
-The array interface needs, at minimum:
+For runs on real mosaics — with drizzled, spatially varying PSFs, cached
+kernels, and file outputs — describe the run in a JSON file and let the
+pipeline handle PSF generation and bookkeeping. A typical session runs the
+steps one at a time:
+
+```python
+from mophongo.pipeline import Pipeline
+
+pipe = Pipeline.from_config("f770w.json")
+
+pipe.build_psfs()      # per-band PSF region maps (geojson-cached in out_dir)
+pipe.build_kernels()   # matching-kernel map (geojson-cached)
+pipe.run()             # load data (footprint/trial cuts, bg/ivar) and fit
+pipe.write_outputs()   # residual FITS, fit table, stamps, scene diagnostics
+
+pipe.table                 # fitted catalog
+pipe.show_sources([1, 2])  # image/model/residual figure per source
+```
+
+`pipe.run_all()` performs the same four steps in order and logs everything
+to `<out_dir>/<name>.log`. The command line is equivalent:
+
+```bash
+python -m mophongo.pipeline f770w.json          # all steps
+python -m mophongo.pipeline f770w.json psfs fit # selected steps
+```
+
+Valid step names are `psfs`, `kernels`, `load`, `loadfit`, `info`, `fit`,
+`outputs`, and `all`. {meth}`mophongo.pipeline.Pipeline.from_config` is
+lazy: images are read when `run()` (or `load_data()`) is first called.
+{meth}`mophongo.pipeline.Pipeline.write_outputs` writes
+`<out_dir>/<name>_residual.fits` (on the detection grid),
+`<name>_fit_table.fits`, per-source stamps, and scene diagnostics.
+
+A minimal config:
+
+```json
+{
+  "name": "myrun",
+  "out_dir": "output",
+  "sci_hi": "image_hi.fits",
+  "segmap": "segmap.fits",
+  "catalog": "catalog.fits",
+  "sci_lo": "image_lo.fits",
+  "wht_lo": "wht_lo.fits",
+  "csv_hi": "frames_hi.csv",
+  "csv_lo": "frames_lo.csv",
+  "pattern_hi": "STDPSF_NRCA._F444W.*fits",
+  "pattern_lo": "STDPSF_MIRI_F770W.*fits",
+  "filter_lo": "f770w"
+}
+```
+
+Lines starting with `#` are treated as comments and stripped, so configs can
+be annotated. Unknown keys raise an error, so typos fail loudly. A realistic
+config for a JWST field — 40 mas F444W detection mosaic, 80 mas MIRI F770W
+band, MJD-tagged ePSF grids, a trial patch for testing before the full-field
+run — looks like:
+
+```text
+{
+  "name": "f770w",
+  "out_dir": "runs/f770w",
+
+  # high-resolution template side
+  "sci_hi": "data/mosaic-40mas-f444w_drc_sci.fits",
+  "segmap": "data/segmap_f444w.fits",
+  "catalog": "data/catalog.fits",
+  "csv_hi": "data/mosaic-40mas-f444w_wcs.csv",
+
+  # low-resolution fit side
+  "sci_lo": "data/mosaic-80mas-f770w_drz_sci.fits",
+  "wht_lo": "data/mosaic-80mas-f770w_drz_wht.fits",
+  "csv_lo": "data/mosaic-80mas-f770w_wcs.csv",
+
+  # MJD-tagged ePSF grids; psf_size in arcsec
+  "psf_dir": "data/PSF",
+  "pattern_hi": "NRC.._F444W_MJD\\d+_GRID25_OS4",
+  "pattern_lo": "MIRI_F770W_MJD\\d+_GRID9_OS4",
+  "filter_lo": "f770w",
+  "psf_size": 4.0,
+  "psf_blur_fwhm": "default",
+
+  # preprocessing: footprint cut + trial patch (r_trial 0 = full mosaic)
+  "footprint_filter": true,
+  "r_trial": 0.6,
+  "trial_center": [34.35, -5.27],
+  "bg_filter_sigma": 64.0,
+
+  # FitConfig overrides
+  "fit": {"fit_astrometry_joint": true, "aperture_diam": 0.5}
+}
+```
+
+Start with a small `r_trial` patch to validate PSFs, kernels, and residuals,
+then set `r_trial` to `0` for the full field: the cached PSF and kernel maps
+in `out_dir` are reused.
+
+### `RunConfig` fields
+
+{class}`mophongo.pipeline.RunConfig` describes one filter fit (one
+high-resolution plus one low-resolution band). Fields without a default are
+required.
+
+`name` (`str`)
+: Run label; prefixes every output file.
+
+`out_dir` (`str`)
+: Output directory for products and PSF/kernel caches (never inputs).
+
+`sci_hi` (`str`)
+: High-resolution template image (FITS).
+
+`segmap` (`str`)
+: Segmentation map on the high-resolution grid; labels equal catalog ids.
+
+`catalog` (`str`)
+: Source catalog with `id`, `x`, `y` (high-resolution pixels), `ra`, `dec`.
+
+`sci_lo` (`str`)
+: Low-resolution science mosaic to fit.
+
+`wht_lo` (`str`)
+: Low-resolution weight map (inverse variance).
+
+`csv_hi`, `csv_lo` (`str`)
+: Per-frame WCS CSV files of the high- and low-resolution mosaics, used to
+  drizzle position-dependent PSFs. The "Per-frame WCS CSVs" section of
+  {doc}`pipeline` describes what they contain and how to generate them with
+  {func}`mophongo.utils.reconstruct_wcs`.
+
+`driz_hi` (`str | None`, default `None`)
+: Mosaic providing the DrizzlePSF footprints/grid of the high-resolution
+  side; defaults to `sci_hi`. Set when `sci_hi` is a derived template
+  image.
+
+`psf_dir` (`str`, default `"data/PSF"`)
+: Directory holding STDPSF grid files.
+
+`pattern_hi`, `pattern_lo` (`str`, default `""`)
+: STDPSF filename regexes selecting the PSF grids for each band.
+
+`filter_lo` (`str`, default `""`)
+: Low-resolution filter name (e.g. `"f770w"`), used for the blur lookup.
+
+`psf_size` (`float | None`, default `4.0`)
+: PSF stamp size in arcsec; `None` keeps the full native ePSF stamp.
+
+`psf_autobuild` (`bool`, default `True`)
+: Generate missing PSF grids with
+  {class}`mophongo.psf_factory.PSFFactory` (see {doc}`psf`).
+
+`psf_fov_arcsec` (`float | None`, default `None`)
+: PSFFactory field of view; `None` uses the backend default.
+
+`psf_blur_fwhm` (`float | str | None`, default `"default"`)
+: Extra Gaussian broadening of the low-resolution model PSF (FWHM,
+  arcsec). `"default"` looks up a per-filter value from
+  `mophongo.mock_mosaic.DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC`; a number uses
+  that value; `None` applies no broadening.
+
+`expect_frames` (`list[int] | None`, default `None`)
+: Optional `[n_frames_hi, n_frames_lo]` sanity assertion on the WCS CSVs.
+
+`extend_templates` (`str | None`, default `"psf_wings"`)
+: Template extension mode, as in the array interface below.
+
+`bg_filter_sigma` (`float`, default `64.0`)
+: Background filter scale for the background/inverse-variance
+  preprocessing step (see {doc}`preprocessing`).
+
+`footprint_filter` (`bool`, default `True`)
+: Keep only sources where the low-resolution weight is positive.
+
+`r_trial` (`float`, default `0.0`)
+: Trial-patch radius in arcmin; `0` fits the full mosaic.
+
+`trial_center` (`list[float] | None`, default `None`)
+: `[ra, dec]` in degrees of the trial patch center.
+
+`fit` (`dict`, default `{}`)
+: Keyword arguments forwarded to {class}`mophongo.fit.FitConfig`
+  (see {doc}`fitting`).
+
+`scene_plots` (`bool`, default `True`)
+: Write per-scene diagnostic PNGs during `write_outputs()`.
+
+`save_stamps` (`bool`, default `True`)
+: Write the per-source stamps FITS file (native-size high/low templates
+  plus each source's PSF region key; the PSF stamps themselves are not
+  duplicated here, they stay in the cached `<name>_psf_*.geojson` maps),
+  which later allows restoring a finished run with `Pipeline.load_fit()`.
+
+The full description of the config-driven flow, the step methods, and the
+caching behavior is in {doc}`pipeline`.
+
+## An array-level run
+
+The array interface skips configs, file caching, and drizzled PSFs: pass
+images and PSF stamps directly. It needs, at minimum:
 
 - a list of science images, with the high-resolution detection image first
   and the band(s) to fit after it;
@@ -203,8 +403,8 @@ PSFs of different shapes are zero-padded to a common grid.
 
 `method` (`str`, default `"window"`)
 : Kernel algorithm: `"window"` (Fourier ratio with the window function),
-  `"tikhonov"`, `"wiener"`, or `"forward"` (Fourier fit with wavelet
-  denoising).
+  `"tikhonov"`, `"wiener"`, or `"forward"` (ForWaRD: a regularized Fourier
+  inverse followed by wavelet denoising).
 
 `reg` (`float`, default `1e-3`)
 : Regularization strength for the `tikhonov`, `wiener`, and `forward`
@@ -220,153 +420,6 @@ default `True`)
 : Optional signal power spectrum for `method="wiener"`.
 
 See {doc}`psf` for kernel diagnostics and regularization scans.
-
-## Config-driven runs
-
-For runs on real mosaics — with drizzled, spatially varying PSFs, cached
-kernels, and file outputs — describe the run in a JSON file and let the
-pipeline handle PSF generation and bookkeeping:
-
-```python
-from mophongo.pipeline import Pipeline
-
-pipe = Pipeline.from_config("run.json")
-pipe.run_all()   # build_psfs, build_kernels, run, write_outputs
-```
-
-or from the command line:
-
-```bash
-python -m mophongo.pipeline run.json          # all steps
-python -m mophongo.pipeline run.json psfs fit # selected steps
-```
-
-Valid step names are `psfs`, `kernels`, `load`, `loadfit`, `info`, `fit`,
-`outputs`, and `all`. {meth}`mophongo.pipeline.Pipeline.from_config` is
-lazy: images are read when `run()` (or `load_data()`) is first called.
-{meth}`mophongo.pipeline.Pipeline.write_outputs` writes
-`<out_dir>/<name>_residual.fits` (on the detection grid),
-`<name>_fit_table.fits`, per-source stamps, and scene diagnostics;
-`run_all()` also logs everything to `<out_dir>/<name>.log`.
-
-A minimal config:
-
-```json
-{
-  "name": "myrun",
-  "out_dir": "output",
-  "sci_hi": "image_hi.fits",
-  "segmap": "segmap.fits",
-  "catalog": "catalog.fits",
-  "sci_lo": "image_lo.fits",
-  "wht_lo": "wht_lo.fits",
-  "csv_hi": "frames_hi.csv",
-  "csv_lo": "frames_lo.csv",
-  "pattern_hi": "STDPSF_NRCA._F444W.*fits",
-  "pattern_lo": "STDPSF_MIRI_F770W.*fits",
-  "filter_lo": "f770w"
-}
-```
-
-Lines starting with `#` are treated as comments and stripped. Unknown keys
-raise an error, so typos fail loudly.
-
-### `RunConfig` fields
-
-{class}`mophongo.pipeline.RunConfig` describes one filter fit (one
-high-resolution plus one low-resolution band). Fields without a default are
-required.
-
-`name` (`str`)
-: Run label; prefixes every output file.
-
-`out_dir` (`str`)
-: Output directory for products and PSF/kernel caches (never inputs).
-
-`sci_hi` (`str`)
-: High-resolution template image (FITS).
-
-`segmap` (`str`)
-: Segmentation map on the high-resolution grid; labels equal catalog ids.
-
-`catalog` (`str`)
-: Source catalog with `id`, `x`, `y` (high-resolution pixels), `ra`, `dec`.
-
-`sci_lo` (`str`)
-: Low-resolution science mosaic to fit.
-
-`wht_lo` (`str`)
-: Low-resolution weight map (inverse variance).
-
-`csv_hi`, `csv_lo` (`str`)
-: Per-frame WCS CSV files of the high- and low-resolution mosaics, used to
-  drizzle position-dependent PSFs. The "Per-frame WCS CSVs" section of
-  {doc}`pipeline` describes what they contain and how to generate them with
-  {func}`mophongo.utils.reconstruct_wcs`.
-
-`driz_hi` (`str | None`, default `None`)
-: Mosaic providing the DrizzlePSF footprints/grid of the high-resolution
-  side; defaults to `sci_hi`. Set when `sci_hi` is a derived template
-  image.
-
-`psf_dir` (`str`, default `"data/PSF"`)
-: Directory holding STDPSF grid files.
-
-`pattern_hi`, `pattern_lo` (`str`, default `""`)
-: STDPSF filename regexes selecting the PSF grids for each band.
-
-`filter_lo` (`str`, default `""`)
-: Low-resolution filter name (e.g. `"f770w"`), used for the blur lookup.
-
-`psf_size` (`float | None`, default `4.0`)
-: PSF stamp size in arcsec; `None` keeps the full native ePSF stamp.
-
-`psf_autobuild` (`bool`, default `True`)
-: Generate missing PSF grids with
-  {class}`mophongo.psf_factory.PSFFactory` (see {doc}`psf`).
-
-`psf_fov_arcsec` (`float | None`, default `None`)
-: PSFFactory field of view; `None` uses the backend default.
-
-`psf_blur_fwhm` (`float | str | None`, default `"default"`)
-: Extra Gaussian broadening of the low-resolution model PSF (FWHM,
-  arcsec). `"default"` looks up a per-filter value from
-  `mophongo.mock_mosaic.DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC`; a number uses
-  that value; `None` applies no broadening.
-
-`expect_frames` (`list[int] | None`, default `None`)
-: Optional `[n_frames_hi, n_frames_lo]` sanity assertion on the WCS CSVs.
-
-`extend_templates` (`str | None`, default `"psf_wings"`)
-: Template extension mode, as in the array interface above.
-
-`bg_filter_sigma` (`float`, default `64.0`)
-: Background filter scale for the background/inverse-variance
-  preprocessing step (see {doc}`preprocessing`).
-
-`footprint_filter` (`bool`, default `True`)
-: Keep only sources where the low-resolution weight is positive.
-
-`r_trial` (`float`, default `0.0`)
-: Trial-patch radius in arcmin; `0` fits the full mosaic.
-
-`trial_center` (`list[float] | None`, default `None`)
-: `[ra, dec]` in degrees of the trial patch center.
-
-`fit` (`dict`, default `{}`)
-: Keyword arguments forwarded to {class}`mophongo.fit.FitConfig`
-  (see {doc}`fitting`).
-
-`scene_plots` (`bool`, default `True`)
-: Write per-scene diagnostic PNGs during `write_outputs()`.
-
-`save_stamps` (`bool`, default `True`)
-: Write the per-source stamps FITS file (native-size high/low templates
-  plus PSF cubes), which later allows restoring a finished run with
-  `Pipeline.load_fit()`.
-
-The full description of the config-driven flow, the step methods, and the
-caching behavior is in {doc}`pipeline`.
 
 ## Where to go next
 

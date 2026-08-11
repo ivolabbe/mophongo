@@ -45,12 +45,17 @@ fit_table = result["fits"]
 
 ### How the repair works
 
-For each interior hole with equivalent radius `r_equiv`, the fitting donut is
+For each interior hole with equivalent radius `r_equiv`, two radii are
+derived:
 
 - `r_in = r_equiv + buffer`
 - `r_out = max(2 * fwhm_pix, factor * r_in)`
 
-and the per-hole sequence is:
+`r_out` is the outer radius of the fitting region. Its inner boundary is the
+dilated zero-weight footprint rather than the `r_in` circle, so the excluded
+core follows the actual saturation shape; `r_in` is used for the recorded
+donut `significance` and is reported in the output table. The per-hole
+sequence is:
 
 1. **Saturation pre-filter.** The median sky-subtracted flux in the thin
    annulus just outside the hole (the "buffer" pixels created by dilating the
@@ -281,10 +286,12 @@ Returns the refined `(y, x)` center.
 
 ### `plot_repair_diagnostic`
 
-{func}`mophongo.saturate.plot_repair_diagnostic` renders a two-row
-diagnostic figure per source: data, scaled model, shifted and no-shift
-residuals, an SNR map with per-radial-bin calibrated noise, the repaired or
-subtracted image, a radial profile, and a polar-remapped residual SNR map.
+{func}`mophongo.saturate.plot_repair_diagnostic` renders a diagnostic figure
+of two rows of five panels per source. Top row: data, scaled model, shifted
+residual, an SNR map with per-radial-bin calibrated noise, and the no-shift
+residual. Bottom row: data with hole and fit-ring overlays, the repaired or
+subtracted image, the same image at 2x zoom, a radial profile, and a
+polar-remapped residual SNR map.
 
 `diag` (`RepairDiagnostic`)
 : One entry of the `diagnostics` list returned by
@@ -306,8 +313,11 @@ subtracted image, a radial profile, and a polar-remapped residual SNR map.
 
 ### `RepairDiagnostic` fields
 
-`RepairDiagnostic` is a result container, one per hole for which a fit was
-attempted. Scalar fields: `id`, `yc`, `xc`, `r_equiv`, `r_in`, `r_out`
+`RepairDiagnostic` is a result container, collected when
+`return_diagnostics=True` for holes that reached the fitting stage. Holes
+rejected by the buffer-SNR pre-filter or by the residual-fraction guard get a
+table row but no diagnostic; a hole whose fit failed gets a stub diagnostic
+with `ok=False`. Scalar fields: `id`, `yc`, `xc`, `r_equiv`, `r_in`, `r_out`
 (geometry), `amplitude`, `chi2_red`,
 `n_pix`, `n_iter`, `shift_total`, `significance`, `center`,
 `amplitude_noshift`, `chi2_red_noshift`, `center_noshift` (fit results,
@@ -371,9 +381,9 @@ Methods:
   amplitudes. For the polynomial model the basis order comes from
   `astrom_kwargs["poly"]["order"]` (default 2); for the Gaussian process,
   `astrom_kwargs["gp"]["length_scale"]` (default 300 pixels) sets the RBF
-  kernel scale. The cutout `box_size` (default 7) can be supplied through
-  `astrom_kwargs` as well. After fitting, every template with a predicted
-  shift of at least 0.01 pixel is shifted in place.
+  kernel scale. The cutout `box_size` (default 7) is read from the same
+  per-model dict. After fitting, a template is shifted in place unless both
+  predicted shift components are below 0.01 pixel.
 
   The defaults above are `AstroCorrect`-internal fallbacks that apply only
   when `astrom_kwargs` omits the key. `FitConfig` itself supplies
@@ -425,9 +435,9 @@ Methods:
   pass),
   `wcs1`/`wcs2` (default `None`; when both are given, cutouts in each image
   are centered on the same sky position and centroids are compared through
-  the WCS), and `pixel_scale` (default 1.0, a multiplicative scale on the
-  measured pixel shifts). The raw samples are stored as `self.pos` and
-  `self.dxy`.
+  the WCS), and `pixel_scale` (default 1.0, a multiplicative scale applied to
+  the centroid-difference shifts; the cross-correlation branch ignores it).
+  The raw samples are stored as `self.pos` and `self.dxy`.
 
 `__call__(x, y=None)`
 : Evaluate the fitted field, with the same calling conventions as

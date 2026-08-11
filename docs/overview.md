@@ -20,9 +20,9 @@ The measurement proceeds in four stages:
    (see {doc}`catalog`).
 2. **Template extraction.** For every source, the pixels inside its segment
    are cut from the detection image to form a template. Because segmentation
-   truncates the faint outer profile, templates are by default extended
-   beyond the segment with the high-resolution PSF wings; without an
-   extension the recovered total flux is biased low
+   truncates the faint outer profile, templates are extended beyond the
+   segment with the high-resolution PSF wings (the default in config-driven
+   runs); without an extension the recovered total flux is biased low
    (see {doc}`templates`).
 3. **PSF matching.** Each template is convolved with a convolution kernel
    that transforms the high-resolution PSF into the PSF of the measurement
@@ -181,16 +181,18 @@ parallel to `images` (index 0 = detection image).
 
 `extend_templates` (`str | None`, default `None`)
 : Template extension mode: `"psf_wings"` adds the high-resolution PSF wings
-  beyond the segment, `"psf_model"` replaces the template with the PSF, and
-  `None` leaves templates truncated at the segment boundary. Config-driven
-  runs default to `"psf_wings"`.
+  beyond the segment, `"psf_model"` replaces the template with the
+  best-fitting PSF-convolved Gaussian model, and `None` leaves templates
+  truncated at the segment boundary. Config-driven runs default to
+  `"psf_wings"`.
 
 `templates` (`Templates | Sequence[Template] | None`, default `None`)
 : Pre-built templates to reuse instead of extracting them from `segmap`.
 
 `config` (`FitConfig | None`, default `None`)
 : Fitting configuration; a default {class}`mophongo.fit.FitConfig` is used
-  when omitted. All fields are documented in {doc}`fitting`.
+  when omitted. The fitting-related fields are documented in {doc}`fitting`,
+  the full reference on {doc}`pipeline`.
 
 {func}`mophongo.pipeline.run` returns `(table, residuals, pipeline)`;
 {meth}`mophongo.pipeline.Pipeline.run` returns `(table, residuals)` and keeps
@@ -222,11 +224,11 @@ the fitter, templates, and model images on the instance.
 
 ## Requirements
 
-Mophongo requires Python >= 3.11, < 3.13. Core dependencies are `numpy`,
-`scipy`, `astropy`, `photutils`, and `stpsf` (for JWST/HST PSF generation),
-with `drizzlepac` used to drizzle empirical PSFs to mosaic frames.
+Mophongo requires Python >= 3.11, < 3.13. The main scientific dependencies
+are `numpy`, `scipy`, `astropy`, `photutils`, and `stpsf` (for JWST PSF
+generation), with `drizzlepac` used to drizzle PSF grids onto mosaic frames.
 `shapely` and `geopandas` are also required: they back the
 {class}`mophongo.psf_map.PSFRegionMap` region geometry used by every
-config-driven run. Install
+config-driven run. `pyproject.toml` holds the complete list. Install
 with Poetry (`poetry install`) or in editable mode with
 `pip install -e .`.

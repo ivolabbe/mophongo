@@ -3,6 +3,48 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Full independent verification of the docs set + theme (2026-08-11).
+  Twelve agents re-checked every docs page claim-by-claim against source
+  after the gap-fix round; 55 further corrections applied (wrong shift sign
+  in fitting.md, unpopulated `Scene.flux/err`, per-source `ee_psf_lo`
+  divisor, `find_stars` keyword-only marking, donut fit geometry, mock
+  position-shift units, stamps "PSF cubes" claim, and similar). The three
+  runnable examples (README, overview, quickstart array example) were
+  executed verbatim against synthetic FITS inputs: all pass end-to-end with
+  finite fluxes (README's old positional-argument example raised TypeError
+  and was rewritten). Quickstart restructured config-first to match real
+  usage, with a realistic annotated JSON config and the stepwise
+  build_psfs/build_kernels/run/write_outputs session. Theme switched to
+  furo (left section navigation, right per-page TOC, dark mode) with
+  sphinx-copybutton; docs extra now sphinx/myst-parser/furo/
+  sphinx-copybutton. Build has zero page-level warnings; built HTML swept
+  for internal names (none). Verification also surfaced real code bugs —
+  logged under the docs-verification entry in `TODO.md`, headline items: a
+  verified `weights <= 0 | np.isnan(weights)` precedence bug in
+  `fit.py`/`scene.py`, a verified double background subtraction in
+  `catalog.py` with `estimate_background=True`, and the `write_wcs_csv`
+  dead `continue`.
+- [x] Injected-truth mock verification of the UDS MIRI setup, one 800-source
+  realistic mock per band (F770W/F1280W/F1500W/F1800W), run through the
+  package verification framework (`build_realistic_two_detector_mock` ->
+  `build_wiener_psf_maps` -> `run_pipeline_extension_scenario("psf_wings")`)
+  with the production settings of the real runs: the band's STPSF grid
+  (`UDS_MIRI_<BAND>_OS4_GRID1`), the band's blur (0.08/0.12/0.18/0.24"),
+  aperture (0.70/1.20/1.20/1.50") and scene limits 800/1000. Total-flux
+  recovery is unbiased to <= 0.2% in every band (medians 0.9998/0.9983/
+  0.9982/0.9983; 0.9986-1.0000 at SNR > 25), residual RMS 0.80x the noise
+  floor, MAD pull sigma 0.72 at SNR >= 20. Two systematics recorded: a faint-
+  end pull skew growing with wavelength (-0.05 -> -0.34), and the hi-res
+  self-fit sitting 0.7% high in all four bands. All 696 fitted sources fell
+  back to the filter-mean `ee_psf_lo` (the known propagation TODO), which on
+  this mock costs nothing measurable.
+  Driver: `examples/minerva/run_verification.py` (tracked); outputs under
+  `examples/minerva/verification/uds_<band>/` + `summary_all.json`. The
+  framework keys its lo-res slot `f770w` internally, so inside a band
+  directory that label means "the lo-res band"; the driver docstring records
+  the aliasing. `run_pipeline_extension_scenario` gained `fit_overrides`
+  (defaults unchanged) so production apertures/scene limits reach the mock
+  fit.
 - [x] Full Read the Docs documentation set (2026-08-11). Twelve pages under
   `docs/`: overview, quickstart, pipeline (full `run()`/`Pipeline`/`RunConfig`/
   `FitConfig` parameter reference incl. per-frame WCS CSV generation),

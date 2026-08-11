@@ -76,9 +76,12 @@ Beyond the Cutout2D geometry, a template records:
 - `ee_psf_lo` (`float`): encircled energy of the low-resolution PSF stamp at
   this position, set by {meth}`~mophongo.templates.Templates.convolve_templates`;
   `NaN` until then.
-- `ee_tmpl` (`float`): fraction of the normalized source model this template
-  retains after construction (below one when wing flux is withheld from
-  neighboring segments).
+- `ee_tmpl` (`float`): the template's own sum, recorded at the end of
+  extraction and of PSF-wing extension. Both steps renormalize the stamp, so
+  it is 1.0 for any nonzero template and 0.0 for a zero-sum one, and it stays
+  `NaN` when neither ran (`extend_with_psf_model` never sets it). Wing flux
+  withheld from a neighboring segment is reported by `extension_blocked_sum`
+  instead. Diagnostic only: the fitted amplitude does not scale with it.
 - `to_shift`, `shifted` (`np.ndarray`, length 2): pending and accumulated
   astrometric shifts in `(dx, dy)`.
 
@@ -196,8 +199,9 @@ enlarging the cutout to whole native-pixel boundaries.
 
 The projected template keeps `input_position_original`, `position_original`,
 the recomputed cutout-frame positions, `flag`, `deblend_parent_label`, and
-`deblend_nchildren`. Other metadata (fit results, `ee_*` values, shift state)
-are freshly initialized on the returned template, as of this writing.
+`deblend_nchildren`. Other metadata (fit results, `ee_*` values, shift state,
+`id_scene`) are freshly initialized on the returned template, as of this
+writing.
 
 ## Templates
 
@@ -361,7 +365,8 @@ complete the template.
 - `inplace` (`bool`, default `False`): replace the internal template list.
 
 The completed stamp is renormalized to unit sum. Diagnostics recorded per
-template: `extension_mode`, `extension_sigma_pix` (best-fit Gaussian sigma),
+template: `extension_mode` (the `mode` value, `"wings"` or `"model"` — not
+`"psf_model"`), `extension_sigma_pix` (best-fit Gaussian sigma),
 `extension_score` (residual sum of squares on segment pixels),
 `extension_segment_fraction` (model flux inside the segment), and
 `extension_psf_throughput`.

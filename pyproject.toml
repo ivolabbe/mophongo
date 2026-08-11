@@ -41,7 +41,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-docs = ["sphinx (>=8,<9)", "pydata-sphinx-theme (>=0.20.0,<0.21.0)", "myst-parser (>=5.1.0,<6.0.0)"]
+docs = ["sphinx (>=8,<9)", "myst-parser (>=5.1.0,<6.0.0)", "furo (>=2025.12.19,<2026.0.0)", "sphinx-copybutton (>=0.5.2,<0.6.0)"]
 [tool.poetry]
 packages = [{include = "mophongo", from = "src"}]
 

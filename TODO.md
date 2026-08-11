@@ -19,6 +19,42 @@ This file tracks future desired features, checks, and investigations.
   says `recenter` defaults to True but the signature default is False, and
   `Pipeline.run`'s docstring promises three return values while the method
   returns `(table, residuals)`.
+- [ ] Code findings from the 2026-08-11 full docs verification (12 agents
+  checked every docs page against source; these are source-side, docs already
+  describe actual behavior):
+  * **Operator precedence bug, verified by execution**: `fit.py:271` and
+    `scene.py:1192` compute `weights <= 0 | np.isnan(weights)`, which parses
+    as `weights <= (0 | isnan)`, so NaN-weight pixels are NOT zeroed
+    (`[-1,0,2,nan] -> [T,T,F,F]`). `scene.py:961` has the correct
+    parenthesized form. Fix and revert the matching docs softening in
+    fitting.md (fix 8 of the verify pass).
+  * **Double background subtraction, verified numerically**: with
+    `estimate_background=True`, `Catalog.run` rebinds `self.sci` to
+    bg-subtracted data and `_detect` subtracts `self.background` again
+    (`catalog.py:682`, `:633`); det image ends up `(sci - 2*BG)*sqrt(ivar)`.
+  * `PSF.gaussian(size)` without `fwhm` raises UnboundLocalError
+    (`psf.py:845-851`).
+  * `PSFRegionMap` cannot pickle/deepcopy: `__getstate__` drops `tree` but
+    not `_prepared` (`psf_map.py:114`); breaks multiprocessing use.
+  * `AstroCorrect.fit` mutates the caller's `FitConfig.astrom_kwargs` via
+    `.pop` (`astrometry.py:251-267`); second fit() silently falls back to
+    order 2 / box_size 7. Pipeline never calls it (dead path;
+    `pipeline.py:2212` constructs and drops it).
+  * `PSFSZ<i>`/`RCIRC<i>` header keys use the reference pixel scale on the
+    default upsample path (`pipeline.py:2116` overwrites `wcs[ifilt]`), so a
+    2x band reports half the true values.
+  * `id_scene` is never assigned by `generate_scenes`/`Scene`; stamps column
+    is constant 1 and `plot_subphot`/`plot_result` see a single scene.
+  * `FLAG_HAS_NAN`/`FLAG_OUTSIDE_WEIGHT` declared, never set.
+  * `pipeline.py:2275` `astrom_shift_tol` getattr fallback 0.02 disagrees
+    with the FitConfig default 0.05.
+  * Stale docstrings/comments contradicting behavior: `ee_tmpl`
+    (`templates.py:430`), shift-direction comment (`templates.py:988`),
+    `FitConfig.astrom_model` comment 'polynomial' (`fit.py:65`),
+    `saturate.py` module header (`r_outer`, amplitude-only fit, rho_psf
+    polarity), `read_wcs_csv` docstring module path (`psf.py:2129`).
+  * Possibly dead: `refine_center_from_donut` (never called),
+    `getattr(tmpl, "parent_id", ...)` branches (no Template has parent_id).
 - [ ] `utils.write_wcs_csv` is dead code: a leftover debug `continue` at
   `utils.py:1983` skips the row-building loop, so it writes a header-only CSV.
   Remove the `continue` (or the function; `reconstruct_wcs` is the working

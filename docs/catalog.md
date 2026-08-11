@@ -24,7 +24,10 @@ segmentation, `deblend_sources` for separating blended sources, and
   parameter is applied directly to this smoothed image. Because smoothing
   suppresses pixel-to-pixel noise, the effective significance per pixel is
   higher than the nominal value; the threshold is not rescaled by the
-  post-smoothing noise as of this writing.
+  post-smoothing noise as of this writing. `sci` here is the attribute, which
+  `run()` has already background-subtracted when `estimate_background=True`,
+  so as of this writing the fitted background is subtracted a second time
+  before detection.
 - **Segment labels are catalog ids.** After `run()`, `table["id"]` equals the
   integer labels in `segmap`, which is the contract the pipeline relies on.
 
@@ -61,8 +64,9 @@ are what {class}`mophongo.pipeline.Pipeline` consumes as its `catalog` and
 {class}`mophongo.catalog.Catalog` is a `@dataclass`. Constructor fields:
 
 `sci` : `np.ndarray`
-: Science image (2D). Background is subtracted in place on this attribute
-  when `estimate_background=True`.
+: Science image (2D). When `estimate_background=True`, `run()` rebinds this
+  attribute to the background-subtracted image; the caller's array is not
+  modified.
 
 `wht` : `np.ndarray`
 : Weight map. Interpreted as inverse variance unless `estimate_ivar=True`.
@@ -222,8 +226,9 @@ table, idx_stars = cat.find_stars(psf=None, snr_min=100, r50_max=5,
 
 Selects point-like sources from `cat.table` and optionally fits a PSF stamp
 to each. Adds a boolean `point_like` column to `cat.table` as a side effect.
+All arguments are keyword-only.
 
-`psf` : `np.ndarray | None`, keyword-only, default `None`
+`psf` : `np.ndarray | None`, default `None`
 : PSF stamp. When given, each candidate is fit with
   {func}`mophongo.catalog.fit_psf_stamp` and the returned table gains
   `flux_psf` and `chi2_red` columns.
@@ -271,8 +276,9 @@ cat.table["flag_star"] = 0
 cat.table["flag_star"][idx_stars] = 1
 ```
 
-Without a `flag_star` column no templates are marked as stars and the
-selection has no effect on the fit.
+Without a `flag_star` column no templates are marked as stars. Marking them
+is necessary but not sufficient: `astrom_exclude_stars` is `False` by
+default, so the flag changes the astrometry only once that option is on.
 
 ### `Catalog.show_stamp`
 
@@ -471,8 +477,11 @@ saturated core filled, and a log table with columns `parent_id`, `fit_id`,
 ## Feeding the pipeline
 
 The pipeline contract is: `segmap` labels equal catalog `id` values, and the
-catalog provides `id`, `x`, `y` on the high-resolution pixel grid plus `ra`,
-`dec`. `Catalog.run` produces exactly this, so a typical hand-off is
+catalog provides `id`, `x`, `y` on the high-resolution pixel grid. Those three
+columns are all the fit needs; the output catalog carries them forward together
+with the deblend and `FLAG_SATURATED_*` provenance columns when present, and
+drops everything else, `ra` and `dec` included. `Catalog.run` produces this, so
+a typical hand-off is
 
 ```python
 cat = Catalog.from_fits("image.fits", "weight.fits")

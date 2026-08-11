@@ -374,7 +374,7 @@ All four are frozen dataclasses.
   n_dither=8)` — two MIRI macro positions aligned to the LW detectors, each
   with deterministic phase dithers.
 - `write_pointing_summary(paths, out_dir)` — writes `wcs_products.csv`
-  listing CSV paths, frame counts, and pixel scales.
+  listing the WCS CSV and mosaic FITS paths, frame counts, and pixel scales.
 
 ### Weight sanity checks
 
@@ -393,8 +393,11 @@ All four are frozen dataclasses.
 standard realistic verification setup — two NIRCam LW detectors with six
 phase dithers in F444W, and two MIRI macro pointings (aligned to the LW
 detectors) with eight phase dithers each in F770W — then writes, injects
-noise and sources, saves `mock_config.json`, `mock_truth.ecsv`, and
-`mock_mosaic.png`, and returns `(mock, paths, noise_info, dpsfs, truth)`.
+noise and sources, saves `mock_config.json`, `wcs_products.csv`,
+`mock_truth.ecsv`, and `mock_mosaic.png`, and returns
+`(mock, paths, noise_info, dpsfs, truth)`. Sources are calibrated on F770W
+(`ref_filter="f770w"`) and sampled inside the F444W/F770W footprint
+intersection, so every source has a template in both bands.
 
 `out_dir` (path, required); `psf_dir` (path, required, keyword-only) — STPSF
 grid directory. Remaining keyword parameters:
@@ -415,7 +418,7 @@ grid directory. Remaining keyword parameters:
 - `nircam_detectors` (`Sequence[str]`, `("NRCA5", "NRCB5")`) and
   `miri_detector` (`Sequence[str]`, `("MIRIM",)`) — detector restrictions.
 - `f770w_position_shift_xy` (`tuple | None`, `None`) — deliberate F770W
-  source-position shift in native pixels (limited to ±1 per axis), for
+  source-position shift in F770W mosaic pixels (limited to ±1 per axis), for
   astrometric-recovery tests.
 - `psf_gaussian_fwhm_arcsec` (`float | dict | None`, `None`) — extra PSF
   broadening; `None` keeps the `MockMosaic` default, `0.0` or `{}` disables.
@@ -457,9 +460,10 @@ Keyword parameters: `reg_grid` (`Sequence[float]`,
   fitted image index `i`, raw amplitudes are kept as `flux_<i>_model`;
   `flux_<i>_total` is read from the catalog when present, otherwise computed
   from `throughput_<i>`; ratio and pull columns (`ratio_<i>`,
-  `pull_<i>_pred`, `pull_<i>_cov`) compare totals to `flux_true`. Optional
-  columns are copied when present in `truth`; `template_extension` stamps a
-  constant label column.
+  `pull_<i>_pred`, `pull_<i>_cov`) compare totals to `flux_true`. The
+  optional `snr_col`/`sigma_col`/`point_source_col` columns are copied when
+  present in `truth`, the deblend metadata columns when present in
+  `fit_table`; `template_extension` stamps a constant label column.
 - `segment_weighted_positions(image, segmap, ids)` — flux-weighted mean
   (x, y) per segment; NaN for segments without positive flux. Used to flag
   truth/segment mismatches.
@@ -498,7 +502,9 @@ recovery bookkeeping; `nsrc` (`int | None`, `None`) and `sigma_range`
 (`tuple`, `(1.0, 5.0)`) and `point_source_fraction` (`float`, 0.10) —
 caption metadata only; `max_match_offset_pix` (`float`, 3.0) — maximum
 segment-centroid offset before a row is flagged position-mismatched and
-excluded from the recovery plots.
+excluded from the recovery plots; `fit_overrides` (`dict | None`, `None`) —
+extra `FitConfig` keywords merged over the scenario defaults, e.g. a
+per-band `aperture_diam` matching a production run.
 
 ### Diagnostic figure helpers
 

@@ -48,7 +48,7 @@ p = pipe.source_products(42, ifilt=1, half_size=30)
 p["residual"].std(), p["flux"], p["err"]
 ```
 
-Parameters:
+Parameters (`source_id` positional, the rest keyword-only):
 
 `source_id` (`int`)
 : Catalog id of the source.
@@ -103,17 +103,17 @@ with one row per source and eight columns:
 7. `psf_hi` — hi-band PSF at the source position
 8. `psf_lo` — lo-band PSF at the source position
 
-The `lo image`, `model`, and `residual` panels share one display scale — a
-median/MAD stretch computed from their combined pixels, clipped at ±5 MAD —
-so the quality of the subtraction can be judged by eye. The other panels are
-auto-scaled individually. Each row is labeled with the source id and its
-fitted `flux ± err`.
+The `lo image`, `model`, and `residual` panels share one display scale — the
+median of their combined pixels, clipped at ±5 times their `mad_std` — so the
+quality of the subtraction can be judged by eye. The other panels are
+auto-scaled the same way, each on its own pixels. Each row is labeled with
+the source id and its fitted `flux ± err`.
 
 ```python
 fig, axes = pipe.show_sources([12, 42, 108], half_size=25, save="sources.png")
 ```
 
-Parameters:
+Parameters (`source_ids` positional, the rest keyword-only):
 
 `source_ids` (`int | Sequence[int]`)
 : One id or a sequence of ids; one figure row per id.
@@ -151,10 +151,13 @@ Columns 3 and 4 share one display scale, so the effect of the extension step
 is visible directly. The segmentation panel shows the target source in gray
 and each neighbor in a distinct color from a ten-entry palette, with every
 label id printed at its segment centroid (the target in bold). It requires a
-completed {meth}`~mophongo.pipeline.Pipeline.run`, since it uses the stored
-extracted and extended template collections; each row rebuilds the stage
-templates for its source (falling back to stored snapshots when the run used
-externally supplied templates).
+completed {meth}`~mophongo.pipeline.Pipeline.run`: the model, residual and
+fitted templates come from the run, and it refuses to start unless the
+extracted and extended template collections are present. The three template
+panels are not read back from those collections — extraction, extension and
+convolution are re-run for that one source, so later in-place mutations
+cannot alter them. Stored snapshots are the fallback, used when the run was
+given externally supplied templates.
 
 ```python
 fig, axes = pipe.diagnose_sources([12, 42], half_size=30, save="stages.png")

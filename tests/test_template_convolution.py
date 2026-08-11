@@ -27,6 +27,10 @@ def test_resampling_preserves_ee_metadata():
         assert out.template_norm == 123.0
         assert out.id_scene == 3
         assert out.id_parent == 7
+        # the full metadata contract, not a hand-picked subset
+        for attr in Template._META_ATTRS:
+            if hasattr(tmpl, attr):
+                assert getattr(out, attr) == getattr(tmpl, attr), attr
 
 
 def _paste_template(tmpl: Template, shape: tuple[int, int]) -> np.ndarray:

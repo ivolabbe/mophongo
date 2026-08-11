@@ -1036,7 +1036,7 @@ def run_pipeline_extension_scenario(
             filter_average_throughput(psf_maps.target_throughputs),
         ],
         wcs=[wcs_444, wcs_444, wcs_770],
-        extend_templates=None if scenario == "none" else scenario,
+        extend_mode=None if scenario == "none" else scenario,
     )
     table, residuals = pipe.run(config=config)
     residual_native = residual_to_native(residuals[1], img_770.shape)

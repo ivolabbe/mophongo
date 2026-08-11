@@ -338,7 +338,17 @@ def _filter_psf_throughput(
     sums = np.asarray(sums, dtype=float)
     valid = np.isfinite(sums) & (sums > 0.0)
     if np.any(valid):
+        if not np.all(valid):
+            logger.warning(
+                "%d of %d PSF stamps have a non-finite or non-positive sum; "
+                "the filter throughput averages the remaining %d",
+                int(np.sum(~valid)), sums.size, int(np.sum(valid)),
+            )
         return float(np.nanmean(sums[valid]))
+    logger.warning(
+        "no PSF stamp has a finite positive sum; filter throughput set to 1 "
+        "(NO missing-flux correction will be applied)"
+    )
     return 1.0
 
 
@@ -458,12 +468,18 @@ class Pipeline:
         psf_throughputs: Sequence[float] | None = None,
         wcs: Sequence[WCS] | None = None,
         window: Window | None = None,
+        extend_mode: str | None = None,
         extend_templates: str | None = None,
         templates: Templates | Sequence[Template] | None = None,
         config: FitConfig | None = None,
     ) -> None:
         if psfs is not None and len(images) != len(psfs):
             raise ValueError("Number of images and PSFs must match")
+        if extend_templates is not None:
+            if extend_mode is not None:
+                raise ValueError("pass extend_mode only; extend_templates is its deprecated alias")
+            logger.warning("Pipeline(extend_templates=...) is deprecated; use extend_mode=...")
+            extend_mode = extend_templates
         if weights is None and wht_images is not None:
             weights = wht_images
         if weights is not None and len(weights) != len(images):
@@ -483,9 +499,9 @@ class Pipeline:
         self.psf_throughputs = psf_throughputs
         self.wcs = wcs
         self.window = window
-        # Legacy selector; None -> FitConfig.extend_mode decides (see
-        # _resolve_extend_mode). Resolved once per run() into self.extend_mode.
-        self.extend_templates = extend_templates
+        # Constructor override; None -> FitConfig.extend_mode decides (see
+        # _resolve_extend_mode). The resolved scheme lives in self.extend_mode.
+        self.extend_mode_override = extend_mode
         self.input_templates = templates
         self.config = config
         self.extend_mode = self._resolve_extend_mode(config)
@@ -1935,6 +1951,12 @@ class Pipeline:
         cat[f"scene_{idx}"] = -1
 
         if not np.isfinite(throughput) or throughput <= 0.0:
+            logger.warning(
+                "filter %d: PSF throughput is %r (non-finite or <= 0); applying "
+                "NO missing-flux correction (=1). flux_%d_total will equal "
+                "flux_%d for sources without a per-source ee_psf_lo.",
+                idx, throughput, idx, idx,
+            )
             throughput = 1.0
         throughput = float(throughput)
 
@@ -1977,12 +1999,23 @@ class Pipeline:
             )
         if ee_used:
             arr = np.asarray(ee_used)
+            n_fallback = int(np.sum(arr == throughput))
             logger.info(
                 "flux_%d_total divided by ee_psf_lo: median %.5f, range %.5f-%.5f "
                 "over %d templates (%d fell back to the filter mean %.5f)",
                 idx, float(np.median(arr)), float(arr.min()), float(arr.max()),
-                arr.size, int(np.sum(arr == throughput)), throughput,
+                arr.size, n_fallback, throughput,
             )
+            # per-source EE missing on some sources is a broken propagation
+            # chain (resampling/restore dropped ee_psf_lo), not a normal state:
+            # their totals silently degrade to the filter-mean correction.
+            if 0 < n_fallback:
+                logger.warning(
+                    "filter %d: %d of %d templates have no finite ee_psf_lo; "
+                    "their flux_%d_total uses the filter-mean EE %.5f instead "
+                    "of the per-source value",
+                    idx, n_fallback, arr.size, idx, throughput,
+                )
 
         for pid, fl in flux_sum.items():
             ci = id_to_index.get(pid)
@@ -2000,7 +2033,7 @@ class Pipeline:
     # ------------------------------------------------------------------
     # template build scheme (extend_mode) resolution
     # ------------------------------------------------------------------
-    #: Legacy ``Pipeline(extend_templates=...)`` values -> ``extend_mode``.
+    #: Accepted constructor-override spellings -> canonical ``extend_mode``.
     _LEGACY_EXTEND_MODES = {
         None: "none",
         "none": "none",
@@ -2016,14 +2049,13 @@ class Pipeline:
     def _resolve_extend_mode(self, config: FitConfig) -> str:
         """Return the active build scheme.
 
-        ``Pipeline(extend_templates=...)`` still selects it when given (it
-        predates the config field and is used by tests and verification runs);
-        otherwise ``FitConfig.extend_mode`` decides.
+        ``Pipeline(extend_mode=...)`` overrides when given (used by tests and
+        verification runs); otherwise ``FitConfig.extend_mode`` decides.
         """
-        if self.extend_templates is not None:
-            key = str(self.extend_templates).lower()
+        if self.extend_mode_override is not None:
+            key = str(self.extend_mode_override).lower()
             if key not in self._LEGACY_EXTEND_MODES:
-                raise ValueError(f"Unknown template extension mode {self.extend_templates!r}")
+                raise ValueError(f"Unknown extend_mode {self.extend_mode_override!r}")
             return self._LEGACY_EXTEND_MODES[key]
         mode = str(getattr(config, "extend_mode", "default") or "default").lower()
         mode = EXTEND_MODE_ALIASES.get(mode, mode)
@@ -2891,7 +2923,7 @@ class Pipeline:
         psf_hi = self.psfs[0] if self.psfs is not None and len(self.psfs) > 0 else None
         if psf_hi is None:
             raise ValueError(
-                f"extend_mode={getattr(self, 'extend_mode', self.extend_templates)!r} "
+                f"extend_mode={getattr(self, 'extend_mode', self.extend_mode_override)!r} "
                 "requires the detection-band PSF in psfs[0] (the images[0] grid). "
                 "No other index is substituted: a lower-resolution PSF would "
                 "silently produce wrong template wings and wrong extension radii."
@@ -3739,6 +3771,7 @@ def run(
     psf_throughputs: Sequence[float] | None = None,
     wcs: Sequence[WCS] | None = None,
     window: Window | None = None,
+    extend_mode: str | None = None,
     extend_templates: str | None = None,
     templates: Templates | Sequence[Template] | None = None,
     config: FitConfig | None = None,
@@ -3756,6 +3789,7 @@ def run(
         psf_throughputs=psf_throughputs,
         wcs=wcs,
         window=window,
+        extend_mode=extend_mode,
         extend_templates=extend_templates,
         templates=templates,
         config=config,

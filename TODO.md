@@ -2,6 +2,17 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] Public-release cleanup: strip MINERVA-internal material from the public
+  repo before advertising it. The repo is public and currently carries
+  collaboration-internal content that Read the Docs does not publish but
+  GitHub does: `examples/canfar/` (Science Platform manual with arc paths and
+  collaborator handles), `examples/minerva/` (field configs and internal
+  release layout), `docs/WREN_MERGE_PATH.md` and the other dev notes in
+  `docs/`. Decide per item: move to a private repo, keep as sanitized
+  examples, or drop. Removing them from history needs a scrub
+  (`git filter-repo`), not just a delete commit. No credentials are in any of
+  it (checked 2026-08-11); this is about internal data layout, not secrets.
+
 - [x] ~~`scene_max_size` = 500 costs F1800W its photometry~~ -- tested and
   rejected (2026-08-11). Reran all four UDS bands with `scene_max_size` = 800,
   `scene_max_merge_radius` = 1000 px: every comparison number unchanged to the

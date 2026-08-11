@@ -29,6 +29,28 @@ logger = logging.getLogger(__name__)
 
 
 # remaps (center-of-pixel convention; origin at pixel centers, 0-based)
+
+def as_label_array(segmap: np.ndarray) -> np.ndarray:
+    """Return ``segmap`` as an integer label array.
+
+    Segmaps are label images, but releases differ on how they store them: the
+    MINERVA UDS and EGS maps are ``int32`` while COSMOS ships the same labels as
+    ``float64``. ``SegmentationImage`` rejects anything non-integer, so cast
+    when the values are whole numbers and refuse when they are not, rather than
+    truncating real fractions silently.
+    """
+    arr = np.asarray(segmap)
+    if np.issubdtype(arr.dtype, np.integer):
+        return arr
+    finite = arr[np.isfinite(arr)]
+    if finite.size and not np.all(finite == np.rint(finite)):
+        raise ValueError(
+            "segmap holds non-integer values and cannot be used as labels"
+        )
+    logger.info("segmap stored as %s; casting labels to int32", arr.dtype)
+    return np.nan_to_num(arr).astype(np.int32)
+
+
 def bin_remap(x: float | tuple[float, float], k: int) -> np.ndarray:
     shift = (k - 1) / 2.0
     return (np.array(x, dtype=np.float64) - shift) / k

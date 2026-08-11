@@ -30,7 +30,7 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 from astropy.wcs.utils import proj_plane_pixel_scales
 
 from .psf_map import PSFRegionMap
-from .utils import bin_factor_from_wcs, downsample_psf, bin_remap
+from .utils import as_label_array, bin_factor_from_wcs, downsample_psf, bin_remap
 from .templates import Templates, Template, _slices_from_bbox
 from .fit import FitConfig as _FitConfig
 from .scene import generate_scenes
@@ -3156,7 +3156,7 @@ class Pipeline:
         nscenes = len(np.unique(self.fit[ifilt - 1].scene_ids))
 
         segmap = self.segmap
-        segm = SegmentationImage(segmap)
+        segm = SegmentationImage(as_label_array(segmap))
         segmap_cmap = segm.cmap
         scene_cmap = deepcopy(segmap_cmap)
         scene_cmap.colors[0] = (1.0, 1.0, 1.0, 0.0)

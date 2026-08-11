@@ -954,11 +954,17 @@ def run_pipeline_extension_scenario(
     sigma_range: tuple[float, float] = (1.0, 5.0),
     point_source_fraction: float = 0.10,
     max_match_offset_pix: float = 3.0,
+    fit_overrides: dict[str, Any] | None = None,
 ) -> PipelineScenarioResult:
     """Run one standard realistic verification scenario.
 
     Diagnostic images are emitted through existing package diagnostics only:
     ``Pipeline.diagnose_sources`` plus the standard flux-recovery helper.
+
+    Args:
+        fit_overrides: Extra :class:`~mophongo.fit.FitConfig` keyword overrides
+            merged over the scenario defaults, e.g. a per-band
+            ``aperture_diam`` or scene limits matching a production run.
     """
 
     import matplotlib.pyplot as plt
@@ -994,7 +1000,7 @@ def run_pipeline_extension_scenario(
     wcs_444 = WCS(fits.getheader(sci_444))
     wcs_770 = WCS(fits.getheader(sci_770))
 
-    config = FitConfig(
+    fit_kwargs: dict[str, Any] = dict(
         reg_flux=0.0,
         fit_astrometry_niter=int(fit_astrometry_niter),
         fit_astrometry_joint=True,
@@ -1003,6 +1009,8 @@ def run_pipeline_extension_scenario(
         aperture_diam=0.5,
         template_dilate_segmap=int(template_dilate_segmap),
     )
+    fit_kwargs.update(fit_overrides or {})
+    config = FitConfig(**fit_kwargs)
     pipe = Pipeline(
         [img_444, img_444, img_770 - bg_770],
         segmap,

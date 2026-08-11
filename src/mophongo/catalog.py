@@ -70,7 +70,7 @@ from astropy.stats import mad_std
 from photutils.segmentation import detect_sources
 from skimage.morphology import disk
 
-from .utils import fftconvolve
+from .utils import as_label_array, fftconvolve
 
 # --- helpers ---------------------------------------------------------------
 
@@ -617,9 +617,9 @@ class Catalog:
         segmap_obj = None
         if segmap is not None:
             if isinstance(segmap, (str, Path)):
-                segmap_obj = SegmentationImage(fits.getdata(segmap))
+                segmap_obj = SegmentationImage(as_label_array(fits.getdata(segmap)))
             elif isinstance(segmap, np.ndarray):
-                segmap_obj = SegmentationImage(segmap)
+                segmap_obj = SegmentationImage(as_label_array(segmap))
             elif isinstance(segmap, SegmentationImage):
                 segmap_obj = segmap
             else:

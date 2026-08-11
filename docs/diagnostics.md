@@ -203,7 +203,9 @@ distance-sorted five-level grayscale segmentation coloring. The panels are:
 - `clean` — masked image minus neighbor models, at `±nsig * prms`
 
 It requires a completed run, and the fitting grid must match the reference
-grid (`NotImplementedError` otherwise).
+grid (`NotImplementedError` otherwise). A `source_id` absent from the
+fitted templates raises `KeyError`; batch scripts looping over ids should
+catch it.
 
 ```python
 rgb = pipe.plot_subphot(42, size=101, save="subphot_42.png")
@@ -301,7 +303,10 @@ columns plus the reshaped 2D `tmpl_hi`/`tmpl_lo` arrays.
 written outputs without refitting. It is the counterpart of
 {meth}`~mophongo.pipeline.Pipeline.load_data`, which restores the pre-run
 state, and requires a config-driven pipeline (one built with
-{meth}`~mophongo.pipeline.Pipeline.from_config`).
+{meth}`~mophongo.pipeline.Pipeline.from_config`). Since `run()` writes a
+copy of its config to `<out_dir>/<name>.json`, a finished run reopens with
+`Pipeline.from_config(out_dir).load_fit()` from the original working
+directory.
 
 Parameters:
 

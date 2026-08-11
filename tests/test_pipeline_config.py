@@ -95,3 +95,22 @@ def test_normal_construction_unaffected():
     seg = np.zeros((8, 8), dtype=int)
     pipe = Pipeline([img, img], seg)
     assert pipe.run_config is None
+
+
+def test_from_config_accepts_directory(tmp_path):
+    """A directory holding exactly one config JSON resolves to that config,
+    so a finished run reopens with from_config(out_dir)."""
+    cfg_path = _write_config(tmp_path)
+    run_dir = tmp_path / "finished"
+    run_dir.mkdir()
+    (run_dir / "test_run.json").write_text(cfg_path.read_text())
+
+    pipe = Pipeline.from_config(run_dir)
+    assert pipe.run_config.name == "test_run"
+
+    # zero or several JSONs is ambiguous and must fail loudly
+    with pytest.raises(FileNotFoundError, match="none"):
+        Pipeline.from_config(tmp_path / "out")
+    (run_dir / "second.json").write_text("{}")
+    with pytest.raises(FileNotFoundError, match="second.json"):
+        Pipeline.from_config(run_dir)

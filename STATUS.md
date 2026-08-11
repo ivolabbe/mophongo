@@ -3,6 +3,354 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Read the Docs scaffold. Sphinx 8 + pydata-sphinx-theme + myst-parser as a
+  `docs` extra in `pyproject.toml` (`poetry install --extras docs`). New
+  `docs/conf.py` (autodoc/autosummary/napoleon, `include_patterns` limits the
+  published set to `index.md`/`api.rst` so the internal dev notes in `docs/`
+  stay unpublished), `docs/index.md` landing page, `docs/api.rst` autosummary
+  over the public modules, and `.readthedocs.yaml` (pip install `.[docs]`,
+  Python 3.12). Local `sphinx-build` succeeds; remaining warnings are
+  pre-existing docstring formatting nits. `docs/_build/` and generated
+  `docs/api/` stubs are gitignored. Remaining manual step: import the repo at
+  readthedocs.org.
+- [x] IDL agreement closed in all four UDS MIRI bands. With the `psf_wings`
+  extension wired in (below) and the comparison read at the median over
+  SNR > 25 sources, Estimator 1 agrees with classic IDL subphot to
+  +0.01/+0.01/+0.02/+0.03 mag (sigma 0.04/0.02/0.03/0.08) for
+  F770W/F1280W/F1500W/F1800W on the r < 1' patch. The earlier "+0.3/+0.5 mag
+  red-band systematic" was a metric artefact: an IDL mag < 24 cut in a shallow
+  band is noise dominated and its mean inflates. Scene partitioning was ruled
+  out twice: `scene_max_size` 500 -> 800 with `scene_max_merge_radius` inf ->
+  1000 px changed nothing to the second decimal, and F1800W's bisected
+  coupling threshold reaching 0.381 left the bright end untouched. The
+  generated configs keep 800/1000; `make_compare_idl_python.py` quotes medians
+  plus an SNR > 25 line and prints a per-band summary table.
+- [x] Config-driven runs now extend templates with PSF wings, and it was the
+  whole of the disagreement with classic IDL. The extension was unreachable
+  from a config file: `RunConfig` had no `extend_templates` field,
+  `Pipeline.from_config` builds through `cls.__new__` and never set the
+  attribute, and `load_data` finished construction with no `extend_templates`
+  argument, so it defaulted to `None` and the branch in `run` was skipped.
+  Independently, that same call passed `psfs=[None, self.prm_lo]`, so even a
+  set flag would have fallen back to the *low-res* MIRI PSF for extending
+  40 mas templates. The `FitConfig` knobs that look like they control this
+  (`extend_wings_background_only`, `skip_template_extension_for_deblended`,
+  printed in every run log) were arguments to a call that never happened.
+  Changes, all in `pipeline.py`:
+  * `RunConfig.extend_templates`, default `"psf_wings"`.
+  * `_ensure_maps` also loads the cached hi-res map into `prm_hi`.
+  * `load_data` passes `psfs=[self.prm_hi, self.prm_lo]` and
+    `extend_templates=cfg.extend_templates`.
+  * `run` refreshes `psfs[0]` on the `load_data(kernels=False)` path.
+  * an INFO line reports the count, the PSF map used and the two flags.
+  Effect on UDS F770W (r < 1', 4583 sources), against the same run without the
+  extension: `flux_1` x1.169 median and x1.103 in the bright decile,
+  `ap_corr_1` x1.111, `ap_flux_corr_1` x1.095. The aperture flux itself is
+  unchanged at the bright end, as it must be. Against IDL the aperture-to-total
+  factor goes from 0.925 +- 0.02 to **0.999 +- 0.02** and Estimator 1 from
+  +0.10 +- 0.03 to **+0.01 +- 0.05** mag. `tests/test_pipeline_config.py`
+  passes (7).
+- [x] Per-source stamp output + post-run restore (2026-08-11).
+  `Pipeline.write_stamps()` writes one FITS per run,
+  `<out_dir>/<name>_stamps.fits`, with stamps at native per-source sizes:
+  the `SOURCES` bintable stores each template flattened in a
+  variable-length array column (`tmpl_hi`, `tmpl_lo`, heap storage — no
+  padding) next to its full geometry (`ny/nx`, origin `x0/y0`, source
+  position `xs/ys`) and fit metadata (`flux, err, err_pred, flag, flag_hi,
+  id_parent, id_scene, ee_psf_lo, ee_tmpl, shift_x/y`). Nothing that has
+  its own save file is duplicated: PSFs stay in the `<name>_psf_*.geojson`
+  maps (rows carry the region `key_psf_hi/lo`), configs stay in the run
+  JSON, and the primary header holds only pointers (`RUNNAME`, `IFILT`)
+  and grid shapes for staleness checks. Written from `write_outputs()`,
+  gated by `RunConfig.save_stamps` (default on); `read_stamps()` returns
+  per-source dicts with 2D arrays.
+  `Pipeline.load_fit()` is the post-run counterpart of `load_data()`: it
+  reads the fit table + residual, rebuilds all templates from the stamps
+  file via the new `Template.from_stamp()` (bit-exact geometry round-trip),
+  and recreates model images/bin factors so the instance matches a
+  completed `run()`; a missing stamps file is regenerated through the same
+  template code path `run()` uses (extraction/extension/convolution were
+  factored into `_prepare_hi_templates`/`_convolved_templates`) with
+  fluxes taken from the fit table, then rewritten. Scenes are not
+  persisted (`all_scenes` stays empty) and regeneration is exact only for
+  runs without applied astrometric shifts. Verified equal to the live
+  post-run state — table, residual, model, per-template data/geometry/
+  metadata, and regenerated-vs-original stamp files — by
+  `tests/test_pipeline.py::test_load_fit_restores_post_run_state` and
+  `test_write_stamps_variable_size_single_file`.
+  Found while verifying, and fixed: `Templates.predicted_errors()` used to
+  overwrite `tmpl.err` with the predicted error after `run()` snapshotted
+  the catalog errors, so post-run `t.err` disagreed with `err_1` by 0.1-1%.
+  It now stores the prediction on `tmpl.err_pred` only (`tmpl.err` keeps
+  the solver error; pre-fit seeding uses the returned array, which no
+  caller relied on as a side effect), and its zero-weight branch returns
+  `inf` instead of an uninitialized `np.empty` slot. Regression-tested in
+  `test_load_fit_restores_post_run_state` (`t.err == err_1`,
+  `t.err_pred == err_pred_1`).
+- [x] mophongo runs on the CANFAR Science Platform. `uds_770_dr0.1` completed
+  headless on 2026-08-10: 14 min wall on 8 cores, 34 GB peak, 2242 fit-table
+  rows, 7 scenes, 3.6 GB of outputs under `arc:home/ilabbe/run/out/`. Method,
+  job scripts and the traps are in `scratch/canfar/RUNNING_ON_CANFAR.md` and
+  `scratch/canfar/jobs/`. The draw is that every input is already on `/arc`, so
+  no download is needed at all. (That first run fetched the plain F444W
+  `_drc_sci` from the grizli S3 bucket unnecessarily: it is on arc under
+  `mosaics/nircam/n3.0/grizli/`, and a truncated listing was misread.)
+  Validated against a local run of the same commit: `flux_1` agrees to a median
+  2.9e-09 (p99 9.5e-06), which is the CG tolerance, and `err_1` to 1.9e-11. The
+  33 percent flux offset against the older `examples/uds_770_dr0.1/` outputs is
+  `490e13c`, not the platform — a local rerun reproduces it identically. For one
+  trial patch CANFAR is not faster (14 min on 8 cores vs 9.1 min locally, ~3 min
+  of it importing from the NFS venv); the gain is that the inputs need no
+  download. Compute is the `skaha` REST API (`/skaha/v1`, pass `version='v1'`),
+  not ssh — the transfer endpoint is SFTP-only. `arc:home` mounts locally via
+  FUSE-T (not macFUSE, whose kext cannot load on Apple Silicon with SIP on):
+  `./canfar-mount.sh /home/ilabbe ~/canfar_home`.
+- [x] Installing into a clean container exposed two packaging/CLI defects, both
+  fixed 2026-08-10. Five directly-imported packages (`psutil`, `photutils`,
+  `matplotlib`, `pysiaf`, `pillow`) were undeclared in `pyproject.toml`; four
+  were masked by transitive installs until pip resolved `photutils` to 3.0.0,
+  which dropped `IntegratedGaussianPRF` and broke `drizzlepac` 3.9.1. Added via
+  `poetry add`, `photutils` bounded `>=2.2.0,<3.0.0`. Separately,
+  `pipeline.py`'s `steps` argument combined `nargs="*"` with `choices`, and
+  argparse checks the collected list against `choices` as one value, so a bare
+  `python -m mophongo.pipeline <cfg>` died with `invalid choice: []`; `choices`
+  is gone and the steps are validated explicitly. Verified by rebuilding a
+  CANFAR venv from `pyproject.toml` alone with no manual pins, and by the full
+  suite (130 passed).
+- [x] The latest MINERVA reductions are staged for all three fields (UDS,
+  COSMOS, EGS) and there is a run config for every field and MIRI band, 17 in
+  all, in `examples/minerva/`. Versions: UDS n3.0/m3.1/n3.0_v1.2/
+  n3.0_m3.1_v1.2.1, COSMOS n3.0/m3.0/n3.0_v1.0/n3.0_m3.0_v1.0.1, EGS n2.0/
+  m2.1/n2.0_v1.3/n2.0_m2.1_v1.3.1. Pointers: `MINERVA/data/00WHERE` (what
+  exists), `00CANFAR` (how to get it), `data/stage/README.md` (this staging).
+  The sources are split, so staging is two scripts:
+  * `data/stage/stage_nircam_s3.sh` -- NIRCam/HST from the public grizli S3
+    bucket, `f277w`/`f356w`/`f444w` × (`_drc_sci_bkgsub`, `_drc_wht`,
+    `_wcs.csv`). 21 files, 66 GB. `_drc_sci_bkgsub` replaces the plain
+    `_drc_sci` of the DR0 configs; that is the flavour recommended for
+    photometry. Transfers run `xargs -P` (default 6).
+  * `data/stage/stage_canfar.py` (`walk`/`plan`/`get`/`link`) -- MIRI mosaics,
+    both detection flavours' segmaps and SUPER catalogs, the wMIRI catalogs,
+    MIRI PSFs and their encircled-energy tables, empirical PSFs, rms maps, from
+    `arc:projects/minerva`. 351 files, 11 GB gzipped, no failures. `get` runs
+    N `vcp` processes (default 6).
+  Verified: every staged FITS opens, its last data row reads back, and its byte
+  size equals `NAXIS1*NAXIS2*|BITPIX|/8`. Segmap grids match their NIRCam
+  mosaics. Catalogs hold 345792 (UDS), 294126 (COSMOS), 520875 (EGS) sources.
+  * `examples/make_minerva_configs.py` writes the configs, reading frame counts
+    off the WCS tables and the trial-patch centre off a scan of the MIRI weight
+    map, so no number is hand-copied. All 17 load as `RunConfig` and every
+    input path resolves. The patch scan reports the weight percentile it
+    reached: 83rd-99th for UDS and COSMOS, but 21st (F1280W) and 15th (F1800W)
+    for EGS, whose MIRI footprints are too fragmented for a deep 1.2 arcmin box
+    to fit. It relaxes its coverage requirement in steps and returns None (so
+    the config becomes a full-field run) rather than emitting a centre in a
+    zero-weight region, which an earlier version did silently.
+  * `DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC` gained `f2100w` = 0.30", extrapolated
+    along the F1280W-F1800W trend. COSMOS and EGS have F2100W and the lookup
+    returns `None` (no blur at all) for a missing key.
+  Trial runs (`r_trial` = 0.6') in all four UDS MIRI bands, compared against
+  classic IDL subphot by `scratch/wren/make_compare_idl_python.py`, which
+  recreates the four-panel `compare_idl_vs_python_*` figure per band. Two
+  conventions were established from the data rather than assumed: IDL
+  `xdet`/`ydet` are 1-indexed FITS pixels on the 40 mas F444W grid (through
+  that WCS they reproduce the SUPER catalog `ra`/`dec` to 0.0 mas, so the sky
+  match is exact and every python source matches), and IDL fluxes are nJy
+  against the mosaic's own 10 nJy unit, pinned by a bright-end ratio of
+  0.092-0.099 with 0.03 dex scatter.
+  The first pass showed +0.37 mag in panel (a), raw aperture flux, where wren's
+  figure had +0.01. Cause: the generated configs inherited a flat
+  `aperture_diam` = 0.5" from `uds_770_dr0.json`, while IDL uses 0.70/1.20/
+  1.20/1.50" for F770W/F1280W/F1500W/F1800W -- values the SUPER catalogue
+  confirms independently in its `Scale_factor_APER07_F770W`,
+  `...APER12_F1280W`, `...APER12_F1500W`, `...APER15_F1800W` column names.
+  Raw aperture fluxes are only comparable at the same aperture, so
+  `make_minerva_configs.py` now carries `APERTURE_DIAM_ARCSEC` and the runs
+  were repeated. After the fix, F770W panel (a) is mu = +0.01, sigma = 0.01,
+  and the whole remaining disagreement sits in the aperture-to-total factor:
+  panel (b) `ap_corr_1`/`totcor` = 0.93, which propagates to +0.10 mag in
+  Estimator 1. That is the quantity the estimator port is about.
+  F1500W and F1800W are much worse (+0.18 +- 0.57 and +0.36 +- 0.75 mag in
+  panel (a)) and the cause looks like scene partitioning, not photometry:
+  `scene_max_size` = 500 forces the adaptive coupling threshold to 0.193 at
+  F1800W, ten times past the value wren sets by hand, and the band ends with
+  more scenes than F770W despite a far broader PSF. See `TODO.md`.
+  The comparison is now driven by a declarative `PANELS` table taken from
+  `flux_estimator_comparison.tex` Sec. 9, six panels wide, and picks the
+  `ivo:main` or `fork` column per panel by inspecting the fit table. Two
+  panels have no `ivo:main` counterpart and are drawn blank and labelled: the
+  shape ratio (IDL `psfcor<f>`, fork `apcor1_<i>`) and the internal F444W
+  total (fork `f444w_ktot_<i>`).
+  `flux_estimator_comparison.tex` gained Sec. 9.4 recording the recipe: the
+  match convention, the unit factor, the aperture requirement, the panel map,
+  and two corrections to earlier work. First, the document's warning that
+  comparisons against `flux_F` must undo `invtotcorcat` does not hold for
+  these catalogues -- applying the SUPER `tot_cor` degrades the bright-decile
+  scatter from 0.033 to 0.158 dex, so `flux_F` is compared as released; a
+  cross-check of `flux_Ff444w` against the catalogue's own F444W columns was
+  inconclusive at better than 0.24 dex and is left open. Second, the existing
+  `compare_idl_vs_python_chimean_f1500w_after.png` plots the fork's `apcor_1`
+  against IDL `psfcor<f>` in panel (b2), which compares the full released
+  correction against one of its factors; the like-for-like column is
+  `apcor1_1`. PDF rebuilt, 30 pages, no undefined references.
+  End-to-end check on `examples/minerva/uds_f770w.json` (`psfs kernels`): 32
+  NIRCam and 9 MIRI ePSF grids loaded from the patterns, 1694 hi and 2911 lo
+  PSFs drizzled, kernel map built at `wiener` `reg` = 5.62e-4 from the 21-point
+  scan, kernel DC 0.999444 (range 0.999442-0.999448) before renormalisation.
+  No errors. EGS has no ePSF grids yet, so its first run per band builds them
+  through `psf_autobuild` and will be much slower.
+- [x] Solved: why IDL/monu `flux_Ff444w` sits ~1.6x below the catalog
+  `f_f444w`. It is a convention mismatch, not a flux error. `flux_Ff444w` is the
+  raw `faper` sum on the detection image at fixed radius `subphot_raper`,
+  zeropoint-scaled only - no PSF correction, no aperture-to-total, no neighbour
+  subtraction (`dophot.pro:733,737-738,773`; detection column q=0 path, unlike
+  the measured bands which get `f1*totcor1*invtotcorcat*zpscl` at `:824`).
+  Measured the v3.0 F444W mosaic at the monu positions: ratio
+  `flux_Ff444w/aper(r)` = 1.006+-0.022 at r=0.35" and flat in SNR and
+  `use_aper` class, at no other radius - so the monu run used
+  `subphot_raper=0.35"` (the archived `phot.param` says 0.9), and the column is
+  in nJy. Closing test: `f_f444w/flux_Ff444w =
+  tot_cor * aper(use_aper/2)/aper(0.35")` per source - observed/predicted =
+  0.992+-0.017 (SNR>10), 0.999+-0.004 (SNR>100), corr 0.998. The ratio rises
+  1.34 (faint, point-like: 1/EE(0.35")) to ~2 (bright, use_aper=1.0-1.4"), and
+  neither `tot_cor` nor `fauto/faper` alone matches (both fall with SNR while
+  the observed ratio rises). Also: the SUPER catalog has no `aper_corr` column,
+  so `invtotcorcat=1` for the monu run and `flux_Ff770w` is the *uncorrected*
+  IDL total (Estimator 1 on the IDL system). Figure:
+  `scratch/wren/fig_idl_f444w_ratio.png` (all diagnostic figures now use
+  matplotlib `layout='tight'`). Recorded in the report's column-name section
+  (dagger footnote), `flux_estimator_comparison.pdf` rebuilt. Follow-up
+  (2026-08-11): catalog-444-vs-IDL-444 comparisons removed everywhere (pointless
+  by construction); new report section documents every subphot output column
+  with formula and source line (`_org/_phot/_res/_model/_model_nn` identities,
+  `_phot.cat` f/e/fcor/ecor/apcor/totcor/fnn/enn/forg, `_model.cat`
+  shx/shy/fmodel/emodel/chi_red/chi_red_half/bg_ann/chi_ann, released
+  flux_F/eflux_F/flux_contam/chi*/rbg_ann/contam/snr_nn/psfcor/totcor/wht/use
+  and the full `use`-flag boolean). Released `psfcor` = internal `apcor1` =
+  ap_F/ap_B measured on the source composite (psf_apercor defaults off, so the
+  PSF branch is the fallback); released `totcor` = 1/ap_B; `eflux_F` correctly
+  carries the totcor1 scaling (Estimator-1 error convention).
+- [x] Checked `examples/run_uds_770_wren.py` inputs: the wren run extracted
+  templates from the aperpy-homogenized image
+  (`...f444w-clear_drc_sci_f444w-matched.fits`) while (a) the weight is the
+  *native* `_drc_wht.fits`, (b) `prm_444.psfs` are drizzled from the *native*
+  STPSF grids, and (c) the MIRI matching kernels are built native-F444W ->
+  MIRI. So her templates carry the aperpy homogenization kernel that neither
+  the PSF map, the containment factors, nor the matching kernels know about,
+  and the detection SNRs use a weight map whose noise correlations do not
+  match the smoothed image. Consistent with the catalog side (SUPER is
+  measured on matched images) but inconsistent with every native-PSF-derived
+  correction in her chain. Any rerun should use the native F444W sci+wht or
+  build the PSF/kernels from the matched PSF.
+- [ ] Exhaustive audit of the implementation on main, written up as
+  `scratch/wren/flux_estimator_comparison.pdf` (v4, 23 pp; source
+  `flux_estimator_comparison_v4.tex`). 50 agents mapped `src/mophongo` across five
+  areas and adversarially re-checked every claim at its cited `file:line`: 751 claims,
+  682 confirmed, 62 imprecise, 4 wrong, plus 41 completeness gaps. Section 7 replaces the
+  stale "current python implementation" section; sections 8 and 9 state the four
+  estimators in main's conventions and measure the catalogue side.
+  Headline findings:
+  * **`ee_psf_lo` is destroyed in the default multi-resolution path** —
+    `project_to_block_replicated_grid` does not copy it, so every source falls back to
+    the filter-level mean and the encircled-energy chain is inactive on any k>1 run.
+    Confirmed by execution. See TODO.
+  * main implements Estimator 1 *in full*: `ap_corr_<i> = 1/ap_B` = `totcor1`. The
+    earlier reading that it "stopped one factor short" is obsolete.
+  * the aperture family and the total family are on absolute scales differing by
+    `1/S_lo`; `ap_flux_corr_<i>` is never divided by `ee_psf_lo`.
+  * `_resolve_catalog_ap_radius_pix` (the only `R_cat` implementation) has zero callers,
+    so the two-radius generalisation is unreachable.
+  * `extend_templates` is not reachable from a run config, so config-driven runs fit bare
+    segment cutouts.
+  * the fit table drops every catalogue column except id/x/y and a short allowlist, so
+    `fauto_KRON`/`faper_KRON`/`tot_cor`/`use_aper`/`f_f444w` cannot reach the estimators.
+  * operator-precedence bug in the weight mask (`fit.py:269`, `scene.py:1192`):
+    `w <= 0 | isnan(w)` parses as `w <= (0 | isnan(w))`, so NaN-weight pixels are never
+    masked.
+  * `generate_scenes` raises `TypeError` when called with its own defaults
+    (`minimum_bright=None`).
+- [ ] Merge path for the dev-wren aperture-correction / total-flux system
+  decided and written up: `docs/WREN_MERGE_PATH.md`. Design only, no code
+  changed yet. It restates `docs/FORK_AUDIT_WREN.md` against the settled
+  encircled-energy chain and the `template` branch's rewritten builder, and
+  sequences the work as PR-0 (land `template`) through PR-6.
+  What the audit's tiers reduce to:
+  * `PSFRegionMap.containment` is dropped, and replaced by a per-region curve
+    of growth. wren needs `containment` because its stored stamps are
+    unit-normalised; ours are absolutely calibrated, so `EE_true(r)` is the
+    aperture sum on the stamp directly. What is genuinely missing is EE at an
+    *arbitrary* radius — `refresh_ee` caches two scalars — which the Kron path
+    needs. Add `refresh_cog`/`get_ee_at`, keyed on `resolve_key` rather than
+    on `id(psf)` (wren fixed a real collision there: `get_psf` returns a fresh
+    ndarray per call and CPython reuses freed ids).
+  * The four estimators are **kept in full**, renamed `est3int -> est3` and
+    `est3cat -> est4`:
+    `ap_flux_est1 = (ap_model + res_sum)*totcor1` (IDL-exact),
+    `ap_flux_est2 = ap_model*totcor1 + res_sum` (residual unscaled),
+    `ap_flux_est3 = ap_model*apcor1*tcor_int + res_sum` (Kron-convention),
+    `ap_flux_est4 = ap_model*apcor1*tcor_int*s_cat + res_sum` (catalogue-tied).
+    `_model_kron` is not a fallback for truncated templates: it runs the
+    catalogue's own Kron recipe on the extended model stamp, giving a noise-free
+    `fauto/faper` for sources too faint to measure it on the data.
+  * **wren's formulae cannot be transcribed verbatim.** wren carries the
+    finite-stamp truncation through `containment` (`c_det`, `c_b`) because its
+    stamps are unit-normalised; ours are absolute and carry it in `S_hi`/`S_lo`.
+    Copying the expressions double-corrects by `S_hi/S_lo` = 4.6% on UDS. The
+    substitution is `c_det -> S_hi = prm_hi.get_ee_box`, `c_b -> S_lo =
+    ee_psf_lo`, giving `apF_corr = (apF_book + apF_blank)*S_hi` and
+    `apB_corr = (apB_book + apB_blank)*S_lo`. Bridge identity to pin:
+    `ap_flux_est2 == flux_<i>_total + res_sum` exactly, for an isolated point
+    source under `psf_wings`.
+  * `sample_psf_on_stamp` divides by `psf.sum()` before interpolation, so the
+    `psf_wings` halo is unit-sum, not absolute: `model_total = template_norm /
+    S_hi`, replacing wren's `trunc_denom`. Needs the hi-res PSF map wired into
+    the config path (`psfs=[None, prm_lo]` today).
+  * The SUPER catalog's `tot_cor` factorises, and the second factor is
+    recoverable: `ee_kron_cat = (fauto_KRON/faper_KRON)/tot_cor`. Verified on
+    288,153 UDS rows: bounded in (0,1] (0.13% exceed) and **a single global
+    function of `kron_radius_circ`** - regressing on 200 quantile bins leaves
+    NMAD 4.3e-4 (0.05%), and residual medians over a 4x4 sky grid span -6e-5 to
+    +1e-5. So the catalog used one F444W growth curve for the whole field. The
+    recovered curve is a NIRCam F444W EE: 0.583 at 0.125", 0.838 at 0.375"
+    (the first Airy minimum), shoulder, 0.939 at 1.375" - and it does not reach
+    1, so it carries its own normalisation convention. Three consequences:
+    (a) a 288k-row acceptance gate for the new `PSFRegionMap.get_ee_at`, far
+    harder than anything in wren's suite and free; (b) `s_cat` factorises
+    exactly into `fauto_KRON/kron_flux_model` (Kron flux, model vs data) times
+    `ee_kron_int/ee_kron_cat` (PSF EE, ours vs theirs), the second splitting
+    again into a global-curve ratio and the +-1% per-region structure the
+    catalog does not have - write all three; (c) `est4` gains a route that
+    never divides by a noisy `f_f444w`. Derive the curve at run time, do not
+    ship a table. Unexplained: 3.4% of sources sit >=2% below it, and
+    `flag_kron` is 0 for every row in this release.
+    wren's measured `s_cat` of 0.83 [0.65, 0.88] sits on top of median
+    `ee_kron_cat` = 0.835 (5-95% 0.675-0.905), so its "morphology-dependent
+    per-source difference" may be largely a missing `1/EE_kron`. Test that.
+  * `tcor_int = ktot/(template_norm*apF_book)` carries **no** `S_hi`: the
+    denominator is already the absolute model aperture flux. `S_hi` belongs in
+    `apcor1` via `apF_corr`. Easiest mistake in the translation.
+  * wren's Sec 5.3 bookkeeping invariant (`ap_model` from the fitted template's
+    own aperture fraction, never a curve-of-growth substitute) is already
+    satisfied here: `ap_model = fl * _aperture_sum_on_template(tmpl, r_img)`.
+    Only the frame mismatch needs fixing. Comparison-axis rule adopted: `est1`
+    /`est2`/`est3` on the IDL axis, `est4` only against the SUPER catalog.
+  * `tot_cor` is noise-dominated where it matters: NMAD 1.67 (48%) at
+    `f_f444w/e_f444w` < 3 against 0.18 (14%) above 100, and 57,622 of 345,792
+    rows have no `kron_radius` at all. That is what `est3` supplies.
+  * The `0x40`/`0x80` flag collision and the wren `convolve_cutout` hazard are
+    both already resolved on `template` (extension flags moved to `0x100`/
+    `0x200`; even-alignment convolution untouched).
+  * The `utils` curve-of-growth helpers are retired in favour of what already
+    exists in `psf.py` and `template_schemes.psf_ee_radius_pix`.
+  * Both 345k-source performance cuts are scheduled: `_sources_with_coverage`
+    (~57% of UDS sources never built) and `np.searchsorted` for the segment
+    bbox lookup (3.894 -> 0.053 ms/source); ROI-restricted ownership is
+    already on `template`.
+  * The flux-block ridge is **not** solved (see TODO): the `flux-bug` fix
+    removed a different, larger term. The remaining
+    `lam_A = 1e-6 * median(diag(A))` added before whitening is the exact
+    configuration wren measured, and it must be made relative before the
+    estimator work lands.
 - [x] `DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC` extended from F770W-only to all MIRI
   imaging bands used so far: 0.08" (F560W, F770W), 0.10" (F1000W,
   interpolated), 0.12" (F1280W), 0.18" (F1500W), 0.24" (F1800W). Values are

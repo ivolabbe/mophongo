@@ -129,17 +129,16 @@ This file tracks future desired features, checks, and investigations.
   larger FOV before running the reddest bands, or land the decoupling of PSF
   support from kernel support below.
 
-- [ ] **`ee_psf_lo` never survives to the catalogue in the default path.**
-  `multi_resolution_method` defaults to `upsample`; at `k>1` `Pipeline.run` calls
-  `convolve_templates` (which sets `ee_psf_lo`) and then rebuilds every template through
-  `project_to_block_replicated_grid`, which copies only `flag`, `deblend_parent_label`
-  and `deblend_nchildren` (`templates.py:746-748`). Confirmed by execution: 0.917 in,
-  nan out; `Template.downsample` loses it too. So every source falls back to the
-  filter-level mean and `flux_<i>_total` silently reverts to the pre-encircled-energy
-  behaviour. MINERVA (40 mas ref, 80 mas MIRI, k=2) is exactly this case, so the whole
-  encircled-energy chain is inactive on those runs. Fix: propagate `ee_psf_lo`/`ee_tmpl`
-  in `project_to_block_replicated_grid` and `downsample`, and add a test that a projected
-  template keeps them. Found by the 2026-08-10 main audit (`scratch/wren/flux_estimator_comparison.pdf` §7.6).
+- [x] ~~`ee_psf_lo` never survives to the catalogue in the default path~~ —
+  fixed 2026-08-11. `project_to_block_replicated_grid` and `Template.downsample`
+  now carry `ee_psf_lo`/`ee_tmpl`/`template_norm` (plus `id_parent`/`id_scene`/
+  `name`) across resampling, so at `k>1` the per-source encircled energy set by
+  `convolve_templates` reaches `_update_catalog_with_fluxes` and
+  `flux_<i>_total` divides by the per-source value instead of the filter mean.
+  Regression test `tests/test_template_convolution.py::
+  test_resampling_preserves_ee_metadata`. Found by the 2026-08-10 main audit
+  (`scratch/wren/flux_estimator_comparison.pdf` §7.6); real-data validation of
+  the divisor is the item below.
 - [ ] Validate the `ee_psf_lo` divisor on a real rerun. `flux_<i>_total` now
   divides by the per-source `ee_psf_lo` recorded by `convolve_templates`,
   falling back to the filter mean only where it is missing. Against the old

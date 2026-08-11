@@ -67,6 +67,16 @@ def roots_for(local_path: str) -> list[str]:
     # local-only suffix on some segmap directories
     version = re.sub(r"_SEC$", "", version)
 
+    # Some products were staged flat, straight under the field directory, so the
+    # component after the field is the file itself. The release version is in
+    # the filename either way: MINERVA-COSMOS_n3.0_m3.0_v1.0.1_ACS+WEBB_...
+    VERSION_DIR = re.compile(r"[nm][\d.]+|n[\d.]+(?:_m[\d.]+)?_v[\d.]+")
+    if not VERSION_DIR.fullmatch(version):
+        match = re.search(r"_(n[\d.]+(?:_m[\d.]+)?_v[\d.]+)_", Path(local_path).name)
+        if not match:
+            return []
+        version = match.group(1)
+
     if re.fullmatch(r"n[\d.]+", version):
         return [f"{ARC}/{field}/mosaics/nircam/{version}/grizli",
                 f"{ARC}/{field}/mosaics/nircam/{version}/bkgsub"]

@@ -12,6 +12,32 @@ This file tracks future desired features, checks, and investigations.
   examples, or drop. Removing them from history needs a scrub
   (`git filter-repo`), not just a delete commit. No credentials are in any of
   it (checked 2026-08-11); this is about internal data layout, not secrets.
+  Also in code: `Pipeline.write_outputs` writes a `minerva_link` column with
+  hard-coded `https://minerva.colorado.edu` URLs into the scene-catalog CSV
+  (pipeline.py ~1119); drop or make it configurable before release. Two stale
+  docstrings found by the 2026-08-11 docs fact-check: `utils.matching_kernel`
+  says `recenter` defaults to True but the signature default is False, and
+  `Pipeline.run`'s docstring promises three return values while the method
+  returns `(table, residuals)`.
+- [ ] `utils.write_wcs_csv` is dead code: a leftover debug `continue` at
+  `utils.py:1983` skips the row-building loop, so it writes a header-only CSV.
+  Remove the `continue` (or the function; `reconstruct_wcs` is the working
+  path and the one `DrizzlePSF.read_wcs_csv` auto-calls). Related stale refs:
+  the `FitConfig.astrom_model` inline comment (`fit.py:65`) still says
+  `'polynomial'` though `AstroCorrect.fit` accepts only `'poly'|'gp'`, and the
+  `DrizzlePSF.read_wcs_csv` docstring cites nonexistent
+  `mophongo.wcs_recon.reconstruct_wcs` (lives in `mophongo.utils`).
+
+- [ ] Multi-band pipeline stream. `run()` still fits multiple images
+  sequentially (shared hi-res templates, per-band convolution/solve,
+  `flux_<i>` columns), but the config/save/restore stream is one band per
+  run: `RunConfig` has a single lo slot, `write_outputs` writes only band
+  1's residual and stamps, and `load_fit` hard-codes band slot 0 (its
+  `ifilt` parameter promises more than it delivers). Status matrix and a
+  six-step upgrade path (per-band `bands` config list, filter-suffixed
+  caches/outputs, slot-filling `load_fit`, three-image restore test) in
+  `docs/MULTIBAND_PIPELINE.md`. Open question recorded there: one
+  multi-band run buys convenience, not speed, over N single-band runs.
 
 - [x] ~~`scene_max_size` = 500 costs F1800W its photometry~~ -- tested and
   rejected (2026-08-11). Reran all four UDS bands with `scene_max_size` = 800,

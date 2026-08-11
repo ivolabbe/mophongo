@@ -1,31 +1,54 @@
 # mophongo
 
-Mophongo is a scientific Python package for PSF modeling, image
-registration, image simulation, and template-fitting photometry, aimed at
-multi-band JWST/HST imaging.
+Mophongo is a scientific Python package for template-fitting photometry on
+multi-band JWST/HST imaging: PSF modeling, PSF-matched convolution kernels,
+image simulation, and simultaneous sparse fitting of source fluxes across
+images of heterogeneous depth and resolution.
 
 The main photometry flow:
 
 1. Template extraction from a high-resolution detection image
-   (`mophongo.templates`).
-2. PSF handling and spatial PSF lookup (`mophongo.psf`,
-   `mophongo.psf_map`).
-3. PSF matching and convolution kernels (`mophongo.utils`,
-   `mophongo.psf`).
-4. Sparse or scene-based fitting (`mophongo.fit`, `mophongo.scene`,
-   `mophongo.scene_fitter`).
-5. Pipeline orchestration and diagnostics (`mophongo.pipeline`).
+   ({doc}`templates`).
+2. PSF handling and spatial PSF lookup ({doc}`psf`, {doc}`psf_maps`).
+3. PSF matching and convolution kernels ({doc}`psf`).
+4. Sparse or scene-based fitting with optional astrometric shifts
+   ({doc}`fitting`).
+5. Pipeline orchestration, outputs, and diagnostics ({doc}`pipeline`,
+   {doc}`outputs`, {doc}`diagnostics`).
 
-## Installation
+```{toctree}
+:maxdepth: 1
+:caption: Getting started
 
-```bash
-pip install -e .
-# or
-poetry install
+overview
+quickstart
 ```
 
 ```{toctree}
-:maxdepth: 2
+:maxdepth: 1
+:caption: User guide
+
+pipeline
+outputs
+diagnostics
+```
+
+```{toctree}
+:maxdepth: 1
+:caption: Components
+
+psf
+psf_maps
+templates
+fitting
+catalog
+preprocessing
+simulation
+```
+
+```{toctree}
+:maxdepth: 1
+:caption: Reference
 
 api
 ```

@@ -17,6 +17,8 @@ examples/*
 examples/minerva/*
 !examples/minerva/*.json
 !examples/minerva/*.md
+!examples/minerva/*.py
+!examples/minerva/*.sh
 # CANFAR toolkit: track the scripts and docs, not the generated arc configs
 # (they carry a hardcoded username), the uploads, or the fetched outputs
 !examples/canfar/
@@ -43,3 +45,15 @@ legacy/autopilot/*pdf
 # Sphinx build output
 docs/_build/
 docs/api/
+
+# verification version dirs: track READMEs, summaries, figures and leg logs;
+# never the run products (fits/stamps/mocks, tens of GB per version)
+!examples/minerva/verification/
+examples/minerva/verification/*
+!examples/minerva/verification/v*/
+examples/minerva/verification/v*/*
+!examples/minerva/verification/v*/README.md
+!examples/minerva/verification/v*/verification_summary.json
+!examples/minerva/verification/v*/uds_monu/
+!examples/minerva/verification/v*/uds_sims/
+examples/minerva/verification/v*/uds_sims/uds_*/

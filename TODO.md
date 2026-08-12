@@ -2,6 +2,27 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] `make_minerva_configs.py` must write `wht_hi`: the scheme-based
+  template builds require the detection weight map, and the automatic
+  `_sci`->`_wht` substitution cannot see through the `_bkgsub` suffix of the
+  MINERVA `sci_hi` names. The v2/v3 verification driver injects the derived
+  `..._drc_wht.fits` path per config as a stopgap
+  (`examples/minerva/run_verification_v2.py::prep_configs`); fold that into
+  the generator and regenerate the 17 configs.
+- [ ] Aperture-floor template support. The v2 injected-truth mocks show the
+  `psf_wings` scheme recovers point sources at 1.008 but extended sources at
+  0.971: PSF-shaped wings cannot represent extended outer profiles, so
+  segment truncation is partially reintroduced for anything resolved (IDL
+  classic shares the mechanism and the bias — subphot's own comment says
+  "the segmentation map does not contain all the flux"). Proposed cheap
+  scheme variant: trust the *data* out to at least the catalog aperture
+  radius (segment ∪ background-owned pixels within r_aper, neighbours
+  nulled), PSF wings only beyond. Wren's competitive-dilation ownership is
+  the SNR-graded version of the same idea; verification v3 (wren, all four
+  bands, real + mock legs) measures whether it already removes the deficit.
+  Decide after v3: adopt wren, add the hard-floor variant, or revert the
+  default to the convolution-fill `psf_convolution` (mock-exact at 0.9998).
+
 - [ ] Public-release cleanup: strip MINERVA-internal material from the public
   repo before advertising it. The repo is public and currently carries
   collaboration-internal content that Read the Docs does not publish but

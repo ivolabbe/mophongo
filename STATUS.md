@@ -3,6 +3,57 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Verification v2 (psf_wings) + v3 (wren) on the merged code
+  (2026-08-11/12), consolidated under `examples/minerva/verification/v2,v3`
+  (per-version README, `runs/`, `uds_monu/` IDL leg with figures+json+log,
+  `uds_sims/` mock leg with figures+json+log; driver
+  `examples/minerva/run_verification_v2.py --version --scheme`, heavy
+  products gitignored). Headline numbers (F770W mock, recovered/true):
+  conv-fill 0.9998, psf_wings 0.9755 (points 1.008 / extended 0.971), wren
+  0.9635 (points 0.968 / extended 0.972). Attribution settled in three
+  steps: (1) the psf_wings extended-source deficit is wing *shape* (PSF
+  wings cannot carry extended profiles; IDL classic shares the mechanism);
+  (2) the apparent ~5% est1 offset against IDL is NOT hi-PSF truncation
+  (8" F444W grids measure stamp sums 0.950 — the far field is stpsf
+  throughput, not box truncation) but the aperture estimator never applying
+  the recorded `ee_psf_lo` — IDL's totcor includes it (IDL 1.450 vs
+  ap_corr 1.358 vs ap_corr/ee 1.480, within 2%); fixed by the new
+  `ap_flux_total_<i>` column; (3) wren adds a ~3% point-source deficit
+  (clipped noisy-data wings) and does not cure the extended one. Decision
+  (TODO): revert default extend_mode to `psf_convolution`, optionally add
+  an aperture-floor trusted-data variant. `ee_psf_lo` chain live end to
+  end: 0 filter-mean fallbacks in every v2/v3 band.
+- [x] UDS F444W repair run + example notebook (2026-08-11). Full-mosaic
+  run of `mophongo-repair` on the MINERVA UDS F444W DR0.1 inputs
+  (n3.0 mosaic, n3.0_v1.2 segmap, n3.0_m3.1_v1.2.1 SUPER catalog wMIRI):
+  22455 interior holes, 129 saturated stars repaired (200-sig buffer
+  filter), 292 catalog segments flagged FLAG_SATURATED_F444W. Outputs +
+  README in `MINERVA/data/UDS/repair/v1/`. New concise walkthrough
+  `examples/repair_uds_f444w.{py,ipynb}` (jupytext percent + executed
+  notebook): one call per step, inspects per-star PNGs, flag log, and the
+  default flag diagnostic — supersedes the long-form
+  `examples/repair_saturate.*` for the repair/flag workflow. Fixes from
+  the run: `repair_image` also writes the fit table as FITS
+  (`_saturate_<mode>.fits`, types preserved; CSV bools read back as
+  strings — `catalog._bool_column` now coerces `ok`/`flagged` wherever
+  consumed), saturate status strings are ASCII (FITS-safe), flag
+  diagnostic subsamples the display stretch on large mosaics.
+- [x] Post-hoc saturated-segment flagging (2026-08-11). New
+  `catalog.flag_saturated_segments`: non-destructive counterpart to
+  `repair_saturated_catalog` for catalogs built before the repair (e.g.
+  the MINERVA SUPER catalogs) — a segment is flagged
+  `FLAG_SATURATED_<FILTER>=1` when the repair's best-fit star model
+  contributes more than `flux_frac` (default 0.3) of its observed flux;
+  rows are kept (order/matching preserved) and flagged labels are zeroed
+  in the output segmap. `mophongo-repair --catalog/--segmap` now defaults
+  to this flag mode (`--flux-frac`; `--merge` restores the destructive
+  parent-merge), writes `<catalog>_flagged.fits` /
+  `<segmap>_flagged.fits` / `<catalog>_flaglog.csv`, and by default a
+  per-star diagnostic (`verification.plot_saturated_flag_diagnostic`,
+  4 panels: segmap before | sci before | sci repaired + flagged overlay |
+  segmap after with flagged=0). `drizzled_psf_stamp` is now public.
+  Tests: `tests/test_repair.py` grown to 12 (flag mode, neighbour kept,
+  merge mode, both CLI paths); docs `repair.md` updated.
 - [x] Concept figures in the docs (2026-08-11). Sixteen PNGs under
   `docs/images/`, drawn from the wren report material (tmplfig, fitfig
   PDFs converted, ee_report, psf_check_figs, mock verification) and

@@ -13,7 +13,7 @@ import os
 import re
 import psutil
 from contextlib import contextmanager
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Sequence
 from copy import deepcopy
@@ -126,8 +126,22 @@ class RunConfig:
     repair_cache_path: str | None = ".."
     bg_filter_sigma: float = 64.0  # get_bg_and_ivar background filter
     footprint_filter: bool = True  # keep only sources with wht_lo > 0
-    r_trial: float = 0.0  # trial-patch radius in arcmin; 0 = full run
-    trial_center: list[float] | None = None  # [ra, dec] deg of the patch
+    # Trial patch for fast iteration: ``{"center": [ra, dec], "radius": 1.5}``
+    # (degrees, arcmin), optionally ``"margin"`` in arcsec. ``None`` = full
+    # field. When set, only the patch is read off disk and only sources inside
+    # ``radius`` are fitted, but every array keeps its full-frame shape so
+    # pixel coordinates, slices and WCS are unchanged.
+    #
+    # The margin covers what reaches outside the patch: PSF support (half of
+    # ``psf_size`` — 4" for production and canfar runs, 8" for the verification
+    # runs), template stamps and convolution wings. The 60" default clears
+    # both by a wide margin and still reads a few per cent of a mosaic.
+    #
+    # A trial run is not a subset of a production run: the background and the
+    # ivar calibration are measured on the patch, so ``sigma_true`` and hence
+    # the flux errors differ from a full-field run. Use it to iterate, not to
+    # produce release numbers.
+    trial: dict[str, Any] | None = None
     # Viewer path for the scene-catalog `minerva_link` column, as
     # `<field>/<release>`. None derives the field from the leading token of
     # `name` and pairs it with `minerva_release`; "" drops the column.
@@ -149,6 +163,14 @@ class RunConfig:
         )
         data = json.loads(clean)
         known = {f.name for f in fields(cls)}
+        legacy = {"r_trial", "trial_center"} & set(data)
+        if legacy:
+            raise ValueError(
+                f"{sorted(legacy)} were replaced by a single `trial` field: "
+                'trial={"center": [ra, dec], "radius": <arcmin>}. '
+                "Regenerate the config (examples/make_minerva_configs.py) or "
+                "edit it by hand."
+            )
         unknown = set(data) - known
         if unknown:
             raise ValueError(f"unknown config keys: {sorted(unknown)}")
@@ -158,6 +180,126 @@ class RunConfig:
         from dataclasses import asdict
 
         Path(path).write_text(json.dumps(asdict(self), indent=2) + "\n")
+
+    def trial_geometry(self) -> tuple[tuple[float, float], float, float] | None:
+        """``((ra, dec), radius_arcmin, margin_arcsec)``, or None for a full run.
+
+        Raises:
+            ValueError: ``trial`` is set but incomplete.
+        """
+        if not self.trial:
+            return None
+        center = self.trial.get("center")
+        radius = float(self.trial.get("radius") or 0.0)
+        margin = float(self.trial.get("margin", 60.0))
+        if radius <= 0:
+            return None
+        if center is None or len(center) != 2:
+            raise ValueError(
+                'trial needs {"center": [ra, dec], "radius": <arcmin>}; '
+                f"got center={center!r}"
+            )
+        unknown = set(self.trial) - {"center", "radius", "margin"}
+        if unknown:
+            raise ValueError(f"unknown trial keys: {sorted(unknown)}")
+        return (float(center[0]), float(center[1])), radius, margin
+
+
+def _trial_pixel_box(
+    wcs: WCS, shape: tuple[int, int], center: tuple[float, float],
+    radius_arcmin: float, margin_arcsec: float,
+) -> tuple[int, int, int, int]:
+    """Pixel ``(y0, y1, x0, x1)`` of the trial patch, clipped to ``shape``.
+
+    The margin covers what reaches outside the patch: PSF support, template
+    stamps and convolution wings. Sources are still selected on ``radius``;
+    the margin only widens the pixels that are read.
+    """
+    scale = float(proj_plane_pixel_scales(wcs)[0]) * 3600.0  # arcsec / pixel
+    x, y = wcs.all_world2pix(center[0], center[1], 0)
+    half = (radius_arcmin * 60.0 + margin_arcsec) / scale
+    y0 = max(0, int(np.floor(float(y) - half)))
+    y1 = min(int(shape[0]), int(np.ceil(float(y) + half)) + 1)
+    x0 = max(0, int(np.floor(float(x) - half)))
+    x1 = min(int(shape[1]), int(np.ceil(float(x) + half)) + 1)
+    if y0 >= y1 or x0 >= x1:
+        raise ValueError(
+            f"trial patch at {center} falls outside the image ({shape})"
+        )
+    return y0, y1, x0, x1
+
+
+def _box_slice(box: tuple[int, int, int, int] | None) -> tuple[slice, slice]:
+    """``box`` as a 2-D slice, or the whole array when there is no box.
+
+    Basic slicing gives a *view*, so writing through it edits the parent
+    array in place and touches only the box's pages.
+    """
+    if box is None:
+        return (slice(None), slice(None))
+    y0, y1, x0, x1 = box
+    return (slice(y0, y1), slice(x0, x1))
+
+
+def _upsample_boxed(
+    image: np.ndarray,
+    weight: np.ndarray | None,
+    factor: int,
+    box: tuple[int, int, int, int] | None,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """``_upsample_flux_conserving_image_and_ivar`` over ``box`` only.
+
+    The upsampled arrays are full-size on the reference grid, so pixel
+    coordinates are unchanged, but only the box is replicated and written.
+    On a trial patch the alternative is materialising the whole reference
+    grid (876 Mpx = 3.5 GB per array for a MINERVA mosaic) to hold data that
+    was never read.
+    """
+    k = int(factor)
+    if box is None:
+        return _upsample_flux_conserving_image_and_ivar(image, weight, k)
+
+    y0, y1, x0, x1 = box
+    sub_img, sub_wht = _upsample_flux_conserving_image_and_ivar(
+        image[y0:y1, x0:x1], None if weight is None else weight[y0:y1, x0:x1], k
+    )
+    shape_hi = (image.shape[0] * k, image.shape[1] * k)
+    hi_sl = (slice(y0 * k, y1 * k), slice(x0 * k, x1 * k))
+    image_hi = np.zeros(shape_hi, dtype=sub_img.dtype)
+    image_hi[hi_sl] = sub_img
+    weight_hi = None
+    if sub_wht is not None:
+        weight_hi = np.zeros(shape_hi, dtype=sub_wht.dtype)
+        weight_hi[hi_sl] = sub_wht
+    return image_hi, weight_hi
+
+
+def _read_image(path: str | Path, box: tuple[int, int, int, int] | None = None):
+    """Read a 2-D image, optionally only the pixels inside ``box``.
+
+    With a box, ``hdu.section`` reads just those rows off disk and the result
+    is placed into a full-shape array. Untouched pages of that array are never
+    faulted in, so it costs the box in resident memory while every pixel
+    coordinate, slice and WCS in the pipeline keeps its full-frame meaning.
+    """
+    from astropy.io import fits
+
+    with fits.open(path, memmap=True) as hdul:
+        idx = next(
+            (i for i, h in enumerate(hdul) if int(h.header.get("NAXIS", 0)) == 2),
+            None,
+        )
+        if idx is None:
+            raise ValueError(f"no 2-D image HDU in {path}")
+        hdu = hdul[idx]
+        shape = (int(hdu.header["NAXIS2"]), int(hdu.header["NAXIS1"]))
+        if box is None:
+            return np.asarray(hdu.data)
+        y0, y1, x0, x1 = box
+        sub = np.asarray(hdu.section[y0:y1, x0:x1])
+        full = np.zeros(shape, dtype=sub.dtype)
+        full[y0:y1, x0:x1] = sub
+        return full
 
 
 def _upsample_flux_conserving_image_and_ivar(
@@ -549,6 +691,11 @@ class Pipeline:
             psfs = [None] * len(images)
 
         self.residuals: list[np.ndarray] = []
+        # Pixel box of the trial patch on the hi/lo grids, or None for a
+        # full-field run; set by load_data and used to scope the whole-array
+        # passes (background/ivar, saturation repair).
+        self.trial_box_hi: tuple[int, int, int, int] | None = None
+        self.trial_box_lo: tuple[int, int, int, int] | None = None
         self.fit: list[np.ndarray] = []
         self.astro: list[np.ndarray] = []
         #        self.templates: list[np.ndarray] = []
@@ -984,6 +1131,33 @@ class Pipeline:
             )
         return guess
 
+    @staticmethod
+    def _bg_and_ivar_boxed(
+        sci: np.ndarray,
+        wht: np.ndarray,
+        box: tuple[int, int, int, int] | None,
+        **kwargs: Any,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """``get_bg_and_ivar`` restricted to ``box``, returned full-shape.
+
+        A trial run's arrays are full-shape but only the box was read, so the
+        rest is zero. Estimating on the whole array would both fault in the
+        entire mosaic and measure the noise of a field of zeros; running on
+        the slice keeps the cost and the statistics on real pixels. Outside
+        the box the returned ivar is zero, so those pixels carry no weight.
+        """
+        from .catalog import get_bg_and_ivar
+
+        if box is None:
+            return get_bg_and_ivar(sci, wht, **kwargs)
+        y0, y1, x0, x1 = box
+        bg_sub, ivar_sub = get_bg_and_ivar(sci[y0:y1, x0:x1], wht[y0:y1, x0:x1], **kwargs)
+        bg = np.zeros(sci.shape, dtype=bg_sub.dtype)
+        ivar = np.zeros(sci.shape, dtype=ivar_sub.dtype)
+        bg[y0:y1, x0:x1] = bg_sub
+        ivar[y0:y1, x0:x1] = ivar_sub
+        return bg, ivar
+
     def _repair_provenance(self, pattern_halo: str) -> dict[str, str]:
         """What the repair depended on; a cache is valid only if all match."""
         cfg = self.run_config
@@ -993,6 +1167,9 @@ class Pipeline:
             "pattern": cfg.pattern_hi,
             "halo": pattern_halo or "",
             "kwargs": json.dumps(cfg.repair_kwargs or {}, sort_keys=True),
+            # A trial run only repairs its own patch, so its cache must not
+            # satisfy a full-field run (or a differently-placed patch).
+            "trial_box": json.dumps(getattr(self, "trial_box_hi", None)),
         }
         for key in ("sci_hi", "wht_hi"):
             prov[key + "_mtime"] = str(int(Path(prov[key]).stat().st_mtime))
@@ -1141,18 +1318,22 @@ class Pipeline:
             logger.info("detection weight map %s (not read: extend_mode=%r)", path.name, mode)
             return None
 
-        bg_hi, ivar_hi = get_bg_and_ivar(
+        box_hi = getattr(self, "trial_box_hi", None)
+        bg_hi, ivar_hi = self._bg_and_ivar_boxed(
             sci_hi,
-            wht_hi if wht_hi is not None else fits.getdata(path),
+            wht_hi if wht_hi is not None else _read_image(path, box_hi),
+            box_hi,
             bg_filter_sigma=cfg.bg_filter_sigma,
             label=f"detection band, {path.name}",
         )
         # The detection background is measured but NOT subtracted: that would
         # change 'default' templates too. It matters for the extended schemes,
         # which blend raw data over a large halo, so report it (see TODO.md).
+        # over the box: np.median copies its input to partition it, so on a
+        # trial run this one diagnostic would fault in the whole mosaic twice
         logger.info(
             "detection ivar from %s (median background %.4g; not subtracted)",
-            path.name, float(np.median(bg_hi)),
+            path.name, float(np.median(bg_hi[_box_slice(box_hi)])),
         )
         return ivar_hi
 
@@ -1171,13 +1352,42 @@ class Pipeline:
         cfg = self.run_config
         wcs_hi = WCS(fits.getheader(cfg.sci_hi))
         wcs_lo = WCS(fits.getheader(cfg.sci_lo))
-        tmpl_hi = fits.getdata(cfg.sci_hi)
-        sci_lo = fits.getdata(cfg.sci_lo)
-        wht_lo = fits.getdata(cfg.wht_lo)
+
+        # Trial patch: read only those pixels, but into full-shape arrays so
+        # nothing downstream has to know. self.trial_box_hi/_lo also scope the
+        # whole-array passes (background/ivar, saturation repair), which would
+        # otherwise fault in the entire mosaic and undo the saving.
+        geom = cfg.trial_geometry()
+        box_hi = box_lo = None
+        if geom is not None:
+            center, radius, margin = geom
+            hdr_hi = fits.getheader(cfg.sci_hi)
+            hdr_lo = fits.getheader(cfg.sci_lo)
+            shape_hi = (int(hdr_hi["NAXIS2"]), int(hdr_hi["NAXIS1"]))
+            shape_lo = (int(hdr_lo["NAXIS2"]), int(hdr_lo["NAXIS1"]))
+            box_hi = _trial_pixel_box(wcs_hi, shape_hi, center, radius, margin)
+            box_lo = _trial_pixel_box(wcs_lo, shape_lo, center, radius, margin)
+            logger.warning(
+                "TRIAL RUN: r=%.2f' + %.0f\" margin at (%.5f, %.5f); reading "
+                "hi %dx%d of %dx%d (%.1f%%), lo %dx%d of %dx%d. Background and "
+                "ivar are calibrated on the patch, so fluxes and errors will "
+                "NOT match a full-field run — iterate with this, do not "
+                "release it.",
+                radius, margin, center[0], center[1],
+                box_hi[1] - box_hi[0], box_hi[3] - box_hi[2], *shape_hi,
+                100.0 * (box_hi[1] - box_hi[0]) * (box_hi[3] - box_hi[2])
+                / float(shape_hi[0] * shape_hi[1]),
+                box_lo[1] - box_lo[0], box_lo[3] - box_lo[2], *shape_lo,
+            )
+        self.trial_box_hi, self.trial_box_lo = box_hi, box_lo
+
+        tmpl_hi = _read_image(cfg.sci_hi, box_hi)
+        sci_lo = _read_image(cfg.sci_lo, box_lo)
+        wht_lo = _read_image(cfg.wht_lo, box_lo)
         # Normalise the label dtype once, here at the boundary: releases differ
         # (MINERVA COSMOS ships float64 where UDS and EGS ship int32) and every
         # downstream SegmentationImage would otherwise have to defend itself.
-        segmap = as_label_array(fits.getdata(cfg.segmap))
+        segmap = as_label_array(_read_image(cfg.segmap, box_hi))
         cat = Table.read(cfg.catalog)
 
         wht_hi_repaired: np.ndarray | None = None
@@ -1212,7 +1422,7 @@ class Pipeline:
                         pattern_halo, exc,
                     )
                     stamp_dpsf, pattern_halo = None, ""
-            wht0 = fits.getdata(self.resolve_wht_hi())
+            wht0 = _read_image(self.resolve_wht_hi(), box_hi)
             if cfg.repair_cache_path:
                 cache_path = Path(cfg.repair_cache_path)
                 if not cache_path.is_absolute():
@@ -1261,39 +1471,51 @@ class Pipeline:
             cat = cat[wht_lo[iy, ix] > 0]
             logger.info("%d sources inside the lo-res footprint", len(cat))
 
-        if cfg.r_trial and cfg.r_trial > 0:
+        if geom is not None:
             import astropy.units as u
             from astropy.coordinates import SkyCoord
 
-            if not cfg.trial_center:
-                raise ValueError("r_trial > 0 requires trial_center=[ra, dec]")
+            center, radius, _margin = geom
             coords = SkyCoord(
                 ra=np.asarray(cat["ra"], float) * u.deg,
                 dec=np.asarray(cat["dec"], float) * u.deg,
             )
-            ref = SkyCoord(
-                ra=cfg.trial_center[0] * u.deg, dec=cfg.trial_center[1] * u.deg
-            )
-            cat = cat[coords.separation(ref) < cfg.r_trial * u.arcmin]
-            logger.info("r_trial=%.2f': %d sources", cfg.r_trial, len(cat))
+            ref = SkyCoord(ra=center[0] * u.deg, dec=center[1] * u.deg)
+            cat = cat[coords.separation(ref) < radius * u.arcmin]
+            logger.info("trial radius %.2f': %d sources", radius, len(cat))
 
-        bg, ivar = get_bg_and_ivar(
-            sci_lo, wht_lo, bg_filter_sigma=cfg.bg_filter_sigma,
+        bg, ivar = self._bg_and_ivar_boxed(
+            sci_lo, wht_lo, box_lo,
+            bg_filter_sigma=cfg.bg_filter_sigma,
             label=f"{cfg.filter_lo or 'lo band'}, {Path(cfg.wht_lo).name}",
         )
-        sci_fit = sci_lo - bg
+        # Background subtraction and the non-finite guard, over the trial box
+        # only. Whole-array arithmetic here would touch every page and fault
+        # the mosaic that was deliberately not read back into memory; outside
+        # the box the arrays are zero, which is already what the guard wants.
+        sl_lo = _box_slice(box_lo)
+        # np.zeros, not np.zeros_like: zeros_like is empty_like + memset and
+        # so writes every page, which on a trial run materialises the whole
+        # grid that was deliberately never read
+        sci_fit = np.zeros(sci_lo.shape, dtype=sci_lo.dtype)
+        sub = sci_lo[sl_lo] - bg[sl_lo]
         # zero non-finite pixels in image AND weight so they carry no information
-        bad = ~np.isfinite(sci_fit)
-        sci_fit[bad] = 0.0
-        ivar[bad] = 0.0
-        ivar[~np.isfinite(ivar)] = 0.0
+        bad = ~np.isfinite(sub)
+        sub[bad] = 0.0
+        sci_fit[sl_lo] = sub
+        ivar_box = ivar[sl_lo]
+        ivar_box[bad] = 0.0
+        ivar_box[~np.isfinite(ivar_box)] = 0.0
 
         ivar_hi = self._load_detection_ivar(tmpl_hi, wht_hi=wht_hi_repaired)
-        bad_hi = ~np.isfinite(tmpl_hi)
-        np.nan_to_num(tmpl_hi, copy=False)
+        sl_hi = _box_slice(box_hi)
+        tmpl_box = tmpl_hi[sl_hi]
+        bad_hi = ~np.isfinite(tmpl_box)
+        np.nan_to_num(tmpl_box, copy=False)
         if ivar_hi is not None:
-            ivar_hi[bad_hi] = 0.0
-            ivar_hi[~np.isfinite(ivar_hi)] = 0.0
+            ivar_hi_box = ivar_hi[sl_hi]
+            ivar_hi_box[bad_hi] = 0.0
+            ivar_hi_box[~np.isfinite(ivar_hi_box)] = 0.0
 
         if kernels:
             self._ensure_maps()
@@ -1317,6 +1539,9 @@ class Pipeline:
             wcs=[wcs_hi, wcs_lo],
             config=_FitConfig(**cfg.fit),
         )
+        # __init__ resets the trial boxes; they describe the data just loaded,
+        # so restore them for the repair provenance and the detection-band ivar
+        self.trial_box_hi, self.trial_box_lo = box_hi, box_lo
         return self
 
     # -- config snapshot + resume ------------------------------------------
@@ -1784,9 +2009,9 @@ class Pipeline:
         if cfg.scene_plots and self.scenes:
             scene_dir.mkdir(parents=True, exist_ok=True)
 
-        # Saturated stars' segment ids: nulled in every OTHER scene's
-        # diagnostic (their brightness would dominate the display), shown in
-        # their own scene's plot.
+        # Saturated stars' segment ids: kept out of the display scale of every
+        # OTHER scene's image panel (their brightness would dominate it) and
+        # nulled in that scene's residual panel; see Scene.plot.
         sat_ids = [
             int(t.id)
             for s in self.scenes
@@ -1833,6 +2058,16 @@ class Pipeline:
         scene_table.write(
             f"{stem}_scene_catalog.csv", format="ascii.csv", overwrite=True
         )
+
+        # full-field map of the partition: every segment colored by the scene
+        # that fitted it, with each scene's bounding box drawn over it
+        if cfg.scene_plots and self.scenes:
+            from .verification import save_scene_overview
+
+            save_scene_overview(
+                self.images[0], self.segmap, self.scenes,
+                f"{stem}_scene_map.png",
+            )
 
         # shift field: only exists when astrometry was actually solved
         out = self.plot_shift_field(save=f"{stem}_shift_field.png")
@@ -2092,8 +2327,8 @@ class Pipeline:
         self.fit_bin_factors.append(int(k))
         if k > 1 and config.multi_resolution_method == "upsample":
             logger.info("upsampling image %d by factor %d", ifilt, k)
-            self.images[ifilt], _ = _upsample_flux_conserving_image_and_ivar(
-                self.images[ifilt], None, k
+            self.images[ifilt], _ = _upsample_boxed(
+                self.images[ifilt], None, k, self.trial_box_lo
             )
             self.wcs[ifilt] = self.wcs[0]
 
@@ -2806,10 +3041,18 @@ class Pipeline:
 
         return out
 
-    def _aperture_sum_on_template(self, tmpl: Template, radius_pix: float) -> float:
-        """Exact aperture sum on a template image centered on its own center."""
-        x0 = tmpl.input_position_cutout[0]  # - tmpl.slices_cutout[1].start
-        y0 = tmpl.input_position_cutout[1]  # - tmpl.slices_cutout[0].start
+    def _aperture_sum_on_template(
+        self, tmpl: Template, radius_pix: float,
+        offset: tuple[float, float] = (0.0, 0.0),
+    ) -> float:
+        """Exact aperture sum on a template image centered on its own center.
+
+        ``offset`` displaces the aperture from the catalog position — pass
+        the template's accumulated astrometric shift so the aperture follows
+        the source the template was resampled onto.
+        """
+        x0 = tmpl.input_position_cutout[0] + float(offset[0])
+        y0 = tmpl.input_position_cutout[1] + float(offset[1])
         aper = CircularAperture((float(x0), float(y0)), r=float(radius_pix))
         phot = aperture_photometry(tmpl.data, aper, method="exact")
         return float(phot["aperture_sum"][0])
@@ -2978,8 +3221,13 @@ class Pipeline:
             model_patch = fl * tmpl.data[tmpl.slices_cutout]
             patch = res_patch + model_patch
 
-            x0 = tmpl.input_position_cutout[0] - tmpl.slices_cutout[1].start
-            y0 = tmpl.input_position_cutout[1] - tmpl.slices_cutout[0].start
+            # Aperture at the *fitted* position: the astrometric passes moved
+            # both the source and its resampled template off the catalog
+            # position (median ~1.3 fit-pix), and an off-centre aperture
+            # loses EE. subphot does the same for its raw flux (xaper = xc-p).
+            sx, sy = (float(v) for v in getattr(tmpl, "shifted", (0.0, 0.0))[:2])
+            x0 = tmpl.input_position_cutout[0] - tmpl.slices_cutout[1].start + sx
+            y0 = tmpl.input_position_cutout[1] - tmpl.slices_cutout[0].start + sy
             aper_img = CircularAperture((float(x0), float(y0)), r=float(r_img_pix))
             phot = aperture_photometry(patch, aper_img, method="exact")
             ap_raw = float(phot["aperture_sum"][0])
@@ -2988,7 +3236,9 @@ class Pipeline:
             # than 1.0 accounts for any flux lost at the template boundary
             # during convolution.
             num = float(tmpl.data.sum())
-            den = self._aperture_sum_on_template(tmpl, r_img_pix)  # ap_lo * num
+            # same fitted-position convention as ap_raw: the template was
+            # resampled onto the shifted source, so the aperture follows it
+            den = self._aperture_sum_on_template(tmpl, r_img_pix, offset=(sx, sy))
 
             ap_model = fl * den  # aperture flux on model only (for info)
 
@@ -3135,7 +3385,14 @@ class Pipeline:
             for t in templates:
                 if int(t.id) in star_ids:
                     t.is_star = True
-            logger.info("Marked %d templates as stars (excluded from astrometry)", sum(t.is_star for t in templates))
+            # is_star only reaches the astrometry when the run asks for it:
+            # unsaturated stars are the best anchors there is (FitConfig
+            # .astrom_exclude_stars, default False).
+            logger.info(
+                "Marked %d templates as stars (%s from astrometry)",
+                sum(t.is_star for t in templates),
+                "excluded" if config.astrom_exclude_stars else "kept as anchors",
+            )
 
         ndropped = len(cat) - len(templates)
         # @@@ this is because of reliance of x,y in catalog -> use segmap + weight?
@@ -3180,10 +3437,11 @@ class Pipeline:
         if k > 1:
             if config.multi_resolution_method == "upsample":
                 logger.info("upsampling image %d by factor %d", ifilt, k)
-                images[ifilt], weights_i = _upsample_flux_conserving_image_and_ivar(
+                images[ifilt], weights_i = _upsample_boxed(
                     images[ifilt],
                     weights_i,
                     k,
+                    self.trial_box_lo,
                 )
                 wcs[ifilt] = wcs[0]
             else:
@@ -3408,8 +3666,28 @@ class Pipeline:
                     ", ".join(f"scene {s.id} ({s.astrom_step:.3f} pix)" for s in slow[:5]),
                 )
 
-            # build model in res first, then subtract from image
-            res = np.zeros_like(images[ifilt])
+            # Each pass solves fluxes on the templates as they stood *before*
+            # that pass's shift was applied, so the stored fluxes, errors and
+            # model belong to a basis that no longer exists -- the last shift
+            # applied is never accounted for. Re-solve fluxes once on the final
+            # templates, for every scene and regardless of the convergence
+            # verdict, so what is written is stationary for the basis actually
+            # used to build the model, residual and stamps. Shifts are left
+            # untouched: this is a flux-only pass.
+            if config.fit_astrometry_niter > 0:
+                final_cfg = replace(config, fit_astrometry_niter=0)
+                for scn in scenes:
+                    scn.set_band(images[ifilt], weights_i, config=config)
+                    scn.solve(config=final_cfg)
+                logger.info(
+                    "[Scenes] re-solved fluxes on the final templates for %d scene(s)",
+                    len(scenes),
+                )
+
+            # build model in res first, then subtract from image. np.zeros,
+            # not np.zeros_like: zeros_like memsets every page, which on a
+            # trial run materialises the whole reference grid.
+            res = np.zeros(images[ifilt].shape, dtype=images[ifilt].dtype)
             for s in scenes:
                 sl = _slices_from_bbox(s.bbox)
                 res[sl] += s.model_image()  # adds models in place

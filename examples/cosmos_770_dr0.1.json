@@ -37,13 +37,13 @@
   "psf_size": null,
   "psf_blur_fwhm": "default",
 
-  # preprocessing: footprint cut + trial patch (set r_trial 0 for full run).
-  # trial_center = deepest fully F770W-covered 0.5' patch (median wht 1.34e8,
+  # preprocessing: footprint cut + trial patch (set "trial": null for a full
+  # run). Only the patch plus its margin is read off disk.
+  # trial.center = deepest fully F770W-covered 0.5' patch (median wht 1.34e8,
   # 2.6x the footprint median); 507 LW sources, close to the 578 of the DR0
   # UDS patch so the two trial runs are comparable in size.
   "footprint_filter": true,
-  "r_trial": 0.5,
-  "trial_center": [150.17963, 2.43257],
+  "trial": {"center": [150.17963, 2.43257], "radius": 0.5},
   "bg_filter_sigma": 64.0,
 
   # FitConfig overrides

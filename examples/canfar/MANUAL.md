@@ -234,9 +234,11 @@ automatically and is less error-prone.
 
 ### 4.5 Run it
 
-Start small. `r_trial` is the fitted patch radius in arcmin; edit it to `0.25`
-in the config for a first pass, which takes minutes instead of the better part
-of an hour.
+Start small. `trial` is the patch to fit — `{"center": [ra, dec], "radius":
+<arcmin>}`; set the radius to `0.25` in the config for a first pass, which
+takes minutes instead of the better part of an hour. Only that patch (plus a
+margin, default 60", for the PSF support and template stamps) is read off
+disk, so a small patch is cheap in memory as well as in time.
 
 ```bash
 cd /arc/home/$USER/run
@@ -246,15 +248,17 @@ cd /arc/home/$USER/run
 Expect roughly three minutes of silence at the start while Python imports
 mophongo off the network filesystem. That is normal, not a hang.
 
-When it works, set `r_trial` back to `1.0` (or `0` for the full field) and run
-again.
+When it works, set the radius back to `1.0` (or `"trial": null` for the full
+field) and run again.
 
-Measured on 8 cores, for reference:
+Measured on 8 cores, for reference. These numbers predate the partial-read
+change and so report the old full-mosaic memory; a patch now reads only its
+own pixels, so peak memory scales with the patch rather than the mosaic:
 
-| patch | sources fitted | wall time | peak memory |
+| patch | sources fitted | wall time | peak memory (full-mosaic read) |
 |---|---|---|---|
-| `r_trial` 0.25 | 810 | 8 min | 33.6 GB |
-| `r_trial` 0.6 | 2242 | 14 min | 34 GB |
+| radius 0.25 | 810 | 8 min | 33.6 GB |
+| radius 0.6 | 2242 | 14 min | 34 GB |
 
 Most of the small run is fixed cost — loading the mosaics, building or loading
 the PSF and kernel maps — which is why a quarter-size patch is not four times
@@ -325,7 +329,7 @@ See `README.md` here for the details of what each step does.
 |---|---|
 | Cannot list `arc:projects/minerva` | not in the `minerva` group yet — ask `<adam>` |
 | `No such file or directory: /arc/home/<user>` | home not created yet; see Part 2 |
-| Job or session dies with no Python traceback | out of memory. Use 48 GB; memory scales with the mosaic, not `r_trial` |
+| Job or session dies with no Python traceback | out of memory. A full-field run needs 48 GB; a `trial` patch reads only its own pixels and needs far less |
 | Nothing happens for three minutes at startup | importing mophongo off `/arc`; normal |
 | `ModuleNotFoundError` after install | you used the image's `python` instead of `./venv/bin/python` |
 | matplotlib font-cache warnings on every command | set `MPLCONFIGDIR` (Part 4.2) |

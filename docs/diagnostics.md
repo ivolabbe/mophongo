@@ -21,6 +21,10 @@ residual, and a color composite. The residual is flat down to the noise
 apart from the cores of the few brightest sources.
 ```
 
+`write_outputs` also writes `<name>_scene_map.png`: the whole field with
+every segment colored by the scene that fitted it, which is the partition
+the figure above shows one cell of (see {doc}`outputs`).
+
 ## Inspecting the inputs
 
 {meth}`mophongo.pipeline.Pipeline.plot_inputs` gives a 2×2 quicklook of the
@@ -264,6 +268,48 @@ teed stdout/stderr (bare `print` and `tqdm`) all land in the file while the
 console stays unchanged. Each entry starts with a header recording the run
 name, timestamp, Python version, platform, and output directory, and ends
 with the elapsed time — or a `FAILED after <t>s` line if the block raises.
+
+## From the command line
+
+The `mophongo` console script reaches the same products from a shell:
+
+```bash
+# the matching kernel at a sky position, as FITS with a WCS
+mophongo psf run/uds_770_kernel.geojson 34.5202 -5.2566 -o kernel.fits
+
+# the same for a band PSF, naming the run instead of the map
+mophongo psf run/uds_770.json 34.5202 -5.2566 --map-kind psf_lo
+
+# one source's cutouts, PSFs, and fit row as a multi-extension FITS
+mophongo stamps run/uds_770.json 4711 --half-size 40
+
+# the subphot six-panel diagnostic (--style stages for the build stages)
+mophongo diag run/uds_770.json 4711 --size 101
+
+mophongo info run/uds_770.json               # summarize a run, no pixels read
+mophongo run  run/uds_770.json fit outputs   # pipeline steps
+```
+
+`psf` reads only the cached region map (`_psf_hi`, `_psf_lo`, or `_kernel`),
+so it costs nothing. The stamp is written centered on the requested
+position, inheriting the orientation and pixel scale of the mosaic the map
+was drizzled onto; the run config beside the map names that mosaic, and
+`--pixel-scale` in arcsec covers the case where there is none (a north-up
+tangent plane). The header carries the region key, the stamp's encircled
+energy, and the map's provenance — PSF pattern, stamp size, broadening,
+kernel method and regularization.
+
+`stamps` and `diag` restore the run with
+{meth}`~mophongo.pipeline.Pipeline.load_fit`, so they read the mosaics;
+several ids in one invocation share that single load. `stamps` writes the
+{meth}`~mophongo.pipeline.Pipeline.source_products` dict as image extensions
+(`IMG_HI`, `SEGMAP`, `TMPL_HI`, `IMG_LO`, `TMPL_LO`, `MODEL`, `RESID`,
+`PSF_HI`, `PSF_LO`), each with the WCS of its parent grid, the fitted
+scalars in the primary header, and the fit-table row as `FITROW`.
+
+Every subcommand is a thin wrapper over a function in {mod}`mophongo.cli`
+(`psf_to_fits`, `source_stamps_to_fits`, `source_diagnostic_png`); the last
+two take a `Pipeline` that is already loaded.
 
 ## PSF and kernel diagnostics
 

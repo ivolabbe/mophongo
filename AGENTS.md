@@ -91,6 +91,8 @@ Key components:
 - `saturate.py`: saturated-pixel repair (see Module Boundaries).
 - `repair.py`: standalone saturation-repair entry point (`mophongo-repair`
   console script / `python -m mophongo.repair`).
+- `cli.py`: command-line access to a finished run's products (`mophongo`
+  console script: `psf`, `stamps`, `diag`, `info`, `run`).
 - `template_schemes.py`: self-contained ports of the alternative template build
   schemes (wren fork, IDL classic) selected by `FitConfig.extend_mode`.
 - `astrometry.py`, `jwst_psf.py`: astrometric corrections and JWST PSF
@@ -123,6 +125,10 @@ Guiding rules:
 - `repair.py` is an entry-point orchestrator (like `pipeline.py`): it may
   import both `saturate` and `catalog` to chain image repair and catalog
   flagging, but must hold no algorithmic logic of its own.
+- `cli.py` is an entry-point orchestrator as well: argument parsing, path
+  resolution, and FITS/PNG writing over existing `Pipeline`/`PSFRegionMap`
+  methods. Any computation a subcommand needs belongs in the module that
+  owns it, not here.
 - `template_schemes.py` holds the alternative build schemes and must stay a
   leaf: pure numpy in, `(composite, info)` dict out, no imports from
   `templates.py`, `fit.py`, `catalog.py` or `pipeline.py`. Dispatch lives in

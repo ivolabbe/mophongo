@@ -148,10 +148,15 @@ def prep_configs() -> None:
                     lines[k] = f'  "psf_size": {PSF_SIZE},'
             text = "\n".join(lines)
         if R_TRIAL is not None:
+            # keep the config's own trial centre, override only the radius
+            import re as _re
+
             lines = text.splitlines()
             for k, line in enumerate(lines):
-                if '"r_trial"' in line:
-                    lines[k] = f'  "r_trial": {R_TRIAL},'
+                if '"trial"' in line:
+                    lines[k] = _re.sub(
+                        r'"radius"\s*:\s*[0-9.eE+-]+', f'"radius": {R_TRIAL}', line
+                    )
             text = "\n".join(lines)
         (RUNS / f"{name}.json").write_text(text)
         # seed the PSF/kernel caches from the newest prior copy anywhere —
@@ -215,12 +220,16 @@ def run_idl_leg() -> list[dict]:
     cmp.log.addHandler(leg_log)
 
     summaries = []
-    for band in cmp.discover():
+    # cmp.discover() scans the IDL catalogues, which cover every band; the
+    # positional band arguments restrict the run and must restrict this leg
+    # too, or a single-band verification also re-compares its siblings.
+    for band in [b for b in cmp.discover() if b in BANDS]:
         log.info("idl compare %s", band)
         trio = cmp.matched(band)
         if trio is None:
             continue
-        r_trial = RunConfig.from_json(RUNS / f"uds_{band}.json").r_trial
+        geom = RunConfig.from_json(RUNS / f"uds_{band}.json").trial_geometry()
+        r_trial = geom[1] if geom else 0.0
         path, panel_stats = cmp.figure(band, *trio, r_trial)
         entry = {"band": band, "n_matched": len(trio[0]),
                  "figure": path.name}

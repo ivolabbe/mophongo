@@ -44,6 +44,7 @@ dependencies = [
 docs = ["sphinx (>=8,<9)", "myst-parser (>=5.1.0,<6.0.0)", "furo (>=2025.12.19,<2026.0.0)", "sphinx-copybutton (>=0.5.2,<0.6.0)"]
 
 [project.scripts]
+mophongo = "mophongo.cli:main"
 mophongo-repair = "mophongo.repair:main"
 [tool.poetry]
 packages = [{include = "mophongo", from = "src"}]

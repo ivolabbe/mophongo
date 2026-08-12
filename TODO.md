@@ -2,6 +2,52 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] `AlignedCutout.downsample`/`upsample` pass `self.wcs` (this cutout's
+  WCS) as the parent WCS of a new cutout built on a full-shape dummy, the
+  same pattern fixed in `Template.convolve_cutout` and
+  `project_to_block_replicated_grid` under P1-05 (2026-08-12). Left alone
+  because `AlignedCutout` has no `wcs_original` to pass, so fixing it means
+  either carrying the parent WCS on the base class or taking it as an
+  argument the way `Template.downsample` already does. No caller currently
+  reads the resulting WCS for a sky lookup, which is why it is not a P1.
+
+- [ ] Re-tune the background source mask against real mosaics. P1-03
+  (2026-08-12) set `detect_thresh=2.5` and `faint_thresh=4.0` from injected
+  sources on synthetic correlated noise (`tests/test_background_masking.py`),
+  which fixes the coupled polarity/threshold defects but calibrates the
+  thresholds on a source population whose realism is unverified. Check the
+  mask occupancy and recovered `sigma_true` on a real UDS/COSMOS mosaic
+  before the release; the acceptance metrics are already in the test file.
+  Related: `dilate` sets both the detection smoothing radius and the
+  dilation radius, so the mask is not nested in `dilate` -- worth splitting
+  into two parameters if the tuning turns out to be sensitive to it.
+
+- [ ] Finish scoping a `trial` run to its patch. The *read* is scoped
+  (2026-08-12): `_read_image(path, box)` pulls only the patch off disk via
+  `hdu.section` into a full-shape array, so pixel coordinates, slices and WCS
+  are untouched, and the background/ivar and repair passes take the box. On
+  MINERVA UDS F770W at radius 0.5', reads went 12.24 GB -> 0.88 GB and
+  `load_data` to 8 s. Peak RSS only fell 22.3 -> 15.5 GB, because several
+  full-grid operations downstream still touch every page and fault the whole
+  mosaic back in — chiefly `sci_fit = sci_lo - bg` and the non-finite guard
+  in `load_data`, the full-shape `ivar_hi`, and the lo->hi upsample in `run`
+  (`pipeline.py:3357`, 876 Mpx = 3.5 GB per array). Scoping those to the box
+  (in global coordinates, no coordinate changes needed) should get a trial
+  run to ~1-2 GB and make it laptop-runnable. Measured breakdown in the
+  2026-08-12 session notes.
+
+- [ ] Aperture placement for `ap_flux`/`stampcor`: python measures at the
+  catalog position while sources sit med ~1.3 px (40 mas) off it after
+  astrometric shifts; measuring at the shifted/fitted position (as subphot
+  does for its raw flux) is worth +~1% on ap_flux and +0.8% on stampcor
+  coherence (2026-08-12 QA measurement). Decide convention and document.
+
+- [ ] Saturated-star fragment stamps: `write_stamps` rows for spike
+  fragments (QA patch, contiguous id blocks) hold smeared star structure
+  while the fit table's stampcor for the same ids is sane — stamps-file
+  content vs fit-time templates disagree for those sources. Not touched by
+  the 2026-08-12 convolution change; inspect write path.
+
 - [ ] Robust astrometry option: IRLS across scene anchors. Extended sources
   with asymmetric colour gradients produce a residual dipole formally
   identical to a shift, so no per-source test on residual size or shape
@@ -21,8 +67,10 @@ This file tracks future desired features, checks, and investigations.
   member.
 
 - [ ] Resolve the 2026-08-12 deep-review release gates in
-  `docs/CODE_REVIEW_2026-08-12.md`. Start with the exact astrometric block
-  system and final flux-only solve; then rebuild background/IVAR masking,
+  `docs/CODE_REVIEW_2026-08-12.md`. P1-01 (exact astrometric block system),
+  P1-02 (final flux-only solve), P1-03 (background/IVAR source masking),
+  P1-04 (non-finite preprocessing input) and P1-05 (template WCS provenance)
+  are done (2026-08-12, see STATUS.md); next
   enforce template/WCS and catalog/segmentation invariants, remove OS4/cache
   assumptions, repair mock-validation independence, and reconcile the public
   docs only after the numerical gates pass. Each P1 fix needs the focused
@@ -573,7 +621,12 @@ This file tracks future desired features, checks, and investigations.
   `verify_pipeline_realistic_out` products with the fixed
   `inject_point_sources` (see `scratch/dipole_rootcause/README.md`)
 - [ ] 3 of 40 verification scenes still fit astrometric shifts 0.1-0.34 fit-pix
-  off the injected value. Ruled out: iteration count (converges to a stationary
+  off the injected value. **Recheck against the P1-01 fix (2026-08-12) before
+  investigating further**: both surviving cases are blends or bright-extended
+  sources, exactly where the old per-anchor blocks were biased, and the
+  measured spurious order-1 field (0.05 px rms, 0.16 px peak on a synthetic
+  blend) is the right order of magnitude for the smaller offsets here.
+  Ruled out before that fix: iteration count (converges to a stationary
   biased point), faint templates in the shift blocks (`snr_thresh_astrom=15`
   identical), cross-scene contamination (clean-data chi2 scan identical),
   kernel regions, and local mock painting errors. One case is a blend flux
@@ -595,7 +648,14 @@ This file tracks future desired features, checks, and investigations.
   - [ ] background per stamp
 - [ ] validate output catalogs on MIRI data
   - [ ] color color, color mag
-  - [ ] SEDs of stars, photo-z
+  - [ ] SED validation
+    - [ ] SEDs of stars
+    - [x] All-field COSMOS+EGS+UDS photo-z broadband stack in rest and observed
+      wavelength; exact current EAzY pairing, per-field/filter provenance,
+      filter-count planes, raw filter-footprint and connected pivot-cell
+      reconstructions, a continuum-residual contrast view, and machine-readable
+      stack products are implemented in
+      `examples/minerva/plot_uds_sed_stack.py`
   - [ ] add in residuals in core for improved flux measurements (shift / psf errors)
 - [ ] investigate blending in detection image
 - [ ] Investigate template extension methods (Moffat fit and PSF dilation)

@@ -368,6 +368,21 @@ coupling block `AB`, the shift block `BB`, and the right-hand side `bB` for
 one scene, seeding the gradient terms with the diagonal-only flux estimates
 $b_i/A_{ii}$.
 
+The shift columns of the design are scene-wide sums over the bright anchors,
+
+$$
+B_k = -\sum_i \alpha_i\,\phi_k(u_i, v_i)\,\nabla T_i ,
+$$
+
+so `AB` $= A^\top W B$, `BB` $= B^\top W B$ and `bB` $= B^\top W d$ keep the
+cross-template terms: a flux row couples to its neighbours' gradients,
+distinct anchors couple to each other, and the $x$–$y$ block is populated.
+Accumulating only each template's own gradient products instead is exact for
+an isolated anchor, but in a blend it reads the residual dipole of an
+overlapping neighbour as a shift — on a perfectly aligned synthetic blend
+that produced a spurious order-1 shift field of 0.05 px rms, and it shrank a
+recovered 0.30 px offset to 0.18 px at 6 px separation.
+
 A scene needs at least two bright members; otherwise empty blocks are
 returned and the solver falls back to flux-only, leaving that scene's
 templates unshifted (logged as a warning).
@@ -411,6 +426,14 @@ A verdict is only recorded where a shift was actually fitted.
 run and for scenes with too few bright anchors to carry a shift block. Those
 templates trivially do not move, and reporting that as convergence would
 claim an astrometric solution that was never solved for.
+
+Once the passes finish, every scene gets one more flux-only solve on its
+final templates, converged or not. A pass solves fluxes and shifts together
+and *then* resamples the templates, so the fluxes it produced belong to the
+basis as it stood before that pass's shift — the last applied shift is never
+accounted for. Without the closing pass the stored fluxes, errors, model and
+residual would describe a template basis that no longer exists. The extra
+solve leaves the fitted shifts alone and costs one pass.
 
 The tolerance is a stopping rule, not an accuracy claim, and `0.1` fit-grid
 pixels is chosen against the noise rather than against the arithmetic. The

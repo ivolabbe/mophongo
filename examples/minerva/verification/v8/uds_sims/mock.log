@@ -1,0 +1,523 @@
+INFO verify: === f770w: pattern UDS_MIRI_F770W_OS4_GRID1, blur 0.08", aperture 0.70", sigma log (1.0, 10.0) pix
+INFO mophongo.mock_mosaic: wrote mock_f444w_wcs.csv (12 rows) and mock_f444w_sci.fits (7656×3312)
+INFO mophongo.mock_mosaic: wrote mock_f770w_wcs.csv (16 rows) and mock_f770w_sci.fits (3828×1656)
+INFO drizzlepac.haputils.astrometric_utils: ASTROMETRIC_CATALOG_URL = http://gsss.stsci.edu/webservices
+INFO mophongo.mock_mosaic: injected noise in f444w (R=0.608, K=0.0768, p_out=0.040as, p_in=0.063as)
+INFO mophongo.mock_mosaic: injected noise in f770w (R=0.551, K=1.505, p_out=0.080as, p_in=0.110as)
+INFO mophongo.psf: psf_size=4.000" (100 pix): realized ee_box=0.9680, ee_circ(2.000")=0.9642
+INFO mophongo.psf: psf_size=8.000" (100 pix): realized ee_box=0.9588, ee_circ(4.000")=0.9550
+INFO mophongo.mock_mosaic: wrote /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/examples/minerva/verification/v8/uds_sims/uds_f770w/mock/mock_mosaic.png (dpi=180)
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/src/mophongo/psf_map.py:486: UserWarning: Geometry is in a geographic CRS. Results from 'area' are likely incorrect. Use 'GeoSeries.to_crs()' to re-project geometries to a projected CRS before this operation.
+
+  gdf["area"] = gdf.geometry.area
+
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/src/mophongo/psf_map.py:486: UserWarning: Geometry is in a geographic CRS. Results from 'area' are likely incorrect. Use 'GeoSeries.to_crs()' to re-project geometries to a projected CRS before this operation.
+
+  gdf["area"] = gdf.geometry.area
+
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/.venv/lib/python3.12/site-packages/pyogrio/geopandas.py:710: UserWarning: 'crs' was not provided.  The output dataset will not have projection information defined and may not be usable in other systems.
+  write(
+
+INFO pyogrio._io: Created 2 records
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/.venv/lib/python3.12/site-packages/pyogrio/geopandas.py:710: UserWarning: 'crs' was not provided.  The output dataset will not have projection information defined and may not be usable in other systems.
+  write(
+
+INFO pyogrio._io: Created 2 records
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/.venv/lib/python3.12/site-packages/pyogrio/geopandas.py:710: UserWarning: 'crs' was not provided.  The output dataset will not have projection information defined and may not be usable in other systems.
+  write(
+
+INFO pyogrio._io: Created 2 records
+INFO mophongo.catalog: weight calibration: correction factor to wht = 1.011 (ivar x 1.011), sigma_true=0.9945 -> consistent with the weight image; measured on 8x8 blocks; median wht 1846 -> ivar 1866; median background -1.001e-05
+WARNING astroquery: The deblending mode of one or more source labels from the input segmentation image was changed from "exponential" to "linear". See the "info" attribute for the list of affected input labels.
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/src/mophongo/catalog.py:960: RuntimeWarning: divide by zero encountered in divide
+  self.sci, self.segmap, error=np.sqrt(1.0 / self.ivar), wcs=self.wcs
+
+INFO mophongo.pipeline: Pipeline (init) memory: 5.0 GB
+INFO mophongo.pipeline: Pipeline (start) memory: 5.0 GB
+INFO mophongo.pipeline: Pipeline config: FitConfig(positivity=True, reg_flux=0.0, bad_value=nan, cg_kwargs={'M': None, 'maxiter': 500, 'atol': 1e-06}, fit_astrometry_niter=2, astrom_shift_tol=0.1, astrom_damping=0.8, fit_astrometry_joint=True, reg_astrom=0.0001, snr_thresh_astrom=0.0, astrom_isolation_thresh=0.7, astrom_exclude_stars=False, astrom_leverage_cap=0.9, astrom_model='gp', astrom_centroid='centroid', astrom_kwargs={'poly': {'order': 0}, 'gp': {'length_scale': 400}}, multi_resolution_method='upsample', normal='tree', scene_minimum_bright=10, aperture_diam=0.7, aperture_catalog=None, aperture_units='arcsec', cat_kron_flux_col=None, cat_aper_flux_col=None, cat_kron_radius_col=None, cat_kron_k=2.5, template_dilate_segmap=0, skip_template_extension_for_deblended=False, extend_wings_background_only=True, extend_mode='psf_wings', psf_wings_snrlo=5.0, psf_wings_blend_p=2.0, psf_wings_rms=None, wren_ee_fraction=0.95, wren_fit_snrlo_psf=10.0, wren_wings_snr_psf=3.0, wren_blend_p=2.0, wren_blend_annulus=0.15, wren_bg_rms=None, classic_tmpl_snrlo=15.0, classic_rms=None, run_scene_solver=True, scene_coupling_thresh=0.001, scene_max_size=800, scene_max_merge_radius=1000, generate_scene_catalog=False)
+INFO mophongo.pipeline: 696 extracted templates, dropped 0
+INFO mophongo.pipeline: Pipeline (templates) memory: 5.2 GB
+INFO mophongo.pipeline: Pipeline (convolved) memory: 5.4 GB
+INFO mophongo.scene: 38 scenes for 696 templates: sizes 10-31 (median 16), 0 scene(s) without bright members
+INFO mophongo.pipeline: [Scenes] iteration 1 of 2: 38 of 38 scene(s) still moving
+INFO mophongo.scene: [Scenes] Scene 1 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 2 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 3 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 4 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 5 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 6 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 7 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 8 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 9 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 10 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 11 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 12 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 13 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 14 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 15 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 16 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 17 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 18 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 19 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 20 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 21 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 22 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 23 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 24 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 25 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 26 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 27 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 28 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 29 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 30 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 31 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 32 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 33 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 34 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 35 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 36 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 37 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 38 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.pipeline: [Scenes] iteration 1: max shift increment 0.0000 pix, 38 scene(s) converged
+INFO mophongo.pipeline: [Scenes] shifts converged (< 0.1 pix = 4.0 mas) after 1 passes
+INFO mophongo.pipeline: [Scenes] re-solved fluxes on the final templates for 38 scene(s)
+INFO mophongo.pipeline: flux_1_total divided by ee_psf_lo: median 0.98522, range 0.98522-0.98522 over 696 templates (696 fell back to the filter mean 0.98522)
+WARNING mophongo.pipeline: filter 1: 696 of 696 templates have no finite ee_psf_lo; their flux_1_total uses the filter-mean EE 0.98522 instead of the per-source value
+INFO mophongo.pipeline: using kernel lookup table F444W overlay with F770W
+INFO mophongo.pipeline: upsampling image 2 by factor 2
+INFO mophongo.pipeline: Pipeline (convolved) memory: 6.3 GB
+INFO mophongo.scene: 34 scenes for 696 templates: sizes 11-69 (median 17), 0 scene(s) without bright members
+INFO mophongo.pipeline: [Scenes] iteration 1 of 2: 34 of 34 scene(s) still moving
+INFO mophongo.scene: [Scenes] Scene 1 shift at x0,y0 ≈ (0.003, -0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 2 shift at x0,y0 ≈ (-0.001, -0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 3 shift at x0,y0 ≈ (0.004, -0.011) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 4 shift at x0,y0 ≈ (0.005, -0.004) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 5 shift at x0,y0 ≈ (-0.002, -0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 6 shift at x0,y0 ≈ (0.000, 0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 7 shift at x0,y0 ≈ (0.003, 0.004) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 8 shift at x0,y0 ≈ (-0.000, 0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 9 shift at x0,y0 ≈ (0.009, -0.005) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 10 shift at x0,y0 ≈ (0.003, -0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 11 shift at x0,y0 ≈ (-0.001, -0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 12 shift at x0,y0 ≈ (-0.003, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 13 shift at x0,y0 ≈ (0.000, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 14 shift at x0,y0 ≈ (-0.004, 0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 15 shift at x0,y0 ≈ (-0.003, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 16 shift at x0,y0 ≈ (-0.004, -0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 17 shift at x0,y0 ≈ (-0.000, 0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 18 shift at x0,y0 ≈ (-0.000, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 19 shift at x0,y0 ≈ (-0.002, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 20 shift at x0,y0 ≈ (0.005, -0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 21 shift at x0,y0 ≈ (-0.002, 0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 22 shift at x0,y0 ≈ (0.003, 0.007) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 23 shift at x0,y0 ≈ (-0.002, 0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 24 shift at x0,y0 ≈ (0.002, 0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 25 shift at x0,y0 ≈ (0.003, 0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 26 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 27 shift at x0,y0 ≈ (-0.002, 0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 28 shift at x0,y0 ≈ (0.000, 0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 29 shift at x0,y0 ≈ (-0.000, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 30 shift at x0,y0 ≈ (0.021, 0.032) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 31 shift at x0,y0 ≈ (-0.000, -0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 32 shift at x0,y0 ≈ (0.004, -0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 33 shift at x0,y0 ≈ (-0.001, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 34 shift at x0,y0 ≈ (0.001, -0.004) px (applied x0.80)
+INFO mophongo.pipeline: [Scenes] iteration 1: max shift increment 0.0258 pix, 34 scene(s) converged
+INFO mophongo.pipeline: [Scenes] shifts converged (< 0.1 pix = 4.0 mas) after 1 passes
+INFO mophongo.pipeline: [Scenes] re-solved fluxes on the final templates for 34 scene(s)
+INFO mophongo.pipeline: flux_2_total divided by ee_psf_lo: median 0.96864, range 0.96864-0.96864 over 696 templates (696 fell back to the filter mean 0.96864)
+WARNING mophongo.pipeline: filter 2: 696 of 696 templates have no finite ee_psf_lo; their flux_2_total uses the filter-mean EE 0.96864 instead of the per-source value
+INFO mophongo.pipeline: Pipeline (end) memory: 6.6 GB
+INFO verify: f770w: med_lo 0.9608  p16-p84 0.8629-1.0039  pull -4.66 +- 31.89  resid/noise 0.800
+INFO v2: mock f770w done in 4.1 min
+INFO verify: === f1280w: pattern UDS_MIRI_F1280W_OS4_GRID1, blur 0.12", aperture 1.20", sigma log (1.0, 10.0) pix
+INFO mophongo.mock_mosaic: wrote mock_f444w_wcs.csv (12 rows) and mock_f444w_sci.fits (7656×3312)
+INFO mophongo.mock_mosaic: wrote mock_f770w_wcs.csv (16 rows) and mock_f770w_sci.fits (3828×1656)
+INFO mophongo.mock_mosaic: injected noise in f444w (R=0.608, K=0.0768, p_out=0.040as, p_in=0.063as)
+INFO mophongo.mock_mosaic: injected noise in f770w (R=0.551, K=1.505, p_out=0.080as, p_in=0.110as)
+INFO mophongo.psf: psf_size=4.000" (100 pix): realized ee_box=0.9680, ee_circ(2.000")=0.9642
+INFO mophongo.psf: psf_size=8.000" (100 pix): realized ee_box=0.9410, ee_circ(4.000")=0.9383
+INFO mophongo.mock_mosaic: wrote /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/examples/minerva/verification/v8/uds_sims/uds_f1280w/mock/mock_mosaic.png (dpi=180)
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/src/mophongo/psf_map.py:486: UserWarning: Geometry is in a geographic CRS. Results from 'area' are likely incorrect. Use 'GeoSeries.to_crs()' to re-project geometries to a projected CRS before this operation.
+
+  gdf["area"] = gdf.geometry.area
+
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/src/mophongo/psf_map.py:486: UserWarning: Geometry is in a geographic CRS. Results from 'area' are likely incorrect. Use 'GeoSeries.to_crs()' to re-project geometries to a projected CRS before this operation.
+
+  gdf["area"] = gdf.geometry.area
+
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/.venv/lib/python3.12/site-packages/pyogrio/geopandas.py:710: UserWarning: 'crs' was not provided.  The output dataset will not have projection information defined and may not be usable in other systems.
+  write(
+
+INFO pyogrio._io: Created 2 records
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/.venv/lib/python3.12/site-packages/pyogrio/geopandas.py:710: UserWarning: 'crs' was not provided.  The output dataset will not have projection information defined and may not be usable in other systems.
+  write(
+
+INFO pyogrio._io: Created 2 records
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/.venv/lib/python3.12/site-packages/pyogrio/geopandas.py:710: UserWarning: 'crs' was not provided.  The output dataset will not have projection information defined and may not be usable in other systems.
+  write(
+
+INFO pyogrio._io: Created 2 records
+INFO mophongo.catalog: weight calibration: correction factor to wht = 1.013 (ivar x 1.013), sigma_true=0.9938 -> consistent with the weight image; measured on 8x8 blocks; median wht 1846 -> ivar 1869; median background -1.204e-05
+WARNING astroquery: The deblending mode of one or more source labels from the input segmentation image was changed from "exponential" to "linear". See the "info" attribute for the list of affected input labels.
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/src/mophongo/catalog.py:960: RuntimeWarning: divide by zero encountered in divide
+  self.sci, self.segmap, error=np.sqrt(1.0 / self.ivar), wcs=self.wcs
+
+INFO mophongo.pipeline: Pipeline (init) memory: 8.5 GB
+INFO mophongo.pipeline: Pipeline (start) memory: 8.5 GB
+INFO mophongo.pipeline: Pipeline config: FitConfig(positivity=True, reg_flux=0.0, bad_value=nan, cg_kwargs={'M': None, 'maxiter': 500, 'atol': 1e-06}, fit_astrometry_niter=2, astrom_shift_tol=0.1, astrom_damping=0.8, fit_astrometry_joint=True, reg_astrom=0.0001, snr_thresh_astrom=0.0, astrom_isolation_thresh=0.7, astrom_exclude_stars=False, astrom_leverage_cap=0.9, astrom_model='gp', astrom_centroid='centroid', astrom_kwargs={'poly': {'order': 0}, 'gp': {'length_scale': 400}}, multi_resolution_method='upsample', normal='tree', scene_minimum_bright=10, aperture_diam=1.2, aperture_catalog=None, aperture_units='arcsec', cat_kron_flux_col=None, cat_aper_flux_col=None, cat_kron_radius_col=None, cat_kron_k=2.5, template_dilate_segmap=0, skip_template_extension_for_deblended=False, extend_wings_background_only=True, extend_mode='psf_wings', psf_wings_snrlo=5.0, psf_wings_blend_p=2.0, psf_wings_rms=None, wren_ee_fraction=0.95, wren_fit_snrlo_psf=10.0, wren_wings_snr_psf=3.0, wren_blend_p=2.0, wren_blend_annulus=0.15, wren_bg_rms=None, classic_tmpl_snrlo=15.0, classic_rms=None, run_scene_solver=True, scene_coupling_thresh=0.001, scene_max_size=800, scene_max_merge_radius=1000, generate_scene_catalog=False)
+INFO mophongo.pipeline: 696 extracted templates, dropped 0
+INFO mophongo.pipeline: Pipeline (templates) memory: 8.5 GB
+INFO mophongo.pipeline: Pipeline (convolved) memory: 8.6 GB
+INFO mophongo.scene: 38 scenes for 696 templates: sizes 10-31 (median 16), 0 scene(s) without bright members
+INFO mophongo.pipeline: [Scenes] iteration 1 of 2: 38 of 38 scene(s) still moving
+INFO mophongo.scene: [Scenes] Scene 1 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 2 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 3 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 4 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 5 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 6 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 7 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 8 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 9 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 10 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 11 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 12 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 13 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 14 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 15 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 16 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 17 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 18 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 19 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 20 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 21 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 22 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 23 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 24 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 25 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 26 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 27 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 28 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 29 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 30 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 31 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 32 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 33 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 34 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 35 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 36 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 37 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 38 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.pipeline: [Scenes] iteration 1: max shift increment 0.0000 pix, 38 scene(s) converged
+INFO mophongo.pipeline: [Scenes] shifts converged (< 0.1 pix = 4.0 mas) after 1 passes
+INFO mophongo.pipeline: [Scenes] re-solved fluxes on the final templates for 38 scene(s)
+INFO mophongo.pipeline: flux_1_total divided by ee_psf_lo: median 0.98522, range 0.98522-0.98522 over 696 templates (696 fell back to the filter mean 0.98522)
+WARNING mophongo.pipeline: filter 1: 696 of 696 templates have no finite ee_psf_lo; their flux_1_total uses the filter-mean EE 0.98522 instead of the per-source value
+INFO mophongo.pipeline: using kernel lookup table F444W overlay with F1280W
+INFO mophongo.pipeline: upsampling image 2 by factor 2
+INFO mophongo.pipeline: Pipeline (convolved) memory: 9.4 GB
+INFO mophongo.scene: 32 scenes for 696 templates: sizes 11-53 (median 20), 0 scene(s) without bright members
+INFO mophongo.pipeline: [Scenes] iteration 1 of 2: 32 of 32 scene(s) still moving
+INFO mophongo.scene: [Scenes] Scene 1 shift at x0,y0 ≈ (0.005, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 2 shift at x0,y0 ≈ (0.007, -0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 3 shift at x0,y0 ≈ (-0.002, 0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 4 shift at x0,y0 ≈ (0.001, 0.005) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 5 shift at x0,y0 ≈ (-0.001, 0.004) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 6 shift at x0,y0 ≈ (0.004, -0.020) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 7 shift at x0,y0 ≈ (0.002, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 8 shift at x0,y0 ≈ (-0.002, -0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 9 shift at x0,y0 ≈ (-0.002, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 10 shift at x0,y0 ≈ (0.001, -0.007) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 11 shift at x0,y0 ≈ (0.004, 0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 12 shift at x0,y0 ≈ (-0.022, -0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 13 shift at x0,y0 ≈ (-0.001, 0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 14 shift at x0,y0 ≈ (-0.002, 0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 15 shift at x0,y0 ≈ (0.004, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 16 shift at x0,y0 ≈ (-0.003, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 17 shift at x0,y0 ≈ (-0.002, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 18 shift at x0,y0 ≈ (-0.001, 0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 19 shift at x0,y0 ≈ (0.001, -0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 20 shift at x0,y0 ≈ (0.007, -0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 21 shift at x0,y0 ≈ (0.002, 0.010) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 22 shift at x0,y0 ≈ (-0.003, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 23 shift at x0,y0 ≈ (0.001, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 24 shift at x0,y0 ≈ (0.003, 0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 25 shift at x0,y0 ≈ (-0.002, 0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 26 shift at x0,y0 ≈ (-0.001, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 27 shift at x0,y0 ≈ (0.002, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 28 shift at x0,y0 ≈ (0.001, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 29 shift at x0,y0 ≈ (-0.003, -0.005) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 30 shift at x0,y0 ≈ (-0.000, -0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 31 shift at x0,y0 ≈ (0.000, -0.005) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 32 shift at x0,y0 ≈ (-0.003, 0.005) px (applied x0.80)
+INFO mophongo.pipeline: [Scenes] iteration 1: max shift increment 0.0176 pix, 32 scene(s) converged
+INFO mophongo.pipeline: [Scenes] shifts converged (< 0.1 pix = 4.0 mas) after 1 passes
+INFO mophongo.pipeline: [Scenes] re-solved fluxes on the final templates for 32 scene(s)
+INFO mophongo.pipeline: flux_2_total divided by ee_psf_lo: median 0.95067, range 0.95067-0.95067 over 696 templates (696 fell back to the filter mean 0.95067)
+WARNING mophongo.pipeline: filter 2: 696 of 696 templates have no finite ee_psf_lo; their flux_2_total uses the filter-mean EE 0.95067 instead of the per-source value
+INFO mophongo.pipeline: Pipeline (end) memory: 9.6 GB
+INFO verify: f1280w: med_lo 0.9645  p16-p84 0.8826-1.0101  pull -4.07 +- 32.10  resid/noise 0.799
+INFO v2: mock f1280w done in 4.4 min
+INFO verify: === f1500w: pattern UDS_MIRI_F1500W_OS4_GRID1, blur 0.18", aperture 1.20", sigma log (1.0, 10.0) pix
+INFO mophongo.mock_mosaic: wrote mock_f444w_wcs.csv (12 rows) and mock_f444w_sci.fits (7656×3312)
+INFO mophongo.mock_mosaic: wrote mock_f770w_wcs.csv (16 rows) and mock_f770w_sci.fits (3828×1656)
+INFO mophongo.mock_mosaic: injected noise in f444w (R=0.608, K=0.0768, p_out=0.040as, p_in=0.063as)
+INFO mophongo.mock_mosaic: injected noise in f770w (R=0.551, K=1.505, p_out=0.080as, p_in=0.110as)
+INFO mophongo.psf: psf_size=4.000" (100 pix): realized ee_box=0.9680, ee_circ(2.000")=0.9642
+INFO mophongo.psf: psf_size=8.000" (100 pix): realized ee_box=0.9335, ee_circ(4.000")=0.9299
+INFO mophongo.mock_mosaic: wrote /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/examples/minerva/verification/v8/uds_sims/uds_f1500w/mock/mock_mosaic.png (dpi=180)
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/src/mophongo/psf_map.py:486: UserWarning: Geometry is in a geographic CRS. Results from 'area' are likely incorrect. Use 'GeoSeries.to_crs()' to re-project geometries to a projected CRS before this operation.
+
+  gdf["area"] = gdf.geometry.area
+
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/src/mophongo/psf_map.py:486: UserWarning: Geometry is in a geographic CRS. Results from 'area' are likely incorrect. Use 'GeoSeries.to_crs()' to re-project geometries to a projected CRS before this operation.
+
+  gdf["area"] = gdf.geometry.area
+
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/.venv/lib/python3.12/site-packages/pyogrio/geopandas.py:710: UserWarning: 'crs' was not provided.  The output dataset will not have projection information defined and may not be usable in other systems.
+  write(
+
+INFO pyogrio._io: Created 2 records
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/.venv/lib/python3.12/site-packages/pyogrio/geopandas.py:710: UserWarning: 'crs' was not provided.  The output dataset will not have projection information defined and may not be usable in other systems.
+  write(
+
+INFO pyogrio._io: Created 2 records
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/.venv/lib/python3.12/site-packages/pyogrio/geopandas.py:710: UserWarning: 'crs' was not provided.  The output dataset will not have projection information defined and may not be usable in other systems.
+  write(
+
+INFO pyogrio._io: Created 2 records
+INFO mophongo.catalog: weight calibration: correction factor to wht = 1.012 (ivar x 1.012), sigma_true=0.9942 -> consistent with the weight image; measured on 8x8 blocks; median wht 1846 -> ivar 1867; median background -1.073e-05
+WARNING astroquery: The deblending mode of one or more source labels from the input segmentation image was changed from "exponential" to "linear". See the "info" attribute for the list of affected input labels.
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/src/mophongo/catalog.py:960: RuntimeWarning: divide by zero encountered in divide
+  self.sci, self.segmap, error=np.sqrt(1.0 / self.ivar), wcs=self.wcs
+
+INFO mophongo.pipeline: Pipeline (init) memory: 7.1 GB
+INFO mophongo.pipeline: Pipeline (start) memory: 7.1 GB
+INFO mophongo.pipeline: Pipeline config: FitConfig(positivity=True, reg_flux=0.0, bad_value=nan, cg_kwargs={'M': None, 'maxiter': 500, 'atol': 1e-06}, fit_astrometry_niter=2, astrom_shift_tol=0.1, astrom_damping=0.8, fit_astrometry_joint=True, reg_astrom=0.0001, snr_thresh_astrom=0.0, astrom_isolation_thresh=0.7, astrom_exclude_stars=False, astrom_leverage_cap=0.9, astrom_model='gp', astrom_centroid='centroid', astrom_kwargs={'poly': {'order': 0}, 'gp': {'length_scale': 400}}, multi_resolution_method='upsample', normal='tree', scene_minimum_bright=10, aperture_diam=1.2, aperture_catalog=None, aperture_units='arcsec', cat_kron_flux_col=None, cat_aper_flux_col=None, cat_kron_radius_col=None, cat_kron_k=2.5, template_dilate_segmap=0, skip_template_extension_for_deblended=False, extend_wings_background_only=True, extend_mode='psf_wings', psf_wings_snrlo=5.0, psf_wings_blend_p=2.0, psf_wings_rms=None, wren_ee_fraction=0.95, wren_fit_snrlo_psf=10.0, wren_wings_snr_psf=3.0, wren_blend_p=2.0, wren_blend_annulus=0.15, wren_bg_rms=None, classic_tmpl_snrlo=15.0, classic_rms=None, run_scene_solver=True, scene_coupling_thresh=0.001, scene_max_size=800, scene_max_merge_radius=1000, generate_scene_catalog=False)
+INFO mophongo.pipeline: 696 extracted templates, dropped 0
+INFO mophongo.pipeline: Pipeline (templates) memory: 7.2 GB
+INFO mophongo.pipeline: Pipeline (convolved) memory: 7.2 GB
+INFO mophongo.scene: 38 scenes for 696 templates: sizes 10-31 (median 16), 0 scene(s) without bright members
+INFO mophongo.pipeline: [Scenes] iteration 1 of 2: 38 of 38 scene(s) still moving
+INFO mophongo.scene: [Scenes] Scene 1 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 2 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 3 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 4 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 5 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 6 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 7 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 8 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 9 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 10 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 11 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 12 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 13 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 14 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 15 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 16 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 17 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 18 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 19 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 20 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 21 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 22 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 23 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 24 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 25 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 26 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 27 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 28 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 29 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 30 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 31 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 32 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 33 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 34 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 35 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 36 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 37 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 38 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.pipeline: [Scenes] iteration 1: max shift increment 0.0000 pix, 38 scene(s) converged
+INFO mophongo.pipeline: [Scenes] shifts converged (< 0.1 pix = 4.0 mas) after 1 passes
+INFO mophongo.pipeline: [Scenes] re-solved fluxes on the final templates for 38 scene(s)
+INFO mophongo.pipeline: flux_1_total divided by ee_psf_lo: median 0.98522, range 0.98522-0.98522 over 696 templates (696 fell back to the filter mean 0.98522)
+WARNING mophongo.pipeline: filter 1: 696 of 696 templates have no finite ee_psf_lo; their flux_1_total uses the filter-mean EE 0.98522 instead of the per-source value
+INFO mophongo.pipeline: using kernel lookup table F444W overlay with F1500W
+INFO mophongo.pipeline: upsampling image 2 by factor 2
+INFO mophongo.pipeline: Pipeline (convolved) memory: 8.1 GB
+INFO mophongo.scene: 34 scenes for 696 templates: sizes 10-71 (median 19), 0 scene(s) without bright members
+INFO mophongo.pipeline: [Scenes] iteration 1 of 2: 34 of 34 scene(s) still moving
+INFO mophongo.scene: [Scenes] Scene 1 shift at x0,y0 ≈ (0.004, -0.006) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 2 shift at x0,y0 ≈ (-0.001, -0.022) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 3 shift at x0,y0 ≈ (0.006, -0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 4 shift at x0,y0 ≈ (-0.002, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 5 shift at x0,y0 ≈ (-0.003, 0.004) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 6 shift at x0,y0 ≈ (-0.007, 0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 7 shift at x0,y0 ≈ (0.000, 0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 8 shift at x0,y0 ≈ (-0.001, -0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 9 shift at x0,y0 ≈ (0.001, 0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 10 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 11 shift at x0,y0 ≈ (0.001, 0.013) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 12 shift at x0,y0 ≈ (-0.008, -0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 13 shift at x0,y0 ≈ (0.002, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 14 shift at x0,y0 ≈ (-0.003, 0.004) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 15 shift at x0,y0 ≈ (0.004, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 16 shift at x0,y0 ≈ (-0.002, 0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 17 shift at x0,y0 ≈ (0.001, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 18 shift at x0,y0 ≈ (-0.000, 0.005) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 19 shift at x0,y0 ≈ (0.001, -0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 20 shift at x0,y0 ≈ (0.009, -0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 21 shift at x0,y0 ≈ (-0.012, 0.007) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 22 shift at x0,y0 ≈ (0.001, -0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 23 shift at x0,y0 ≈ (-0.003, -0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 24 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 25 shift at x0,y0 ≈ (0.003, 0.008) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 26 shift at x0,y0 ≈ (0.002, 0.004) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 27 shift at x0,y0 ≈ (-0.002, 0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 28 shift at x0,y0 ≈ (0.004, -0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 29 shift at x0,y0 ≈ (-0.001, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 30 shift at x0,y0 ≈ (0.001, -0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 31 shift at x0,y0 ≈ (0.003, -0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 32 shift at x0,y0 ≈ (-0.001, -0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 33 shift at x0,y0 ≈ (0.000, -0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 34 shift at x0,y0 ≈ (-0.000, -0.006) px (applied x0.80)
+INFO mophongo.pipeline: [Scenes] iteration 1: max shift increment 0.0176 pix, 34 scene(s) converged
+INFO mophongo.pipeline: [Scenes] shifts converged (< 0.1 pix = 4.0 mas) after 1 passes
+INFO mophongo.pipeline: [Scenes] re-solved fluxes on the final templates for 34 scene(s)
+INFO mophongo.pipeline: flux_2_total divided by ee_psf_lo: median 0.94303, range 0.94303-0.94303 over 696 templates (696 fell back to the filter mean 0.94303)
+WARNING mophongo.pipeline: filter 2: 696 of 696 templates have no finite ee_psf_lo; their flux_2_total uses the filter-mean EE 0.94303 instead of the per-source value
+INFO mophongo.pipeline: Pipeline (end) memory: 8.3 GB
+INFO verify: f1500w: med_lo 0.9673  p16-p84 0.8927-1.0163  pull -3.71 +- 30.28  resid/noise 0.799
+INFO v2: mock f1500w done in 4.2 min
+INFO verify: === f1800w: pattern UDS_MIRI_F1800W_OS4_GRID1, blur 0.24", aperture 1.50", sigma log (1.0, 10.0) pix
+INFO mophongo.mock_mosaic: wrote mock_f444w_wcs.csv (12 rows) and mock_f444w_sci.fits (7656×3312)
+INFO mophongo.mock_mosaic: wrote mock_f770w_wcs.csv (16 rows) and mock_f770w_sci.fits (3828×1656)
+INFO mophongo.mock_mosaic: injected noise in f444w (R=0.608, K=0.0768, p_out=0.040as, p_in=0.063as)
+INFO mophongo.mock_mosaic: injected noise in f770w (R=0.551, K=1.505, p_out=0.080as, p_in=0.110as)
+INFO mophongo.psf: psf_size=4.000" (100 pix): realized ee_box=0.9680, ee_circ(2.000")=0.9642
+INFO mophongo.psf: psf_size=8.000" (100 pix): realized ee_box=0.9233, ee_circ(4.000")=0.9196
+INFO mophongo.mock_mosaic: wrote /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/examples/minerva/verification/v8/uds_sims/uds_f1800w/mock/mock_mosaic.png (dpi=180)
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/src/mophongo/psf_map.py:486: UserWarning: Geometry is in a geographic CRS. Results from 'area' are likely incorrect. Use 'GeoSeries.to_crs()' to re-project geometries to a projected CRS before this operation.
+
+  gdf["area"] = gdf.geometry.area
+
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/src/mophongo/psf_map.py:486: UserWarning: Geometry is in a geographic CRS. Results from 'area' are likely incorrect. Use 'GeoSeries.to_crs()' to re-project geometries to a projected CRS before this operation.
+
+  gdf["area"] = gdf.geometry.area
+
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/.venv/lib/python3.12/site-packages/pyogrio/geopandas.py:710: UserWarning: 'crs' was not provided.  The output dataset will not have projection information defined and may not be usable in other systems.
+  write(
+
+INFO pyogrio._io: Created 2 records
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/.venv/lib/python3.12/site-packages/pyogrio/geopandas.py:710: UserWarning: 'crs' was not provided.  The output dataset will not have projection information defined and may not be usable in other systems.
+  write(
+
+INFO pyogrio._io: Created 2 records
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/.venv/lib/python3.12/site-packages/pyogrio/geopandas.py:710: UserWarning: 'crs' was not provided.  The output dataset will not have projection information defined and may not be usable in other systems.
+  write(
+
+INFO pyogrio._io: Created 2 records
+INFO mophongo.catalog: weight calibration: correction factor to wht = 1.012 (ivar x 1.012), sigma_true=0.9941 -> consistent with the weight image; measured on 8x8 blocks; median wht 1846 -> ivar 1868; median background -1.071e-05
+WARNING astroquery: The deblending mode of one or more source labels from the input segmentation image was changed from "exponential" to "linear". See the "info" attribute for the list of affected input labels.
+WARNING py.warnings: /Users/ivo/Astro/PROJECTS/MOPHONGO/mophongo/mophongo/src/mophongo/catalog.py:960: RuntimeWarning: divide by zero encountered in divide
+  self.sci, self.segmap, error=np.sqrt(1.0 / self.ivar), wcs=self.wcs
+
+INFO mophongo.pipeline: Pipeline (init) memory: 10.8 GB
+INFO mophongo.pipeline: Pipeline (start) memory: 10.8 GB
+INFO mophongo.pipeline: Pipeline config: FitConfig(positivity=True, reg_flux=0.0, bad_value=nan, cg_kwargs={'M': None, 'maxiter': 500, 'atol': 1e-06}, fit_astrometry_niter=2, astrom_shift_tol=0.1, astrom_damping=0.8, fit_astrometry_joint=True, reg_astrom=0.0001, snr_thresh_astrom=0.0, astrom_isolation_thresh=0.7, astrom_exclude_stars=False, astrom_leverage_cap=0.9, astrom_model='gp', astrom_centroid='centroid', astrom_kwargs={'poly': {'order': 0}, 'gp': {'length_scale': 400}}, multi_resolution_method='upsample', normal='tree', scene_minimum_bright=10, aperture_diam=1.5, aperture_catalog=None, aperture_units='arcsec', cat_kron_flux_col=None, cat_aper_flux_col=None, cat_kron_radius_col=None, cat_kron_k=2.5, template_dilate_segmap=0, skip_template_extension_for_deblended=False, extend_wings_background_only=True, extend_mode='psf_wings', psf_wings_snrlo=5.0, psf_wings_blend_p=2.0, psf_wings_rms=None, wren_ee_fraction=0.95, wren_fit_snrlo_psf=10.0, wren_wings_snr_psf=3.0, wren_blend_p=2.0, wren_blend_annulus=0.15, wren_bg_rms=None, classic_tmpl_snrlo=15.0, classic_rms=None, run_scene_solver=True, scene_coupling_thresh=0.001, scene_max_size=800, scene_max_merge_radius=1000, generate_scene_catalog=False)
+INFO mophongo.pipeline: 696 extracted templates, dropped 0
+INFO mophongo.pipeline: Pipeline (templates) memory: 10.9 GB
+INFO mophongo.pipeline: Pipeline (convolved) memory: 10.9 GB
+INFO mophongo.scene: 36 scenes for 696 templates: sizes 10-34 (median 19), 0 scene(s) without bright members
+INFO mophongo.pipeline: [Scenes] iteration 1 of 2: 36 of 36 scene(s) still moving
+INFO mophongo.scene: [Scenes] Scene 1 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 2 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 3 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 4 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 5 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 6 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 7 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 8 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 9 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 10 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 11 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 12 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 13 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 14 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 15 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 16 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 17 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 18 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 19 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 20 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 21 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 22 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 23 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 24 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 25 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 26 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 27 shift at x0,y0 ≈ (-0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 28 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 29 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 30 shift at x0,y0 ≈ (-0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 31 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 32 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 33 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 34 shift at x0,y0 ≈ (0.000, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 35 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 36 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.pipeline: [Scenes] iteration 1: max shift increment 0.0000 pix, 36 scene(s) converged
+INFO mophongo.pipeline: [Scenes] shifts converged (< 0.1 pix = 4.0 mas) after 1 passes
+INFO mophongo.pipeline: [Scenes] re-solved fluxes on the final templates for 36 scene(s)
+INFO mophongo.pipeline: flux_1_total divided by ee_psf_lo: median 0.98522, range 0.98522-0.98522 over 696 templates (696 fell back to the filter mean 0.98522)
+WARNING mophongo.pipeline: filter 1: 696 of 696 templates have no finite ee_psf_lo; their flux_1_total uses the filter-mean EE 0.98522 instead of the per-source value
+INFO mophongo.pipeline: using kernel lookup table F444W overlay with F1800W
+INFO mophongo.pipeline: upsampling image 2 by factor 2
+INFO mophongo.pipeline: Pipeline (convolved) memory: 11.6 GB
+INFO mophongo.scene: 29 scenes for 696 templates: sizes 10-69 (median 20), 0 scene(s) without bright members
+INFO mophongo.pipeline: [Scenes] iteration 1 of 2: 29 of 29 scene(s) still moving
+INFO mophongo.scene: [Scenes] Scene 1 shift at x0,y0 ≈ (0.006, -0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 2 shift at x0,y0 ≈ (-0.002, 0.005) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 3 shift at x0,y0 ≈ (0.003, -0.005) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 4 shift at x0,y0 ≈ (0.065, 0.049) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 5 shift at x0,y0 ≈ (0.002, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 6 shift at x0,y0 ≈ (-0.012, 0.003) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 7 shift at x0,y0 ≈ (-0.001, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 8 shift at x0,y0 ≈ (-0.002, 0.006) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 9 shift at x0,y0 ≈ (-0.005, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 10 shift at x0,y0 ≈ (-0.001, -0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 11 shift at x0,y0 ≈ (0.002, 0.005) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 12 shift at x0,y0 ≈ (0.005, 0.006) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 13 shift at x0,y0 ≈ (0.002, 0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 14 shift at x0,y0 ≈ (-0.001, -0.006) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 15 shift at x0,y0 ≈ (0.012, -0.010) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 16 shift at x0,y0 ≈ (-0.001, -0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 17 shift at x0,y0 ≈ (-0.001, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 18 shift at x0,y0 ≈ (0.005, 0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 19 shift at x0,y0 ≈ (0.003, 0.007) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 20 shift at x0,y0 ≈ (0.000, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 21 shift at x0,y0 ≈ (-0.002, -0.004) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 22 shift at x0,y0 ≈ (-0.000, 0.004) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 23 shift at x0,y0 ≈ (-0.001, -0.001) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 24 shift at x0,y0 ≈ (0.007, -0.005) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 25 shift at x0,y0 ≈ (-0.002, 0.012) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 26 shift at x0,y0 ≈ (0.001, -0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 27 shift at x0,y0 ≈ (-0.001, 0.000) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 28 shift at x0,y0 ≈ (-0.001, 0.002) px (applied x0.80)
+INFO mophongo.scene: [Scenes] Scene 29 shift at x0,y0 ≈ (-0.001, 0.000) px (applied x0.80)
+INFO mophongo.pipeline: [Scenes] iteration 1: max shift increment 0.0519 pix, 29 scene(s) converged
+INFO mophongo.pipeline: [Scenes] shifts converged (< 0.1 pix = 4.0 mas) after 1 passes
+INFO mophongo.pipeline: [Scenes] re-solved fluxes on the final templates for 29 scene(s)
+INFO mophongo.pipeline: flux_2_total divided by ee_psf_lo: median 0.93280, range 0.93280-0.93280 over 696 templates (696 fell back to the filter mean 0.93280)
+WARNING mophongo.pipeline: filter 2: 696 of 696 templates have no finite ee_psf_lo; their flux_2_total uses the filter-mean EE 0.93280 instead of the per-source value
+INFO mophongo.pipeline: Pipeline (end) memory: 11.8 GB
+INFO verify: f1800w: med_lo 0.9688  p16-p84 0.9023-1.0189  pull -3.42 +- 28.62  resid/noise 0.799
+INFO v2: mock f1800w done in 4.5 min
+INFO verify: === f770w: pattern UDS_MIRI_F770W_OS4_GRID1, blur 0.08", aperture 0.70", sigma log (1.0, 10.0) pix
+INFO mophongo.mock_mosaic: wrote mock_f444w_wcs.csv (12 rows) and mock_f444w_sci.fits (7656×3312)
+INFO mophongo.mock_mosaic: wrote mock_f770w_wcs.csv (16 rows) and mock_f770w_sci.fits (3828×1656)
+INFO drizzlepac.haputils.astrometric_utils: ASTROMETRIC_CATALOG_URL = http://gsss.stsci.edu/webservices
+INFO mophongo.mock_mosaic: injected noise in f444w (R=0.608, K=0.0768, p_out=0.040as, p_in=0.063as)
+INFO mophongo.mock_mosaic: injected noise in f770w (R=0.551, K=1.505, p_out=0.080as, p_in=0.110as)
+INFO mophongo.psf: psf_size=4.000" (100 pix): realized ee_box=0.9680, ee_circ(2.000")=0.9642

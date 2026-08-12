@@ -5,9 +5,9 @@
 # F444W background-subtracted mosaic as the template image, the release segmap
 # and SUPER catalog, one 80 mas MIRI band fitted.
 #
-# expect_frames are the row counts of the two WCS tables; trial_center is the
-# deepest fully covered 3.0 arcmin patch of the MIRI weight map. Set r_trial to
-# 0 for a full-field run.
+# expect_frames are the row counts of the two WCS tables; trial.center is the
+# deepest fully covered 3.0 arcmin patch of the MIRI weight map. Set
+# "trial" to null for a full-field run.
 #
 # Run from examples/minerva/:  python -m mophongo.pipeline uds_f1500w.json
 {
@@ -36,11 +36,7 @@
   "repair_kwargs": {
     "min_buffer_snr": 200
   },
-  "r_trial": 3.0,
-  "trial_center": [
-    34.41359,
-    -5.30102
-  ],
+  "trial": {"center": [34.41359, -5.30102], "radius": 3},
   "bg_filter_sigma": 64.0,
   "fit": {
     "fit_astrometry_joint": true,

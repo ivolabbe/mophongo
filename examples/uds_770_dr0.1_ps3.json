@@ -53,8 +53,7 @@
   # (median wht 1.30e8, 2.0x the footprint median), found by scanning the
   # weight map; close to the [34.4, -5.26] patch of the DR0 v2.4 UDS run.
   "footprint_filter": true,
-  "r_trial": 0.6,
-  "trial_center": [34.34914, -5.27462],
+  "trial": {"center": [34.34914, -5.27462], "radius": 0.6},
   "bg_filter_sigma": 64.0,
 
   # FitConfig overrides

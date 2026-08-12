@@ -106,8 +106,8 @@ def test_saturated_without_group_gets_own_scene_each():
     assert labels[1] != labels[2]
 
 
-def test_scene_plot_nulls_foreign_saturated(tmp_path):
-    """null_segments blanks foreign saturated pixels, keeps the scene's own."""
+def test_scene_plot_keeps_foreign_saturated_out_of_the_image_scale(tmp_path):
+    """null_segments leaves the star in the image panel, out of its stretch."""
     import matplotlib
     matplotlib.use("Agg")
 
@@ -136,6 +136,42 @@ def test_scene_plot_nulls_foreign_saturated(tmp_path):
         plt.close(fig)
     assert sat_id not in {int(t.id) for t in normal.templates}
     assert sat_id in {int(t.id) for t in sat_scene.templates}
+
+    # panel contents: the grayscale Image panel still shows the foreign
+    # saturated segment, but does not let it set the display scale
+    normal.solve()
+    fig, axes = normal.plot(image, segmap, null_segments=[sat_id])
+    y0, y1, x0, x1 = normal.bbox
+    seg_cut = segmap[y0 : y1 + 1, x0 : x1 + 1]
+    foreign = seg_cut == sat_id
+    assert foreign.any(), "the foreign saturated segment is outside the bbox"
+
+    def _panels(f, axs):
+        names = ["Template", "Image", "Model", "Segmap", "Residual", "Color"]
+        out = {}
+        for i, name in enumerate(names):
+            im = axs[i].get_images()[0]
+            out[name] = (np.asarray(im.get_array()), im.get_clim())
+        plt.close(f)
+        return out
+
+    nulled = _panels(fig, axes)
+    fig2, axes2 = normal.plot(image, segmap, null_segments=None)
+    plain = _panels(fig2, axes2)
+
+    # the star is drawn either way ...
+    assert plain["Image"][0][foreign].max() > 0, "test setup: star not visible"
+    assert np.array_equal(nulled["Image"][0], plain["Image"][0]), (
+        "Image panel pixels changed when null_segments was passed"
+    )
+    # ... but its brightness is kept out of the panel's stretch
+    assert nulled["Image"][1][1] < plain["Image"][1][1], (
+        "Image panel stretch still set by the foreign saturated star"
+    )
+    # the Color panel is unaffected by null_segments entirely
+    assert np.array_equal(nulled["Color"][0], plain["Color"][0]), (
+        "Color panel changed when null_segments was passed"
+    )
 
 
 def test_saturated_scene_fits_rigid_shift():

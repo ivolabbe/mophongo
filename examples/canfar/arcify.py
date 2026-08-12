@@ -128,13 +128,25 @@ def arcify(cfg_path: Path, index: dict[str, str], out_dir: Path,
 
     ``r_trial`` overrides the trial-patch radius (in arcmin) so a cheap smoke
     run can be generated from the same source config; ``suffix`` keeps its
-    outputs separate from the full run's.
+    outputs separate from the full run's. The config's own ``trial.center``
+    is kept — only the radius is overridden — so the patch stays where the
+    source config put it.
     """
     raw = re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text())
     cfg = json.loads(raw)
     name = cfg.get("name", cfg_path.stem) + suffix
     if r_trial is not None:
-        cfg["r_trial"] = r_trial
+        if r_trial <= 0:
+            cfg["trial"] = None  # full field
+        else:
+            trial = dict(cfg.get("trial") or {})
+            if not trial.get("center"):
+                raise SystemExit(
+                    f"{cfg_path.name}: --r-trial needs a trial.center in the "
+                    'config: "trial": {"center": [ra, dec], "radius": <arcmin>}'
+                )
+            trial["radius"] = r_trial
+            cfg["trial"] = trial
     cfg["name"] = name
 
     stage: list[tuple[str, str]] = []  # (arc source, staged basename)

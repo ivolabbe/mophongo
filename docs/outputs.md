@@ -244,7 +244,19 @@ scene inherits `flag_astrom` as the fit table's `flag_astrom_<i>`.
 
 With `scene_plots` enabled, each scene also gets a `<name>_scene_<id>.png`
 diagnostic figure, written to a `scenes/` subdirectory of `out_dir` (created
-only when the plots are requested).
+only when the plots are requested), and the partition as a whole gets
+`<name>_scene_map.png` in `out_dir`: the full field with every segment
+colored by the scene that fitted it, and each scene's bounding box drawn in
+the same color. Fields wider than 4000 pixels are decimated for the display,
+reducing each block by its largest label so single-pixel segments survive
+rather than falling between samples; the title states the ratio. Bounding
+boxes are drawn for up to 250 scenes, past which they overlap into noise.
+
+In a scene diagnostic, segments listed as saturated elsewhere in the field
+stay visible in the image panel but are excluded from its display scale,
+which their brightness would otherwise flatten; the residual panel nulls
+them, since the fit residual under a saturated core is meaningless. A scene's
+own saturated members are never treated this way.
 
 Scene ids are labels of one run's fit partition, not stable source
 identifiers: membership depends on the scene-construction settings

@@ -419,11 +419,30 @@ def assemble_scene_system_AB(
     alpha0: np.ndarray | float | None,  # per-template flux (unwhitened), scene-local
     order: int = 1,
     include_y: bool = True,
-    ab_from_bright_only: bool = True,
     leverage_cap: float | None = None,
 ) -> tuple[sp.csr_matrix, sp.csr_matrix, np.ndarray]:
     """
     Build the (A,B) coupling blocks and beta RHS for a *single scene*.
+
+    These are the exact normal-equation blocks of the linearized joint
+    design (``docs/fitting.md``). Writing the shift field as
+    :math:`\\delta x_i = S_i \\cdot \\beta^x`, the model is
+
+    .. math::
+        m = \\sum_i \\alpha_i
+            [T_i - (S_i \\beta^x) \\partial_x T_i - (S_i \\beta^y) \\partial_y T_i]
+
+    so the design columns are :math:`A_j = T_j` for the fluxes and
+    :math:`B_k = -\\sum_i \\alpha_i S_{ik} \\nabla T_i` for the shift
+    coefficients, and the blocks are :math:`A^\\top W B`,
+    :math:`B^\\top W B` and :math:`B^\\top W d`.
+
+    Each :math:`B_k` sums over *every* bright anchor in the scene, so the
+    blocks retain the cross-template terms: a flux row couples to gradients
+    of its neighbours, distinct anchors couple to each other, and the x-y
+    block is populated. Accumulating only each template's own products
+    instead is exact for isolated anchors but, in a blend, mistakes the
+    residual dipole of an overlapping neighbour for a shift.
 
     Parameters
     ----------
@@ -443,31 +462,27 @@ def assemble_scene_system_AB(
         Chebyshev polynomial order for the shift basis (only used for nB sizing).
     include_y
         If True, include ∂/∂y block (else only ∂/∂x).
-    ab_from_bright_only
-        If True, rows with Si=None (faint) do not contribute to AB; BB/bB
-        still use only bright members (Si≠None).
     leverage_cap
         Quantile in (0, 1] at which to cap each anchor's leverage, or None
         to leave the weights alone.
 
-        Written out, the accumulation below is a weighted least-squares fit
-        of the per-anchor implied shifts onto the basis::
+        An anchor's information is ``I_i = a_i^2 <Gx,w,Gx>``, so leverage
+        grows as flux squared and one bright source can carry a scene on its
+        own. That is a problem when the source is extended with an asymmetric
+        colour gradient: its residual is a dipole aligned with the template
+        gradient, formally indistinguishable from a shift. Capping at
+        ``I_cap = quantile(I, leverage_cap)`` scales that anchor down by
+        ``wl_i = min(1, I_cap / I_i)`` while leaving the shift it implies
+        untouched -- it still says what it says, it just counts less.
 
-            I_i  = a_i^2 <Gx,w,Gx>                 (anchor information)
-            dx_i = -<Gx,w,r> / (a_i <Gx,w,Gx>)     (shift it implies)
-            BB   = sum_i I_i S_i S_i^T
-            bB   = sum_i I_i dx_i S_i
-
-        so leverage grows as flux squared and one bright source can carry a
-        scene on its own. That is a problem when the source is extended with
-        an asymmetric colour gradient: its residual is a dipole aligned with
-        the template gradient, formally indistinguishable from a shift.
-        Capping at ``I_cap = quantile(I, leverage_cap)`` and scaling that
-        anchor's contribution to AB/BB/bB by ``min(1, I_cap / I_i)`` bounds
-        its influence while leaving its measured ``dx_i`` untouched -- it
-        still says what it says, it just counts less. Equivalent to scaling
-        that source's pixel weights inside the shift equations only; the
-        flux block is not touched, so photometry is unchanged.
+        The cap is a weight on the shift equations, not a rescaling of the
+        anchor, so it enters the blocks at two different powers. ``AB`` and
+        ``bB`` are linear in a derivative column and take ``wl_i``; ``BB`` is
+        quadratic and takes ``sqrt(wl_i wl_j)``, which leaves ``wl_i`` on the
+        diagonal. That is what keeps the implied shift
+        ``dx_i = -bB_i / BB_ii`` invariant under capping, and it reduces to
+        scaling that source's pixel weights exactly when nothing overlaps.
+        The flux block is not touched, so photometry is unchanged.
 
         Note what this does *not* do: it cannot tell which anchor is wrong,
         so it clips the brightest, which are often the best anchors, and it
@@ -493,8 +508,6 @@ def assemble_scene_system_AB(
     p = len(cheb_basis(0.0, 0.0, order))
     nB = p * (2 if include_y else 1)
 
-    AB = sp.lil_matrix((nA, nB), dtype=float)
-    BB = np.zeros((nB, nB), dtype=float)
     bB = np.zeros(nB, dtype=float)
 
     # Normalize/validate alpha0 → scene-local array
@@ -552,44 +565,79 @@ def assemble_scene_system_AB(
                         float(lev_w[over].min()),
                     )
 
-    for row, ti in enumerate(templates):
-        sl = ti.slices_original
-        tcut = ti.data[ti.slices_cutout]
-        w = weights[sl]
-        img = image[sl]
+    # Scene-wide derivative columns B_k = sum_i (-a_i S_ik) grad(T_i),
+    # accumulated over the union footprint of the bright anchors. Faint
+    # members contribute no column of their own but still couple to these
+    # through their AB row. Two weightings are carried so the leverage cap
+    # keeps its per-anchor meaning (see `leverage_cap` above): `Bq` holds
+    # sqrt(wl_i) and builds BB, `Bl` holds wl_i and builds AB and bB. They
+    # are the same array unless some anchor is actually capped.
+    y0 = min(templates[i].slices_original[0].start for i in bright_idx)
+    y1 = max(templates[i].slices_original[0].stop for i in bright_idx)
+    x0 = min(templates[i].slices_original[1].start for i in bright_idx)
+    x1 = max(templates[i].slices_original[1].stop for i in bright_idx)
+    logger.debug(
+        "[scenes] shift columns: %d x (%d, %d) buffer, %.1f MB",
+        nB, y1 - y0, x1 - x0, nB * (y1 - y0) * (x1 - x0) * 8 / 1e6,
+    )
 
-        Si = basis_vals[row]
-        if (Si is None) and ab_from_bright_only:
-            continue
+    Bq = np.zeros((nB, y1 - y0, x1 - x0), dtype=float)
+    capped = bool(np.any(lev_w[bright_idx] < 1.0))
+    Bl = np.zeros_like(Bq) if capped else Bq
 
-        ai = float(a[row])  # flux scaling (pixels remain in dx/dy)
-        wl = lev_w[row]     # leverage weight; 1.0 unless capped
-        Gx, Gy = _gx_gy_for(row)
-
-        # Inner products with template (weighted)
-        gx_ip = float(np.sum(tcut * w * Gx[ti.slices_cutout]))
-        AB[row, 0:p] += (-ai) * wl * gx_ip * (Si if Si is not None else 0.0)
-        if include_y:
-            gy_ip = float(np.sum(tcut * w * Gy[ti.slices_cutout]))
-            AB[row, p : 2 * p] += (-ai) * wl * gy_ip * (Si if Si is not None else 0.0)
-
-        if Si is not None:
-            # BB accumulation (Gauss–Newton, uses gradients only on support)
-            Gxx = float(np.sum(Gx[ti.slices_cutout] * w * Gx[ti.slices_cutout]))
-            BB[0:p, 0:p] += wl * (ai * ai) * Gxx * np.outer(Si, Si)
-
+    for i in bright_idx:
+        ti = templates[i]
+        Si = basis_vals[i]
+        Gx, Gy = _gx_gy_for(i)
+        gx = Gx[ti.slices_cutout]
+        gy = Gy[ti.slices_cutout] if include_y else None
+        sl = (
+            slice(ti.slices_original[0].start - y0, ti.slices_original[0].stop - y0),
+            slice(ti.slices_original[1].start - x0, ti.slices_original[1].stop - x0),
+        )
+        cq = -float(a[i]) * np.sqrt(lev_w[i])
+        cl = -float(a[i]) * lev_w[i]
+        for k in range(p):
+            Bq[k][sl] += (cq * Si[k]) * gx
             if include_y:
-                Gyy = float(np.sum(Gy[ti.slices_cutout] * w * Gy[ti.slices_cutout]))
-                BB[p : 2 * p, p : 2 * p] += wl * (ai * ai) * Gyy * np.outer(Si, Si)
+                Bq[p + k][sl] += (cq * Si[k]) * gy
+        if capped:
+            for k in range(p):
+                Bl[k][sl] += (cl * Si[k]) * gx
+                if include_y:
+                    Bl[p + k][sl] += (cl * Si[k]) * gy
 
-            # RHS for beta (sign matches AB)
-            bB[0:p] += (-ai) * wl * float(np.sum(Gx[ti.slices_cutout] * w * img)) * Si
-            if include_y:
-                bB[p : 2 * p] += (
-                    (-ai) * wl * float(np.sum(Gy[ti.slices_cutout] * w * img)) * Si
-                )
+    wbuf = weights[y0:y1, x0:x1]
+    dbuf = image[y0:y1, x0:x1]
 
-    return AB.tocsr(), sp.csr_matrix(BB), bB
+    # BB = B^T W B (cross-anchor and x-y terms included), bB = B^T W d
+    BB = np.empty((nB, nB), dtype=float)
+    for k in range(nB):
+        bw = Bq[k] * wbuf
+        for m in range(k, nB):
+            BB[k, m] = BB[m, k] = float(np.sum(bw * Bq[m]))
+        bB[k] = float(np.sum(Bl[k] * wbuf * dbuf))
+
+    # AB = A^T W B, one row per template: a faint member's row is simply its
+    # overlap with the anchors' derivative columns.
+    AB = np.zeros((nA, nB), dtype=float)
+    for row, tj in enumerate(templates):
+        so = tj.slices_original
+        ya, yb = max(so[0].start, y0), min(so[0].stop, y1)
+        xa, xb = max(so[1].start, x0), min(so[1].stop, x1)
+        if ya >= yb or xa >= xb:
+            continue  # no overlap with any anchor
+        sc = tj.slices_cutout
+        tsl = (
+            slice(sc[0].start + ya - so[0].start, sc[0].start + yb - so[0].start),
+            slice(sc[1].start + xa - so[1].start, sc[1].start + xb - so[1].start),
+        )
+        tw = tj.data[tsl] * weights[ya:yb, xa:xb]
+        bsl = (slice(ya - y0, yb - y0), slice(xa - x0, xb - x0))
+        for k in range(nB):
+            AB[row, k] = float(np.sum(tw * Bl[k][bsl]))
+
+    return sp.csr_matrix(AB), sp.csr_matrix(BB), bB
 
 
 def generate_scenes(
@@ -965,7 +1013,6 @@ class Scene:
                 alpha0=alpha0,
                 order=order,
                 include_y=True,
-                ab_from_bright_only=True,
                 leverage_cap=getattr(cfg, "astrom_leverage_cap", None),
             )
             # if no valid AB BB solve will fall back to flux-only
@@ -1014,16 +1061,21 @@ class Scene:
             else:
                 # <2 bright members: shift blocks were empty and the solver
                 # fell back to flux-only — leave templates unshifted.
-                # TODO: consider merging this scene with a neighbor rather than skipping,
-                # since isolation filtering (unlike star filtering) can't be applied at
-                # merge time. Currently the star mask is applied during merge so this
-                # should only be reached in pathological all-blended scenes.
+                # TODO: consider merging this scene with a neighbor rather
+                # than skipping. merge_small_scenes applies the same three
+                # cuts against the full-field normal matrix, where a source
+                # also competes with neighbours outside its scene, so a scene
+                # that passed there can still fall short here.
                 for tmpl in self.templates:
                     tmpl.to_shift = np.zeros(2, dtype=float)
                 logger.warning(
-                    "[Scenes] Scene %s: no bright non-star isolated sources after isolation filter; "
-                    "astrometry skipped for this scene.",
+                    "[Scenes] Scene %s: fewer than 2 sources pass the astrometric "
+                    "anchor cuts (SNR > %g, isolation >= %g%s); astrometry skipped "
+                    "for this scene.",
                     getattr(self, "id", -1),
+                    float(cfg.snr_thresh_astrom),
+                    float(cfg.astrom_isolation_thresh),
+                    ", stars excluded" if getattr(cfg, "astrom_exclude_stars", False) else "",
                 )
 
         # store solution
@@ -1152,11 +1204,13 @@ class Scene:
             therefore still contains the (masked) light of sources belonging
             to other scenes.
         null_segments
-            Segmentation labels to null in the grayscale panels — typically
-            the saturated stars' segments, whose brightness would otherwise
-            dominate every neighbouring scene's display. Labels belonging to
-            THIS scene's templates are never nulled, so a saturated star is
-            shown in its own scene's diagnostic.
+            Segmentation labels of sources whose brightness would otherwise
+            dominate a neighbouring scene's display — typically the saturated
+            stars' segments. They are excluded from the *display scale* of
+            the image panel but still drawn there, and nulled in the residual
+            panel, where the fit residual under a saturated core is
+            meaningless. Labels belonging to THIS scene's templates are never
+            affected. The template and colour panels ignore the list.
         ax
             Optional array of matplotlib axes to draw on.
         **imshow_kwargs
@@ -1185,18 +1239,19 @@ class Scene:
         seg_cut = seg_image[sl]
         img_cut = self.image[sl]
 
-        # Null foreign saturated segments in the *fit-side* panels (image,
-        # residual) so they don't dominate the display scale. The template
-        # panel deliberately keeps them visible: it shows the detection
-        # image as it is, saturated stars included.
+        # Foreign saturated segments stay visible in the image panel — it
+        # shows the data as it is — but are kept out of its display scale,
+        # which their brightness would otherwise flatten. The residual panel
+        # nulls them: the fit residual under a saturated core is meaningless
+        # and would set the whole panel's stretch.
+        img_raw = img_cut  # un-nulled, for the colour composite below
         own_ids = {int(t.id) for t in self.templates}
         null_ids = [int(s) for s in (null_segments or []) if int(s) not in own_ids]
+        null_mask = None
         if null_ids:
-            null_mask = np.isin(seg_cut, np.asarray(null_ids))
-            if null_mask.any():
-                img_cut = np.where(null_mask, 0.0, img_cut)
-        else:
-            null_mask = None
+            mask = np.isin(seg_cut, np.asarray(null_ids))
+            if mask.any():
+                null_mask = mask
 
         scene_cut = np.zeros_like(seg_cut)
         scene_cut[seg_cut > 0] = int(self.id)
@@ -1216,7 +1271,7 @@ class Scene:
             res_cut = np.where(null_mask, 0.0, res_cut)
 
         b = tmpl_cut / np.nanstd(tmpl_cut) if np.nanstd(tmpl_cut) != 0 else tmpl_cut
-        r = img_cut / np.nanstd(img_cut) if np.nanstd(img_cut) != 0 else img_cut
+        r = img_raw / np.nanstd(img_raw) if np.nanstd(img_raw) != 0 else img_raw
         g = (r + b) / 2.0
         col_cut = make_lupton_rgb(r, g, b, stretch=display_sig / 1.5)
 
@@ -1252,12 +1307,25 @@ class Scene:
         images = [tmpl_cut, img_cut, model_cut, seg_cut, res_cut_masked, col_cut]
         titles = ["Template", "Image", "Model", "Segmap", "Residual", "Color"]
 
+        # Pixels each panel's grayscale stretch is measured on; only the image
+        # panel differs from what it displays (foreign saturated segments are
+        # shown but excluded from its scale).
+        scale_data = list(images)
+        if null_mask is not None:
+            scale_data[1] = img_cut[~null_mask]
+
+        def _panel_std(ref: np.ndarray, fallback: np.ndarray) -> float:
+            values = ref[ref != 0]
+            if values.size == 0:
+                values = fallback[fallback != 0]
+            return float(np.std(values)) if values.size else 1.0
+
         for i, (img, title) in enumerate(zip(images, titles)):
             sig = (display_sig_by_title or {}).get(title, display_sig)
             if "Segmap" in title:
                 ax[i].imshow(img, origin="lower", cmap=segmap_cmap, interpolation="nearest")
             elif "Residual" in title:  # residual
-                std = np.std(img[img != 0])
+                std = _panel_std(scale_data[i], img)
                 ax[i].imshow(
                     img,
                     origin="lower",
@@ -1278,7 +1346,7 @@ class Scene:
             elif "Color" in title:  # color
                 ax[i].imshow(img, origin="lower", **imshow_kwargs)
             else:
-                std = np.std(img[img != 0])
+                std = _panel_std(scale_data[i], img)
                 ax[i].imshow(
                     img,
                     origin="lower",

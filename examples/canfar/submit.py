@@ -273,8 +273,9 @@ def do_run(args: argparse.Namespace) -> None:
         print(f"--- {sid} [{status}]\n{tidy(text)}")
         if status == "Failed" and "RUN_DONE" not in text:
             print("  note: a failure with no traceback is usually the container "
-                  "being OOM-killed. Memory scales with the mosaic size, not "
-                  "r_trial, so keep --ram at 48 even for a small patch.")
+                  "being OOM-killed. A full-field run needs --ram 48; a run "
+                  'with a "trial" patch reads only that patch and needs far '
+                  "less.")
 
 
 def do_status(args: argparse.Namespace) -> None:

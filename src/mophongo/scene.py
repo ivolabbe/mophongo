@@ -214,9 +214,11 @@ def build_scene_tree_from_normal(
             n_split += 1
         labels0 = np.unique(labels0, return_inverse=True)[1]
         nscene = int(labels0.max()) + 1
-        logger.info(
+        # pre-merge component count: confusing at INFO (merge_small_scenes
+        # absorbs most of these); only the final scene summary is reported
+        logger.debug(
             "split %d component(s) over max_size=%d locally: threshold up to "
-            "%.3g (floor %.3g), max scene %d, %d scenes",
+            "%.3g (floor %.3g), max component %d, %d pre-merge components",
             n_split,
             int(max_size),
             t_hi,
@@ -653,6 +655,14 @@ def generate_scenes(
 
         scenes.append(scn)
 
+    if scenes:
+        sizes = np.array([len(s.templates) for s in scenes])
+        logger.info(
+            "%d scenes for %d templates: sizes %d-%d (median %d), "
+            "%d scene(s) without bright members",
+            len(scenes), int(sizes.sum()), int(sizes.min()), int(sizes.max()),
+            int(np.median(sizes)), int(sum(not s.is_bright.any() for s in scenes)),
+        )
     return scenes, labels
 
 

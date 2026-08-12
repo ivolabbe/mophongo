@@ -110,11 +110,13 @@ class RunConfig:
     # extra kwargs for mophongo.repair.repair_in_memory (e.g. min_buffer_snr,
     # flux_frac, min_snr, stamp_npix)
     repair_kwargs: dict[str, Any] = field(default_factory=dict)
-    # Large-FOV STDPSF pattern (e.g. the 30" 'UDS_NRC.._F444W_OS4_GRID5'
-    # grids) for the repair's star model: full halo + diffraction spikes,
-    # so segments far from the core can be flagged. The core fit keeps
-    # pattern_hi (MJD-matched). Empty = use pattern_hi for both, which
-    # limits the flag reach to that ePSF's native field of view.
+    # Large-FOV STDPSF pattern for the repair's halo model (full halo +
+    # diffraction spikes, so segments far from the core can be flagged).
+    # Empty (default) derives '{prefix}_{det}_{filt}_MJD\d+_FOV30_GRID1_OS4'
+    # from pattern_hi and, with psf_autobuild, generates the grids once
+    # (~minutes; cached in psf_dir). The core fit always keeps the
+    # MJD-matched pattern_hi ePSFs; the halo model is grafted outside
+    # their support.
     repair_psf_pattern: str = ""
     bg_filter_sigma: float = 64.0  # get_bg_and_ivar background filter
     footprint_filter: bool = True  # keep only sources with wht_lo > 0
@@ -242,7 +244,7 @@ def normalize(arr: np.ndarray) -> np.ndarray:
 
 _PSF_PATTERN_RE = re.compile(
     r"^(?P<prefix>[A-Za-z0-9+-]+)_(?P<det>.+?)_(?P<filt>[Ff]\d+[A-Za-z]*)"
-    r"(?P<mjd>_MJD[^_]+)?_GRID(?P<n>\d+)_(?P<samp>OS\d+|DET)$"
+    r"(?P<mjd>_MJD[^_]+)?(?:_FOV(?P<fov>\d+))?_GRID(?P<n>\d+)_(?P<samp>OS\d+|DET)$"
 )
 
 
@@ -268,6 +270,12 @@ def _psf_factory_kwargs(pattern: str) -> dict[str, Any]:
         "oversample": 4 if samp == "DET" else int(samp[2:]),
         "use_detsampled_psf": samp == "DET",
         "include_mjd": m.group("mjd") is not None,
+        # FOV token (e.g. _FOV30 on the large halo grids): generate at
+        # that field of view and keep the token in the saved filenames.
+        **(
+            {"fov_arcsec": float(m.group("fov")), "include_fov": True}
+            if m.group("fov") is not None else {}
+        ),
     }
 
 
@@ -542,7 +550,7 @@ class Pipeline:
         if not hasattr(self, "run_config"):
             self.run_config = None
 
-        print(f"Pipeline (init) memory: {memory():.1f} GB")
+        logger.info("Pipeline (init) memory: %.1f GB", memory())
 
     # ------------------------------------------------------------------
     # Config-driven runs: Pipeline.from_config("run.json") + step methods.
@@ -710,12 +718,17 @@ class Pipeline:
         kw = _psf_factory_kwargs(pattern)
         logger.warning(
             "no PSF grids match %r under %s; generating them from %s with "
-            "PSFFactory(%s). This is slow.",
+            "PSFFactory(%s). This is slow (minutes to tens of minutes) but "
+            "one-off: the grids are cached in %s.",
             pattern, cfg.psf_dir, csv,
             ", ".join(f"{k}={v!r}" for k, v in sorted(kw.items())),
+            cfg.psf_dir,
         )
         Path(cfg.psf_dir).mkdir(parents=True, exist_ok=True)
-        PSFFactory(outdir=str(cfg.psf_dir), fov_arcsec=cfg.psf_fov_arcsec, **kw).from_csv(
+        # An _FOV token in the pattern carries its own field of view;
+        # otherwise the config's psf_fov_arcsec applies.
+        fov = kw.pop("fov_arcsec", cfg.psf_fov_arcsec)
+        PSFFactory(outdir=str(cfg.psf_dir), fov_arcsec=fov, **kw).from_csv(
             str(csv), save=True
         )
         dpsf.epsf_obj.load_jwst_stdpsf(local_dir=str(cfg.psf_dir), filter_pattern=pattern)
@@ -960,6 +973,29 @@ class Pipeline:
             )
         return guess
 
+    def _repair_halo_pattern(self) -> str:
+        """Canonical large-FOV halo-grid pattern derived from ``pattern_hi``.
+
+        Keeps the prefix/detector/filter of the photometry grids and swaps
+        the sampling tail for the 30" single-position halo layout:
+        ``{prefix}_{det}_{filt}_MJD\\d+_FOV30_GRID1_OS4``. Building these
+        is a one-off of a few minutes per detector (stpsf at 30" FOV),
+        cached in ``psf_dir``; :meth:`_load_epsf` handles the build when
+        ``psf_autobuild`` is on.
+        """
+        m = _PSF_PATTERN_RE.match(self.run_config.pattern_hi.strip())
+        if m is None:
+            logger.warning(
+                "cannot derive a halo-grid pattern from pattern_hi=%r; "
+                "set repair_psf_pattern explicitly",
+                self.run_config.pattern_hi,
+            )
+            return ""
+        return (
+            f"{m.group('prefix')}_{m.group('det')}_{m.group('filt')}"
+            r"_MJD\d+_FOV30_GRID1_OS4"
+        )
+
     def _load_detection_ivar(
         self, sci_hi: np.ndarray, wht_hi: np.ndarray | None = None
     ) -> np.ndarray | None:
@@ -1031,11 +1067,13 @@ class Pipeline:
             from .repair import repair_in_memory
 
             self._ensure_dpsfs(load_epsf=True)
-            # Large-FOV grids for the flag model (halo + spikes); the core
-            # fit keeps the MJD-matched pattern_hi ePSFs. Same two-PSF
-            # split as the original standalone repair flow.
+            # Large-FOV grids for the halo model (halo + spikes); the core
+            # fit keeps the MJD-matched pattern_hi ePSFs and the halo is
+            # grafted outside their support. Same two-PSF split as the
+            # original standalone repair flow.
+            pattern_halo = cfg.repair_psf_pattern or self._repair_halo_pattern()
             stamp_dpsf = None
-            if cfg.repair_psf_pattern:
+            if pattern_halo and pattern_halo != cfg.pattern_hi:
                 from .psf import DrizzlePSF
 
                 stamp_dpsf = DrizzlePSF(
@@ -1043,15 +1081,25 @@ class Pipeline:
                     info=(self.dpsf_hi.flt_keys, self.dpsf_hi.wcs,
                           self.dpsf_hi.footprint, self.dpsf_hi.hdrs),
                 )
-                self._load_epsf(
-                    stamp_dpsf, cfg.repair_psf_pattern, cfg.csv_hi, "repair"
-                )
+                try:
+                    self._load_epsf(stamp_dpsf, pattern_halo, cfg.csv_hi, "halo")
+                except (FileNotFoundError, ValueError) as exc:
+                    # Missing grids with autobuild off, or a pattern the
+                    # autobuild grammar cannot parse (e.g. a legacy-order
+                    # spelling): degrade to the pattern_hi reach instead of
+                    # failing the run — the repair itself is unaffected.
+                    logger.warning(
+                        "halo PSF grids unavailable for %r (%s); flag reach "
+                        "limited to the pattern_hi field of view",
+                        pattern_halo, exc,
+                    )
+                    stamp_dpsf, pattern_halo = None, ""
             rep = repair_in_memory(
                 tmpl_hi, fits.getdata(self.resolve_wht_hi()),
                 dpsf=self.dpsf_hi, wcs=wcs_hi, psf_pattern=cfg.pattern_hi,
                 catalog=cat, segmap=segmap,
                 stamp_dpsf=stamp_dpsf,
-                stamp_pattern=cfg.repair_psf_pattern or None,
+                stamp_pattern=pattern_halo or None,
                 out_dir=self.out_dir / "repaired",
                 plots=cfg.scene_plots,
                 **(cfg.repair_kwargs or {}),
@@ -1391,13 +1439,16 @@ class Pipeline:
             fig.savefig(save, dpi=180, bbox_inches="tight")
         return fig, axes
 
-    def _scene_shift_samples(self, scene) -> tuple[np.ndarray, np.ndarray] | None:
-        """Sample one scene's fitted shift field on a grid over the scene.
+    def _scene_shift_samples(
+        self, scene, *, at: Sequence[float] | None = None
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """Sample one scene's total shift field.
 
-        The number of samples follows the Chebyshev order of the scene's shift
-        basis: ``2**order``, laid out as ``nx x ny`` with the longer side along
-        the scene's longer axis. Order 0 gives a single sample at the scene
-        center, order 1 two spread along that axis, order 2 a 2x2 grid.
+        Without ``at``, the number of samples follows the Chebyshev order of
+        the scene's shift basis: ``2**order``, laid out as ``nx x ny`` with the
+        longer side along the scene's longer axis. Order 0 gives a single
+        sample at the scene center, order 1 two spread along that axis, order 2
+        a 2x2 grid.
 
         ``Scene.shifts`` holds only the last astrometric iteration, so the
         field is refit at the same order to the accumulated
@@ -1405,6 +1456,7 @@ class Pipeline:
 
         Args:
             scene: A :class:`~mophongo.scene.Scene` that solved for shifts.
+            at: Evaluate at this single ``(x, y)`` instead of on the grid.
 
         Returns:
             ``(xy, dxy)`` in reference-image pixels, both ``(n, 2)``, or None
@@ -1437,18 +1489,21 @@ class Pipeline:
         )
         beta, *_ = np.linalg.lstsq(design, sh[ok], rcond=None)  # (p, 2)
 
-        # sample grid: 2**order points spread over the scene's own extent
-        nx, ny = 2 ** ((order + 1) // 2), 2 ** (order // 2)
-        span = pos[ok].max(axis=0) - pos[ok].min(axis=0)
-        if span[1] > span[0]:
-            nx, ny = ny, nx
+        if at is not None:
+            xs, ys = np.atleast_1d(float(at[0])), np.atleast_1d(float(at[1]))
+        else:
+            # sample grid: 2**order points spread over the scene's own extent
+            nx, ny = 2 ** ((order + 1) // 2), 2 ** (order // 2)
+            span = pos[ok].max(axis=0) - pos[ok].min(axis=0)
+            if span[1] > span[0]:
+                nx, ny = ny, nx
 
-        def step(n: int) -> np.ndarray:
-            return np.zeros(1) if n == 1 else np.linspace(-0.5, 0.5, n)
+            def step(n: int) -> np.ndarray:
+                return np.zeros(1) if n == 1 else np.linspace(-0.5, 0.5, n)
 
-        gu, gv = np.meshgrid(step(nx), step(ny))
-        xs = pos[ok][:, 0].mean() + gu.ravel() * span[0] * _SHIFT_SAMPLE_SPREAD
-        ys = pos[ok][:, 1].mean() + gv.ravel() * span[1] * _SHIFT_SAMPLE_SPREAD
+            gu, gv = np.meshgrid(step(nx), step(ny))
+            xs = pos[ok][:, 0].mean() + gu.ravel() * span[0] * _SHIFT_SAMPLE_SPREAD
+            ys = pos[ok][:, 1].mean() + gv.ravel() * span[1] * _SHIFT_SAMPLE_SPREAD
 
         phi = np.vstack(
             [cheb_basis((x - x0) / Sx, (y - y0) / Sy, order) for x, y in zip(xs, ys)]
@@ -1596,7 +1651,16 @@ class Pipeline:
         for s in self.scenes:
             xy = np.mean([t.position_original for t in s.templates], axis=0)
             ra, dec = self.wcs[0].wcs_pix2world([xy], 0)[0]
-            rows.append((s.id, len(s.templates), int(s.is_bright.sum()), ra, dec))
+            # total applied shift at the scene center, NaN where none was fitted
+            sampled = self._scene_shift_samples(s, at=xy)
+            dx, dy = sampled[1][0] if sampled is not None else (np.nan, np.nan)
+            rows.append(
+                (s.id, len(s.templates), int(s.is_bright.sum()), ra, dec,
+                 float(dx), float(dy),
+                 int(s.astrom_niter),
+                 -1 if s.astrom_converged is None else int(not s.astrom_converged),
+                 float(s.astrom_step if s.astrom_step is not None else np.nan))
+            )
             if cfg.scene_plots:
                 import matplotlib.pyplot as plt
 
@@ -1607,7 +1671,9 @@ class Pipeline:
                 fig.savefig(scene_dir / f"{cfg.name}_scene_{s.id}.png", dpi=300)
                 plt.close(fig)
         scene_table = Table(
-            rows=rows, names=["id", "n_templates", "is_bright", "ra", "dec"]
+            rows=rows,
+            names=["id", "n_templates", "is_bright", "ra", "dec", "dx", "dy",
+                   "astrom_niter", "flag_astrom", "astrom_step"],
         )
         scene_table["minerva_link"] = [
             f"https://minerva.colorado.edu/?ra={ra}&dec={dec}&zoom=7"
@@ -1874,7 +1940,7 @@ class Pipeline:
         k = bin_factor_from_wcs(self.wcs[0], self.wcs[ifilt]) if self.wcs is not None else 1
         self.fit_bin_factors.append(int(k))
         if k > 1 and config.multi_resolution_method == "upsample":
-            print(f"upsampling image {ifilt} by factor {k}")
+            logger.info("upsampling image %d by factor %d", ifilt, k)
             self.images[ifilt], _ = _upsample_flux_conserving_image_and_ivar(
                 self.images[ifilt], None, k
             )
@@ -2180,6 +2246,7 @@ class Pipeline:
         throughput: float,
         idx: int,
         scene_ids: np.ndarray | list[int] | None = None,
+        scene_flags: dict[int, int] | None = None,
     ) -> None:
         """Insert measured fluxes into the output catalog.
 
@@ -2206,6 +2273,11 @@ class Pipeline:
             persisted otherwise, and without it ``load_fit`` cannot rebuild them
             and the scene diagnostics can only be regenerated by refitting.
             Sources with no template keep -1.
+        scene_flags
+            Scene-level astrometry verdict per scene id, inherited by every
+            source fitted in that scene and written as ``flag_astrom_<idx>``
+            (0 converged, 1 still moving when the pass budget ran out).
+            Sources with no template, and scenes with no verdict, keep -1.
         """
 
         parent_ids = [
@@ -2221,6 +2293,8 @@ class Pipeline:
         cat[f"err_{idx}_total"] = self.config.bad_value
         cat[f"err_pred_{idx}_total"] = self.config.bad_value
         cat[f"scene_{idx}"] = -1
+        # scene-level astrometry verdict, inherited by every member source
+        cat[f"flag_astrom_{idx}"] = np.full(len(cat), -1, dtype=np.int8)
 
         if not np.isfinite(throughput) or throughput <= 0.0:
             logger.warning(
@@ -2300,7 +2374,10 @@ class Pipeline:
             cat[f"err_{idx}_total"][ci] = err_total_sum[pid]
             cat[f"err_pred_{idx}_total"][ci] = err_pred_total_sum[pid]
             cat[f"throughput_{idx}"][ci] = throughput
-            cat[f"scene_{idx}"][ci] = scene_of_parent.get(pid, -1)
+            sid = scene_of_parent.get(pid, -1)
+            cat[f"scene_{idx}"][ci] = sid
+            if scene_flags:
+                cat[f"flag_astrom_{idx}"][ci] = scene_flags.get(sid, -1)
 
     # ------------------------------------------------------------------
     # template build scheme (extend_mode) resolution
@@ -2678,7 +2755,14 @@ class Pipeline:
         Writes:
         ap_flux_{idx}        – raw aperture sum on model+residual
         ee_psf_lo_{idx}      – per-source box EE used (fallback: filter mean)
-        totcor_{idx}         – 1/(ap_B * ee_psf_lo)
+        tot_stamp_{idx}      – 1/ap_B alone: aperture-to-stamp-total on the
+                               model's own support, NO EE factor.  This is the
+                               like-for-like quantity against classic IDL's
+                               released ``totcor`` — but only when the two
+                               runs use the same PSF support.
+        totcor_{idx}         – 1/(ap_B * ee_psf_lo): ``totcor`` by convention
+                               ALWAYS includes the beyond-support EE, like a
+                               catalog aperture-to-total
         psfcor_{idx}         – ap_F/ap_B
         ap_flux_corr_{idx}   – ap_flux * totcor: total flux
         totcor_cat           – catalog-side aperture-to-total (band-independent),
@@ -2700,8 +2784,8 @@ class Pipeline:
 
         # ensure columns exist
         for name in (f"ap_model_{idx}", f"ap_flux_{idx}", f"ee_psf_lo_{idx}",
-                     f"totcor_{idx}", f"psfcor_{idx}", f"ap_flux_corr_{idx}",
-                     f"ap_flux_cat_{idx}"):
+                     f"tot_stamp_{idx}", f"totcor_{idx}", f"psfcor_{idx}",
+                     f"ap_flux_corr_{idx}", f"ap_flux_cat_{idx}"):
             if name not in cat.colnames:
                 cat[name] = cfg.bad_value
         totcor_cat = self._totcor_cat(cat)
@@ -2760,6 +2844,7 @@ class Pipeline:
             cat[f"ap_model_{idx}"][row] = ap_model
             cat[f"ap_flux_{idx}"][row] = ap_raw
             cat[f"ee_psf_lo_{idx}"][row] = ee
+            cat[f"tot_stamp_{idx}"][row] = inv_ap_b
             cat[f"totcor_{idx}"][row] = totcor
             cat[f"psfcor_{idx}"][row] = psfcor
             cat[f"ap_flux_corr_{idx}"][row] = ap_corr
@@ -2772,7 +2857,7 @@ class Pipeline:
         catalog = self.catalog
         if catalog is None:
             # use astropy to make catalog from image[0] + segmap
-            print("No catalog provided, generating from segmap")
+            logger.error("no catalog provided; generating one from the segmap")
             raise NotImplementedError("Catalog generation not implemented yet")
         cat = catalog.copy()
         keep_cols = ["id", "x", "y"]
@@ -2883,8 +2968,8 @@ class Pipeline:
         ndropped = len(cat) - len(templates)
         # @@@ this is because of reliance of x,y in catalog -> use segmap + weight?
         source = "prebuilt" if self.input_templates is not None else "extracted"
-        print(f"Pipepline: {len(templates)} {source} templates, dropped {ndropped}.")
-        print(f"Pipeline (templates) memory: {memory():.1f} GB")
+        logger.info("%d %s templates, dropped %d", len(templates), source, ndropped)
+        logger.info("Pipeline (templates) memory: %.1f GB", memory())
         return templates
 
     def _convolved_templates(
@@ -2906,7 +2991,7 @@ class Pipeline:
         weights_i = weights[ifilt] if weights is not None else None
         kernel = kernels[ifilt]
         if isinstance(kernel, PSFRegionMap):
-            print(f"Using kernel lookup table {kernel.name}")
+            logger.info("using kernel lookup table %s", kernel.name)
 
         k = bin_factor_from_wcs(wcs[0], wcs[ifilt]) if wcs is not None else 1
         self.fit_bin_factors.append(int(k))
@@ -2922,7 +3007,7 @@ class Pipeline:
 
         if k > 1:
             if config.multi_resolution_method == "upsample":
-                print(f"upsampling image {ifilt} by factor {k}")
+                logger.info("upsampling image %d by factor %d", ifilt, k)
                 images[ifilt], weights_i = _upsample_flux_conserving_image_and_ivar(
                     images[ifilt],
                     weights_i,
@@ -2930,7 +3015,7 @@ class Pipeline:
                 )
                 wcs[ifilt] = wcs[0]
             else:
-                print(f"Downsampling templates and kernels by factor {k}")
+                logger.info("downsampling templates and kernels by factor %d", k)
                 tmpls_lo = Templates()
                 tmpls_lo.original_shape = images[ifilt].shape
                 tmpls_lo.wcs = wcs[ifilt]
@@ -2959,7 +3044,7 @@ class Pipeline:
                 for t in templates
             ]
         self.templates = templates
-        print(f"Pipeline (convolved) memory: {memory():.1f} GB")
+        logger.info("Pipeline (convolved) memory: %.1f GB", memory())
 
         for t in templates:
             assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
@@ -3011,8 +3096,8 @@ class Pipeline:
         if getattr(self, "run_config", None) is not None:
             self.save_config()
 
-        print(f"Pipeline (start) memory: {memory():.1f} GB")
-        print(f"Pipeline config: {config}")
+        logger.info("Pipeline (start) memory: %.1f GB", memory())
+        logger.info("Pipeline config: %s", config)
 
         # test for NaN values in images and weights
         for i in range(len(images)):
@@ -3078,7 +3163,7 @@ class Pipeline:
                 scene_table.write(
                     f"scene_catalog_{ifilt}.ecsv", format="ascii.ecsv", overwrite=True
                 )
-                print(f"Wrote scene catalog scene_catalog_{ifilt}.ecsv")
+                logger.info("wrote scene catalog scene_catalog_%d.ecsv", ifilt)
                 import sys
 
                 sys.exit()
@@ -3088,24 +3173,53 @@ class Pipeline:
 
             niter_scene = max(config.fit_astrometry_niter, 1)
             shift_tol = float(getattr(config, "astrom_shift_tol", 0.02))
+            # Scenes are independent -- solve() only reads the scene's own
+            # templates, image and weights -- so one that has stopped moving
+            # stays stopped, and re-solving it only burns time. Iterate over
+            # the scenes still above tolerance and drop each as it converges.
+            pending = list(scenes)
             for j in range(niter_scene):
-                logger.info(f"[Scenes] Running iteration {j+1} of {niter_scene}")
-                max_step = 0.0
-                for scn in scenes:
+                logger.info(
+                    f"[Scenes] iteration {j+1} of {niter_scene}: "
+                    f"{len(pending)} of {len(scenes)} scene(s) still moving"
+                )
+                max_step, still = 0.0, []
+                for scn in pending:
                     prev = np.array([t.shifted[:2] for t in scn.templates], dtype=float)
                     scn.set_band(images[ifilt], weights_i, config=config)
                     scn.solve(config=config, apply_shifts=True)
                     cur = np.array([t.shifted[:2] for t in scn.templates], dtype=float)
-                    if prev.size and cur.shape == prev.shape:
-                        max_step = max(max_step, float(np.max(np.abs(cur - prev))))
+                    step = (
+                        float(np.max(np.abs(cur - prev)))
+                        if prev.size and cur.shape == prev.shape
+                        else 0.0
+                    )
+                    scn.astrom_step, scn.astrom_niter = step, j + 1
+                    scn.astrom_converged = step < shift_tol
+                    max_step = max(max_step, step)
+                    if not scn.astrom_converged:
+                        still.append(scn)
                 logger.info(
-                    f"[Scenes] iteration {j+1}: max shift increment {max_step:.4f} pix"
+                    f"[Scenes] iteration {j+1}: max shift increment {max_step:.4f} pix, "
+                    f"{len(pending) - len(still)} scene(s) converged"
                 )
-                if config.fit_astrometry_niter > 0 and max_step < shift_tol:
+                pending = still
+                if config.fit_astrometry_niter > 0 and not pending:
                     logger.info(
                         f"[Scenes] shifts converged (< {shift_tol} pix) after {j+1} passes"
                     )
                     break
+
+            # Scenes still moving when the budget ran out: their shifts are the
+            # last iterate, not a converged solution. Worth knowing which.
+            if pending:
+                slow = sorted(pending, key=lambda s: -(s.astrom_step or 0.0))
+                logger.warning(
+                    "[Scenes] %d of %d scene(s) did not converge in %d passes "
+                    "(tol %.3g pix); worst: %s",
+                    len(pending), len(scenes), niter_scene, shift_tol,
+                    ", ".join(f"scene {s.id} ({s.astrom_step:.3f} pix)" for s in slow[:5]),
+                )
 
             # build model in res first, then subtract from image
             res = np.zeros_like(images[ifilt])
@@ -3148,6 +3262,12 @@ class Pipeline:
                 id(t): s.id for s in scenes for t in getattr(s, "templates", [])
             }
             template_scene_ids = [scene_of_template.get(id(t), -1) for t in templates]
+            # Convergence is a property of the scene, and every source fitted
+            # in it shares the verdict: its shift came out of the same passes.
+            scene_astrom_flags = {
+                s.id: (-1 if s.astrom_converged is None else int(not s.astrom_converged))
+                for s in scenes
+            }
             self._update_catalog_with_fluxes(
                 cat,
                 templates,
@@ -3157,6 +3277,7 @@ class Pipeline:
                 throughput,
                 ifilt,
                 scene_ids=template_scene_ids,
+                scene_flags=scene_astrom_flags,
             )
             self._add_aperture_photometry(
                 cat,
@@ -3175,7 +3296,8 @@ class Pipeline:
             self.all_scenes.append(scenes)
         #            self.infos.append(info)
 
-        print(f"Pipeline (end) memory: {psutil.Process(os.getpid()).memory_info().rss/1e9:.1f} GB")
+        logger.info("Pipeline (end) memory: %.1f GB",
+                    psutil.Process(os.getpid()).memory_info().rss / 1e9)
         self.table = cat
 
         return self.table, self.residuals  # , self.all_templates, self.all_scenes

@@ -129,11 +129,23 @@ aperture radius of 1.5 times the band PSF FWHM).
 : The aperture diameter used, in arcsec. Only written when
   `FitConfig.aperture_diam` is set.
 
-The correction names follow classic (IDL) mophongo. With `src_tmpl` the
-unit-normalized high-resolution composite `H` and `src_img` the
-unit-normalized band-convolved composite `H*K`, `ap_hi = aper(src_tmpl, R)`
-and `ap_lo = aper(src_img, R)` are their encircled energies at the aperture
-radius.
+With `src_tmpl` the unit-normalized high-resolution composite `H` and
+`src_img` the unit-normalized band-convolved composite `H*K`,
+`ap_hi = aper(src_tmpl, R)` and `ap_lo = aper(src_img, R)` are their
+encircled energies at the aperture radius.
+
+```{note}
+**Naming rule.** A correction name carries `tot` only if it includes the
+encircled-energy term. A correction that stops at the edge of the model's
+own finite support is not a total, whatever other codes call it. So
+`stampcor` (`1/ap_lo`) has no EE and is deliberately not `totcor`, while
+`totcor` (`1/(ap_lo*ee_psf_lo)`) does and keeps the name. Classic IDL
+releases the first of these *as* `totcor`, and comparing it against a
+quantity that does include the EE is the usual way to manufacture a
+few-percent offset between the two codes. When writing an estimator, prefer
+the factored `psfcor * totcor_cat` over a bare `totcor`: the factors state
+which convention is meant and the bare name does not.
+```
 
 `ap_flux_<i>`
 : Raw aperture sum on model + residual at the source position.
@@ -146,16 +158,18 @@ radius.
   `totcor_<i>` (filter-mean fallback where a template has no recorded
   value) — the same factor `flux_<i>_total` divides by.
 
-`tot_stamp_<i>`
-: `1 / ap_lo` alone: the aperture-to-total of the model on its own finite
-  stamp support, with no EE factor. This is the quantity classic IDL
-  releases as `totcor` — compare the two only when both runs use the same
-  PSF support.
+`stampcor_<i>`
+: `1 / ap_lo` alone: the aperture carried to the total of the model on its
+  own finite stamp support, with **no** EE factor. Named `stampcor` rather
+  than `tot*` on purpose — see the naming rule below. This is the quantity
+  classic IDL releases as `totcor`, which is misnamed by the same rule;
+  compare the two only when both runs use the same PSF support. (Written as
+  `tot_stamp_<i>` before 2026-08-12.)
 
 `totcor_<i>`
-: Aperture-to-total correction, `1 / (ap_lo * ee_psf_lo)`. By convention
-  `totcor` always includes the beyond-support encircled energy, like a
-  catalog aperture-to-total; the support-only piece is `tot_stamp_<i>`.
+: Aperture-to-total correction, `1 / (ap_lo * ee_psf_lo)`. This one earns
+  the name: it always includes the beyond-support encircled energy, like a
+  catalog aperture-to-total. The support-only piece is `stampcor_<i>`.
 
 `psfcor_<i>`
 : `ap_hi / ap_lo`, the source's own high-res to low-res band EE ratio at the

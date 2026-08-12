@@ -470,10 +470,13 @@ class MockMosaic:
             (8 arcsec is safe for NIRCam LW and MIRI grids).
         source_sigma_pix: Intrinsic circular Gaussian source sigma, in
             pixels on ``source_sigma_pscale``. ``None``/0 injects pure point
-            sources; a two-value tuple draws log-uniform sizes between the
-            bounds.
+            sources; a two-value tuple draws sizes between the bounds with
+            the ``source_sigma_dist`` law.
         source_sigma_pscale: Pixel scale (arcsec) on which
             ``source_sigma_pix`` is defined.
+        source_sigma_dist: Draw for a two-value ``source_sigma_pix`` range,
+            ``"log"`` (log-uniform, default) or ``"uniform"``. A range whose
+            lower bound is 0 is uniform either way.
         point_source_fraction: Fraction of sources forced to be point
             sources when ``source_sigma_pix`` requests extended profiles.
         source_psf_normalization: ``"native"`` preserves the finite-stamp
@@ -531,6 +534,9 @@ class MockMosaic:
     # tuple draws log-uniform sizes between the bounds.
     source_sigma_pix: float | tuple[float, float] | None = None
     source_sigma_pscale: float = 0.040
+    # Draw for a two-value ``source_sigma_pix`` range: ``log`` (default,
+    # log-uniform) or ``uniform``. A range starting at 0 is always uniform.
+    source_sigma_dist: str = "log"
     # Fraction of injected sources forced to be pure point sources when
     # ``source_sigma_pix`` requests extended profiles.
     point_source_fraction: float = 0.0
@@ -1043,6 +1049,7 @@ class MockMosaic:
                              psf_size_arcsec: float | None = None,
                              source_sigma_pix: float | tuple[float, float] | np.ndarray | None = None,
                              source_sigma_pscale: float | None = None,
+                             source_sigma_dist: str | None = None,
                              point_source_fraction: float | None = None,
                              source_psf_normalization: str | None = None,
                              sample_filters: tuple[str, ...] | None = None,
@@ -1090,6 +1097,11 @@ class MockMosaic:
             if source_sigma_pscale is not None
             else float(self.source_sigma_pscale)
         )
+        dist = (
+            str(source_sigma_dist).lower()
+            if source_sigma_dist is not None
+            else str(self.source_sigma_dist).lower()
+        )
         if sigma_spec is None:
             source_sigma_refpix = np.zeros(n, dtype=float)
         elif np.isscalar(sigma_spec):
@@ -1100,7 +1112,9 @@ class MockMosaic:
                 lo, hi = float(sigma_arr[0]), float(sigma_arr[1])
                 if lo < 0 or hi < lo:
                     raise ValueError("source_sigma_pix range must be non-negative and increasing")
-                if lo > 0:
+                if dist not in {"log", "uniform"}:
+                    raise ValueError("source_sigma_dist must be 'log' or 'uniform'")
+                if dist == "log" and lo > 0:
                     source_sigma_refpix = np.exp(rng.uniform(np.log(lo), np.log(hi), size=n))
                 else:
                     source_sigma_refpix = rng.uniform(lo, hi, size=n)

@@ -4,8 +4,8 @@ Analysis of the three estimators in `scratch/wren/flux_estimator_comparison.pdf`
 (Monu Sharma), the legacy IDL implementation in `legacy/autopilot/`, and what
 the current python pipeline actually computes.
 
-The write-up for circulation is `scratch/wren/flux_estimator_comparison.pdf`,
-currently **v3** (source: `..._v3.tex`; v1 and v2 preserved alongside). It is
+The write-up for circulation is `scratch/wren/flux_estimator_comparison.pdf`
+(source: `flux_estimator_comparison.tex`; `_v1`.. `_v4` preserved alongside). It is
 canonical for the algebra and for the assessment against catalogue-matching and
 low-SNR goals. This file is the repo-facing summary.
 
@@ -50,13 +50,20 @@ python `num` and `den`:
 |---|---|---|
 | `ap_hi = aper(src_tmpl, R_φ)` | `num` (`pipeline.py:1000`) | high-res composite EE at `R_φ` |
 | `ap_lo = aper(src_img, R_φ)` | `den` (`pipeline.py:1007`) | band-convolved composite EE at `R_φ` |
-| `apcor1 = ap_hi/ap_lo` | `ap_corr_<i>` | high-res → low-res band EE ratio |
-| `totcor1 = 1/ap_lo` | *not computed* | band aperture → total |
+| `psfcor = ap_hi/ap_lo` (IDL `apcor1`) | `psfcor_<i>` | high-res → low-res band EE ratio |
+| `stampcor = 1/ap_lo` (IDL `totcor1`) | `stampcor_<i>` | aperture → support total, **no EE** |
 | `aper(_phot, R_φ)` | `ap_flux_<i>` | raw neighbour-subtracted aperture flux |
 | `aper(_phot, R_φ)·apcor1` = `fcor1` | `ap_flux_corr_<i>` | band-PSF-corrected aperture flux |
 | `A` (NNLS amplitude, `fmodel`) | `flux_<i>` | fitted template amplitude |
 
-**So current python implements Estimator 1, stopped one factor short of total.**
+> **Superseded 2026-08-12.** The table above is updated to current names and
+> columns; the assessment paragraphs below it are historical. Main now writes
+> `psfcor_<i>`, `stampcor_<i>` and `totcor_<i>`, so Estimator 1 is computable
+> from the table. Naming follows the rule in the tex report's "Naming" section
+> and in {doc}`outputs`: a name carries `tot` only when it includes the
+> encircled-energy term, which is why `1/ap_lo` is `stampcor` and not `totcor`.
+
+**Historical (pre-2026-08-12): current python implements Estimator 1, stopped one factor short of total.**
 `ap_flux_corr_<i>` is the PDF's `fcor1`, not `f_t^(1)`; reaching a total needs
 one further multiplication by a `tcor_H`-like factor. Verified numerically on
 the DR0.1 COSMOS F770W run (`flux_1 > 5`, n=119): `den` = 0.468, `num` = 0.662,

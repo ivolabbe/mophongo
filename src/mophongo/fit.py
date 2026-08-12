@@ -72,6 +72,17 @@ class FitConfig:
     # default: unsaturated stars are the best astrometric anchors, and
     # saturated ones are already isolated into their own scenes.
     astrom_exclude_stars: bool = False
+    # Cap each astrometric anchor's leverage at this quantile of the scene's
+    # anchor information (a_i^2 <G,w,G>), or None to leave weights alone.
+    # Leverage grows as flux squared, so one bright source can carry a scene
+    # -- and if it is extended with an asymmetric colour gradient, its
+    # residual dipole is indistinguishable from a shift and drags the field.
+    # The cap bounds influence without changing the shift that anchor
+    # measures. See assemble_scene_system_AB and TODO.md (cross-anchor IRLS
+    # is the complementary fix this cannot provide).
+    # 0.9 clips only the top tail: the handful of anchors carrying more
+    # information than nine-tenths of their scene.
+    astrom_leverage_cap: float | None = 0.9
     astrom_model: str = "gp"  # 'poly' or 'gp'
     astrom_centroid: str = "centroid"  # "centroid" (=old) | "correlation"
     astrom_kwargs: dict[str, dict] = field(

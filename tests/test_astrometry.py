@@ -486,3 +486,72 @@ def test_scene_shift_iteration_converges():
     assert mag2 < mag1, (
         f"Pass-2 residual shift ({mag2:.4f} px) should be smaller than pass-1 ({mag1:.4f} px)"
     )
+
+
+def test_leverage_cap_bounds_one_bright_anchor(tmp_path):
+    """A bright lopsided source must not carry the scene's shift on its own.
+
+    Anchor leverage in the shift block goes as flux squared, so one bright
+    source outweighs many faint ones. When that source is extended with an
+    asymmetric colour gradient its residual is a dipole aligned with its own
+    template gradient -- formally a shift -- and it drags the fitted field.
+    Capping leverage bounds its influence while leaving the shift it measures
+    untouched.
+    """
+    import numpy as np
+    import pytest
+    from mophongo.psf import PSF
+    from mophongo.scene import assemble_scene_system_AB, make_scene_basis
+    from mophongo.templates import Templates
+
+    size, npsf = 161, 31
+    rng = np.random.default_rng(5)
+    psf = PSF.gaussian(npsf, 3.0).array
+    # one bright source plus eight faint ones on a ring around it
+    pos = [(80.0, 80.0)] + [
+        (80.0 + 45 * np.cos(t), 80.0 + 45 * np.sin(t))
+        for t in np.linspace(0, 2 * np.pi, 8, endpoint=False)
+    ]
+    flux = np.array([300.0] + [3.0] * 8)
+
+    hires = np.zeros((size, size))
+    for (x, y), f in zip(pos, flux):
+        sly = slice(int(y) - npsf // 2, int(y) + npsf // 2 + 1)
+        slx = slice(int(x) - npsf // 2, int(x) + npsf // 2 + 1)
+        hires[sly, slx] += f * psf
+    yy, xx = np.indices(hires.shape)
+    near = np.argmin([np.hypot(xx - x, yy - y) for x, y in pos], axis=0)
+    segmap = np.where(hires > 1e-3 * hires.max(), near + 1, 0).astype(np.int32)
+    tmpls = Templates.from_image(hires, segmap, pos, kernel=PSF.gaussian(npsf, 1.0).array)
+    templates = list(tmpls)
+
+    # image: every source truly unshifted, except the bright one, which is
+    # given a 1-pixel lopsidedness standing in for a colour gradient
+    image = np.zeros_like(hires)
+    for t, f in zip(templates, flux):
+        image[t.slices_original] += f * t.data[t.slices_cutout]
+    t0 = templates[0]
+    gy0, gx0 = np.gradient(t0.data.astype(float))
+    image[t0.slices_original] += -1.0 * flux[0] * gx0[t0.slices_cutout]
+    weights = np.ones_like(image)
+    image += rng.normal(0, 1e-6, image.shape)
+
+    alpha0 = np.asarray(flux, dtype=float)
+    is_bright = np.ones(len(templates), dtype=bool)
+    basis, _c, _s = make_scene_basis(templates, is_bright, order=0)
+
+    def solve(cap):
+        _AB, BB, bB = assemble_scene_system_AB(
+            templates, image, weights, basis, alpha0=alpha0, order=0,
+            include_y=True, ab_from_bright_only=True, leverage_cap=cap,
+        )
+        BB = BB.toarray()
+        return float(np.linalg.solve(BB + 1e-12 * np.eye(BB.shape[0]), bB)[0])
+
+    dx_free = solve(None)
+    dx_capped = solve(0.5)          # clip anything above the median anchor
+    # the bright source pulls the whole scene; the cap pulls it back toward 0
+    assert abs(dx_free) > 0.5
+    assert abs(dx_capped) < 0.5 * abs(dx_free)
+    # and the cap is inert when every anchor is already below it
+    assert solve(1.0) == pytest.approx(dx_free, rel=1e-12)

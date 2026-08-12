@@ -112,11 +112,17 @@ class RunConfig:
     # MJD-matched pattern_hi ePSFs; the halo model is grafted outside
     # their support.
     repair_psf_pattern: str = ""
-    # Reuse a previous run's repair from out_dir/repaired/repair_cache.fits
-    # when its recorded inputs (sci_hi/wht_hi paths + mtimes, patterns,
-    # repair_kwargs) match; the PSF fit is then skipped and the cached pixel
-    # patches and catalog flags are applied instead.
+    # Reuse a previous run's repair from the cache file when its recorded
+    # inputs (sci_hi/wht_hi paths + mtimes, patterns, repair_kwargs) match;
+    # the PSF fit is then skipped and the cached pixel patches and catalog
+    # flags are applied instead.
     repair_reuse: bool = True
+    # Cache location. Default None = out_dir/repaired/repair_cache.fits.
+    # The repair depends only on detection-side inputs, so multi-band
+    # campaigns over the same sci_hi should point every band's config at ONE
+    # shared file (relative paths resolve against out_dir): band 1 fits,
+    # bands 2..N reload.
+    repair_cache_path: str | None = None
     bg_filter_sigma: float = 64.0  # get_bg_and_ivar background filter
     footprint_filter: bool = True  # keep only sources with wht_lo > 0
     r_trial: float = 0.0  # trial-patch radius in arcmin; 0 = full run
@@ -1201,7 +1207,12 @@ class Pipeline:
                     )
                     stamp_dpsf, pattern_halo = None, ""
             wht0 = fits.getdata(self.resolve_wht_hi())
-            cache_path = self.out_dir / "repaired" / "repair_cache.fits"
+            if cfg.repair_cache_path:
+                cache_path = Path(cfg.repair_cache_path)
+                if not cache_path.is_absolute():
+                    cache_path = self.out_dir / cache_path
+            else:
+                cache_path = self.out_dir / "repaired" / "repair_cache.fits"
             prov = self._repair_provenance(pattern_halo)
             cached = None
             if cfg.repair_reuse:

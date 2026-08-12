@@ -120,8 +120,10 @@ class RunConfig:
     # Cache location. Default None = out_dir/repaired/repair_cache.fits.
     # The repair depends only on detection-side inputs, so multi-band
     # campaigns over the same sci_hi should point every band's config at ONE
-    # shared file (relative paths resolve against out_dir): band 1 fits,
-    # bands 2..N reload.
+    # shared file. Relative paths resolve against out_dir (never the CWD),
+    # so band out_dirs sharing a field directory can all use
+    # "../<field>_repair_cache.fits"; a directory-valued path gets
+    # "repair_cache.fits" appended.
     repair_cache_path: str | None = None
     bg_filter_sigma: float = 64.0  # get_bg_and_ivar background filter
     footprint_filter: bool = True  # keep only sources with wht_lo > 0
@@ -1210,7 +1212,12 @@ class Pipeline:
             if cfg.repair_cache_path:
                 cache_path = Path(cfg.repair_cache_path)
                 if not cache_path.is_absolute():
+                    # resolves against out_dir, NOT the process CWD: multi-band
+                    # configs whose out_dirs share a field directory can all
+                    # point at "../<field>_repair_cache.fits"
                     cache_path = self.out_dir / cache_path
+                if cache_path.is_dir() or not cache_path.suffix:
+                    cache_path = cache_path / "repair_cache.fits"
             else:
                 cache_path = self.out_dir / "repaired" / "repair_cache.fits"
             prov = self._repair_provenance(pattern_halo)

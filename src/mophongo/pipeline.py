@@ -117,14 +117,13 @@ class RunConfig:
     # the PSF fit is then skipped and the cached pixel patches and catalog
     # flags are applied instead.
     repair_reuse: bool = True
-    # Cache location. Default None = out_dir/repaired/repair_cache.fits.
-    # The repair depends only on detection-side inputs, so multi-band
-    # campaigns over the same sci_hi should point every band's config at ONE
-    # shared file. Relative paths resolve against out_dir (never the CWD),
-    # so band out_dirs sharing a field directory can all use
-    # "../<field>_repair_cache.fits"; a directory-valued path gets
-    # "repair_cache.fits" appended.
-    repair_cache_path: str | None = None
+    # Cache location. Relative paths resolve against out_dir (never the
+    # CWD); a directory-valued path gets "repair_cache.fits" appended. The
+    # repair depends only on detection-side inputs, so the default ".."
+    # (= <out_dir>/../repair_cache.fits) is shared by every band whose
+    # out_dir sits in the same field directory: band 1 fits, bands 2..N
+    # reload. Set None for a per-run cache in out_dir/repaired/.
+    repair_cache_path: str | None = ".."
     bg_filter_sigma: float = 64.0  # get_bg_and_ivar background filter
     footprint_filter: bool = True  # keep only sources with wht_lo > 0
     r_trial: float = 0.0  # trial-patch radius in arcmin; 0 = full run

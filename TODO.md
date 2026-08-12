@@ -25,8 +25,10 @@ This file tracks future desired features, checks, and investigations.
   nulled), PSF wings only beyond. Wren's competitive-dilation ownership is
   the SNR-graded version of the same idea; verification v3 (wren, all four
   bands, real + mock legs) measures whether it already removes the deficit.
-  Decide after v3: adopt wren, add the hard-floor variant, or revert the
-  default to the convolution-fill `psf_convolution` (mock-exact at 0.9998).
+  Decided 2026-08-12: default STAYS `psf_wings` (v3 showed wren adds a
+  ~3% point-source deficit and does not cure the extended one). Still
+  open: the hard aperture-floor variant, and whether the extended-source
+  2-2.5% mock deficit warrants a scheme change later.
 
 - [ ] Public-release cleanup: strip MINERVA-internal material from the public
   repo before advertising it. The repo is public and currently carries

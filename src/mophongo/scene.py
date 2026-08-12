@@ -420,6 +420,7 @@ def assemble_scene_system_AB(
     order: int = 1,
     include_y: bool = True,
     ab_from_bright_only: bool = True,
+    leverage_cap: float | None = None,
 ) -> tuple[sp.csr_matrix, sp.csr_matrix, np.ndarray]:
     """
     Build the (A,B) coupling blocks and beta RHS for a *single scene*.
@@ -445,6 +446,33 @@ def assemble_scene_system_AB(
     ab_from_bright_only
         If True, rows with Si=None (faint) do not contribute to AB; BB/bB
         still use only bright members (Si≠None).
+    leverage_cap
+        Quantile in (0, 1] at which to cap each anchor's leverage, or None
+        to leave the weights alone.
+
+        Written out, the accumulation below is a weighted least-squares fit
+        of the per-anchor implied shifts onto the basis::
+
+            I_i  = a_i^2 <Gx,w,Gx>                 (anchor information)
+            dx_i = -<Gx,w,r> / (a_i <Gx,w,Gx>)     (shift it implies)
+            BB   = sum_i I_i S_i S_i^T
+            bB   = sum_i I_i dx_i S_i
+
+        so leverage grows as flux squared and one bright source can carry a
+        scene on its own. That is a problem when the source is extended with
+        an asymmetric colour gradient: its residual is a dipole aligned with
+        the template gradient, formally indistinguishable from a shift.
+        Capping at ``I_cap = quantile(I, leverage_cap)`` and scaling that
+        anchor's contribution to AB/BB/bB by ``min(1, I_cap / I_i)`` bounds
+        its influence while leaving its measured ``dx_i`` untouched -- it
+        still says what it says, it just counts less. Equivalent to scaling
+        that source's pixel weights inside the shift equations only; the
+        flux block is not touched, so photometry is unchanged.
+
+        Note what this does *not* do: it cannot tell which anchor is wrong,
+        so it clips the brightest, which are often the best anchors, and it
+        does nothing in a scene whose offender is the only bright member.
+        Cross-anchor robustness is the fix for that case (see TODO.md).
 
     Returns
     -------
@@ -493,6 +521,37 @@ def assemble_scene_system_AB(
             grad_cache[i_local] = (gx, gy)
         return grad_cache[i_local]
 
+    # Per-anchor leverage, known before any solve: it depends on the
+    # template, its flux seed and the weight map, not on the residual. So
+    # the cap is a single pass here, unlike an IRLS scheme which has to see
+    # the fit first.
+    lev_w = np.ones(nA, dtype=float)
+    if leverage_cap is not None and 0 < float(leverage_cap) <= 1:
+        info = np.zeros(nA, dtype=float)
+        for row in bright_idx:
+            ti = templates[row]
+            w = weights[ti.slices_original]
+            Gx, Gy = _gx_gy_for(row)
+            gxc = Gx[ti.slices_cutout]
+            iso = float(np.sum(gxc * w * gxc))
+            if include_y:
+                gyc = Gy[ti.slices_cutout]
+                iso = 0.5 * (iso + float(np.sum(gyc * w * gyc)))
+            info[row] = a[row] ** 2 * iso
+        pos = info[info > 0]
+        if pos.size:
+            cap = float(np.quantile(pos, float(leverage_cap)))
+            if cap > 0:
+                over = info > cap
+                lev_w[over] = cap / info[over]
+                if over.any():
+                    logger.debug(
+                        "[scenes] leverage cap q=%.2f: %d of %d anchor(s) "
+                        "clipped, min weight %.3g",
+                        float(leverage_cap), int(over.sum()), len(bright_idx),
+                        float(lev_w[over].min()),
+                    )
+
     for row, ti in enumerate(templates):
         sl = ti.slices_original
         tcut = ti.data[ti.slices_cutout]
@@ -504,28 +563,31 @@ def assemble_scene_system_AB(
             continue
 
         ai = float(a[row])  # flux scaling (pixels remain in dx/dy)
+        wl = lev_w[row]     # leverage weight; 1.0 unless capped
         Gx, Gy = _gx_gy_for(row)
 
         # Inner products with template (weighted)
         gx_ip = float(np.sum(tcut * w * Gx[ti.slices_cutout]))
-        AB[row, 0:p] += (-ai) * gx_ip * (Si if Si is not None else 0.0)
+        AB[row, 0:p] += (-ai) * wl * gx_ip * (Si if Si is not None else 0.0)
         if include_y:
             gy_ip = float(np.sum(tcut * w * Gy[ti.slices_cutout]))
-            AB[row, p : 2 * p] += (-ai) * gy_ip * (Si if Si is not None else 0.0)
+            AB[row, p : 2 * p] += (-ai) * wl * gy_ip * (Si if Si is not None else 0.0)
 
         if Si is not None:
             # BB accumulation (Gauss–Newton, uses gradients only on support)
             Gxx = float(np.sum(Gx[ti.slices_cutout] * w * Gx[ti.slices_cutout]))
-            BB[0:p, 0:p] += (ai * ai) * Gxx * np.outer(Si, Si)
+            BB[0:p, 0:p] += wl * (ai * ai) * Gxx * np.outer(Si, Si)
 
             if include_y:
                 Gyy = float(np.sum(Gy[ti.slices_cutout] * w * Gy[ti.slices_cutout]))
-                BB[p : 2 * p, p : 2 * p] += (ai * ai) * Gyy * np.outer(Si, Si)
+                BB[p : 2 * p, p : 2 * p] += wl * (ai * ai) * Gyy * np.outer(Si, Si)
 
             # RHS for beta (sign matches AB)
-            bB[0:p] += (-ai) * float(np.sum(Gx[ti.slices_cutout] * w * img)) * Si
+            bB[0:p] += (-ai) * wl * float(np.sum(Gx[ti.slices_cutout] * w * img)) * Si
             if include_y:
-                bB[p : 2 * p] += (-ai) * float(np.sum(Gy[ti.slices_cutout] * w * img)) * Si
+                bB[p : 2 * p] += (
+                    (-ai) * wl * float(np.sum(Gy[ti.slices_cutout] * w * img)) * Si
+                )
 
     return AB.tocsr(), sp.csr_matrix(BB), bB
 
@@ -904,6 +966,7 @@ class Scene:
                 order=order,
                 include_y=True,
                 ab_from_bright_only=True,
+                leverage_cap=getattr(cfg, "astrom_leverage_cap", None),
             )
             # if no valid AB BB solve will fall back to flux-only
             # @@@ scenefitter.solve should not take config but regularization and cg_kwargs

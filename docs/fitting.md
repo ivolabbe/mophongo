@@ -423,6 +423,43 @@ tolerance buys passes, not precision. Because the fit grid is the
 high-resolution grid on the upsample path, and not the grid of the band being
 fitted, the run logs the tolerance in mas alongside pixels.
 
+### Anchor leverage
+
+Written out, the shift block is a weighted least-squares fit of per-anchor
+shifts onto the basis:
+
+$$
+I_i = \alpha_i^2 \langle G_x, w, G_x\rangle, \qquad
+\mathrm{d}x_i = -\frac{\langle G_x, w, r\rangle}{\alpha_i \langle G_x, w, G_x\rangle},
+\qquad
+BB = \sum_i I_i S_i S_i^\top, \quad
+bB = \sum_i I_i\, \mathrm{d}x_i\, S_i .
+$$
+
+Leverage $I_i$ grows as flux squared, so one bright source can carry a scene.
+That matters when the source is extended with an asymmetric colour gradient:
+its residual is a dipole aligned with its own template gradient, formally
+indistinguishable from a shift, and it drags the fitted field. No per-source
+test on the residual separates the two cases — the residual really does look
+like a shift.
+
+`FitConfig.astrom_leverage_cap` bounds the damage without pretending to
+identify it. Anchors above the quantile $I_\mathrm{cap}$ have their
+contribution to $AB$, $BB$ and $bB$ scaled by $I_\mathrm{cap}/I_i$, which is
+the system you get by scaling that source's pixel weights inside the shift
+equations only: the anchor still measures the same $\mathrm{d}x_i$, it just
+counts less. The flux block is untouched, so photometry does not change.
+$I_i$ depends on the template, its flux seed and the weight map but not on
+the residual, so the cap costs nothing — it is applied while the blocks are
+assembled, with no extra pass.
+
+Its limitation is the flip side of its simplicity: it clips the brightest
+anchors, which are often the best ones, and does nothing in a scene where the
+offending source is the only bright member. Separating a real offset from a
+colour gradient needs the coherence of *neighbouring* anchors, since real
+offsets are smooth in position while morphology-driven pseudo-shifts are
+random per source; that robust variant is listed in `TODO.md`.
+
 Each pass is also damped, because the same linearization can err in the other
 direction. The gradients $\partial_x T_i$, $\partial_y T_i$ are central
 differences of the template stamp, which underestimate the gradient of
@@ -469,6 +506,7 @@ page.
 | `reg_astrom` | `float` | `1e-4` | Ridge on the shift block, relative to its diagonal scale. |
 | `snr_thresh_astrom` | `float` | `15.0` | Minimum SNR proxy $b_i/\sqrt{A_{ii}}$ for a bright astrometric anchor; `0` keeps all. |
 | `astrom_isolation_thresh` | `float` | `0.7` | Minimum flux dominance (0–1) within its own footprint for a template to anchor astrometry; `0.0` disables the cut. |
+| `astrom_leverage_cap` | `float \| None` | `0.9` | Cap each anchor's leverage at this quantile of the scene's anchor information. Bounds how much one bright source can move the shift field; `None` leaves the weights alone. |
 | `astrom_exclude_stars` | `bool` | `False` | Exclude `is_star` templates from the shift fit. Off by default: unsaturated stars are the best anchors, and saturated ones already sit in singleton scenes. |
 | `astrom_model` | `str` | `"gp"` | Model for the separate (non-joint) astrometry step: `"poly"` or `"gp"`; any other value raises `ValueError`. |
 | `astrom_centroid` | `str` | `"centroid"` | Shift measurement for the separate step: `"centroid"` or `"correlation"`. |

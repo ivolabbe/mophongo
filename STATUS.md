@@ -3,6 +3,123 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] `FitConfig.astrom_leverage_cap` (2026-08-12, default `0.9`).
+  Anchor leverage in the shift block goes as flux squared
+  (`I_i = a_i^2 <Gx,w,Gx>`), so one bright source can carry a scene's
+  astrometry -- and when that source is extended with an asymmetric colour
+  gradient, its residual dipole is formally a shift and drags the field.
+  The cap scales anchors above the quantile by `I_cap / I_i` in AB/BB/bB,
+  which bounds influence while leaving the shift the anchor measures
+  unchanged; the flux block is untouched so photometry does not move.
+  `I_i` does not depend on the residual, so it is applied during assembly
+  with no extra pass. What it cannot do -- identify *which* anchor is
+  wrong, or help when the offender is the only bright member -- is the
+  cross-anchor IRLS option now recorded in TODO.md.
+- [x] Relentless cross-source code and documentation review completed
+  (2026-08-12). `docs/CODE_REVIEW_2026-08-12.md` records the audit of package
+  source, tests, public docs, deployed Read the Docs, code comments, and every
+  top-level `scratch/wren` TeX/PDF report. It separates 23 release-blocking P1
+  findings, 40 conditional/API P2 findings, conceptual risks, document drift,
+  positive checks, and a gated remediation/acceptance plan. Validation included
+  the full suite (237 passed; one test-only diagnostic-path failure), focused
+  suites, a strict Sphinx build, package/dependency checks, PDF renders, and
+  numerical reproductions of the highest-impact solver, background, WCS,
+  config, repair, PSF, and mock-verification defects. This turn changed no
+  package behavior; existing concurrent verification work was preserved.
+- [x] Verification v7 (2026-08-12): v6's fits and IDL leg with a reworked
+  mock leg. **The `psf_wings` extended-source deficit is 4-5%, not the
+  2-3% carried since v2**: recovery 0.9533/0.9573/0.9606/0.9637 across the
+  four bands against v6's 0.9669/0.9694/0.9715/0.9740. The F770W
+  diagnostic splits the budget cleanly — point sources fit a pull of
+  mu=+0.30, sigma=0.91 (unbiased, error model calibrated) while the full
+  SNR>20 sample fits mu=-3.35, sigma=2.81, so the whole bias lives in the
+  extended sources; the size panel shows it reaching -0.07 by sigma 4-6
+  pixels. SNR>20 median 0.9553 +/- 0.0022 (n=392), a ~20-sigma effect.
+  Still a floor: sources are pure Gaussians (see TODO). Two changes:
+  * Source sizes sigma **log-uniform over 1-10 pixels** on the 40 mas grid
+    (0.04-0.40" sigma, 0.09-0.94" FWHM) instead of 1-5, reaching resolved
+    galaxies while staying weighted to the small sizes that dominate a real
+    catalogue. Painting stamps stay at the builder default (F444W 4",
+    F770W 8"): a 0.4" sigma source is inside a 4" box to better than 1e-4,
+    so no truncation term enters. Past ~12 pixels it would, and the new
+    `psf_size_arcsec` argument on `build_realistic_two_detector_mock` is
+    how to raise it.
+  * `mock_dilate_segmap` default 2 -> 0 (see below).
+  `runs/` seeded with copies of v6's four configs and fit tables (3.1 MB);
+  the fits are untouched by any mock-side change, so the IDL leg is a
+  rerun of v6's and only the mock leg differs.
+- [x] Correction nomenclature fixed across doc and code (2026-08-12). One
+  rule: **a name may carry "tot" only if it includes the encircled-energy
+  term** — a correction that stops at the edge of the model's own finite
+  support is not a total, whatever the code calls it. Three codebases had
+  used `totcor` for two different quantities, which is the origin of most
+  of their apparent disagreement.
+  * `psfcor` = ap_hi/ap_lo, the shape/resolution correction (IDL `apcor1`).
+  * `stampcor` = 1/ap_lo, aperture to the support total, **no EE**. Renamed
+    from `tot_stamp_<i>`, which broke the rule. IDL's released `totcor<f>`
+    is this quantity and is likewise misnamed.
+  * `totcor` = 1/(ap_lo*ee_psf_lo) keeps the name because it does include
+    the EE.
+  Estimators are now written factored as `psfcor * totcor_cat` rather than
+  with a bare `totcor`, since the factors state the convention and the bare
+  name does not. `flux_estimator_comparison.tex` gained a "Naming" section
+  and Estimator 1 is written both ways — `aper(_phot,Rphi)*stampcor` and
+  `[aper(_model - _model_nn,Rphi) + aper(_res,Rphi)]*stampcor` — making
+  plain that `_phot` already contains the residual and that what separates
+  Estimator 1 from 2/3 is that it *scales* the residual. Readers accept the
+  old `tot_stamp_<i>` so v6/v7 tables still load; PDF recompiles clean.
+- [x] IDL comparison reworked to be like-for-like (2026-08-12),
+  `scratch/wren/make_compare_idl_python.py`. Estimator 1 now carries **no
+  encircled-energy term on either side** — IDL's `flux_F` applies
+  `totcor = 1/ap_lo` and has none, so the python side uses
+  `ap_flux * tot_stamp` (derived in `matched()`) instead of `ap_flux_corr`,
+  which also divides by `ee_psf_lo`. The comparison flips sign: python read
+  0.012 mag brighter than IDL, now 0.020 fainter, so the old offset was the
+  convention rather than the code. Also: magnitude panels are drawn as
+  `IDL - python` vs IDL magnitude over (-1, 1) (the recorded JSON keeps the
+  `py - IDL` sign every earlier version used); every quoted statistic is
+  SNR>20 alone, replacing the mag<24 cut that had been producing a spurious
+  F1800W offset; the PSF support of both codes is printed on every figure;
+  and a new panel (e) compares `psfcor = ap_hi/ap_lo` directly. v7's
+  `uds_monu/` figures and JSON were regenerated on this basis and supersede
+  v6's IDL numbers.
+- [x] Mock segmaps no longer dilated twice (2026-08-12).
+  `remap_detection_to_truth` builds its segmap with `Catalog.from_fits`,
+  which already applies `Catalog`'s own `dilate_segmap` disk(2) — the same
+  step a production catalog run gets — and then dilated a second time with
+  `ndilate=mock_dilate_segmap=2`. Segments came out about twice the
+  production area (a 5x5 source grows 25 -> 69 -> 129 px, equivalent
+  radius 2.8 -> 4.7 -> 6.4 px), letting templates take more of each source
+  from the data than a real run would and flattering the extended-source
+  recovery. Default is now 0: the catalog step's dilation stands alone and
+  nothing dilates again inside the mophongo run (`template_dilate_segmap`
+  was already 0, matching `FitConfig`).
+- [x] Both verification compare legs are mandatory (2026-08-12). The
+  driver honored `fits idl` literally, so v5 and v6 shipped with a
+  `uds_monu/` and no `uds_sims/`. Step arguments now select only whether
+  the expensive `fits` stage re-runs; `idl` and `mock` always both run,
+  and the driver exits non-zero if either leg returns nothing.
+  `--psf-dir` now also reaches the mock leg (it read a hardcoded
+  `data/PSF`, so v6's mock would have verified 4" support while its fits
+  leg used 8"). Confirmed by the F444W box EE moving 0.96317 -> 0.98522
+  while the MIRI band held at 0.96864 — the MIRI grids are byte-identical
+  between `data/PSF` and `data/PSF8`.
+- [x] `data/PSF8` gained the F444W `OS4_GRID1` pair (2026-08-12). The 8"
+  set had only GRID25 and the 30" halo layouts, so the mock leg's default
+  `UDS_NRC.._F444W_OS4_GRID1` pattern matched nothing and every band died
+  with a `no stpsf grid loaded` KeyError. Built at 8" FOV, same epoch
+  (MJD 59967.188) and OPD as the 4" originals, 508x508. Rebuild script:
+  `scratch/build_psf8_f444w_grid1.py` (`data/` is gitignored).
+- [x] Flux-recovery diagnostic extended (2026-08-12), in
+  `verification.save_flux_recovery_plot`: running median of the unblended
+  sources and a `SNR>20 median +/- MAD-based standard error` band in the
+  flux-ratio panel; a fifth panel of fractional residual vs injected
+  source size for SNR>20, which is what makes the extended-source shape
+  term directly readable; and a green point-source histogram (any SNR,
+  any size) in the residual-pull panel, separating the error model from
+  the shape term. Equal-count binning is shared through
+  `verification._running_median`. Recovered flux stays `flux_<i>_total`
+  = fitted amplitude / `ee_psf_lo` (pipeline.py:2497).
 - [x] Verification v6 (2026-08-12): the first fully like-for-like IDL
   comparison — 8" PSF support (matching monu's measured 7.8"; parity
   check passes), saturated-star repair active (30" halo grids, flagged +
@@ -18,7 +135,11 @@ This file records completed implementations, validation runs, and the current wo
   VerifyWarning silenced in log_run, weight-calibration log names its
   band and verdict, template panel keeps saturated stars visible.
   `examples/minerva/verification/v6/` has README + figures + json +
-  logs.
+  logs. The mock leg was backfilled on 2026-08-12 (it had been skipped):
+  recovery 0.9669/0.9694/0.9715/0.9740 across the four bands, 0.7-0.9%
+  below v4's 4"-detection-PSF numbers because the `psf_wings` composite
+  is built on the F444W stamp, so more wing flux inside the template
+  normalization means a smaller fitted amplitude against unchanged truth.
 - [x] Astrometry convergence: tolerance 0.1, honest verdicts (2026-08-12).
   Three changes on top of the per-scene freeze loop:
   * `astrom_shift_tol` default 0.05 -> 0.1 fit-grid pixels. The MINERVA logs

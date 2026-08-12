@@ -2,6 +2,32 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] Robust astrometry option: IRLS across scene anchors. Extended sources
+  with asymmetric colour gradients produce a residual dipole formally
+  identical to a shift, so no per-source test on residual size or shape
+  separates them; they pull the scene's shift field the wrong way. The
+  discriminator is coherence: a real offset is smooth in position (the
+  premise of the GP/poly field), while morphology-driven pseudo-shifts are
+  random per source. So reweight on *disagreement with the neighbours*, not
+  on residual size. Per pass: solve, compute each anchor's implied shift
+  `dx_i = -<Gx,w,r> / (a_i <Gx,w,Gx>)`, take the robust scatter of `dx_i`
+  about the fitted field, apply a Tukey/Huber weight to that anchor's
+  contribution to `AB`/`BB`/`bB`, re-solve. A genuinely offset region keeps
+  full weight because its neighbours agree with it; one galaxy disagreeing
+  with twenty anchors gets cut. Costs one extra assembly per pass. This is
+  the case `astrom_leverage_cap` (2026-08-12) cannot cover: the cap bounds
+  the influence of the brightest anchors without knowing which one is
+  wrong, and does nothing in a scene where the offender is the only bright
+  member.
+
+- [ ] Resolve the 2026-08-12 deep-review release gates in
+  `docs/CODE_REVIEW_2026-08-12.md`. Start with the exact astrometric block
+  system and final flux-only solve; then rebuild background/IVAR masking,
+  enforce template/WCS and catalog/segmentation invariants, remove OS4/cache
+  assumptions, repair mock-validation independence, and reconcile the public
+  docs only after the numerical gates pass. Each P1 fix needs the focused
+  regression named in the report; do not close this umbrella item from a
+  passing legacy suite alone.
 - [ ] Footprint-limited saturation repair. On a trial-patch run the repair
   still fits every saturated star in the full mosaic; restrict the
   candidate list to the run footprint (r_trial + the halo-model reach,
@@ -17,6 +43,27 @@ This file tracks future desired features, checks, and investigations.
   `..._drc_wht.fits` path per config as a stopgap
   (`examples/minerva/run_verification_v2.py::prep_configs`); fold that into
   the generator and regenerate the 17 configs.
+- [ ] F1280W scene 1: convolved templates lose their aperture flux. In the
+  v7 run 612 of the 618 sources in scene 1 (a compact block at x 10982-12254,
+  y 3712-5157) have `tot_stamp_1` ~ 7.96, i.e. only 12.6% of the convolved
+  template's flux lands inside the 1.2" aperture against ~76% everywhere
+  else, while the pre-convolution composite still holds ~92%. `psfcor_1`
+  follows to ~7.3 (the plume above the 1:1 line in panel (e)) and `totcor_1`
+  to ~8.4, so every aperture-derived column is wrong for those sources.
+  Confined to one scene, so it is the kernel or low-res PSF assigned to that
+  region, not a per-source property — segment areas there are if anything
+  *larger* than normal (median 17 vs 12 px), which rules out tiny segments.
+  Inspect that scene's matching kernel before trusting F1280W corrections.
+- [ ] One `trial_center` per field, not per band. `make_minerva_configs.py`
+  picks each band's own deepest fully covered MIRI patch, so the trial
+  patches sit on different sky per filter: UDS centers span 3.53', COSMOS
+  6.01' (EGS is uniform). At the `r_trial=1.5` used by v6/v7 that leaves
+  2 of 6 UDS band pairs and 8 of 15 COSMOS pairs *completely disjoint* —
+  F1280W and F1800W share no sources at all. Per-band numbers are sound,
+  but any band-to-band trend (e.g. the bluest-worst ordering of the mock
+  deficit) partly conflates filter with sky patch. Fix: choose the center
+  from the intersection of all bands' MIRI coverage, then regenerate the
+  17 configs. Note this invalidates the v6/v7 patch definition.
 - [ ] Carry `ap_flux_total_<i>` into the verification recovery table
   (`build_source_recovery_table` keeps only flux/err columns), so the
   aperture estimator is checked against injected truth directly — the v4
@@ -37,6 +84,24 @@ This file tracks future desired features, checks, and investigations.
   ~3% point-source deficit and does not cure the extended one). Still
   open: the hard aperture-floor variant, and whether the extended-source
   2-2.5% mock deficit warrants a scheme change later.
+  Superseded 2026-08-12 by v7: the deficit is **4-5%**, not 2-2.5%. The
+  earlier number was flattered by two things, both fixed — sizes were
+  log-uniform 1-5 px (median FWHM 0.21", smaller than the F770W beam) and
+  the mock segmap was dilated twice. v7 gives 0.9533/0.9573/0.9606/0.9637,
+  with point sources unbiased (pull mu=+0.30, sigma=0.91) and the entire
+  bias in the extended population. Decide the scheme question on these
+  numbers, and re-check once Sersic injection lands (next item), since
+  4-5% is still a Gaussian-profile floor.
+- [ ] Inject Sersic sources, not Gaussians. `MockMosaic` paints every
+  extended source as PSF (x) circular Gaussian
+  (`mock_mosaic.py:1260`), which has almost no outer wings: outside 3
+  half-light radii a Gaussian keeps 0.2% of its flux against 3.9% for an
+  exponential disc and 21% for a de Vaucouleurs profile. The
+  extended-source deficit comes precisely from PSF-shaped template wings
+  failing to follow a real outer profile, so a Gaussian population is
+  close to the best case and cannot size the problem. Add a Sersic option
+  (n as a per-source truth column) before deciding whether the
+  aperture-floor variant is worth it.
 
 - [ ] Public-release cleanup: strip MINERVA-internal material from the public
   repo before advertising it. The repo is public and currently carries
@@ -48,9 +113,12 @@ This file tracks future desired features, checks, and investigations.
   examples, or drop. Removing them from history needs a scrub
   (`git filter-repo`), not just a delete commit. No credentials are in any of
   it (checked 2026-08-11); this is about internal data layout, not secrets.
-  Also in code: `Pipeline.write_outputs` writes a `minerva_link` column with
-  hard-coded `https://minerva.colorado.edu` URLs into the scene-catalog CSV
-  (pipeline.py ~1119); drop or make it configurable before release.
+  Also in code: `Pipeline.write_outputs` writes a `minerva_link` column into
+  the scene-catalog CSV. Made configurable 2026-08-12 — `RunConfig
+  .minerva_viewer` (`<field>/<release>`, default derived from the run name
+  plus `minerva_release`, `""` drops the column); the URL now carries the
+  field/release path, e.g. `.../uds/DR0/?ra=...&dec=...&zoom=7`. Still
+  decide before release whether a public build should emit it at all.
   (The `matching_kernel.recenter` and `Pipeline.run` docstring staleness
   noted here earlier was fixed on 2026-08-11.)
 - [ ] Code findings from the 2026-08-11 full docs verification (12 agents

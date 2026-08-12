@@ -308,9 +308,11 @@ def build_realistic_two_detector_mock(
     pa: float = 0.0,
     snr_range: tuple[float, float] = (1.0, 500.0),
     sigma_range: tuple[float, float] = (1.0, 5.0),
+    sigma_dist: str = "log",
     point_source_fraction: float = 0.10,
     seed: int = 42,
     image_size: int | None = None,
+    psf_size_arcsec: dict[str, float] | None = None,
     source_pattern: str = DEFAULT_F444W_PATTERN,
     target_pattern: str = DEFAULT_F770W_PATTERN,
     nircam_detectors: Sequence[str] = DEFAULT_NIRCAM_LW_DETECTORS,
@@ -326,6 +328,18 @@ def build_realistic_two_detector_mock(
 
     Parameters
     ----------
+    sigma_range, sigma_dist
+        Intrinsic circular-Gaussian source sizes: sigma bounds in pixels on
+        the 40 mas size grid, drawn ``'log'``-uniform (default) or
+        ``'uniform'`` between them. ``point_source_fraction`` of the sources
+        are then forced to zero size.
+    psf_size_arcsec
+        Per-filter painting stamp size; default ``{'f444w': 4.0, 'f770w':
+        8.0}``. The stamp must comfortably hold ``PSF (x) source``, so
+        raise it alongside ``sigma_range``: a 0.8" sigma source loses 2.5%
+        of its flux to a 4" stamp, which would read as a recovery deficit.
+        Sizes above the PSF grid's own FOV are zero-padded, so the grids in
+        ``psf_dir`` must supply the requested support.
     psf_gaussian_fwhm_arcsec
         Extra Gaussian broadening of the injected PSFs (FWHM, arcsec; float or
         per-filter dict). ``None`` uses the ``MockMosaic`` default
@@ -363,13 +377,14 @@ def build_realistic_two_detector_mock(
         mosaic_pscale="nircam_lw",
         exptime={"f444w": 418.734, "f770w": 444.006},
         pixfrac={"nircam_lw": 0.75, "miri": 1.00},
-        psf_size_arcsec={"f444w": 4.0, "f770w": 8.0},
+        psf_size_arcsec=psf_size_arcsec or {"f444w": 4.0, "f770w": 8.0},
         stpsf_patterns={"f444w": source_pattern, "f770w": target_pattern},
         detectors={"f444w": tuple(nircam_detectors), "f770w": tuple(miri_detector)},
         stpsf_dir=Path(psf_dir),
         snr_range=snr_range,
         source_sigma_pix=sigma_range,
         source_sigma_pscale=0.040,
+        source_sigma_dist=sigma_dist,
         point_source_fraction=point_source_fraction,
         source_psf_normalization="native",
         apertures_arcsec=(0.32, 0.7),
@@ -788,6 +803,7 @@ def remap_detection_to_truth(
     truth: Table,
     *,
     ndilate: int = 0,
+    detect_params: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, Table]:
     """Detect on F444W and remap detection labels onto truth-source ids.
 
@@ -803,8 +819,14 @@ def remap_detection_to_truth(
 
     from mophongo.catalog import Catalog, safe_dilate_segmentation
 
-    cat_obj = Catalog.from_fits(sci_path, wht_path, estimate_background=True, estimate_ivar=True)
+    cat_obj = Catalog.from_fits(
+        sci_path, wht_path, estimate_background=True, estimate_ivar=True,
+        params=dict(detect_params or {}),
+    )
     segdata = np.asarray(cat_obj.segmap.data)
+    # Catalog.detect has already grown the segments by its own dilate_segmap
+    # disk(2), the same step a real run gets. ndilate is growth on top of that,
+    # so leave it at 0 to keep the mock's footprints production-sized.
     if int(ndilate) > 0:
         segdata = safe_dilate_segmentation(SegmentationImage(segdata), disk(int(ndilate)))
     segmap = np.zeros_like(segdata, dtype=np.int32)
@@ -971,7 +993,8 @@ def run_pipeline_extension_scenario(
     noise_info: dict[str, Any],
     truth: Table,
     psf_maps: WienerPSFMaps,
-    mock_dilate_segmap: int = 2,  # how the truth segmap is grown, not a template knob
+    mock_dilate_segmap: int = 0,  # extra growth ON TOP of Catalog.detect's own dilation
+    detect_params: dict[str, Any] | None = None,  # Catalog.detect overrides
     template_dilate_segmap: int = 0,  # matches FitConfig; wing recovery is extension's job
     fit_astrometry_niter: int = 2,
     fit_background: bool = False,
@@ -998,8 +1021,17 @@ def run_pipeline_extension_scenario(
         out_dir, paths, noise_info, truth, psf_maps: Products of
             :func:`build_realistic_two_detector_mock` and
             :func:`build_wiener_psf_maps`.
-        mock_dilate_segmap: Dilation when building the truth-labelled
-            segmentation (not a template knob).
+        mock_dilate_segmap: Extra dilation of the truth-labelled segmentation
+            (not a template knob). 0 is the production-matching value: the
+            catalog step inside :func:`remap_detection_to_truth` already
+            applies ``Catalog``'s own ``dilate_segmap``, so anything above 0
+            grows the segments a second time and lets templates take more of
+            each source from the data than a real run would.
+        detect_params: ``Catalog`` parameter overrides for the segmap-building
+            step (``detect_threshold``, ``detect_npixels``, ``kernel_size``,
+            ``dilate_segmap``). Use these — not ``mock_dilate_segmap`` — to
+            make the detected segmap resemble the released SExtractor map a
+            production run inherits.
         template_dilate_segmap: Pipeline ``FitConfig.template_dilate_segmap``;
             0 matches the FitConfig default (wing recovery is extension's
             job).
@@ -1045,6 +1077,7 @@ def run_pipeline_extension_scenario(
         wht_444,
         truth,
         ndilate=int(mock_dilate_segmap),
+        detect_params=detect_params,
     )
 
     img_444 = fits.getdata(sci_444).astype(np.float32)
@@ -1170,6 +1203,11 @@ def run_pipeline_extension_scenario(
         if "is_point_source" in source_table.colnames
         else None
     )
+    size_col = (
+        np.asarray(source_table["source_sigma_pix"], dtype=float)
+        if "source_sigma_pix" in source_table.colnames
+        else None
+    )
     sel = position_matched
     save_flux_recovery_plot(
         scenario_dir / f"flux_ratio_{scenario}_lowres.png",
@@ -1177,7 +1215,7 @@ def run_pipeline_extension_scenario(
         np.asarray(source_table["flux_2_total"], dtype=float)[sel],
         error=np.asarray(source_table["err_pred_2_total"], dtype=float)[sel],
         label=(
-            f"{target_label} fit: unit PSF-shape templates + throughput-corrected total flux; "
+            f"{target_label} fit: unit PSF-shape templates; total = amplitude / ee_psf_lo; "
             f"nsrc={int(nsrc if nsrc is not None else len(truth))}, "
             f"sigma=[{sigma_range[0]:g}, {sigma_range[1]:g}], "
             f"template_extension={scenario}"
@@ -1189,6 +1227,7 @@ def run_pipeline_extension_scenario(
         else None,
         point_source_mask=point_mask[sel] if point_mask is not None else None,
         deblended_mask=deblended_mask[sel] if deblended_mask is not None else None,
+        source_size=size_col[sel] if size_col is not None else None,
         error_label="Predicted Error + 1% floor",
         systematic_error_fraction=0.01,
         caption=note,
@@ -1199,7 +1238,7 @@ def run_pipeline_extension_scenario(
         np.asarray(source_table["flux_1_total"], dtype=float)[sel],
         error=np.asarray(source_table["err_pred_1_total"], dtype=float)[sel],
         label=(
-            "F444W self-fit: unit PSF-shape templates + throughput-corrected total flux; "
+            "F444W self-fit: unit PSF-shape templates; total = amplitude / ee_psf_lo; "
             f"nsrc={int(nsrc if nsrc is not None else len(truth))}, "
             f"sigma=[{sigma_range[0]:g}, {sigma_range[1]:g}], "
             f"template_extension={scenario}"
@@ -1211,6 +1250,7 @@ def run_pipeline_extension_scenario(
         else None,
         point_source_mask=point_mask[sel] if point_mask is not None else None,
         deblended_mask=deblended_mask[sel] if deblended_mask is not None else None,
+        source_size=size_col[sel] if size_col is not None else None,
         error_label="Predicted Error + 1% floor",
         systematic_error_fraction=0.01,
         caption=note,
@@ -1771,6 +1811,33 @@ def save_scene_overview(
     plt.close(fig)
 
 
+def _running_median(
+    x: np.ndarray,
+    y: np.ndarray,
+    mask: np.ndarray,
+    *,
+    per_bin: int = 25,
+    max_bins: int = 10,
+) -> tuple[list[float], list[float]]:
+    """Median of ``y`` in equal-count ``x`` bins, as ``(centers, medians)``.
+
+    The bin count adapts to the sample so each bin holds about ``per_bin``
+    points; too few points returns empty lists.
+    """
+    n = int(np.count_nonzero(mask))
+    n_bins = int(np.clip(n // per_bin, 0, max_bins))
+    if n_bins < 2:
+        return [], []
+    edges = np.unique(np.quantile(x[mask], np.linspace(0.0, 1.0, n_bins + 1)))
+    centers, medians = [], []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        in_bin = mask & (x >= lo) & (x <= hi)
+        if np.count_nonzero(in_bin) >= 5:
+            centers.append(float(np.median(x[in_bin])))
+            medians.append(float(np.median(y[in_bin])))
+    return centers, medians
+
+
 def save_flux_recovery_plot(
     filename: str | Path,
     truth: np.ndarray,
@@ -1783,6 +1850,8 @@ def save_flux_recovery_plot(
     snr_values: np.ndarray | None = None,
     point_source_mask: np.ndarray | None = None,
     deblended_mask: np.ndarray | None = None,
+    source_size: np.ndarray | None = None,
+    source_size_label: str = "Input source sigma (pix)",
     error_label: str = "Error",
     systematic_error_fraction: float = 0.0,
     caption: str | None = None,
@@ -1809,21 +1878,47 @@ def save_flux_recovery_plot(
     )
     base_mask = ~deblended_mask
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    nrows = 2 if source_size is None else 3
+    # Source-type counts go in the legend: the three classes carry different
+    # error budgets (point sources have exact templates, deblended children
+    # carry their family's flux-splitting error), so the sample sizes behind
+    # each are part of reading the panel.
+    n_ext = int(np.count_nonzero(base_mask & ~point_source_mask))
+    n_ps = int(np.count_nonzero(point_source_mask & base_mask))
+    n_db = int(np.count_nonzero(deblended_mask))
+
+    # Scatter panels split the extended sources at SNR 20 in the same colours
+    # the pull histogram uses (orange below, blue above), so a point can be
+    # traced between panels.
+    low_snr = (
+        np.zeros(len(truth), dtype=bool)
+        if snr_values is None
+        else np.asarray(snr_values, dtype=float) < 20.0
+    )
+    ext_lo = base_mask & ~point_source_mask & low_snr
+    ext_hi = base_mask & ~point_source_mask & ~low_snr
+    EXT_STYLES = (
+        (ext_hi, "tab:blue", f"Extended SNR>=20 (n={int(ext_hi.sum())})"),
+        (ext_lo, "tab:orange", f"Extended SNR<20 (n={int(ext_lo.sum())})"),
+    )
+
+    fig, axes = plt.subplots(nrows, 2, figsize=(12, 5 * nrows))
     for ax, y, ylabel_i in (
         (axes[0, 0], recovered, ylabel),
         (axes[0, 1], ratio, "Recovered / True"),
     ):
-        if np.any(base_mask):
-            ax.scatter(truth[base_mask], y[base_mask], s=20, alpha=0.4, label="Data")
+        for mask, color, lab in EXT_STYLES:
+            if np.any(mask):
+                ax.scatter(truth[mask], y[mask], s=20, alpha=0.4, color=color, label=lab)
         ps = point_source_mask & base_mask
         if np.any(ps):
-            ax.scatter(truth[ps], y[ps], s=26, color="tab:green", alpha=0.8, label="Point source")
+            ax.scatter(truth[ps], y[ps], s=26, color="tab:green", alpha=0.8,
+                       label=f"Point source (n={n_ps})")
         db = deblended_mask & ~point_source_mask
         if np.any(db):
             ax.scatter(
                 truth[db], y[db], s=52, facecolors="none", edgecolors="tab:blue",
-                linewidths=1.4, label="Deblended child",
+                linewidths=1.4, label=f"Deblended child (n={n_db})",
             )
         dbps = deblended_mask & point_source_mask
         if np.any(dbps):
@@ -1849,12 +1944,38 @@ def save_flux_recovery_plot(
     axes[0, 1].set_ylim(0.7, 1.3)
     axes[0, 1].set_xscale("function", functions=(np.sqrt, lambda x: x**2))
     axes[0, 1].set_xlim(max(float(np.nanmin(truth[truth > 0])), 1e-6), float(np.nanmax(truth)))
-    axes[0, 1].legend()
+
+    # Trend and offset of the unblended sources: deblended children carry the
+    # flux-splitting error of their whole family, so they are excluded here to
+    # leave the scheme's own bias.
+    finite = np.isfinite(truth) & np.isfinite(ratio) & (truth > 0)
+    unblended = base_mask & finite
+    centers, medians = _running_median(truth, ratio, unblended)
+    if centers:
+        axes[0, 1].plot(centers, medians, color="crimson", linewidth=2.0,
+                        zorder=5, label="Running median (unblended)")
+    if snr_values is not None:
+        hi_snr = unblended & (np.asarray(snr_values, dtype=float) >= 20.0)
+        n_hi = int(np.count_nonzero(hi_snr))
+        if n_hi >= 5:
+            r_hi = ratio[hi_snr]
+            med_hi = float(np.median(r_hi))
+            # standard error of the median, MAD-based so outliers do not set it
+            sigma_hi = 1.4826 * float(np.median(np.abs(r_hi - med_hi)))
+            err_hi = 1.253 * sigma_hi / np.sqrt(n_hi)
+            axes[0, 1].axhspan(
+                med_hi - err_hi, med_hi + err_hi, color="crimson", alpha=0.20,
+                zorder=1,
+                label=f"SNR>20 median {med_hi:.4f} +/- {err_hi:.4f} (n={n_hi})",
+            )
+            axes[0, 1].axhline(med_hi, color="crimson", linestyle=":", linewidth=1.6,
+                               zorder=5)
+    axes[0, 1].legend(fontsize=8)
 
     if error is not None:
         rel = error / truth
-        axes[0, 1].scatter(truth, 1.0 + rel, s=5, alpha=0.35, color="orange", label="+/- 1 sigma")
-        axes[0, 1].scatter(truth, 1.0 - rel, s=5, alpha=0.35, color="orange")
+        axes[0, 1].scatter(truth, 1.0 + rel, s=5, alpha=0.35, color="0.5", label="+/- 1 sigma")
+        axes[0, 1].scatter(truth, 1.0 - rel, s=5, alpha=0.35, color="0.5")
         if snr_values is not None:
             ax2 = axes[0, 1].twiny()
             ticks = [1, 3, 5, 10, 20, 50, 100]
@@ -1883,6 +2004,12 @@ def save_flux_recovery_plot(
                 ("SNR < 20", snr_values < 20.0, "tab:orange"),
                 ("SNR >= 20", snr_values >= 20.0, "tab:blue"),
             ]
+        # Point sources at any SNR and any size: their templates are exact by
+        # construction, so this group isolates the noise/error model from the
+        # extended-source shape term the other groups mix in.
+        if np.any(point_source_mask):
+            groups.append((f"Point source (n={n_ps + int(np.count_nonzero(point_source_mask & deblended_mask))})",
+                           point_source_mask, "tab:green"))
         for name, mask, color in groups:
             vals = pulls[np.asarray(mask, dtype=bool)]
             vals = vals[np.isfinite(vals)]
@@ -1915,18 +2042,21 @@ def save_flux_recovery_plot(
         axes[1, 0].set_title(f"Residuals / {error_label} Distribution")
         axes[1, 0].legend()
 
-        if np.any(base_mask):
-            axes[1, 1].scatter(recovered[base_mask], pulls[base_mask], s=20, alpha=0.4, label="Data")
+        for mask, color, lab in EXT_STYLES:
+            if np.any(mask):
+                axes[1, 1].scatter(recovered[mask], pulls[mask], s=20, alpha=0.4,
+                                   color=color, label=lab)
         ps = point_source_mask & base_mask
         if np.any(ps):
             axes[1, 1].scatter(
-                recovered[ps], pulls[ps], s=26, color="tab:green", alpha=0.8, label="Point source"
+                recovered[ps], pulls[ps], s=26, color="tab:green", alpha=0.8,
+                label=f"Point source (n={n_ps})"
             )
         db = deblended_mask & ~point_source_mask
         if np.any(db):
             axes[1, 1].scatter(
                 recovered[db], pulls[db], s=52, facecolors="none", edgecolors="tab:blue",
-                linewidths=1.4, label="Deblended child",
+                linewidths=1.4, label=f"Deblended child (n={n_db})",
             )
         dbps = deblended_mask & point_source_mask
         if np.any(dbps):
@@ -1949,6 +2079,43 @@ def save_flux_recovery_plot(
         axes[1, 1].set_ylabel(f"(Recovered - True) / {error_label}")
         axes[1, 1].set_title("Residuals vs Recovered Flux")
         axes[1, 1].legend()
+
+    if source_size is not None:
+        # Size dependence of the fractional flux error: PSF-shaped template
+        # wings cannot represent an extended outer profile, so any residual
+        # shape bias of the build scheme shows up as a trend against the
+        # injected size. Both SNR classes are drawn, but only SNR>20 sets the
+        # running median — below that the noise swamps the trend.
+        size = np.asarray(source_size, dtype=float)
+        frac = ratio - 1.0
+        ax = axes[2, 0]
+        keep = np.isfinite(size) & np.isfinite(frac)
+        for mask, style in (
+            (keep & ext_hi, dict(s=20, alpha=0.45, color="tab:blue",
+                                 label=f"Extended SNR>=20 (n={int((keep & ext_hi).sum())})")),
+            (keep & ext_lo, dict(s=20, alpha=0.45, color="tab:orange",
+                                 label=f"Extended SNR<20 (n={int((keep & ext_lo).sum())})")),
+            (keep & base_mask & point_source_mask,
+             dict(s=26, color="tab:green", alpha=0.85, label="Point source (sigma=0)")),
+            (keep & deblended_mask,
+             dict(s=52, facecolors="none", edgecolors="tab:blue", linewidths=1.4,
+                  label="Deblended child")),
+        ):
+            if np.any(mask):
+                ax.scatter(size[mask], frac[mask], **style)
+        centers, medians = _running_median(
+            size, frac, keep & base_mask & ~low_snr, per_bin=15
+        )
+        if centers:
+            ax.plot(centers, medians, color="crimson", linewidth=2.0, zorder=5,
+                    label="Running median (unblended, SNR>20)")
+        ax.axhline(0.0, color="k", linestyle="--", label="no bias")
+        ax.set_xlabel(source_size_label)
+        ax.set_ylabel("(Recovered - True) / True")
+        ax.set_ylim(-0.3, 0.3)
+        ax.set_title("Fractional residual vs input size")
+        ax.legend(fontsize=8)
+        axes[2, 1].axis("off")
 
     if caption:
         fig.text(0.01, 0.012, fill(caption, width=140), fontsize=8, ha="left", va="bottom")

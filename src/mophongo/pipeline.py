@@ -128,6 +128,11 @@ class RunConfig:
     footprint_filter: bool = True  # keep only sources with wht_lo > 0
     r_trial: float = 0.0  # trial-patch radius in arcmin; 0 = full run
     trial_center: list[float] | None = None  # [ra, dec] deg of the patch
+    # Viewer path for the scene-catalog `minerva_link` column, as
+    # `<field>/<release>`. None derives the field from the leading token of
+    # `name` and pairs it with `minerva_release`; "" drops the column.
+    minerva_viewer: str | None = None
+    minerva_release: str = "DR0"
     # --- fitting ----------------------------------------------------------
     fit: dict[str, Any] = field(default_factory=dict)  # FitConfig kwargs
     scene_plots: bool = True  # write per-scene diagnostic PNGs
@@ -1816,10 +1821,15 @@ class Pipeline:
             names=["id", "n_templates", "is_bright", "ra", "dec", "dx", "dy",
                    "astrom_niter", "flag_astrom", "astrom_step"],
         )
-        scene_table["minerva_link"] = [
-            f"https://minerva.colorado.edu/?ra={ra}&dec={dec}&zoom=7"
-            for ra, dec in zip(scene_table["ra"], scene_table["dec"])
-        ]
+        viewer = cfg.minerva_viewer
+        if viewer is None:
+            viewer = f"{str(cfg.name).split('_')[0].lower()}/{cfg.minerva_release}"
+        if viewer:
+            scene_table["minerva_link"] = [
+                f"https://minerva.colorado.edu/{viewer.strip('/')}/"
+                f"?ra={ra:.7f}&dec={dec:.7f}&zoom=7"
+                for ra, dec in zip(scene_table["ra"], scene_table["dec"])
+            ]
         scene_table.write(
             f"{stem}_scene_catalog.csv", format="ascii.csv", overwrite=True
         )
@@ -2913,14 +2923,18 @@ class Pipeline:
         Writes:
         ap_flux_{idx}        – raw aperture sum on model+residual
         ee_psf_lo_{idx}      – per-source box EE used (fallback: filter mean)
-        tot_stamp_{idx}      – 1/ap_lo alone: aperture-to-stamp-total on the
-                               model's own support, NO EE factor.  This is the
-                               like-for-like quantity against classic IDL's
-                               released ``totcor`` — but only when the two
-                               runs use the same PSF support.
-        totcor_{idx}         – 1/(ap_lo * ee_psf_lo): ``totcor`` by convention
-                               ALWAYS includes the beyond-support EE, like a
-                               catalog aperture-to-total
+        stampcor_{idx}       – 1/ap_lo alone: aperture to the total of the
+                               model's own finite support, NO EE factor.  Named
+                               ``stampcor`` and not ``tot*`` deliberately: a
+                               correction that stops at the edge of the support
+                               is not a total (flux_estimator_comparison.tex,
+                               Sec. "Naming").  This is the like-for-like
+                               quantity against classic IDL's released
+                               ``totcor``, which is misnamed by the same rule —
+                               but only when the two runs share a PSF support.
+        totcor_{idx}         – 1/(ap_lo * ee_psf_lo): ``totcor`` earns the name
+                               because it ALWAYS includes the beyond-support
+                               EE, like a catalog aperture-to-total
         psfcor_{idx}         – ap_hi/ap_lo
         ap_flux_corr_{idx}   – ap_flux * totcor: total flux
         totcor_cat           – catalog-side aperture-to-total (band-independent),
@@ -2942,7 +2956,7 @@ class Pipeline:
 
         # ensure columns exist
         for name in (f"ap_model_{idx}", f"ap_flux_{idx}", f"ee_psf_lo_{idx}",
-                     f"tot_stamp_{idx}", f"totcor_{idx}", f"psfcor_{idx}",
+                     f"stampcor_{idx}", f"totcor_{idx}", f"psfcor_{idx}",
                      f"ap_flux_corr_{idx}", f"ap_flux_cat_{idx}"):
             if name not in cat.colnames:
                 cat[name] = cfg.bad_value
@@ -3002,7 +3016,7 @@ class Pipeline:
             cat[f"ap_model_{idx}"][row] = ap_model
             cat[f"ap_flux_{idx}"][row] = ap_raw
             cat[f"ee_psf_lo_{idx}"][row] = ee
-            cat[f"tot_stamp_{idx}"][row] = inv_ap_b
+            cat[f"stampcor_{idx}"][row] = inv_ap_b
             cat[f"totcor_{idx}"][row] = totcor
             cat[f"psfcor_{idx}"][row] = psfcor
             cat[f"ap_flux_corr_{idx}"][row] = ap_corr

@@ -9,7 +9,7 @@ file prefixed with the run `name` from the JSON config:
 | `<name>_residual.fits` | `write_outputs` | data minus model on the reference grid |
 | `<name>_templates.fits` | `write_outputs` | per-template fit state: amplitudes, applied shifts, scene membership |
 | `<name>_stamps.fits` | {meth}`~mophongo.pipeline.Pipeline.write_stamps` (when `save_stamps` is set) | per-source template stamps and fit metadata |
-| `<name>_scene_catalog.csv` | `write_outputs` | one row per fitted scene |
+| `<name>_scene_catalog.csv` | `write_outputs` | one row per fitted scene: position and total astrometric shift |
 | `scenes/<name>_scene_<id>.png` | `write_outputs` (when `scene_plots` is set) | per-scene diagnostic figures |
 | `<name>_shift_field.png` | `write_outputs` (when astrometry was solved) | map of the fitted astrometric shift field |
 | `<name>_psf_hi.geojson`, `<name>_psf_lo.geojson`, `<name>_kernel.geojson` | `build_psfs` / `build_kernels` | cached PSF and kernel region maps ({doc}`psf_maps`) |
@@ -107,6 +107,17 @@ copied through.
   refitting. Scene ids label one run's partition and are not stable across
   runs with different scene settings.
 
+`flag_astrom_<i>`
+: The scene-level astrometry verdict, inherited by every source fitted in
+  that scene: `0` when the scene's shifts converged, `1` when it was still
+  moving after `FitConfig.fit_astrometry_niter` passes, `-1` for sources with
+  no template. Convergence is a property of the scene — all its members came
+  out of the same solve/apply passes — so a `1` marks the whole group whose
+  positions, and therefore fluxes, are the last iterate rather than a
+  converged solution. The run logs a warning naming the worst offenders, and
+  `<name>_scene_catalog.csv` carries the same verdict per scene along with
+  `astrom_niter` (passes used) and `astrom_step` (last increment, pixels).
+
 ### Aperture columns
 
 Aperture photometry on the model-plus-residual image is always attempted; the
@@ -135,10 +146,16 @@ radius.
   `totcor_<i>` (filter-mean fallback where a template has no recorded
   value) — the same factor `flux_<i>_total` divides by.
 
+`tot_stamp_<i>`
+: `1 / ap_B` alone: the aperture-to-total of the model on its own finite
+  stamp support, with no EE factor. This is the quantity classic IDL
+  releases as `totcor` — compare the two only when both runs use the same
+  PSF support.
+
 `totcor_<i>`
-: Aperture-to-total correction, `1 / (ap_B * ee_psf_lo)`. Note that classic
-  IDL's `totcor` is `1/ap_B` alone (no EE factor); reconstruct that
-  like-for-like quantity as `totcor_<i> * ee_psf_lo_<i>`.
+: Aperture-to-total correction, `1 / (ap_B * ee_psf_lo)`. By convention
+  `totcor` always includes the beyond-support encircled energy, like a
+  catalog aperture-to-total; the support-only piece is `tot_stamp_<i>`.
 
 `psfcor_<i>`
 : `ap_F / ap_B`, the source's own high-res to low-res band EE ratio at the
@@ -198,10 +215,22 @@ high-resolution science header. The matching model images are in
 
 `<name>_scene_catalog.csv` has one row per fitted scene ({doc}`fitting`):
 `id` (scene id), `n_templates`, `is_bright` (number of bright anchor sources),
-and `ra`, `dec` of the scene center, plus a URL column linking each position
-to an external sky viewer. With `scene_plots` enabled, each scene also gets a
-`<name>_scene_<id>.png` diagnostic figure, written to a `scenes/`
-subdirectory of `out_dir` (created only when the plots are requested).
+`ra`, `dec` of the scene center, the total astrometric shift `dx`, `dy` at
+that center in reference-grid pixels (NaN where the scene solved no
+astrometry), plus a URL column linking each position to an external sky
+viewer. `dx`, `dy` is the *accumulated* shift, the same quantity as the
+per-template table's `dx`, `dy` — `Scene.shifts` holds only the last
+iteration's increment and is never written.
+
+Three columns record how the shift was reached: `astrom_niter` (solve/apply
+passes this scene used before it dropped out of the loop), `astrom_step`
+(its last shift increment in pixels) and `flag_astrom` (`0` converged, `1`
+still moving when the budget ran out, `-1` no verdict). Every source of the
+scene inherits `flag_astrom` as the fit table's `flag_astrom_<i>`.
+
+With `scene_plots` enabled, each scene also gets a `<name>_scene_<id>.png`
+diagnostic figure, written to a `scenes/` subdirectory of `out_dir` (created
+only when the plots are requested).
 
 Scene ids are labels of one run's fit partition, not stable source
 identifiers: membership depends on the scene-construction settings

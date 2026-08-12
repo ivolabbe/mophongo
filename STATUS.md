@@ -3,6 +3,56 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Verification v4 (2026-08-12): `psf_wings` from main with the
+  aperture estimator corrected by the recorded box EE
+  (`ap_flux_total_<i> = ap_flux_corr_<i>/ee_psf_lo`; est1 panel reads it).
+  Against IDL the offset flips from +0.04..+0.06 to -0.03..-0.07 mag
+  (SNR>25, four bands): the division slightly overshoots because IDL's
+  `totcor` is a partial-total convention (IDL `psfcor` ~1.26 never
+  multiplies `flux_F`), so the residual measures conventions, not error.
+  Mock leg reproduces v2 to four decimals (determinism check). Scene
+  reporting now post-merge only (one INFO line; pre-merge component count
+  demoted to DEBUG) after the 4867-scenes misreading. README + figures +
+  json under `examples/minerva/verification/v4/`. Follow-up in TODO:
+  carry `ap_flux_total` into the mock recovery table for a direct
+  truth check of the aperture estimator.
+- [x] Band-independent flag column + core segment identity (2026-08-12).
+  The saturation flag column is now `FLAG_SATURATED_TMPL` by default
+  (TMPL = template band; `filter_name` still overrides) so downstream
+  code does not change when the detection band does — the CLI passes
+  TMPL unconditionally and no longer requires `--filter` for the catalog
+  step. The core fill in `flag_saturated_segments` was extended: besides
+  the enclosed seg=0 region (now bounded by `r_out` against unrelated
+  sky pockets), all repaired pixels within the fit radius `r_in` get the
+  group id — previously core pixels belonging to a zeroed wing segment
+  were left at 0, leaving a gap in the star's segment. The group-id row
+  therefore keeps a segment covering the PSF-repaired core and a
+  mophongo run on the repaired image models the star as a normal source
+  (verified on UDS: 128/128 star centres carry their group id). The
+  5-panel diagnostic's zeroed panel now masks the filled core too (the
+  core belongs to the flagged star). Autobuilt STDPSFs now use
+  `date_mode="cluster"` — one grid per observation epoch over the full
+  data distribution, nearest-MJD per exposure — matching the pipeline's
+  PSF policy instead of a single modal epoch.
+- [x] Saturation-flag refinements from the UDS F444W inspection
+  (2026-08-12). Four changes to `catalog.flag_saturated_segments` after
+  reviewing real bright stars: (1) flux comparison restricted to the
+  model support (ePSFs are zero beyond their native FOV — spike segments
+  outside a small stamp could never flag); (2) model-flux noise floor
+  `min_snr x sky_noise x sqrt(n_pix)` (default 5 sigma) — the large-FOV
+  model otherwise flags every noise-level segment on a near-zero obs
+  denominator (7628 -> 549 on UDS); (3) flag value is now the star's
+  group id = lowest flagged segment id (membership encoding; `>0` is the
+  boolean cut; contested segments join the star with larger model flux);
+  (4) the undetected saturated core (seg=0 enclosed by the star) is set
+  to the group id in the output segmap so the group-id row keeps a
+  segment. Diagnostic now 5 panels: segmap before | sci before +
+  to-flag | sci repaired + flagged | segmap after with star in one
+  color | sci with flagged zeroed. UDS flagging rerun with the 30"
+  GRID5 ePSF (npix=751): 549 segments / 128 stars, bright-star spikes
+  now fully captured. Tests grown to 14 (group ids, core fill,
+  truncated-stamp support, noise floor); notebook + docs/repair.md +
+  `UDS/repair/v1/README.md` updated.
 - [x] Verification v2 (psf_wings) + v3 (wren) on the merged code
   (2026-08-11/12), consolidated under `examples/minerva/verification/v2,v3`
   (per-version README, `runs/`, `uds_monu/` IDL leg with figures+json+log,

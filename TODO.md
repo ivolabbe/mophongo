@@ -9,6 +9,11 @@ This file tracks future desired features, checks, and investigations.
   `..._drc_wht.fits` path per config as a stopgap
   (`examples/minerva/run_verification_v2.py::prep_configs`); fold that into
   the generator and regenerate the 17 configs.
+- [ ] Carry `ap_flux_total_<i>` into the verification recovery table
+  (`build_source_recovery_table` keeps only flux/err columns), so the
+  aperture estimator is checked against injected truth directly — the v4
+  IDL leg shows it 3-7% brighter than IDL `flux_F`, attributed to IDL's
+  partial-total convention, and the mock should confirm the absolute side.
 - [ ] Aperture-floor template support. The v2 injected-truth mocks show the
   `psf_wings` scheme recovers point sources at 1.008 but extended sources at
   0.971: PSF-shaped wings cannot represent extended outer profiles, so

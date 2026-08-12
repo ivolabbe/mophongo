@@ -43,9 +43,16 @@ autodoc_default_options = {
     "members": True,
     "undoc-members": False,
     "show-inheritance": True,
+    # Document all public members, not just __all__: the narrative pages and
+    # the autosummary tables reference public helpers that modules keep out
+    # of their (import-facing) __all__.
+    "ignore-module-all": True,
 }
 napoleon_google_docstring = True
 napoleon_numpy_docstring = False
+# Render class-docstring Attributes sections as :ivar: fields instead of
+# .. attribute:: directives, which would duplicate autodoc's own member docs.
+napoleon_use_ivar = True
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),

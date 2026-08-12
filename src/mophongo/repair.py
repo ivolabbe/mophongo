@@ -19,10 +19,16 @@ Outputs, written next to the science image (or to ``--out-dir``):
   ``mode="subtract"``).
 * ``<sci>_saturate_<mode>.csv`` — per-hole fit table from
   :func:`mophongo.saturate.repair_saturated_holes`.
-* with ``--catalog`` and ``--segmap``: ``<catalog>_repaired.fits`` /
-  ``<segmap>_repaired.fits`` — oversplit child segments merged into one
-  parent per star and a ``FLAG_SATURATED_<FILTER>`` column added to the
-  catalog (see :func:`mophongo.catalog.repair_saturated_catalog`).
+* with ``--catalog`` and ``--segmap``: ``<catalog>_flagged.fits`` /
+  ``<segmap>_flagged.fits`` — segments dominated by a repaired star's
+  PSF model (model flux > ``--flux-frac`` of the observed flux) get
+  the star's group id in ``FLAG_SATURATED_TMPL`` on their existing
+  catalog rows and are
+  zeroed in the segmap; a per-star diagnostic PNG is written
+  (:func:`mophongo.catalog.flag_saturated_segments`). With ``--merge``
+  the children are instead merged into one parent row
+  (:func:`mophongo.catalog.repair_saturated_catalog`, ``_repaired``
+  outputs).
 
 The PSF model is a drizzled STDPSF (:class:`mophongo.psf.DrizzlePSF`),
 which needs the grizli exposure listing ``<root>_wcs.csv`` next to the
@@ -44,7 +50,7 @@ from astropy.io import fits
 from astropy.table import Table
 from astropy.wcs import WCS
 
-from .catalog import repair_saturated_catalog
+from .catalog import flag_saturated_segments, repair_saturated_catalog
 from .psf import DrizzlePSF
 from .saturate import repair_saturated_holes
 from .utils import get_slice_wcs, get_wcs_pscale
@@ -53,7 +59,9 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "build_drizzle_psf",
+    "drizzled_psf_stamp",
     "repair_image",
+    "repair_in_memory",
     "flag_catalog",
     "main",
 ]
@@ -166,9 +174,12 @@ def build_drizzle_psf(
             "[repair] no STDPSF matched %r in %s — building with PSFFactory",
             psf_pattern, psf_dir,
         )
+        # date_mode='cluster' builds one grid per observation epoch —
+        # same policy as the pipeline's PSF generation — and DrizzlePSF
+        # then picks the nearest-MJD grid per contributing exposure.
         factory = PSFFactory(
             outdir=str(psf_dir), num_psfs=1, oversample=4,
-            fov_arcsec=8.0, date_mode="modal", include_mjd=True,
+            fov_arcsec=8.0, date_mode="cluster", include_mjd=True,
         )
         factory.from_csv(csv_path, save=True)
         _load()
@@ -183,7 +194,7 @@ def build_drizzle_psf(
     return dpsf, psf_pattern
 
 
-def _center_stamp(
+def drizzled_psf_stamp(
     dpsf: DrizzlePSF,
     psf_pattern: str,
     *,
@@ -196,6 +207,9 @@ def _center_stamp(
     else:
         H = int(dpsf.driz_header["NAXIS2"])
         W = int(dpsf.driz_header["NAXIS1"])
+    npix = int(min(npix, H - 2, W - 2))
+    if npix % 2 == 0:
+        npix -= 1  # odd size keeps the stamp centre on a pixel
     cy, cx = H // 2, W // 2
     sly = slice(cy - npix // 2, cy - npix // 2 + npix)
     slx = slice(cx - npix // 2, cx - npix // 2 + npix)
@@ -217,7 +231,7 @@ def _center_stamp(
 
 def psf_fwhm_pix(dpsf: DrizzlePSF, psf_pattern: str) -> float:
     """PSF FWHM in mosaic pixels, from the area above half maximum."""
-    stamp = _center_stamp(dpsf, psf_pattern, npix=101)
+    stamp = drizzled_psf_stamp(dpsf, psf_pattern, npix=101)
     area = int(np.sum(stamp >= 0.5 * float(stamp.max())))
     return 2.0 * float(np.sqrt(area / np.pi))
 
@@ -340,13 +354,147 @@ def repair_image(
             hdr["SATFILT"] = (filter_name.upper(), "filter used for the PSF")
     fits.writeto(sci_out, res["sci"], sci_hdr, overwrite=True)
     fits.writeto(wht_out, res["wht"], wht_hdr, overwrite=True)
+    # FITS copy of the fit table: preserves column types (the CSV turns
+    # the bool ``ok`` into strings on read-back).
+    table_out = out_dir / f"{sci_path.stem}_saturate_{mode}.fits"
+    res["fits"].write(table_out, overwrite=True)
     logger.info("[repair] wrote %s, %s", sci_out, wht_out)
 
     res.update(
         sci_out=sci_out, wht_out=wht_out, csv_out=csv_out,
+        table_out=table_out,
         filter=filter_name, psf_pattern=psf_pattern,
         fwhm_pix=float(fwhm_pix), dpsf=dpsf,
     )
+    return res
+
+
+# --------------------------------------------------------------------------
+# In-memory repair (pipeline integration)
+# --------------------------------------------------------------------------
+
+
+def repair_in_memory(
+    sci: np.ndarray,
+    wht: np.ndarray,
+    *,
+    dpsf: DrizzlePSF,
+    wcs: WCS,
+    psf_pattern: str,
+    catalog: Table | None = None,
+    segmap: np.ndarray | None = None,
+    out_dir: str | Path | None = None,
+    fwhm_pix: float | None = None,
+    flux_frac: float = 0.3,
+    min_snr: float = 5.0,
+    stamp_npix: int | None = None,
+    zero_segments: bool = False,
+    plots: bool = True,
+    **repair_kwargs: Any,
+) -> dict[str, Any]:
+    r"""Repair saturated stars and flag the catalog, all in memory.
+
+    Array-in / array-out variant of :func:`repair_image` +
+    :func:`flag_catalog` for callers that already hold the data — the
+    photometry pipeline runs this on its loaded ``sci_hi / wht_hi /
+    catalog / segmap`` so the mosaics on disk never need to be repaired
+    beforehand. Nothing is written except diagnostics (fit table, flag
+    log, per-star PNGs) to *out_dir*.
+
+    Differences from the file-based flow, both because the products feed
+    a photometry run instead of a catalog release:
+
+    * ``zero_segments=False`` by default — flagged wing segments keep
+      their labels so each catalog row still gets a template, and the
+      shared ``FLAG_SATURATED_TMPL`` group id groups them into one scene
+      per star. The undetected core is still filled with the group id.
+    * the repaired ``wht`` is returned (cores carry the median donut
+      weight) so downstream inverse-variance use sees valid pixels.
+
+    Parameters
+    ----------
+    sci, wht
+        Science and weight arrays; not modified in place.
+    dpsf, wcs, psf_pattern
+        PSF model, image WCS, and the ePSF key pattern for the fit.
+    catalog, segmap
+        Optional catalog + segmentation map to flag. Both or neither.
+    out_dir
+        Directory for diagnostics. ``None`` disables all file output.
+    fwhm_pix
+        PSF FWHM in pixels; measured from a drizzled stamp when None.
+    flux_frac, min_snr
+        Flag thresholds, see
+        :func:`mophongo.catalog.flag_saturated_segments`.
+    stamp_npix
+        Flag-model stamp size in pixels. Default: the native ePSF field
+        of view (the model reach — segments beyond it cannot flag).
+    plots
+        Write per-star repair PNGs and the flag diagnostic to *out_dir*.
+    \*\*repair_kwargs
+        Forwarded to :func:`mophongo.saturate.repair_saturated_holes`
+        (e.g. ``min_buffer_snr``).
+
+    Returns
+    -------
+    dict
+        ``{"sci", "wht", "fits", ...}`` from the image repair, plus
+        ``catalog``, ``segmap``, ``flag_log`` when a catalog was given
+        (unchanged inputs when nothing was flagged).
+    """
+    from .catalog import flag_saturated_segments as _flag_segments
+    from .saturate import _native_psf_drz_size
+
+    if (catalog is None) != (segmap is None):
+        raise ValueError("catalog and segmap must be given together")
+    out_dir = Path(out_dir) if out_dir is not None else None
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    if fwhm_pix is None:
+        fwhm_pix = psf_fwhm_pix(dpsf, psf_pattern)
+        logger.info("[repair] measured PSF FWHM: %.2f pix", fwhm_pix)
+
+    res = repair_saturated_holes(
+        np.asarray(sci), np.asarray(wht),
+        dpsf=dpsf, wcs=wcs, mode="repair",
+        fwhm_pix=float(fwhm_pix), psf_filter=psf_pattern,
+        output_csv=(out_dir / "saturate_repair.csv" if out_dir else None),
+        plot_dir=(out_dir / "saturate_png" if out_dir and plots else None),
+        **repair_kwargs,
+    )
+    n_ok = int(np.sum(res["fits"]["ok"])) if len(res["fits"]) else 0
+    logger.info("[repair] %d/%d holes fit and repaired (in memory)",
+                n_ok, len(res["fits"]))
+    if out_dir is not None:
+        res["fits"].write(out_dir / "saturate_repair.fits", overwrite=True)
+
+    if catalog is not None and n_ok:
+        if stamp_npix is None:
+            stamp_npix = _native_psf_drz_size(dpsf)
+        stamp = drizzled_psf_stamp(dpsf, psf_pattern, npix=int(stamp_npix))
+        new_cat, new_seg, flag_log = _flag_segments(
+            catalog, segmap, res["fits"],
+            sci=res["sci"], psf_stamp=stamp,
+            flux_frac=flux_frac, min_snr=min_snr,
+            zero_segments=zero_segments,
+        )
+        res.update(catalog=new_cat, segmap=new_seg, flag_log=flag_log)
+        if out_dir is not None:
+            flag_log.write(out_dir / "flag_log.csv", format="csv",
+                           overwrite=True)
+            n_flagged = (int(np.sum(np.asarray(flag_log["flagged"])))
+                         if len(flag_log) else 0)
+            if plots and n_flagged:
+                from .verification import plot_saturated_flag_diagnostic
+
+                plot_saturated_flag_diagnostic(
+                    np.asarray(sci), res["sci"],
+                    np.asarray(segmap), new_seg, flag_log,
+                    out_path=out_dir / "flag_diagnostic.png",
+                )
+    elif catalog is not None:
+        res.update(catalog=catalog, segmap=segmap, flag_log=None)
     return res
 
 
@@ -360,21 +508,34 @@ def flag_catalog(
     segmap_path: str | Path,
     fit_table: Table,
     *,
-    filter_name: str,
-    fwhm_pix: float,
-    out_dir: str | Path | None = None,
+    filter_name: str = "TMPL",
     sci: np.ndarray | None = None,
     psf_stamp: np.ndarray | None = None,
+    merge: bool = False,
+    flux_frac: float = 0.3,
+    fwhm_pix: float | None = None,
+    out_dir: str | Path | None = None,
+    sci_before: np.ndarray | None = None,
+    diagnostic: bool = True,
     **catalog_kwargs: Any,
 ) -> dict[str, Any]:
-    r"""Merge oversplit saturated stars in a catalog/segmap and flag them.
+    r"""Flag (or merge) the oversplit segments of repaired stars.
 
-    Thin file-level wrapper around
-    :func:`mophongo.catalog.repair_saturated_catalog`: reads the catalog
-    and segmentation map, merges the child segments of each successfully
-    fit star into one parent row with ``FLAG_SATURATED_<FILTER>=1``, and
-    writes ``<catalog>_repaired.fits``, ``<segmap>_repaired.fits`` and
-    ``<catalog>_mergelog.csv``.
+    Default is the non-destructive **flag** mode for catalogs built
+    before the repair (:func:`mophongo.catalog.flag_saturated_segments`):
+    every segment whose flux is dominated by the star model
+    (``model > flux_frac x observed``) gets ``FLAG_SATURATED_<FILTER>=1``
+    on its existing catalog row and is zeroed in the output segmap. No
+    rows are dropped or added. Writes ``<catalog>_flagged.fits``,
+    ``<segmap>_flagged.fits``, ``<catalog>_flaglog.csv`` and, by
+    default, a per-star before/after diagnostic PNG
+    (``<catalog>_flag_diagnostic.png``).
+
+    With ``merge=True`` the destructive
+    :func:`mophongo.catalog.repair_saturated_catalog` runs instead:
+    child rows are dropped and replaced by one flagged parent, and the
+    outputs are ``<catalog>_repaired.fits``, ``<segmap>_repaired.fits``
+    and ``<catalog>_mergelog.csv``.
 
     Parameters
     ----------
@@ -383,22 +544,39 @@ def flag_catalog(
     fit_table
         ``fits`` table from :func:`repair_image` /
         :func:`mophongo.saturate.repair_saturated_holes`.
-    filter_name, fwhm_pix
-        Flag-column filter name and PSF FWHM in segmap pixels.
+    filter_name
+        Suffix for the ``FLAG_SATURATED_<FILTER>`` column name.
+        Default ``"TMPL"`` — the repair runs on the template band,
+        which varies between surveys, so downstream code can rely on
+        one fixed column name.
     sci, psf_stamp
-        Optional PSF-flux filter protecting unrelated neighbours from
-        being merged; see
-        :func:`~mophongo.catalog.repair_saturated_catalog`.
+        Science image on the segmap grid (use the repaired one) and a
+        unit-sum PSF stamp. Required in flag mode; in merge mode they
+        enable the neighbour-protection flux filter.
+    merge
+        Merge children into a parent row instead of flag-only.
+    flux_frac
+        Flag-mode threshold: flag a segment when
+        ``model_flux > flux_frac * observed_flux``.
+    fwhm_pix
+        PSF FWHM in segmap pixels; required for ``merge=True``.
+    sci_before
+        Pre-repair science image for the diagnostic plot. Defaults to
+        *sci*.
+    diagnostic
+        Write the flag-mode diagnostic PNG (skipped when nothing was
+        flagged).
     \*\*catalog_kwargs
-        Forwarded to
-        :func:`~mophongo.catalog.repair_saturated_catalog` (e.g.
-        ``n_fwhm``, ``flux_frac_thresh``, ``x_col``, ``y_col``).
+        Forwarded to the underlying catalog function (e.g. ``n_fwhm``
+        and ``flux_frac_thresh`` in merge mode, ``id_col`` in both).
 
     Returns
     -------
     dict
-        ``{"catalog", "segmap", "merge_log", "catalog_out", "segmap_out",
-        "log_out"}``.
+        Flag mode: ``{"catalog", "segmap", "flag_log", "catalog_out",
+        "segmap_out", "log_out", "diagnostic_out"}``. Merge mode:
+        ``{"catalog", "segmap", "merge_log", "catalog_out",
+        "segmap_out", "log_out"}``.
     """
     catalog_path = Path(catalog_path)
     segmap_path = Path(segmap_path)
@@ -407,36 +585,65 @@ def flag_catalog(
 
     cat = Table.read(catalog_path)
     seg = np.asarray(fits.getdata(segmap_path)).astype(np.int32)
-
-    new_cat, new_seg, merge_log = repair_saturated_catalog(
-        cat, seg, fit_table,
-        fwhm_pix=float(fwhm_pix), filter_name=filter_name,
-        sci=sci, psf_stamp=psf_stamp,
-        **catalog_kwargs,
-    )
     flag_col = f"FLAG_SATURATED_{filter_name.upper()}"
-    logger.info(
-        "[repair] catalog %d → %d rows, %d flagged in %s",
-        len(cat), len(new_cat), int(np.sum(new_cat[flag_col])), flag_col,
-    )
 
-    catalog_out = out_dir / f"{catalog_path.stem}_repaired.fits"
-    segmap_out = out_dir / f"{segmap_path.stem}_repaired.fits"
-    log_out = out_dir / f"{catalog_path.stem}_mergelog.csv"
+    if merge:
+        if fwhm_pix is None:
+            raise ValueError("fwhm_pix is required with merge=True")
+        new_cat, new_seg, log = repair_saturated_catalog(
+            cat, seg, fit_table,
+            fwhm_pix=float(fwhm_pix), filter_name=filter_name,
+            sci=sci, psf_stamp=psf_stamp,
+            **catalog_kwargs,
+        )
+        logger.info(
+            "[repair] catalog %d → %d rows, %d flagged in %s",
+            len(cat), len(new_cat), int(np.sum(new_cat[flag_col])), flag_col,
+        )
+        suffix, log_name, log_key = "_repaired", "mergelog", "merge_log"
+    else:
+        if sci is None or psf_stamp is None:
+            raise ValueError("sci and psf_stamp are required in flag mode")
+        new_cat, new_seg, log = flag_saturated_segments(
+            cat, seg, fit_table,
+            sci=sci, psf_stamp=psf_stamp,
+            filter_name=filter_name, flux_frac=flux_frac,
+            **catalog_kwargs,
+        )
+        suffix, log_name, log_key = "_flagged", "flaglog", "flag_log"
+
+    catalog_out = out_dir / f"{catalog_path.stem}{suffix}.fits"
+    segmap_out = out_dir / f"{segmap_path.stem}{suffix}.fits"
+    log_out = out_dir / f"{catalog_path.stem}_{log_name}.csv"
     new_cat.write(catalog_out, overwrite=True)
     fits.writeto(
         segmap_out, new_seg.astype(np.int32),
         fits.getheader(segmap_path), overwrite=True,
     )
-    merge_log.write(log_out, format="csv", overwrite=True)
+    log.write(log_out, format="csv", overwrite=True)
     logger.info(
         "[repair] wrote %s, %s, %s", catalog_out, segmap_out, log_out,
     )
-    return {
-        "catalog": new_cat, "segmap": new_seg, "merge_log": merge_log,
+
+    out: dict[str, Any] = {
+        "catalog": new_cat, "segmap": new_seg, log_key: log,
         "catalog_out": catalog_out, "segmap_out": segmap_out,
         "log_out": log_out,
     }
+    if not merge:
+        out["diagnostic_out"] = None
+        n_flagged = int(np.sum(np.asarray(log["flagged"]))) if len(log) else 0
+        if diagnostic and n_flagged:
+            from .verification import plot_saturated_flag_diagnostic
+
+            png = out_dir / f"{catalog_path.stem}_flag_diagnostic.png"
+            plot_saturated_flag_diagnostic(
+                sci_before if sci_before is not None else sci, sci,
+                seg, new_seg, log, out_path=png,
+            )
+            logger.info("[repair] wrote %s", png)
+            out["diagnostic_out"] = png
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -451,7 +658,7 @@ def main(argv: list[str] | None = None) -> None:
         description=(
             "Repair saturated stars in a drizzled mosaic: fill wht=0 "
             "cores with a fitted PSF model and optionally flag the "
-            "affected sources in a catalog (FLAG_SATURATED_<FILTER>)."
+            "affected sources in a catalog (FLAG_SATURATED_TMPL)."
         ),
     )
     ap.add_argument("sci", help="drizzled science FITS image")
@@ -472,6 +679,12 @@ def main(argv: list[str] | None = None) -> None:
                     help="source catalog FITS to flag (needs --segmap)")
     ap.add_argument("--segmap", default=None,
                     help="segmentation map FITS matching --catalog")
+    ap.add_argument("--flux-frac", type=float, default=0.3,
+                    help="flag a segment when the star model exceeds this "
+                         "fraction of its observed flux (default: 0.3)")
+    ap.add_argument("--merge", action="store_true",
+                    help="merge flagged segments into one parent catalog row "
+                         "(drops the child rows) instead of flag-only")
     ap.add_argument("--out-dir", default=None,
                     help="output directory (default: next to sci)")
     ap.add_argument("--mode", choices=("repair", "subtract"), default="repair",
@@ -493,13 +706,6 @@ def main(argv: list[str] | None = None) -> None:
 
     if bool(args.catalog) != bool(args.segmap):
         ap.error("--catalog and --segmap must be given together")
-    if (args.catalog and args.filter_name is None
-            and _infer_filter(Path(args.sci)) is None):
-        ap.error(
-            "--catalog needs a filter for the FLAG_SATURATED_<FILTER> "
-            "column and none can be inferred from the filename; pass "
-            "--filter"
-        )
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -518,14 +724,19 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     if args.catalog:
+        sci_before, _ = _read_image(Path(args.sci))
+        merge_kwargs = {"n_fwhm": args.n_fwhm} if args.merge else {}
         flag_catalog(
             args.catalog, args.segmap, res["fits"],
-            filter_name=res["filter"],
+            filter_name="TMPL",
+            sci=res["sci"],
+            psf_stamp=drizzled_psf_stamp(res["dpsf"], res["psf_pattern"], npix=401),
+            merge=args.merge,
+            flux_frac=args.flux_frac,
             fwhm_pix=res["fwhm_pix"],
             out_dir=args.out_dir,
-            sci=res["sci"],
-            psf_stamp=_center_stamp(res["dpsf"], res["psf_pattern"]),
-            n_fwhm=args.n_fwhm,
+            sci_before=sci_before,
+            **merge_kwargs,
         )
 
 

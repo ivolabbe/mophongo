@@ -963,6 +963,33 @@ class Templates:
         extension: np.ndarray | str | None = None,  # 'psf', 'wings', 'both', None
         wcs: WCS | None = None,
     ) -> "Templates":
+        """Extract templates and optionally convolve them in one call.
+
+        Convenience constructor: runs :meth:`extract_templates` with
+        ``extend_mode='none'`` and, when ``kernel`` is given, applies
+        :meth:`convolve_templates` with ``inplace=True``, so the stored
+        templates are the convolved ones.
+
+        Parameters
+        ----------
+        hires_image
+            High-resolution detection image.
+        segmap
+            Segmentation map on the same grid; each pixel belongs to at most
+            one source label.
+        positions
+            Source positions as ``(x, y)`` pixel coordinates.
+        kernel
+            PSF-matching kernel at the template resolution. ``None`` skips
+            the convolution step.
+        extension
+            Accepted but currently unused. To build extended templates, call
+            :meth:`extract_templates` with an ``extend_mode``, or apply
+            :meth:`extend_with_psf` / :meth:`extend_with_psf_model` after
+            extraction.
+        wcs
+            WCS of the high-resolution image.
+        """
         obj = cls()
         obj.wcs = wcs
 
@@ -1522,8 +1549,29 @@ class Templates:
     ) -> list[Template]:
         """Extract cutout templates around segmentation regions.
 
+        For each source the cutout size is the segment bounding box made
+        symmetric about the source position, with a floor of ``min_size``;
+        the build-time schemes raise that floor so the stamp holds the
+        support they build over. Positions that are non-finite, out of
+        bounds, or fall on segmentation background are skipped silently.
+        Each stamp is normalised to unit sum with the pre-normalisation
+        total kept as ``template_norm`` (a zero-sum stamp gets
+        ``FLAG_SUM_ZERO`` instead), except for the schemes listed in
+        :data:`PRENORMALISED_MODES`, which normalise internally and whose
+        stamps are left alone.
+
         Parameters
         ----------
+        hires_image
+            High-resolution detection image.
+        segmap
+            Segmentation map on the same grid; each pixel belongs to at most
+            one source label.
+        positions
+            Source positions as ``(x, y)`` pixel coordinates.
+        wcs
+            Image WCS. The ``'wren'`` scheme uses it to convert its halo
+            annulus width from arcsec to pixels.
         dilate_segmap
             Disk radius (in pixels) used to dilate each segment *into
             background only* before cutting. Off by default, matching
@@ -1533,21 +1581,36 @@ class Templates:
             wings is the job of template extension. Neither reference scheme
             dilates.
         extend_mode
-            Template build scheme, one of :data:`EXTEND_MODES`. ``'default'``
-            (and the post-pass modes ``'psf'``/``'psf_model'``, which only
-            differ after extraction) masks the data with the segment.
-            ``'wren'`` and ``'classic'`` instead build a composite that
-            replaces the masked data *before* the unit-sum normalisation, so
-            ``template_norm`` covers the extended shape. See
-            :mod:`mophongo.template_schemes`.
+            Template build scheme, one of :data:`EXTEND_MODES` plus the
+            alias ``'default'`` for ``'psf_wings'``; any other value raises
+            ``ValueError``. ``'none'`` and the post-pass modes
+            ``'psf'``/``'psf_model'`` (which only differ after extraction)
+            mask the data with the segment. The :data:`BUILD_TIME_MODES`
+            (``'psf_wings'``, ``'classic'``, ``'wren'``) instead build a
+            composite that replaces the masked data *before* the unit-sum
+            normalisation, so ``template_norm`` covers the extended shape.
+            See :mod:`mophongo.template_schemes`.
         detection_psf
-            High-resolution PSF (array or :class:`~mophongo.psf_map.PSFRegionMap`)
-            required by ``'wren'`` and ``'classic'``.
+            High-resolution PSF on the detection grid (array or
+            :class:`~mophongo.psf_map.PSFRegionMap`), required by every
+            build-time scheme. A region map is looked up per source at the
+            template's sky position; the derived template-size floor comes
+            from the map's *widest* member
+            (:func:`~mophongo.template_schemes.representative_psf`).
         detection_weight
-            Detection-band inverse variance. Used by ``'wren'`` for its SNR
-            statistics; without it a clipped sky sigma is used instead.
-        wren, classic
-            Per-scheme parameters; defaults are used when omitted.
+            Detection-band inverse variance. Every build-time scheme grades
+            data against the PSF by SNR: with a weight map the formal
+            per-pixel noise ``sqrt(sum 1/ivar)`` is used, without one a
+            scalar noise measured once per extraction (or the scheme's own
+            ``rms``/``bg_rms`` override) stands in.
+        wren, classic, psf_wings
+            Per-scheme parameters; defaults are used when omitted, and
+            parameters of schemes that are not selected are ignored.
+
+        Returns
+        -------
+        list of Template
+            The extracted templates, also stored on the container.
         """
 
         mode = str(extend_mode or "none").lower()
@@ -1794,8 +1857,11 @@ class Templates:
         Parameters
         ----------
         kernel : np.ndarray or PSFRegionMap or None
-            Convolution kernel matching the template resolution. If ``None``,
-            templates are returned unchanged (aside from optional padding).
+            Convolution kernel matching the template resolution, or a spatial
+            kernel map looked up at each source's sky position. Identity
+            (delta-function) kernels skip the convolution and leave the
+            template pixels unchanged; ``None`` behaves like an identity
+            kernel for every template.
         inplace : bool, optional
             If ``True``, templates are modified in place and the internal list
             is returned. Otherwise a new list of convolved templates is

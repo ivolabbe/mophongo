@@ -809,7 +809,19 @@ class PSF:
         beta: float,
         theta: float = 0.0,
     ) -> "PSF":
-        """Create a normalized Moffat PSF."""
+        """Create a normalized Moffat PSF.
+
+        Parameters
+        ----------
+        size : int or tuple of int
+            Stamp shape; a scalar gives a square stamp.
+        fwhm_x, fwhm_y : float
+            FWHM along each axis in pixels.
+        beta : float
+            Moffat power-law index.
+        theta : float, optional
+            Rotation angle in radians.
+        """
         from .utils import moffat as moffat_psf
 
         return cls(moffat_psf(size, fwhm_x, fwhm_y, beta, theta))
@@ -897,14 +909,19 @@ class PSF:
         ----------
         data : ndarray
             Image containing the star.
-        position : tuple of float or tuple of astropy Quantity
-            Approximate ``(x, y)`` pixel coordinates of the star, or (ra, dec) as astropy Quantities (e.g. with unit deg).
+        position : tuple of float or tuple of astropy Quantity, optional
+            Approximate ``(x, y)`` pixel coordinates of the star, or (ra, dec)
+            as astropy Quantities (e.g. with unit deg) when ``wcs`` is given.
+            ``None`` uses the image center.
         search_boxsize, fit_boxsize : int or tuple of int, optional
-            Passed to :func:`photutils.centroids.centroid_quadratic`.
+            Passed to :func:`photutils.centroids.centroid_quadratic`. When
+            ``search_boxsize`` is ``None`` (the default), recentering is
+            skipped entirely and the supplied position is used as-is.
         size : int, optional
             Cutout size. The PSF will be a square array of this shape.
         wcs : astropy.wcs.WCS, optional
-            WCS object for the image.
+            WCS object for the image; required for sky-coordinate positions
+            and propagated to the cutout.
 
         Returns
         -------
@@ -986,7 +1003,9 @@ class PSF:
             Neelamani et al. 2004).
         reg : float, optional
             Regularization parameter for ``tikhonov``, ``wiener``, and
-            ``forward``.  Scaled by ``max(|H_hi|^2)`` so it is dimensionless.
+            ``forward``.  Scaled by the peak of the inversion denominator
+            (``max(|H_hi|^2)``; ``max(|H_hi|^2 P_xx)`` for Wiener) so it is
+            dimensionless.
         wavelet, levels, threshold_factor, noise_sigma, forward_wavelet_wiener :
             ``forward``-only options.  ``threshold_factor`` controls the hard
             threshold on detail coefficients in units of estimated per-subband
@@ -1209,10 +1228,66 @@ class PSF:
         Identical figure of merit to
         :meth:`optimize_matching_kernel_window`; mostly used to find the best
         ``reg`` for ``method="tikhonov" | "wiener" | "forward"``.
+        ``reg_grid`` defaults to ``np.logspace(-6, -1, 21)``.  A non-unity
+        ``pixel_ratio`` brings the pair onto a common grid before scanning,
+        exactly as :func:`mophongo.utils.matching_kernel` would.
 
         If ``diagnostic_path`` is provided, the standard PSF matching
         diagnostic is written. Passing a directory writes
         ``diagnostic_<method>.png`` inside that directory.
+
+        Parameters
+        ----------
+        other : PSF or np.ndarray
+            Target PSF that ``self`` should be convolved into.
+        method : str, optional
+            Matching method: ``"tikhonov"``, ``"wiener"``, or ``"forward"``.
+        reg_grid : np.ndarray, optional
+            Regularization values to scan; ``None`` uses
+            ``np.logspace(-6, -1, 21)``, the standard scan range.
+        pixel_ratio : float, optional
+            Pixel-scale ratio between the pair.  Values above 1 resample the
+            target onto the source grid (flux-conserving cubic), values below
+            1 resample the source, so the scan scores the kernel that will
+            actually be built.
+        core_radius : float, optional
+            Maximum radius in pixels for the core radial-profile term.
+            Defaults to one quarter of the PSF size.
+        growth_weight, core_weight, l2_weight : float, optional
+            Weights for the growth-curve, radial-core, and image-space mean
+            square terms in the score.
+        kernel_regularization_weight : float, optional
+            Overall weight for the kernel stability term.
+        kernel_high_frequency_radius : float, optional
+            Fourier radius, in Nyquist units, above which kernel power is
+            penalized as pixel-scale ringing.
+        kernel_high_frequency_weight, kernel_cancellation_weight : float, optional
+            Relative weights for high-frequency kernel power and excess
+            positive/negative L1 flux cancellation.
+        recenter : bool, optional
+            Passed to :func:`mophongo.utils.matching_kernel`; ``False`` keeps
+            already-centered PSFs fixed during scoring.
+        wavelet, levels, threshold_factor, noise_sigma, forward_wavelet_wiener : optional
+            Options for ``method="forward"`` (ForWaRD Fourier+wavelet
+            deconvolution).  ``threshold_factor`` sets the hard threshold on
+            detail coefficients in units of the estimated per-subband noise.
+        signal_psd : np.ndarray, optional
+            Signal power spectral density for ``method="wiener"``.
+        diagnostic_path : str or Path, optional
+            Write the standard diagnostic figure; a directory path writes
+            ``diagnostic_<method>.png`` inside it.
+        source_label, target_label, diagnostic_title, aperture_radius, diagnostic_note : optional
+            Labels used only in the diagnostic figure; ``aperture_radius``
+            draws a vertical marker on the growth-ratio panel and
+            ``diagnostic_note`` is appended to the info panel.
+
+        Returns
+        -------
+        MatchingKernelRegFit
+            The scanned ``method``, best ``reg``, ``score``, ``kernel``, and
+            ``matched_psf``, the 1-D scan grids, the radial-profile and
+            growth-curve vectors, and an ``extra`` dict recording the scan
+            configuration.
         """
         psf_hi = np.asarray(self.array, dtype=float)
         psf_lo = other.array if isinstance(other, PSF) else np.asarray(other, dtype=float)
@@ -1609,7 +1684,17 @@ class EffectivePSF:
         use_astropy_cache=True,
         verbose=False,
     ):
-        """Download JWST STDPSF models.
+        """Load JWST STDPSF models into the ``epsf`` dictionary.
+
+        With both ``local_dir`` and ``filter_pattern`` given (the mode the
+        pipeline uses), recursively loads the ``*.fits`` files under
+        ``local_dir`` whose basenames match the ``filter_pattern`` regex,
+        keying each grid by its filename stem (basename without ``.fits``).
+        Each grid stores its spatial knot positions (``IPSFX*``/``JPSFY*``
+        header keywords), oversampling factor (``OVERSAMP``, default 4), and
+        epoch (``MJD-AVG``), which drives the nearest-MJD key resolution in
+        :class:`DrizzlePSF`. Without both arguments, library STDPSF files are
+        downloaded from the STScI JWST1PASS archive instead.
 
         Parameters
         ----------
@@ -1907,6 +1992,8 @@ def stamp_encircled_energy(
         Stamp pixel scale in arcsec.
     ee_fraction : float, optional
         If given, also return the radius enclosing this absolute fraction.
+    per_stamp : bool, optional
+        Return per-stamp arrays in cube order instead of scalar means.
 
     Returns
     -------
@@ -1974,6 +2061,43 @@ def stamp_encircled_energy(
 
 
 class DrizzlePSF:
+    """Drizzle ePSF models through the per-exposure WCS onto the mosaic grid.
+
+    Reproduces the mosaic PSF at any sky position by evaluating the loaded
+    ePSF grid in each contributing exposure frame and drizzling the stamps
+    onto the output WCS.
+
+    Parameters
+    ----------
+    driz_image : str
+        Path to the drizzled mosaic FITS; its header defines the output WCS
+        and pixel scale.
+    csv_file : str, optional
+        Per-exposure WCS table (``*_wcs.csv``). When ``None``, the path is
+        derived from ``driz_image`` by replacing the
+        ``_drz_sci/_drc_sci/_sci`` suffix with ``_wcs.csv``; a missing CSV
+        is reconstructed from public MAST cal-file headers.
+    info : tuple, optional
+        Pre-parsed ``(flt_keys, wcs, footprints, headers)`` as returned by
+        :meth:`read_wcs_csv`; bypasses the CSV read.
+    driz_hdu : HDU, optional
+        Use this HDU's header instead of reading ``driz_image`` from disk.
+    epsf_obj : EffectivePSF, optional
+        ePSF container; a fresh empty :class:`EffectivePSF` is created when
+        ``None``.
+    flt_files, full_flt_weight
+        Accepted for backward compatibility; currently unused (exposure
+        files come from the CSV, and per-frame weights come from the
+        ``EXPTIME`` column).
+
+    Attributes
+    ----------
+    footprint : dict
+        Maps each frame key to its sky-footprint ``shapely`` Polygon.
+        Region maps are built from these footprints.
+    driz_footprint : shapely.geometry.Polygon
+        Outline of the drizzled mosaic.
+    """
 
     def __init__(
         self,
@@ -2199,7 +2323,26 @@ class DrizzlePSF:
         cutout_data=None,
         verbose=False,
     ):
-        """Return a drizzle Cutout2D, including WCS."""
+        """Return a drizzle Cutout2D, including WCS.
+
+        The cutout WCS is what :meth:`get_psf` drizzles onto.
+
+        Parameters
+        ----------
+        size : int, optional
+            Cutout side in output (mosaic) pixels. ``None`` derives it from
+            ``size_native``.
+        size_native : float, optional
+            Cutout side in detector pixels; ``None`` uses the native ePSF
+            stamp size assuming 4x oversampling.
+        recenter : bool, optional
+            Recenter on the local quadratic centroid before cutting.
+        search_boxsize, fit_boxsize : int, optional
+            Centroid search and fit boxes for ``recenter``.
+        cutout_data : np.ndarray or list of np.ndarray, optional
+            Substitute in-memory array(s) for the mosaic file; a list returns
+            one cutout per array.
+        """
 
         # default size to size of the ePSF model
         if size is None:
@@ -2301,6 +2444,35 @@ class DrizzlePSF:
         Pipeline fitting code should convert this native stamp to a unit-sum
         shape when using it for template extension or matching kernels, and
         keep this stamp sum separately as the finite-support throughput.
+
+        Parameters
+        ----------
+        filter : str, optional
+            ePSF key or regex; ``None`` reuses the pattern given at load time.
+        pixfrac : float, optional
+            Drizzle pixfrac, used exactly as passed; the mosaic header
+            override (``KERNEL``/``PIXFRAC``) is applied by the callers
+            :meth:`get_psf_radec` and :meth:`register`, not here.
+        kernel : str, optional
+            Drizzle kernel, used exactly as passed (see ``pixfrac``).
+        wcs_slice : astropy.wcs.WCS, optional
+            Output WCS defining the stamp footprint; ``None`` uses the full
+            mosaic WCS.
+        get_extended : bool, optional
+            Add the extended halo model if one is loaded for the filter.
+        npix : int, optional
+            Half-size of the evaluated input grid in detector pixels;
+            ``None`` derives it from the output footprint plus a
+            half-``pixfrac`` margin.
+        xphase, yphase : float, optional
+            Extra sub-pixel phase offsets applied to the ePSF evaluation.
+        taper_alpha : float, optional
+            Apply a Tukey taper of this alpha over the drizzled footprint to
+            suppress edge discontinuities.
+        return_hdul : bool, optional
+            Return a FITS HDUList with the stamp WCS instead of a bare array.
+        get_weight, ds9
+            Accepted but currently unused.
         """
         if wcs_slice is None:
             wcs_slice = self.driz_wcs.copy()

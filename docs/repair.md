@@ -157,6 +157,39 @@ field of view. For bright stars whose diffraction spikes fragment the
 segmentation map, drizzle the stamp from a large-FOV (~30") ePSF and use
 a generous `npix`, as in the example notebook.
 
+## Running inside the photometry pipeline
+
+The repair can also run in memory when the {doc}`pipeline` loads its
+data, so the mosaics on disk never need to be repaired beforehand. Set
+in the run config:
+
+```json
+"repair_saturated": true,
+"repair_kwargs": {"min_buffer_snr": 200}
+```
+
+At load time the pipeline then repairs `sci_hi` / `wht_hi` (cores filled
+with the PSF model, weights restored), flags the catalog and
+segmentation map in memory, and proceeds — nothing on disk changes, and
+the repaired templates are what lands in the run's `*_stamps.fits`, so
+they can be inspected there as usual. Diagnostics (fit table, flag log,
+per-star PNGs) are written to `out_dir/repaired/`. The PSF model reuses
+the pipeline's own `pattern_hi` ePSFs and the same epoch policy, so no
+extra PSF setup is needed; `repair_kwargs` forwards tuning options
+(`min_buffer_snr`, `flux_frac`, `min_snr`, `stamp_npix`).
+
+Differences from the file-based flow, because the products feed a
+photometry run instead of a catalog release: flagged wing segments keep
+their labels (each catalog row still gets a template), and each
+saturated star's fragments — the rows sharing one `FLAG_SATURATED_TMPL`
+group id — are fit **together in their own scene**, one scene per star,
+exempt from the `scene_minimum_bright` merging criterion. Everything
+else is solved without them, so the star's poorly-constrained wings
+cannot contaminate neighbouring fluxes. In the per-scene diagnostic
+plots the saturated stars' segments are nulled when other scenes are
+shown, and visible in their own scene's plot. The Python entry point is
+{func}`mophongo.repair.repair_in_memory`.
+
 ## Tuning
 
 - `--min-buffer-snr` (default 200) is the saturation pre-filter: the

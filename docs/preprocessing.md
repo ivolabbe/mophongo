@@ -102,124 +102,21 @@ repaired core continues the profile smoothly across the filled region.
 
 ### `repair_saturated_holes`
 
-{func}`mophongo.saturate.repair_saturated_holes` is the main entry point.
-Signature:
-`repair_saturated_holes(sci, wht, *, dpsf, wcs, holes=None, ...)`.
+{func}`mophongo.saturate.repair_saturated_holes` is the main entry point,
+called as in the example above. Its many knobs group into the donut
+geometry (`buffer`, `factor`, `fwhm_pix`), the iterative amplitude and
+position fit (`fit_shift`, `shift_tol`, `max_shift_pix`), the acceptance
+filtering — the main pre-filter is `min_buffer_snr`, the minimum buffer
+significance in units of the global sky noise, default 200 — and the
+action `mode` (`"repair"` or `"subtract"`). All parameters and defaults
+are documented in the {doc}`api` reference.
 
-Positional arguments:
-
-`sci`, `wht` (`np.ndarray`)
-: 2D science and weight arrays. Weights are inverse variance; only
-  `wht > eps_wht` pixels are considered valid.
-
-Keyword-only arguments:
-
-`dpsf` ({class}`mophongo.psf.DrizzlePSF`)
-: PSF model configured with the same drizzle WCS as `sci` and an ePSF
-  already loaded. Required.
-
-`wcs` (`astropy.wcs.WCS`)
-: WCS of `sci`. Required.
-
-`holes` (`Table | None`, default `None`)
-: Precomputed hole table from
-  {func}`mophongo.saturate.find_wht_holes`. `None` runs hole detection
-  internally.
-
-`buffer` (`float`, default `2.0`)
-: Pixels added to `r_equiv` to form the donut inner radius `r_in`.
-
-`factor` (`float`, default `2.5`)
-: Multiplier on `r_in` for the donut outer radius `r_out`.
-
-`fwhm_pix` (`float`, default `2.0`)
-: PSF FWHM in pixels; sets the floor `r_out >= 2 * fwhm_pix`.
-
-`eps_wht` (`float`, default `0.0`)
-: Pixels with `wht <= eps_wht` count as zero-weight.
-
-`return_diagnostics` (`bool`, default `True`)
-: Collect per-source `RepairDiagnostic` objects in the return value.
-
-`only_ids` (`list[int] | None`, default `None`)
-: Restrict processing to these hole ids.
-
-`fit_shift` (`bool`, default `True`)
-: Fit the sub-pixel PSF position jointly with the amplitude. `False` for
-  amplitude-only fits.
-
-`max_shift_iter` (`int`, default `5`)
-: Maximum drizzle-and-fit iterations for the position refinement.
-
-`shift_tol` (`float`, default `0.05`)
-: Convergence tolerance on the per-iteration shift, in pixels.
-
-`merge_radius` (`int`, default `3`)
-: Dilation radius (pixels) used during hole detection so disconnected
-  fragments of one saturated core share a label.
-
-`sat_significance` (`float`, default `10.0`)
-: Minimum median-donut significance in sigma above sky. Currently not
-  applied as a filter: the measured significance is recorded in the output
-  and the acceptance filter uses `min_buffer_snr` instead.
-
-`hole_dilate` (`int`, default `2`)
-: Dilation (pixels) of the zero-weight mask; the dilated footprint defines
-  the repair region and the inner boundary of the fit ring.
-
-`max_resid_frac` (`float`, default `1.0`)
-: Intended threshold for the residual fraction. Currently not consulted:
-  the applied guard is hard-coded to reject fits with residual fraction
-  above 1.0 (no action taken on the image).
-
-`min_ring_snr` (`float`, default `5.0`)
-: Intended minimum median ring SNR. Currently not applied: the measured
-  ring SNR is stored in the diagnostics only.
-
-`min_buffer_snr` (`float`, default `200.0`)
-: Minimum median sky-subtracted flux of the buffer pixels, in units of the
-  global sky noise, for the hole to be treated as genuine saturation. The
-  main pre-filter.
-
-`max_shift_pix` (`float`, default `3.0`)
-: Hard cap on the cumulative fitted position shift, in pixels.
-
-`extended_max_data_to_model` (`float`, default `1.15`)
-: If `Σ data / Σ (A·ψ)` over the donut exceeds this ratio, refit with an
-  additive pedestal to absorb host-galaxy flux.
-
-`mode` (`str`, default `"repair"`)
-: `"repair"` fills the saturated core with the model; `"subtract"` removes
-  `A·ψ` over the full cutout and blanks the core.
-
-`psf_size_pix_subtract` (`int | None`, default `None`)
-: Cutout size in drizzle pixels for subtract mode. `None` uses
-  `min(400, native ePSF field of view)`.
-
-`psf_filter`, `psf_pixfrac`, `psf_kernel` (default `None`)
-: Forwarded to {meth}`mophongo.psf.DrizzlePSF.get_psf`. `None` falls back
-  to the `dpsf` defaults (drizzle-header `PIXFRAC`/`KERNEL`).
-
-`sky_sample` (`int`, default `200000`)
-: Number of valid pixels sampled to estimate the global sky level and
-  `mad_std` noise. `0` uses all pixels.
-
-`output_csv` (`str | Path | None`, default `None`)
-: If given, write the fit table to this CSV path.
-
-`plot_dir` (`str | Path | None`, default `None`)
-: If given, write per-source diagnostic PNGs to this directory.
-
-Returns a dict with keys `"sci"` (repaired science image, `float32`),
-`"wht"` (repaired weight map), `"fits"` (astropy `Table`),
-`"diagnostics"` (list of `RepairDiagnostic`), `"holes"` (hole table),
-`"sky"`, and `"sky_noise"`.
-
-The `fits` table has one row per hole, including rejected ones, with
-columns `id, yc, xc, r_equiv, r_in, r_out, amplitude, amp_err, chi2_red,
-n_pix, n_iter, shift_x, shift_y, significance, buffer_snr, flux_added,
-pedestal, fit_mode, data_to_model, amplitude_noshift, chi2_red_noshift,
-ok, status`. `ok=False` rows record why a hole was skipped in `status`.
+The returned dict carries the repaired `"sci"` and `"wht"` arrays, the fit
+table `"fits"` (one row per hole, including rejected ones, whose `status`
+column records why a hole was skipped), the per-source `"diagnostics"`,
+the hole table, and the global sky level and noise; `output_csv` and
+`plot_dir` additionally write the fit table as CSV and per-source
+diagnostic PNGs.
 
 ### Helper functions
 
@@ -234,12 +131,39 @@ signatures.
   `merge_radius` so fragments of one saturated core share an id. Returns
   the hole table (`id, yc, xc, area, r_equiv`, bounding box).
 
+```python
+import numpy as np
+from mophongo.saturate import find_wht_holes
+
+wht = np.ones((101, 101))
+yy, xx = np.indices(wht.shape)
+wht[np.hypot(yy - 60, xx - 40) < 6] = 0.0   # saturated core: interior hole
+wht[:, :4] = 0.0                            # chip gap touching the border: dropped
+holes = find_wht_holes(wht, min_area=5)
+print(len(holes), int(holes["area"][0]), round(float(holes["r_equiv"][0]), 2))  # 1 109 5.89
+```
+
 {func}`mophongo.saturate.fit_psf_donut`
 : Fits `data ≈ A·psf [+ C]` by weighted linear least squares on the ring
   `r_in <= r <= r_out`, returning the amplitude, its error, reduced
   chi-square, optional pedestal, and the shape-mismatch diagnostic
   `rho_psf` (an amplitude-invariant weighted data–PSF correlation over the
   ring).
+
+```python
+import numpy as np
+from mophongo.psf import PSF
+from mophongo.saturate import fit_psf_donut
+
+rng = np.random.default_rng(11)
+psf = PSF.gaussian(101, 8.0).array              # unit-sum PSF model
+sci = 500.0 * psf + rng.normal(0, 1e-4, psf.shape)
+wht = np.full(sci.shape, 1e8)
+yy, xx = np.indices(sci.shape)
+wht[np.hypot(yy - 50, xx - 50) < 8] = 0.0       # zero-weight saturated core
+fit = fit_psf_donut(sci, wht, psf, center=(50.0, 50.0), r_in=9.0, r_out=25.0)
+print(round(fit["amplitude"], 2), round(fit["rho_psf"], 3))  # 500.01 1.0 (truth: 500)
+```
 
 {func}`mophongo.saturate.fit_amp_and_shift`
 : One linearised step of the joint amplitude + sub-pixel shift fit of step
@@ -256,24 +180,14 @@ signatures.
   from one `RepairDiagnostic`; pass `to_file` to save a PNG instead of
   returning the matplotlib figure.
 
-### `RepairDiagnostic` fields
-
-`RepairDiagnostic` is a result container, collected when
-`return_diagnostics=True` for holes that reached the fitting stage. Holes
-rejected by the buffer-SNR pre-filter or by the residual-fraction guard get a
-table row but no diagnostic; a hole whose fit failed gets a stub diagnostic
-with `ok=False`. Scalar fields: `id`, `yc`, `xc`, `r_equiv`, `r_in`, `r_out`
-(geometry), `amplitude`, `chi2_red`,
-`n_pix`, `n_iter`, `shift_total`, `significance`, `center`,
-`amplitude_noshift`, `chi2_red_noshift`, `center_noshift` (fit results,
-with a no-shift comparison fit at the original hole centroid),
-`resid_frac`, `ring_snr`, `buffer_snr`, `pedestal`, `rho_psf`,
-`fit_mode` (`"donut"` or `"donut+pedestal"`), `data_to_model`,
-`action_mode` (`"repair"` or `"subtract"`), `ok`, `status`. Array fields
-hold the cutouts and masks used by the plot: `sci_cut`, `wht_cut`,
-`psf_cut_scaled`, `sci_repaired_cut`, `hole_mask`, `dilated_hole_mask`,
-`ring_mask`, `repair_mask`, `psf_cut_noshift_scaled`,
-`ring_mask_noshift`, `bad_resid_mask`.
+Each hole that reached the fitting stage also yields a
+{class}`~mophongo.saturate.RepairDiagnostic` (collected when
+`return_diagnostics=True`): a result container holding the fit geometry
+and quality metrics as scalars, plus the cutouts and masks that
+`plot_repair_diagnostic` renders. Holes rejected by the buffer-SNR
+pre-filter or by the residual-fraction guard get a table row but no
+diagnostic; a hole whose fit failed gets a stub diagnostic with
+`ok=False`.
 
 ## Astrometric corrections (`mophongo.astrometry`)
 
@@ -308,47 +222,30 @@ accumulated in `Template.shifted`.
 
 ### `AstroCorrect`
 
-Dataclass with a single constructor field:
+{class}`mophongo.astrometry.AstroCorrect` is constructed from a
+{class}`~mophongo.fit.FitConfig`, which supplies all its options: the field
+model `astrom_model` (`"poly"` or `"gp"`), the measurement method
+`astrom_centroid`, the anchor cut `snr_thresh_astrom`, and the per-model
+keyword dicts in `astrom_kwargs` — all documented in {doc}`fitting`.
+{meth}`~mophongo.astrometry.AstroCorrect.fit` measures shifts from the
+current fit state (templates, residual image, fitted amplitudes), fits the
+shift field, and resamples each template in place unless its predicted
+shift is below 0.01 pixel in both components; calling the instance
+afterwards evaluates the field at any position (zeros before `fit`). The
+static helper
+{meth}`~mophongo.astrometry.AstroCorrect.build_poly_predictor` constructs
+the same kind of predictor from flat Chebyshev coefficients produced
+elsewhere — this is how the joint astrometric solutions of the scene
+fitter are evaluated.
 
-`cfg` ({class}`mophongo.fit.FitConfig`)
-: Supplies the astrometry options: `astrom_model` (`"poly"` or `"gp"`),
-  `astrom_centroid` (`"centroid"` or `"correlation"`),
-  `snr_thresh_astrom`, and `astrom_kwargs` (per-model keyword dicts, e.g.
-  `{"poly": {"order": 2}, "gp": {"length_scale": 400}}`). These fields are
-  documented in {doc}`fitting`.
+```python
+from mophongo.astrometry import AstroCorrect
+from mophongo.fit import FitConfig
 
-Methods:
-
-`fit(templates, residual, coeffs)`
-: Measure shifts from the current fit state and build the predictor.
-  `templates` is a sequence of {class}`mophongo.templates.Template`,
-  `residual` the current residual image, and `coeffs` the fitted
-  amplitudes. For the polynomial model the basis order comes from
-  `astrom_kwargs["poly"]["order"]` (default 2); for the Gaussian process,
-  `astrom_kwargs["gp"]["length_scale"]` (default 300 pixels) sets the RBF
-  kernel scale. The cutout `box_size` (default 7) is read from the same
-  per-model dict. After fitting, a template is shifted in place unless both
-  predicted shift components are below 0.01 pixel.
-
-  The defaults above are `AstroCorrect`-internal fallbacks that apply only
-  when `astrom_kwargs` omits the key. `FitConfig` itself supplies
-  `astrom_kwargs = {"poly": {"order": 0}, "gp": {"length_scale": 400}}` by
-  default, so pipeline runs with an unmodified `FitConfig` use order 0 and a
-  400-pixel length scale; the internal fallbacks take effect only for a
-  config whose `astrom_kwargs` leaves those entries out.
-
-`__call__(x, y=None)`
-: Evaluate the fitted shift field. Accepts either an `(N, 2)` array of
-  `(x, y)` positions or separate `x` and `y` arrays; returns `(dx, dy)`
-  arrays with matching shape. Before `fit` is called, the predictor
-  returns zeros.
-
-`build_poly_predictor(coeffs, x_cen, y_cen, order, Sx=1.0, Sy=1.0)`
-: Static helper that constructs a shift predictor from flat Chebyshev
-  coefficients (first `n_terms(order)` entries for `dx`, next block for
-  `dy`), with positions centered on `(x_cen, y_cen)` and scaled by
-  `(Sx, Sy)`. Used to evaluate shift solutions produced elsewhere, for
-  example the joint astrometric blocks solved during fitting.
+acorr = AstroCorrect(FitConfig(astrom_model="poly"))
+acorr.fit(templates, residual, coeffs)   # shifts templates in place
+dx, dy = acorr(x, y)                     # evaluate the fitted field
+```
 
 ### `AstroMap`
 
@@ -372,19 +269,25 @@ dx, dy = amap(catalog["x"], catalog["y"])
 
 ### Lower-level helpers
 
-`measure_template_shifts(templates, coeffs, residual, *, box_size=5,
-snr_threshold=7.0, method="quadratic")`
-: Returns `(positions, dx, dy, weights)` arrays for templates with
-  `flux / err >= snr_threshold`. `method="correlation"` selects
-  cross-correlation; any other value selects quadratic centroids. Weights
-  are SNR squared.
+Both facades build on the same primitives:
+{func}`~mophongo.astrometry.measure_template_shifts` collects the per-source
+`(position, dx, dy, weight)` samples,
+{func}`~mophongo.astrometry.fit_polynomial_field` fits the weighted 2D
+Chebyshev shift field and returns a predictor, and
+{func}`~mophongo.astrometry.cheb_basis` /
+{func}`~mophongo.astrometry.n_terms` provide the Chebyshev cross-term basis
+for coordinates scaled to `[-1, 1]`. See the {doc}`api` reference for full
+signatures.
 
-`fit_polynomial_field(pos, dx, dy, w, *, order, shape)`
-: Weighted least-squares fit of 2D Chebyshev shift fields over an image of
-  the given `shape`; returns a `predict(positions) -> (dx, dy)` callable.
+```python
+import numpy as np
+from mophongo.astrometry import fit_polynomial_field
 
-`cheb_basis(x, y, order)` and `n_terms(order)`
-: Chebyshev basis values `T_i(x) T_j(y)` for coordinates scaled to
-  `[-1, 1]`, and the number of terms, `(order + 1)(order + 2) / 2`.
-
-See the {doc}`api` reference for full signatures.
+rng = np.random.default_rng(11)
+pos = rng.uniform(0, 2000, size=(50, 2))        # (x, y) sample positions
+dx = 0.10 + 1e-4 * pos[:, 0]                    # a linear shift field ...
+dy = -0.05 + rng.normal(0, 0.01, 50)            # ... plus noisy constant dy
+predict = fit_polynomial_field(pos, dx, dy, np.ones(50), order=1, shape=(2000, 2000))
+px, py = predict(np.array([[1000.0, 1000.0]]))
+print(round(float(px[0]), 3), round(float(py[0]), 3))  # 0.2 -0.05
+```

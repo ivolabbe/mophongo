@@ -182,8 +182,24 @@ class PSFFactory:
         Filename prefix (e.g. project tag ``'UDS'``).
     outdir
         Output directory for saved FITS files. Created on demand.
-    num_psfs, oversample, fov_arcsec, use_detsampled_psf
-        Default PSF build parameters.
+    num_psfs
+        PSFs per grid; must be a perfect square laid out across the
+        detector. Default 1.
+    oversample
+        Pixel-space oversampling factor. Default 4.
+    fov_arcsec
+        Field of view per PSF in arcsec. ``None`` (default) omits the
+        keyword so ``stpsf`` applies its own pixel-based default
+        (4.09 arcsec for NIRCam, 8.10 for MIRI).
+    use_detsampled_psf
+        Write detector-sampled rather than oversampled PSFs. Default False.
+    date_mode
+        Default epoch-selection mode for :meth:`from_csv`; see
+        :func:`dates_from_csv`. Default ``'modal'``.
+    span
+        Window width in days for ``'modal'``. Default 5.0.
+    delta_day
+        Cluster radius in days for ``'cluster'``. Default 2.0.
     include_mjd
         If True (default), embed the integer MJD in saved filenames as
         ``..._MJD{int}.fits``. Set False to reproduce legacy filenames that
@@ -249,7 +265,13 @@ class PSFFactory:
         save: bool = False,
         **backend_kw: Any,
     ):
-        """Build one PSF / PSF grid. Returns the grid object; optionally writes it."""
+        """Build one PSF / PSF grid. Returns the grid object; optionally writes it.
+
+        ``date`` may be an MJD float, ISO string, or
+        :class:`astropy.time.Time`; when given, the measured wavefront model
+        (OPD) nearest that epoch is used. ``save=True`` writes the grid to
+        ``outdir`` under the canonical :meth:`filename`.
+        """
         backend = BACKENDS.get(telescope.upper())
         if backend is None:
             raise ValueError(f"Unknown telescope {telescope!r}; known: {list(BACKENDS)}")

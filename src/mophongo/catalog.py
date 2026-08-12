@@ -136,12 +136,32 @@ def get_bg_and_ivar(
     Fit a smooth background on the coarse grid (mask-aware), subtract it,
     measure robust σ on bg pixels, and rescale the full-res ivar.
 
+    Bins the image, masks sources with a two-pass detection (bright,
+    smoothed + faint, per-pixel), fits a mask-aware smoothed background on
+    the coarse grid, and measures the robust scatter of background pixels
+    after subtraction.
+
+    Parameters
+    ----------
+    sci, wht
+        Science image and weight map.
+    bg_filter_sigma
+        Sets the coarse-grid bin factor (``floor(sqrt(bg_filter_sigma))``)
+        and the scale of the mask-aware Gaussian background smoothing.
+    detect_thresh
+        Detection threshold, in units of the robust sigma of the coarse
+        noise-equalised image, for masking sources out of the background
+        fit.
+    dilate
+        Disk radius for smoothing the coarse detection image and dilating
+        the background mask.
+
     Returns
     -------
-    ivar_new     : float32 ndarray (H, W)
-    bg_coarse    : float32 ndarray (Hc, Wc)
-    det_coarse   : float32 ndarray (Hc, Wc) after bg subtraction
-    bgmask_full  : float32 ndarray (H, W) linearly interpolated mask in [0,1]
+    bg_img   : float32 ndarray (H, W), background interpolated back to
+               full resolution
+    ivar_new : float32 ndarray (H, W), weight map rescaled to a calibrated
+               inverse variance
     """
     step = np.floor(np.sqrt(bg_filter_sigma)).astype(int)
     min_npixels_bright = step**2
@@ -575,7 +595,86 @@ def _deblend_label_info(
 
 @dataclass
 class Catalog:
-    """Create a catalog from a science image and weight map."""
+    """Create a catalog from a science image and weight map.
+
+    :meth:`run` (called automatically by :meth:`from_fits`) turns ``sci``
+    and ``wht`` into a segmentation map plus a measurement table whose
+    integer segment labels equal ``table['id']``.
+
+    Attributes
+    ----------
+    sci
+        Science image (2D). With ``estimate_background=True``, :meth:`run`
+        rebinds this attribute to the background-subtracted image; the
+        caller's array is not modified.
+    wht
+        Weight map, interpreted as inverse variance unless
+        ``estimate_ivar=True``.
+    nbin
+        Binning factor used by the :meth:`plot_bg` diagnostic display.
+    estimate_background
+        Fit and subtract a smooth background via :func:`get_bg_and_ivar`
+        before detection.
+    estimate_ivar
+        Recalibrate the inverse variance from the measured background-pixel
+        scatter (also via :func:`get_bg_and_ivar`) instead of trusting
+        ``wht``.
+    background
+        Background level or map; filled by :meth:`run` when
+        ``estimate_background=True``.
+    ivar
+        Inverse-variance map. :meth:`run` sets it to ``wht`` when no
+        estimation is requested, or to the recalibrated map when
+        ``estimate_ivar=True``. ``estimate_background=True`` on its own
+        leaves ``ivar`` unset and :meth:`run` fails; enable
+        ``estimate_ivar`` as well, or pass ``ivar`` yourself.
+    segmap
+        Segmentation map. If provided, detection is skipped; otherwise
+        filled by :meth:`run`.
+    parent_segmap
+        Copy of the segmentation map before deblending, used to record
+        deblend provenance.
+    catalog
+        Underlying :class:`photutils.segmentation.SourceCatalog`, filled by
+        :meth:`run`.
+    table
+        Measurement table, filled by :meth:`run`.
+    det_img
+        Noise-equalised detection image, filled during detection.
+    params
+        Detection and deblending parameters; user-supplied entries are
+        merged over these defaults:
+
+        - ``kernel_size`` (3.5): FWHM in pixels of the Gaussian smoothing
+          kernel applied to the detection image (kernel sigma is
+          ``kernel_size / 2.355``, stamp ``int(2 * kernel_size) | 1`` pixels
+          on a side).
+        - ``detect_npixels`` (5): minimum connected pixels for a detection;
+          also passed to the deblender.
+        - ``detect_threshold`` (2.0): threshold applied to the smoothed,
+          noise-equalised detection image.
+        - ``dilate_segmap`` (2): disk radius for
+          :func:`safe_dilate_segmentation`; 0 disables dilation.
+        - ``deblend_mode`` (``"exponential"``): mode passed to
+          ``photutils.segmentation.deblend_sources``; ``None`` skips
+          deblending entirely.
+        - ``deblend_nlevels`` (32): multi-thresholding levels for the
+          deblender.
+        - ``deblend_contrast`` (1e-4): minimum flux fraction of a deblended
+          child.
+        - ``deblend_compactness`` (0.0): reserved; currently not forwarded
+          to the deblender.
+        - ``background_filter_sigma`` (64.0): forwarded to
+          :func:`get_bg_and_ivar` as ``bg_filter_sigma``.
+    header
+        FITS header used to construct a WCS when one is not given; filled
+        by :meth:`from_fits` when ``sci`` is a filename.
+    wcs
+        World coordinate system for sky positions; built from ``header``
+        if absent.
+    default_columns
+        photutils ``SourceCatalog`` columns exported to ``table``.
+    """
 
     sci: np.ndarray
     wht: np.ndarray
@@ -620,6 +719,31 @@ class Catalog:
         header: fits.Header | None = None,
         **kwargs,
     ) -> "Catalog":
+        """Build a catalog from FITS files or arrays and run it.
+
+        Parameters
+        ----------
+        sci
+            Science image or FITS filename. When a filename, the header is
+            read and stored for WCS construction.
+        wht
+            Weight map or FITS filename.
+        segmap
+            External segmentation map (filename, array, or
+            ``SegmentationImage``). When given, detection and deblending are
+            skipped and sources are measured within the provided segments.
+        header
+            Header to use when ``sci`` is an array.
+        kwargs
+            Forwarded to the :class:`Catalog` constructor (e.g.
+            ``estimate_background``, ``params``).
+
+        Returns
+        -------
+        Catalog
+            Instance with ``table`` and ``segmap`` populated
+            (:meth:`run` has been called).
+        """
         # Load sci and wht if they are file paths, force float32
         if isinstance(sci, (str, Path)):
             sci_data = fits.getdata(sci).astype(np.float32)
@@ -686,6 +810,22 @@ class Catalog:
         self.segmap = segmap
 
     def run(self) -> None:
+        """Detect, deblend, and measure sources; fills ``table`` and ``segmap``.
+
+        Steps, in order: optional background / inverse-variance estimation;
+        detection, dilation, and deblending (only if ``segmap`` is not
+        already set); WCS construction from ``header``; measurement with
+        ``SourceCatalog(sci, segmap, error=np.sqrt(1.0 / ivar), wcs=wcs)``;
+        and assembly of ``table``. Beyond ``default_columns`` the table
+        gains ``id``/``x``/``y`` (renamed from
+        ``label``/``xcentroid``/``ycentroid``), ``ra``/``dec`` in degrees
+        when a WCS is available (the ``sky_centroid`` column is removed),
+        ``r50`` (``fluxfrac_radius(0.5)``), ``sharpness``
+        (``max_value * pi * r50**2 / segment_flux``, near unity for point
+        sources), ``snr`` (``segment_flux / segment_fluxerr``), and the
+        deblend provenance columns ``deblend_parent_label``,
+        ``deblend_nchildren``, and ``is_deblended``.
+        """
         if self.estimate_background or self.estimate_ivar:
             print("Estimating background and inverse variance...")
             background, ivar = get_bg_and_ivar(
@@ -758,7 +898,24 @@ class Catalog:
         chi2_max: float = 3.0,
         return_seg: bool = False,
     ) -> Table | tuple[Table, SegmentationImage]:
-        """Find point sources in the catalog image."""
+        """Select point-like sources and optionally fit a PSF stamp to each.
+
+        Candidates must pass ``r50 < r50_max``, ``eccentricity < eccen_max``,
+        and ``sharp_lohi[0] < sharpness < sharp_lohi[1]``; a boolean
+        ``point_like`` column recording that cut is added to ``self.table``
+        as a side effect. The returned table keeps only candidates with
+        ``snr > snr_min``. When ``psf`` is given, each kept source is fit
+        with :func:`fit_psf_stamp` and the returned table gains ``flux_psf``
+        and ``chi2_red`` columns; ``chi2_max`` is not applied inside the
+        method, so filter on ``chi2_red`` yourself. ``return_seg`` currently
+        has no effect.
+
+        Returns
+        -------
+        table, idx_stars
+            Table of the selected sources and their row indices in
+            ``self.table``.
+        """
 
         point_like = (
             (self.table["r50"] < r50_max)
@@ -997,6 +1154,19 @@ class Catalog:
 # module's responsibility.
 
 
+def _bool_column(col) -> np.ndarray:
+    """Boolean array from a table column, handling CSV round-trips.
+
+    A bool column written to CSV reads back as the strings
+    ``"True"/"False"``; a plain ``astype(bool)`` would turn every
+    non-empty string into True.
+    """
+    arr = np.asarray(col)
+    if arr.dtype.kind in "US":
+        return np.char.lower(arr.astype(str)) == "true"
+    return arr.astype(bool)
+
+
 def merge_segments_at_holes(
     seg: np.ndarray,
     holes: "Table",
@@ -1179,7 +1349,7 @@ def repair_saturated_catalog(
         catalog[flag_col] = np.asarray(catalog[flag_col]).astype(np.int8)
 
     if "ok" in fit_table.colnames:
-        ok_mask = np.asarray(fit_table["ok"], dtype=bool)
+        ok_mask = _bool_column(fit_table["ok"])
     else:
         ok_mask = np.ones(len(fit_table), dtype=bool)
 
@@ -1347,3 +1517,257 @@ def repair_saturated_catalog(
         dtype=[int, int, float, float, int, str],
     )
     return catalog, segmap, merge_log
+
+
+def flag_saturated_segments(
+    catalog: Table,
+    segmap: np.ndarray,
+    fit_table: Table,
+    *,
+    sci: np.ndarray,
+    psf_stamp: np.ndarray,
+    filter_name: str = "TMPL",
+    flux_frac: float = 0.3,
+    min_snr: float = 5.0,
+    sky_noise: float | None = None,
+    amplitude_col: str = "amplitude",
+    id_col: str = "id",
+    zero_segments: bool = True,
+) -> Tuple[Table, np.ndarray, Table]:
+    """Flag catalog segments dominated by a repaired star's PSF model.
+
+    Post-hoc, non-destructive counterpart to
+    :func:`repair_saturated_catalog` for catalogs built *before* the
+    saturation repair: no rows are dropped or added and no segmentation
+    labels are merged. For each successful fit in *fit_table* the star
+    model ``A * psf_stamp`` is placed at the fitted centre, and every
+    segmentation label whose model flux exceeds
+    ``flux_frac x observed flux`` — both summed over the segment pixels
+    inside the stamp's support (where the model is non-zero) — is deemed
+    part of the saturated star. Its catalog row gets
+    ``FLAG_SATURATED_<FILTER>`` set to the star's **group id** — the
+    lowest flagged segment id of that star — so rows sharing a value
+    belong to the same star (0 = not saturated; ``flag > 0`` is the
+    boolean cut). Flagged labels are set to 0 in the returned
+    segmentation map (``zero_segments``), and the undetected saturated
+    core — ``seg == 0`` pixels enclosed by the star's flagged segments —
+    is set to the group id, so the group-id row keeps a segment covering
+    the repaired core. A segment claimed by two stars joins the one
+    whose model flux in it is larger.
+
+    Parameters
+    ----------
+    catalog
+        Source catalog whose ``id_col`` matches segmap labels. A copy
+        is returned with the flag column added/updated.
+    segmap
+        2D integer segmentation map. A (possibly masked) copy is
+        returned.
+    fit_table
+        Table from :func:`mophongo.saturate.repair_saturated_holes`.
+        Required columns: ``xc, yc, amplitude``; optional ``ok``
+        (only ``ok=True`` rows are used), ``shift_x, shift_y``
+        (added to ``xc, yc`` for the model centre), and ``r_in, r_out``
+        (repair geometry, used to bound the core fill).
+    sci
+        Science image on the segmap pixel grid. Use the *repaired*
+        image so the observed segment fluxes include the filled cores.
+    psf_stamp
+        Sum-normalised PSF stamp at the segmap pixel scale. Its size
+        limits how far from the star segments can be flagged; segments
+        entirely outside the stamp window are never flagged.
+    filter_name
+        Suffix for the flag column name. Default ``"TMPL"`` →
+        ``FLAG_SATURATED_TMPL``: the repair runs on the template
+        (high-resolution detection) band, which varies between surveys,
+        so the column name stays band-independent.
+    flux_frac
+        Flag a segment when ``model_flux > flux_frac * observed_flux``.
+    min_snr
+        Noise floor: in addition to the flux-ratio test, the model flux
+        in the segment must exceed ``min_snr x sky_noise x sqrt(n_pix)``.
+        Without it, every faint segment inside the stamp support would
+        be flagged whenever its noise-dominated observed flux sums to
+        about zero.
+    sky_noise
+        Per-pixel background rms for the noise floor. Default: robust
+        ``mad_std`` of a subsample of *sci*.
+    zero_segments
+        Also zero the flagged labels in the returned segmap.
+
+    Returns
+    -------
+    new_catalog : Table
+        Catalog with the flag column set on flagged rows.
+    new_segmap : np.ndarray
+        Segmentation map with flagged labels zeroed (or an unchanged
+        copy when ``zero_segments=False``).
+    flag_log : Table
+        One row per (star, segment) pair evaluated: ``fit_id, xc, yc,
+        seg_id, obs_flux, model_flux, frac, flagged``.
+    """
+    if flux_frac <= 0:
+        raise ValueError("flux_frac must be positive")
+    if sky_noise is None:
+        step = max(1, int(np.sqrt(sci.size / 4_000_000)))
+        sample = np.asarray(sci[::step, ::step], dtype=np.float64)
+        sample = sample[np.isfinite(sample) & (sample != 0)]
+        sky_noise = float(mad_std(sample)) if sample.size else 0.0
+        logger.info("[catalog] flag noise floor: sky_noise=%.4g", sky_noise)
+    for col in ("xc", "yc", amplitude_col):
+        if col not in fit_table.colnames:
+            raise ValueError(f"fit_table missing column {col!r}")
+    if id_col not in catalog.colnames:
+        raise ValueError(f"catalog missing id column {id_col!r}")
+    if sci.shape != segmap.shape:
+        raise ValueError("sci and segmap shapes differ")
+
+    catalog = catalog.copy()
+    segmap = np.array(segmap, copy=True)
+    H, W = segmap.shape
+    sh, sw = psf_stamp.shape
+
+    flag_col = f"FLAG_SATURATED_{filter_name.upper()}"
+    if flag_col not in catalog.colnames:
+        catalog[flag_col] = np.zeros(len(catalog), dtype=np.int64)
+    else:
+        catalog[flag_col] = np.asarray(catalog[flag_col]).astype(np.int64)
+
+    if "ok" in fit_table.colnames:
+        ok_mask = _bool_column(fit_table["ok"])
+    else:
+        ok_mask = np.ones(len(fit_table), dtype=bool)
+
+    has_shift = ("shift_x" in fit_table.colnames
+                 and "shift_y" in fit_table.colnames)
+
+    # label -> (model_flux, fit_id) of the star claiming it most strongly
+    claims: dict[int, tuple[float, int]] = {}
+    star_windows: dict[int, tuple[int, int, int, int]] = {}
+    log_rows: list[tuple] = []
+    for row in fit_table[ok_mask]:
+        amp = float(row[amplitude_col])
+        if not np.isfinite(amp) or amp <= 0:
+            continue
+        xc = float(row["xc"])
+        yc = float(row["yc"])
+        if has_shift:
+            xc += float(row["shift_x"])
+            yc += float(row["shift_y"])
+        fit_id = int(row["id"]) if "id" in fit_table.colnames else -1
+
+        # Stamp window on the image grid, clipped to the bounds.
+        y0 = int(round(yc)) - sh // 2
+        x0 = int(round(xc)) - sw // 2
+        iy0, iy1 = max(0, y0), min(H, y0 + sh)
+        ix0, ix1 = max(0, x0), min(W, x0 + sw)
+        if iy1 <= iy0 or ix1 <= ix0:
+            continue
+        star_windows[fit_id] = (iy0, iy1, ix0, ix1)
+        model = amp * psf_stamp[iy0 - y0:iy1 - y0, ix0 - x0:ix1 - x0]
+        seg_cut = segmap[iy0:iy1, ix0:ix1]
+        sci_cut = np.asarray(sci[iy0:iy1, ix0:ix1], dtype=np.float64)
+
+        # Compare fluxes only where the model is defined (stamp support).
+        # Empirical ePSFs are zero beyond their native field of view, so
+        # without this cut a large segment dilutes its ratio with pixels
+        # the model cannot predict.
+        support = model > 0
+        for lbl in np.unique(seg_cut[(seg_cut > 0) & support]).tolist():
+            m = (seg_cut == lbl) & support
+            obs = float(np.nansum(sci_cut[m]))
+            pred = float(np.sum(model[m]))
+            frac = pred / obs if obs > 0 else np.inf
+            floor = float(min_snr) * sky_noise * float(np.sqrt(m.sum()))
+            flagged = (pred > floor
+                       and (obs <= 0 or pred > flux_frac * obs))
+            if flagged:
+                prev = claims.get(int(lbl))
+                if prev is None or pred > prev[0]:
+                    claims[int(lbl)] = (pred, fit_id)
+            log_rows.append(
+                (fit_id, xc, yc, int(lbl), obs, pred, frac, flagged)
+            )
+
+    # Group id per star: the lowest flagged label among its claims.
+    star_labels: dict[int, list[int]] = {}
+    for lbl, (_, star) in claims.items():
+        star_labels.setdefault(star, []).append(lbl)
+    label_group: dict[int, int] = {}
+    for labels in star_labels.values():
+        gid = min(labels)
+        for lbl in labels:
+            label_group[lbl] = gid
+
+    if label_group:
+        flag_vals = np.asarray(catalog[flag_col])
+        for i, idv in enumerate(np.asarray(catalog[id_col])):
+            gid = label_group.get(int(idv))
+            if gid is not None:
+                flag_vals[i] = gid
+        catalog[flag_col] = flag_vals
+        seg_orig = segmap
+        if zero_segments:
+            max_label = int(segmap.max())
+            lut = np.arange(max_label + 1, dtype=segmap.dtype)
+            for lbl in label_group:
+                if 0 <= lbl <= max_label:
+                    lut[lbl] = 0
+            segmap = lut[segmap]
+        # Fill the saturated core so the group-id catalog row keeps a
+        # segment covering the repaired pixels and mophongo models the
+        # star as a normal source:
+        #   * seg=0 pixels enclosed by the star's flagged segments
+        #     (bounded by r_out to skip unrelated enclosed sky pockets);
+        #   * everything within r_in of the fitted centre — the repair
+        #     replaced those pixels with the PSF model, including ones
+        #     that belonged to (now zeroed) flagged wing segments.
+        star_geom: dict[int, tuple[float, float, float, float]] = {}
+        if all(c in fit_table.colnames for c in ("r_in", "r_out")):
+            for row in fit_table[ok_mask]:
+                fid = int(row["id"]) if "id" in fit_table.colnames else -1
+                xg = float(row["xc"]) + (float(row["shift_x"]) if has_shift else 0.0)
+                yg = float(row["yc"]) + (float(row["shift_y"]) if has_shift else 0.0)
+                star_geom[fid] = (yg, xg, float(row["r_in"]), float(row["r_out"]))
+        for star, labels in star_labels.items():
+            gid = min(labels)
+            win = star_windows.get(star)
+            if win is None:
+                continue
+            iy0, iy1, ix0, ix1 = win
+            sub_orig = seg_orig[iy0:iy1, ix0:ix1]
+            sub_out = segmap[iy0:iy1, ix0:ix1]
+            union = np.isin(sub_orig, np.array(labels))
+            if not union.any():
+                continue
+            fill = ndi.binary_fill_holes(union) & ~union & (sub_orig == 0)
+            geom = star_geom.get(star)
+            if geom is not None:
+                yg, xg, r_in, r_out = geom
+                yy, xx = np.indices(sub_orig.shape)
+                rr = np.hypot(yy + iy0 - yg, xx + ix0 - xg)
+                fill = (fill & (rr <= r_out)) | (
+                    (rr <= r_in) & ((sub_orig == 0) | union)
+                )
+            fill &= sub_out == 0
+            if fill.any():
+                sub_out[fill] = gid
+    logger.info(
+        "[catalog] flagged %d segments (%d catalog rows, %d stars) in %s",
+        len(label_group),
+        int(np.sum(np.asarray(catalog[flag_col]) > 0)),
+        len(star_labels),
+        flag_col,
+    )
+
+    flag_log = Table(
+        rows=log_rows or None,
+        names=["fit_id", "xc", "yc", "seg_id",
+               "obs_flux", "model_flux", "frac", "flagged"],
+        dtype=[int, float, float, int, float, float, float, bool],
+    )
+    flag_log["group_id"] = [
+        label_group.get(int(s), 0) if f else 0
+        for s, f in zip(flag_log["seg_id"], flag_log["flagged"])
+    ] if len(flag_log) else np.zeros(0, dtype=int)
+    return catalog, segmap, flag_log

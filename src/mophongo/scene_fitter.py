@@ -136,9 +136,11 @@ class SceneFitter:
     """Stateless solver for scene normal equations.
 
     The fitter whitens the flux block of the normal matrix, solves the
-    system using conjugate gradients and returns unwhitened fluxes and
-    their 1σ uncertainties. Optionally, an additional shift block can be
-    supplied which is solved jointly with the fluxes.
+    system by direct sparse factorization (``scipy.sparse.linalg.spsolve``)
+    and returns unwhitened fluxes and their 1σ uncertainties. Optionally,
+    an additional shift block can be supplied which is solved jointly with
+    the fluxes. All inputs arrive as arguments and results are returned,
+    so the same instance serves every scene.
     """
 
     @staticmethod
@@ -154,6 +156,13 @@ class SceneFitter:
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray | None, int]:
         """Solve ``A x = b`` with optional shift block.
 
+        The flux block receives a small adaptive ridge: ``config.reg_flux``
+        if positive, else ``1e-6`` times the median positive diagonal of
+        ``A``. When shift blocks are supplied and non-empty, the shift block
+        is regularized by ``config.reg_astrom`` times the median positive
+        diagonal of ``BB`` and solved jointly; empty shift blocks (a scene
+        with fewer than two bright members) fall back to flux-only.
+
         Parameters
         ----------
         A
@@ -165,12 +174,16 @@ class SceneFitter:
             and ``reg_astrom`` regularizes only the shift block.
         AB, BB, bB
             Optional blocks coupling the fluxes to shift parameters.
+        cg_kwargs
+            Unused: the solve is a direct sparse factorization, not
+            conjugate gradients. Kept for interface compatibility.
 
         Returns
         -------
-        alpha, err, beta, info
-            Unwhitened fluxes, their 1σ errors, optional shift coefficients
-            and the solver exit flag (always 0 for the direct solver).
+        SimpleNamespace
+            Fields ``flux`` (unwhitened fluxes), ``err`` (1σ errors),
+            ``shifts`` (shift coefficients, ``None`` on the flux-only path)
+            and ``info`` (always ``{"cg_info": 0}`` for the direct solver).
         """
         # Flux regularization must use only the photometric ridge; reg_astrom
         # is reserved for the shift block below. The ridge is adaptive,
@@ -200,7 +213,14 @@ class SceneFitter:
     def solve_flux(
         A: sp.spmatrix, b: np.ndarray, config: Optional[FitConfig] = None
     ) -> tuple[np.ndarray, np.ndarray, dict]:
-        """Solve ``A x = b`` for flux parameters using conjugate gradient."""
+        """Solve ``A x = b`` for flux parameters (flux-only path).
+
+        The matrix is whitened by its diagonal, ``A_w = D^-1 A D^-1`` with
+        ``D = diag(sqrt(A_ii))``, solved directly, and unwhitened. Errors
+        are ``sqrt(diag(A_w^-1)) / d``. If ``config.positivity`` is true,
+        negative fluxes are clipped to zero after the solve (a post-hoc
+        clamp, not a constrained NNLS solve).
+        """
         cfg = config or FitConfig()
         A = A.tocsr()
 

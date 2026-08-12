@@ -37,7 +37,7 @@ med_lo 0.9755/0.9776/0.9788/0.9810, resid/noise 0.799, pull -2.7..-2.2.
 The `ee_psf_lo` division flips the est1 offset from +0.04..+0.06 to
 -0.03..-0.07: python totals are now *brighter* than IDL `flux_F` by 3-7%.
 Per the recorded formalism (`flux_estimator_comparison.tex`: `totcor =
-1/ap_B` on the unit-normalized model `H*K`; `psfcor = ap_F/ap_B`; no
+1/ap_lo` on the unit-normalized model `H*K`; `psfcor = ap_hi/ap_lo`; no
 absolute EE factor anywhere in `flux_F`), IDL's est1 is NOT ee-corrected
 — it is the same model-support convention as our `ap_flux_corr`. The two
 columns therefore serve different comparisons: `ap_flux_corr` is the

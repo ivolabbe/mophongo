@@ -28,6 +28,12 @@ Usage (from the repository root)::
 ``wren``, ``classic``, ...) into both legs — the real-data fit configs get it
 as ``fit.extend_mode`` and the mock scenario runs it directly. Without
 ``--scheme`` the configs' own default applies (``psf_wings``).
+
+Both compare legs (``idl`` -> ``uds_monu/``, ``mock`` -> ``uds_sims/``) run in
+every invocation; the positional step arguments only select whether the
+expensive ``fits`` stage is re-run. ``--psf-dir`` applies to both legs, so the
+mock injects and fits with the same PSF grids (and hence the same support) as
+the real-data leg it is verifying.
 """
 from __future__ import annotations
 
@@ -235,6 +241,13 @@ def run_mock_leg() -> list[dict]:
 
     MOCK_OUT.mkdir(parents=True, exist_ok=True)
     rv.OUT_ROOT = MOCK_OUT
+    if PSF_DIR is not None:
+        # the mock must be injected and fitted with the same grids as the
+        # real-data leg, or it verifies a different PSF support than the one
+        # under test (the grid file's own FOV sets the support, so --psf-size
+        # has no counterpart here)
+        rv.PSF_DIR = Path(PSF_DIR).resolve()
+    log.info("mock leg psf_dir: %s", rv.PSF_DIR)
     leg_log = logging.FileHandler(MOCK_OUT / "mock.log")
     leg_log.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
     logging.getLogger().addHandler(leg_log)
@@ -289,6 +302,10 @@ def main(argv: list[str]) -> None:
     if picked:
         BANDS = picked
     steps = [a for a in args if a in ("fits", "idl", "mock")] or ["fits", "idl", "mock"]
+    # Both compare legs run in every verification: a version carrying only
+    # uds_monu or only uds_sims is half a verification. The step arguments
+    # therefore only select whether the expensive fits stage is re-run.
+    steps = [s for s in steps if s == "fits"] + ["idl", "mock"]
     head = _git_head()
     log.info("verification %s on commit %s; scheme: %s; steps: %s",
              version, head, scheme or "config default (psf_wings)", ", ".join(steps))
@@ -308,16 +325,21 @@ def main(argv: list[str]) -> None:
     log.info("combined summary -> %s", V2 / "verification_summary.json")
     if out.get("idl"):
         for s in out["idl"]:
-            c, c25 = s.get("c", {}), s.get("c_snr25", {})
-            log.info("idl  %-8s est1 %+.2f +- %.2f  SNR>25 %+.2f +- %.2f  (n=%d)",
+            c, e = s.get("c", {}), s.get("e", {})
+            log.info("idl  %-8s est1(noEE) %+.2f +- %.2f  psfcor %.3f  (n=%d, SNR>20)",
                      s["band"], c.get("median", float("nan")),
-                     c.get("sd", float("nan")), c25.get("median", float("nan")),
-                     c25.get("sd", float("nan")), s["n_matched"])
+                     c.get("sd", float("nan")), e.get("median", float("nan")),
+                     s["n_matched"])
     if out.get("mock"):
         for s in out["mock"]:
             log.info("mock %-8s med %.4f  p16-p84 %.4f-%.4f  resid/noise %.3f",
                      s["band"], s["med_lo"], s["p16_lo"], s["p84_lo"],
                      s["resid_std_over_noise"])
+    empty = [leg for leg in ("idl", "mock") if not out.get(leg)]
+    if empty:
+        log.error("%s is incomplete: the %s leg produced no results",
+                  version, " and ".join(empty))
+        raise SystemExit(1)
     log.info("V2_DONE")
 
 

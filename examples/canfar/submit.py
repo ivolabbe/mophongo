@@ -248,21 +248,14 @@ def tidy(text: str, lines: int = 40) -> str:
 
 
 def cores_for(name: str, override: int | None) -> int:
-    """Cores to request for one config: 4 for a full field, 1 for a trial patch.
+    """Cores to request for one config.
 
-    Measured utilisation is about 0.2 of a core - the runs wait on ``/arc``
-    rather than compute, and mophongo has no thread pool in the fitting path -
-    so a large request only idles allocation that another job could use. Full
-    fields get 4 because they carry many more sources through the solver.
+    Two, for everything. Measured utilisation is about 0.2 of a core - the runs
+    wait on ``/arc`` rather than compute, and the fitting path has no thread
+    pool - so a larger request only idles allocation and takes longer to
+    schedule when the platform is busy.
     """
-    if override is not None:
-        return override
-    cfg_path = HERE / f"{name}_canfar.json"
-    try:
-        r_trial = json.loads(cfg_path.read_text()).get("r_trial", 0.0)
-    except (OSError, ValueError):
-        return 4
-    return 1 if r_trial else 4
+    return 2 if override is None else override
 
 
 def do_run(args: argparse.Namespace) -> None:
@@ -281,7 +274,7 @@ def do_run(args: argparse.Namespace) -> None:
         if status == "Failed" and "RUN_DONE" not in text:
             print("  note: a failure with no traceback is usually the container "
                   "being OOM-killed. Memory scales with the mosaic size, not "
-                  "r_trial, so keep --ram at 64 even for a small patch.")
+                  "r_trial, so keep --ram at 48 even for a small patch.")
 
 
 def do_status(args: argparse.Namespace) -> None:
@@ -366,11 +359,11 @@ def main() -> None:
     p = sub.add_parser("run", help="run one job per config")
     p.add_argument("names", nargs="+")
     p.add_argument("--cores", type=int, default=None,
-                   help="override; default is 4 for a full field, 1 for a trial patch")
-    # 64 GB standard. Runs peak near 34 GB on the UDS trial patches and a 16 GB
+                   help="override; 2 by default, for a full field or a patch alike")
+    # 48 GB standard. Runs peak near 34 GB on the UDS trial patches and a 16 GB
     # request is OOM-killed with no traceback; the headroom costs nothing, since
     # the quota's 32 GB is only a default and the nodes are far larger.
-    p.add_argument("--ram", type=int, default=64)
+    p.add_argument("--ram", type=int, default=48)
     p.add_argument("--no-wait", action="store_true")
     p.set_defaults(func=do_run)
 

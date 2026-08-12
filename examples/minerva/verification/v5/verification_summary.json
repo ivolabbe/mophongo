@@ -1,0 +1,40 @@
+{
+  "commit": "1fe6398",
+  "steps": [
+    "fits",
+    "idl"
+  ],
+  "scheme": "psf_wings",
+  "idl": [
+    {
+      "band": "f770w",
+      "n_matched": 17565,
+      "figure": "compare_idl_vs_python_f770w.png",
+      "a": {
+        "median": 0.0082,
+        "sd": 0.0414,
+        "n": 451
+      },
+      "a_snr25": {
+        "median": 0.0072,
+        "sd": 0.0253,
+        "n": 387
+      },
+      "b": {
+        "median": 0.9874,
+        "sd": 0.0756,
+        "n": 451
+      },
+      "c": {
+        "median": -0.0126,
+        "sd": 0.0639,
+        "n": 451
+      },
+      "c_snr25": {
+        "median": -0.0132,
+        "sd": 0.0571,
+        "n": 387
+      }
+    }
+  ]
+}

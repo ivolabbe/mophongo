@@ -87,20 +87,21 @@ collaboration and should stay read-mostly.
    - **type**: `notebook`
    - **image**: `images.canfar.net/skaha/jwst-notebook:25.07.25`
    - **name**: anything, e.g. `mophongo`
-   - **cores**: 4
-   - **memory**: 64 GB
+   - **cores**: 2
+   - **memory**: 48 GB
 4. Launch, wait for it to turn green, and open it.
 5. In JupyterLab, **File → New → Terminal**.
 
 That terminal is a normal shell on a machine with `/arc` mounted and outbound
 internet. Everything below is typed there.
 
-On cores: 4 is plenty for a full field and 1 is enough for a trial patch.
-Measured CPU use is about 0.2 of a core — the run waits on `/arc` rather than
-computing, and the fitting path has no thread pool — so asking for 8 or 16 only
-idles allocation someone else could use.
+On cores: 2 is the standard, for a full field or a trial patch alike. Measured
+CPU use is about 0.2 of a core — the run waits on `/arc` rather than computing,
+and the fitting path has no thread pool — so asking for 8 or 16 only idles
+allocation someone else could use, and a large request waits longer to be
+scheduled when the platform is busy.
 
-On memory: ask for 64 GB and do not economise. The pipeline loads the full
+On memory: ask for 48 GB and do not economise. The pipeline loads the full
 3.3 GB F444W mosaic and the 3.3 GB segmap regardless of how small a trial patch
 you fit, and the UDS runs peak near 34 GB. A 16 GB session is killed partway
 through with no Python traceback, which looks like a mysterious silent failure,
@@ -301,7 +302,7 @@ $P submit.py push                              # source, job scripts, PSF grids
 $P submit.py setup                             # build the venv on /arc
 $P arcify.py ../minerva/uds_f770w.json         # rewrite paths for arc
 $P submit.py stage uds_f770w
-$P submit.py run   uds_f770w --ram 64
+$P submit.py run   uds_f770w
 $P submit.py fetch uds_f770w                   # bring the small outputs home
 ```
 
@@ -324,7 +325,7 @@ See `README.md` here for the details of what each step does.
 |---|---|
 | Cannot list `arc:projects/minerva` | not in the `minerva` group yet — ask `<adam>` |
 | `No such file or directory: /arc/home/<user>` | home not created yet; see Part 2 |
-| Job or session dies with no Python traceback | out of memory. Use 64 GB; memory scales with the mosaic, not `r_trial` |
+| Job or session dies with no Python traceback | out of memory. Use 48 GB; memory scales with the mosaic, not `r_trial` |
 | Nothing happens for three minutes at startup | importing mophongo off `/arc`; normal |
 | `ModuleNotFoundError` after install | you used the image's `python` instead of `./venv/bin/python` |
 | matplotlib font-cache warnings on every command | set `MPLCONFIGDIR` (Part 4.2) |

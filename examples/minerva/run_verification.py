@@ -49,6 +49,24 @@ OUT_ROOT = Path(__file__).resolve().parent / "verification"
 NSRC = 800
 SEED = 42
 SNR_RANGE = (3.0, 3000.0)
+# Intrinsic source sizes: sigma log-uniform over 1-10 pixels on the 40 mas
+# size grid (0.04-0.40" sigma, 0.09-0.94" FWHM), reaching resolved galaxies
+# while keeping the population weighted to the small sizes that dominate a
+# real catalogue. 10% of sources are still forced to pure point sources.
+SIGMA_RANGE = (1.0, 10.0)
+SIGMA_DIST = "log"
+# Painting stamps stay at the builder default (F444W 4", F770W 8"): the 4"
+# box holds a 0.4" sigma source to better than 1e-4. Raise it (and use 8" PSF
+# grids) only if SIGMA_RANGE is pushed past ~12 pixels, where truncation of
+# the detection stamp starts to masquerade as a recovery deficit.
+PSF_SIZE_ARCSEC = None
+# Segmap generation for the mock. Production inherits the released MINERVA
+# SExtractor map, which is much deeper and finer than Catalog.detect's
+# defaults: on a 2.7' UDS patch it holds 10491 segments covering 7.8% of the
+# pixels (median area 13 px) against 1507 covering 3.0% (median 116 px) at
+# threshold 2.0 / dilate 2. Going to threshold 1.5 with dilate 3 recovers 54%
+# of the released footprint instead of 39%. Nothing dilates again afterwards.
+DETECT_PARAMS = {"dilate_segmap": 3, "detect_threshold": 1.5}
 
 # production values of the real-data runs (make_minerva_configs.py)
 APERTURE_DIAM_ARCSEC = {"f770w": 0.70, "f1280w": 1.20, "f1500w": 1.20, "f1800w": 1.50}
@@ -63,14 +81,18 @@ def run_band(band: str, scheme: str = "psf_wings") -> dict:
     out.mkdir(parents=True, exist_ok=True)
     blur = DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC[band]
     pattern = f"UDS_MIRI_{band.upper()}_OS4_GRID1"
-    log.info("=== %s: pattern %s, blur %.2f\", aperture %.2f\"",
-             band, pattern, blur, APERTURE_DIAM_ARCSEC[band])
+    log.info("=== %s: pattern %s, blur %.2f\", aperture %.2f\", sigma %s %s pix",
+             band, pattern, blur, APERTURE_DIAM_ARCSEC[band],
+             SIGMA_DIST, SIGMA_RANGE)
 
     mock, paths, noise_info, dpsfs, truth = build_realistic_two_detector_mock(
         out / "mock",
         psf_dir=PSF_DIR,
         nsrc=NSRC,
         snr_range=SNR_RANGE,
+        sigma_range=SIGMA_RANGE,
+        sigma_dist=SIGMA_DIST,
+        psf_size_arcsec=PSF_SIZE_ARCSEC,
         seed=SEED,
         target_pattern=pattern,
         # the band's blur, keyed by the framework's internal lo-res slot name
@@ -91,6 +113,9 @@ def run_band(band: str, scheme: str = "psf_wings") -> dict:
         truth=truth,
         psf_maps=psf_maps,
         nsrc=NSRC,
+        # captions/labels only; the sizes themselves were drawn by the builder
+        sigma_range=SIGMA_RANGE,
+        detect_params=DETECT_PARAMS,
         target_label=band.upper(),
         fit_overrides={
             "aperture_diam": APERTURE_DIAM_ARCSEC[band],
@@ -99,7 +124,8 @@ def run_band(band: str, scheme: str = "psf_wings") -> dict:
     )
     summary = {"band": band, "scheme": scheme, "blur_fwhm_arcsec": blur,
                "aperture_diam_arcsec": APERTURE_DIAM_ARCSEC[band],
-               "pattern": pattern, **result.summary}
+               "pattern": pattern, "sigma_range_pix": list(SIGMA_RANGE),
+               "sigma_dist": SIGMA_DIST, **result.summary}
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     log.info("%s: med_lo %.4f  p16-p84 %.4f-%.4f  pull %.2f +- %.2f  resid/noise %.3f",
              band, summary["med_lo"], summary["p16_lo"], summary["p84_lo"],

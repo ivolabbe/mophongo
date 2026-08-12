@@ -99,9 +99,9 @@ def main() -> None:
     ap.add_argument("--fields", nargs="+", help="restrict to these fields, e.g. uds cosmos")
     ap.add_argument("--from", dest="start", choices=STEPS, default="push",
                     help="skip everything before this step")
-    ap.add_argument("--ram", type=int, default=64)
+    ap.add_argument("--ram", type=int, default=48)
     ap.add_argument("--cores", type=int, default=None,
-                    help="override; default is 4 for a full field, 1 for a trial patch")
+                    help="override; 2 by default, for a full field or a patch alike")
     ap.add_argument("--r-trial", type=float, default=None,
                     help="override the trial radius in arcmin; 0 runs the full field")
     ap.add_argument("--suffix", default="",

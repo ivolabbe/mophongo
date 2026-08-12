@@ -89,6 +89,13 @@ class FitConfig:
     aperture_diam: float | np.ndarray | None = None  # image measurement aperture (diameter)
     aperture_catalog: float | str | None = None  # catalog aperture (diameter or table column name)
     aperture_units: str = "arcsec"  # "arcsec" or "pix"
+    # Catalog-side aperture-to-total, totcor_cat = (f_kron/f_aper) / EE_H(k*R_kron)
+    # (the flux-estimator report's "tcorH", renamed). Computed when the three
+    # column names below exist in the input catalog; radius column in arcsec.
+    cat_kron_flux_col: str | None = None  # detection-catalog Kron (AUTO) flux
+    cat_aper_flux_col: str | None = None  # detection-catalog flux in the R_phi aperture
+    cat_kron_radius_col: str | None = None  # circularized Kron radius [arcsec]
+    cat_kron_k: float = 2.5  # Kron scaling: EE_H evaluated at k * R_kron
 
     # Template extraction: dilate each segment by this many pixels (disk radius)
     # to capture more of the point-source PSF wings. Off by default (0): the

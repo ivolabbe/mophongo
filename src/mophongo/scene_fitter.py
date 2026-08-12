@@ -156,9 +156,10 @@ class SceneFitter:
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray | None, int]:
         """Solve ``A x = b`` with optional shift block.
 
-        The flux block receives a small adaptive ridge: ``config.reg_flux``
-        if positive, else ``1e-6`` times the median positive diagonal of
-        ``A``. When shift blocks are supplied and non-empty, the shift block
+        The flux-block ridge follows ``config.reg_flux``: ``None`` (default)
+        applies the adaptive ridge, ``1e-6`` times the median positive
+        diagonal of ``A``; ``0.0`` applies none at all; a positive value is
+        used as given. When shift blocks are supplied and non-empty, the shift block
         is regularized by ``config.reg_astrom`` times the median positive
         diagonal of ``BB`` and solved jointly; empty shift blocks (a scene
         with fewer than two bright members) fall back to flux-only.
@@ -186,11 +187,15 @@ class SceneFitter:
             and ``info`` (always ``{"cg_info": 0}`` for the direct solver).
         """
         # Flux regularization must use only the photometric ridge; reg_astrom
-        # is reserved for the shift block below. The ridge is adaptive,
-        # relative to the ATA scale, to avoid biasing fluxes.
+        # is reserved for the shift block below. Three-state semantics:
+        # None -> adaptive ridge 1e-6 * median positive diagonal (the
+        # conditioning default), 0.0 -> genuinely no ridge, >0 -> that value.
         scale_A = _positive_diagonal_scale(A)
-        reg_flux = _finite_nonnegative(getattr(config, "reg_flux", 0.0))
-        lam_A = reg_flux if reg_flux > 0 else 1e-6 * scale_A
+        reg_flux = getattr(config, "reg_flux", None)
+        if reg_flux is None:
+            lam_A = 1e-6 * scale_A
+        else:
+            lam_A = _finite_nonnegative(reg_flux)
         Areg = A + sp.eye(A.shape[0], format="csr") * lam_A
 
         # empty shift blocks (scene with <2 bright members) fall back to flux-only

@@ -34,7 +34,10 @@ class FitConfig:
     """Configuration for template fitting: solver, astrometry and apertures."""
 
     positivity: bool = True
-    reg_flux: float = 0.0
+    # Flux-block ridge. None (default) = adaptive, 1e-6 x the median positive
+    # diagonal of the normal matrix; 0.0 = genuinely unregularized; > 0 = that
+    # explicit value. JSON configs write null for the adaptive default.
+    reg_flux: float | None = None
     bad_value: float = np.nan
     cg_kwargs: Dict[str, Any] = field(
         default_factory=lambda: {"M": None, "maxiter": 500, "atol": 1e-6}

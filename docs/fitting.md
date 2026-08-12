@@ -205,12 +205,20 @@ returns {class}`~mophongo.scene.Scene` objects carrying their sub-blocks of
 `ATA`/`ATb`. The partition is set by the coupling threshold (the pipeline
 passes `FitConfig.scene_coupling_thresh`, default `1e-3`) and the soft
 per-scene cap `max_size`; the merge step is set by the bright-anchor
-definition (SNR and isolation cuts) and the merge radius. Saturated or
-repaired templates are moved into singleton scenes by default
-(`isolate_saturated`): their PSF wings extend far beyond their segment and
-would corrupt the flux solution of every neighbor caught in the same
-coupling graph. All parameters and defaults are documented in the
-{doc}`api` reference.
+definition (SNR and isolation cuts) and the merge radius.
+
+Saturated or repaired templates are held out of that partitioning
+altogether (`isolate_saturated`, on by default). Their PSF wings extend far
+beyond their segment, so leaving them in the coupling graph glues every
+neighbour under the wings into one scene — and the star is then pulled out
+again, leaving that scene shaped by a member it no longer has. Everything
+else is partitioned on its own, and the saturated templates get scenes
+afterwards: fragments sharing a `sat_group` id (the star's core segment id,
+from `FLAG_SATURATED_*` — see {doc}`repair`) are the oversplit pieces of one
+star and go into one scene together, fitted jointly with a single rigid
+shift. These scenes never pass through the merge step, so they are exempt
+from `minimum_bright` by construction. All parameters and defaults are
+documented in the {doc}`api` reference.
 
 ```python
 from mophongo.fit import FitConfig
@@ -288,7 +296,7 @@ arguments and results are returned, so the same instance serves every scene.
 `Scene.solve` hands it the normal block and optional shift blocks;
 {meth}`~mophongo.scene_fitter.SceneFitter.solve` returns a namespace with
 `flux`, `err`, `shifts`, `info`. The flux block receives a small adaptive
-ridge (`FitConfig.reg_flux`, or `1e-6` times the matrix scale when zero) and
+ridge (`FitConfig.reg_flux`; `None` applies an adaptive `1e-6` times the matrix scale, `0.0` none at all) and
 the shift block a relative ridge `FitConfig.reg_astrom`; a scene with fewer
 than two bright members has empty shift blocks and falls back to the
 flux-only path, {meth}`~mophongo.scene_fitter.SceneFitter.solve_flux`, which
@@ -388,6 +396,33 @@ measures the applied, i.e. damped, increment). The loop always runs at least
 once, so `fit_astrometry_niter = 0` still gives each band a single flux-only
 pass.
 
+Convergence is judged per scene, not per band. A scene's solve reads only its
+own templates, image and weights, so once its increment drops below the
+tolerance it cannot start moving again and it leaves the pass list; the
+remaining passes iterate only the scenes still moving. Each scene records what
+happened in `Scene.astrom_step` (its last increment), `Scene.astrom_niter`
+(passes used) and `Scene.astrom_converged`. Scenes still above tolerance when
+the budget runs out hold their last iterate rather than a converged solution,
+and the run logs a warning naming the worst of them — usually crowded scenes,
+or ones whose bright anchors are marginally sampled.
+
+A verdict is only recorded where a shift was actually fitted.
+`astrom_converged` stays `None` — and `flag_astrom` `-1` — for a flux-only
+run and for scenes with too few bright anchors to carry a shift block. Those
+templates trivially do not move, and reporting that as convergence would
+claim an astrometric solution that was never solved for.
+
+The tolerance is a stopping rule, not an accuracy claim, and `0.1` fit-grid
+pixels is chosen against the noise rather than against the arithmetic. The
+weakest scene the anchor cuts admit — `scene_minimum_bright` = 5 members at
+`snr_thresh_astrom` = 15 — has a centroid good to roughly
+$\sigma_{\rm PSF}/({\rm SNR}\sqrt{N}) \approx 0.08$ fit pixels, so iterating
+below that measures nothing; and the systematic floor from PSF and kernel
+mismatch is a bias, which no number of passes removes. Tightening the
+tolerance buys passes, not precision. Because the fit grid is the
+high-resolution grid on the upsample path, and not the grid of the band being
+fitted, the run logs the tolerance in mas alongside pixels.
+
 Each pass is also damped, because the same linearization can err in the other
 direction. The gradients $\partial_x T_i$, $\partial_y T_i$ are central
 differences of the template stamp, which underestimate the gradient of
@@ -401,14 +436,17 @@ extra pass; `1.0` recovers the undamped step.
 
 ```{figure} images/shift_iteration_damping.png
 :width: 100%
-:alt: Two panels showing the per-pass shift increment and the flux error of the joint solve, for damped and undamped iterations recovering a 1.5-pixel offset.
+:alt: Two panels showing the per-pass applied shift increment and the flux error of the joint solve, for damped and undamped iterations recovering a 1.5-pixel offset.
 
-Solve/apply iteration recovering a true offset of $(1.5, -0.8)$ pixels. The
-per-pass shift increment shrinks geometrically until it crosses
-`astrom_shift_tol` (left, dashed line), after which the loop stops; the flux
-error of the joint solve (right) reaches its floor within two or three
-passes. On this well-sampled source damping (0.8, the production default)
-costs about one extra pass relative to the undamped step.
+Solve/apply iteration on a synthetic scene whose band image carries a true
+offset of $(1.5, -0.8)$ pixels. The applied increment shrinks by roughly an
+order of magnitude per pass until it crosses `astrom_shift_tol` (left, dashed
+line), after which the scene leaves the loop; below 0.01 pixel in both axes
+(dotted) nothing is applied at all and the templates stop moving, which is
+why the series ends. The flux error of the joint solve (right) is already at
+its floor by pass two, so the passes a looser tolerance skips cost no
+accuracy. Damping (0.8, the production default) costs about one extra pass
+relative to the undamped step.
 ```
 
 ## Fitting-related FitConfig fields
@@ -421,11 +459,11 @@ page.
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `positivity` | `bool` | `True` | Clip negative fitted fluxes to zero after the solve. |
-| `reg_flux` | `float` | `0.0` | Ridge added to the flux block diagonal; `0` uses an adaptive `1e-6` times the matrix scale. |
+| `reg_flux` | `float \| None` | `None` | Ridge added to the flux block diagonal. `None` = adaptive (`1e-6` times the matrix scale), `0.0` = genuinely unregularized, positive = that value. JSON configs write `null` for the default. |
 | `bad_value` | `float` | `np.nan` | Fill value for missing catalog entries. |
 | `cg_kwargs` | `dict` | `{"M": None, "maxiter": 500, "atol": 1e-6}` | Iterative-solver options; unused by the current direct solver. |
 | `fit_astrometry_niter` | `int` | `5` | Maximum astrometry solve/apply passes per band; `0` disables shift fitting. |
-| `astrom_shift_tol` | `float` | `0.05` | Stop iterating once the largest per-template shift increment (fit-grid pixels) drops below this. |
+| `astrom_shift_tol` | `float` | `0.1` | Stop iterating a scene once its largest per-template shift increment (fit-grid pixels) drops below this. |
 | `astrom_damping` | `float` | `0.8` | Factor applied to each pass's fitted shift increment before it is applied to the templates; `1.0` is undamped. |
 | `fit_astrometry_joint` | `bool` | `True` | Fit shifts jointly with fluxes inside each scene; if `False`, shifts come from the separate {class}`mophongo.astrometry.AstroCorrect` step. |
 | `reg_astrom` | `float` | `1e-4` | Ridge on the shift block, relative to its diagonal scale. |

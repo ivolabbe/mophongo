@@ -14,12 +14,6 @@ from scipy.sparse.csgraph import connected_components
 from .templates import _slices_from_bbox
 
 logger = logging.getLogger(__name__)
-# logger.setLevel(logging.INFO)  # show info for *this* logger only
-if not logger.handlers:  # avoid duplicate handlers on reloads
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.INFO)
-    handler.setFormatter(logging.Formatter("%(module)s.%(funcName)s: %(message)s"))
-    logger.addHandler(handler)
 
 
 def _bbox_union(templates: Sequence[Template]) -> Tuple[int, int, int, int]:
@@ -614,9 +608,25 @@ def generate_scenes(
     # 1) Normal matrix from templates
     ATA, ATb, _ = build_normal_tree(list(templates), image, weight)  # csr, (n,), STRtree
 
+    # 1b) Saturated templates are held out of the partitioning entirely.
+    # A saturated star's wings couple to everything under them, so leaving
+    # it in the graph glues its neighbours into one huge scene and then the
+    # star is pulled back out again, leaving that scene shaped by a member
+    # it no longer has. Partition the rest on its own, and give the star's
+    # fragments their own scene afterwards.
+    sat_mask = (
+        np.asarray([bool(getattr(t, "is_saturated", False)) for t in templates], dtype=bool)
+        if isolate_saturated
+        else np.zeros(len(templates), dtype=bool)
+    )
+    keep = np.where(~sat_mask)[0]
+
     # 2) Initial scene labels from normal-equation couplings
-    labels0, _ = build_scene_tree_from_normal(
-        ATA, ATb, coupling_thresh=coupling_thresh, max_size=max_size, return_0_based=False
+    ATA_k = ATA[keep[:, None], keep].tocsr() if sat_mask.any() else ATA
+    ATb_k = ATb[keep] if sat_mask.any() else ATb
+    labels0_k, _ = build_scene_tree_from_normal(
+        ATA_k, ATb_k, coupling_thresh=coupling_thresh, max_size=max_size,
+        return_0_based=False,
     )
 
     # 3) Merge scenes that are too small in terms of "bright" members
@@ -636,52 +646,44 @@ def generate_scenes(
         # count against a source here.
         bright_mask &= _astrom_isolation_mask(ATA, ATb, float(isolation_thresh))
 
-    labels, nscene = merge_small_scenes(
-        labels0,
-        list(templates),
-        bright_mask,
+    labels_k, nscene = merge_small_scenes(
+        labels0_k,
+        [templates[i] for i in keep],
+        bright_mask[keep],
         minimum_bright=minimum_bright,
         max_merge_radius=max_merge_radius,
     )
+    labels = np.zeros(len(templates), dtype=labels_k.dtype)
+    labels[keep] = labels_k
 
-    # 3b) Isolate saturated/repaired templates into their own scenes.
-    # Their PSF wings span far beyond their segment and would corrupt the
-    # flux solution of every neighbour caught in the same coupling graph.
-    # Templates sharing a ``sat_group`` id (the star's lowest flagged
-    # segment id from FLAG_SATURATED_*) are the fragments of ONE star and
-    # go into ONE scene together, fit jointly against the repaired image.
-    # Ungrouped saturated templates (legacy 0/1 flags, or group id 1 which
-    # is indistinguishable from a legacy flag) each get their own scene.
-    # Isolation runs after merge_small_scenes, so these scenes are exempt
-    # from the minimum_bright merging criterion by construction.
-    if isolate_saturated:
-        sat_mask = np.asarray(
-            [bool(getattr(t, "is_saturated", False)) for t in templates],
-            dtype=bool,
-        )
-        if sat_mask.any():
-            next_label = int(labels.max()) + 1
-            group_label: dict[int, int] = {}
-            for i in np.where(sat_mask)[0]:
-                group = int(getattr(templates[i], "sat_group", 0) or 0)
-                if group > 1:
-                    if group not in group_label:
-                        group_label[group] = next_label
-                        next_label += 1
-                    labels[i] = group_label[group]
-                else:
-                    labels[i] = next_label
+    # 3b) Scenes for the saturated templates held out above. Templates
+    # sharing a ``sat_group`` id (the star's core segment id from
+    # FLAG_SATURATED_*) are the fragments of ONE star and go into ONE scene
+    # together, fit jointly against the repaired image. Ungrouped saturated
+    # templates (legacy 0/1 flags, or group id 1 which is indistinguishable
+    # from a legacy flag) each get their own scene. These scenes never see
+    # merge_small_scenes, so they are exempt from minimum_bright by
+    # construction.
+    if sat_mask.any():
+        next_label = int(labels.max()) + 1
+        group_label: dict[int, int] = {}
+        n_alone = 0
+        for i in np.where(sat_mask)[0]:
+            group = int(getattr(templates[i], "sat_group", 0) or 0)
+            if group > 1:
+                if group not in group_label:
+                    group_label[group] = next_label
                     next_label += 1
-            if group_label:
-                logger.info(
-                    "isolated %d saturated star(s) into their own scenes "
-                    "(%d templates)",
-                    len(group_label) + int(
-                        sum(1 for i in np.where(sat_mask)[0]
-                            if int(getattr(templates[i], "sat_group", 0) or 0) <= 1)
-                    ),
-                    int(sat_mask.sum()),
-                )
+                labels[i] = group_label[group]
+            else:
+                labels[i] = next_label
+                next_label += 1
+                n_alone += 1
+        logger.info(
+            "held %d saturated template(s) out of the partitioning: "
+            "%d star scene(s) + %d ungrouped",
+            int(sat_mask.sum()), len(group_label), n_alone,
+        )
 
     # 4) Instantiate per-scene objects with sub-blocks of ATA/ATb and links to data
     scenes: List[Scene] = []
@@ -781,6 +783,13 @@ class Scene:
     A: sp.csr_matrix | None = None
     b: np.ndarray | None = None
     tree: STRtree | None = None  # STRtree over templates in this scene
+    # astrometric-refinement bookkeeping, written by the caller driving the
+    # passes (Pipeline.run): scenes converge at their own rate, so each one
+    # records the increment of its last pass, how many passes it took, and
+    # whether it got under astrom_shift_tol before the budget ran out.
+    astrom_step: float | None = None
+    astrom_niter: int = 0
+    astrom_converged: bool | None = None
 
     def __post_init__(self) -> None:
         pass

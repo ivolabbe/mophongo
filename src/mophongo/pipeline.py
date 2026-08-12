@@ -39,12 +39,6 @@ from .scene import generate_scenes
 import logging
 
 logger = logging.getLogger(__name__)
-# logger.setLevel(logging.INFO)  # show info for *this* logger only
-if not logger.handlers:  # avoid duplicate handlers on reloads
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.INFO)
-    handler.setFormatter(logging.Formatter("%(module)s.%(funcName)s: %(message)s"))
-    logger.addHandler(handler)
 
 memory = lambda: psutil.Process(os.getpid()).memory_info().rss / 1e9
 
@@ -2306,6 +2300,10 @@ class Pipeline:
         # records would never reach the file. One handler on the root logger
         # catches the lot, and captureWarnings routes warnings.warn there too.
         root = logging.getLogger()
+        # remember whether a console handler existed before ours: if it did
+        # (e.g. main()'s basicConfig), the package handler below must not be
+        # added or every record would print twice on the console
+        had_console_handler = bool(root.handlers)
         file_handler = logging.StreamHandler(handle)
         file_handler.setFormatter(fmt)
         root.addHandler(file_handler)
@@ -2326,7 +2324,7 @@ class Pipeline:
         # teeing here would duplicate every line in the file.
         pkg = logging.getLogger("mophongo")
         handler = None
-        if not pkg.handlers:
+        if not pkg.handlers and not had_console_handler:
             handler = logging.StreamHandler(old_out)
             handler.setFormatter(fmt)
             pkg.addHandler(handler)
@@ -3301,7 +3299,8 @@ class Pipeline:
                 sys.exit()
 
             for s in scenes:
-                logger.info(f"Scene {s.id}: {len(s.templates)} (bright: {s.is_bright.sum()})")
+                # per-scene detail at DEBUG; generate_scenes logs the summary
+                logger.debug(f"Scene {s.id}: {len(s.templates)} (bright: {s.is_bright.sum()})")
 
             niter_scene = max(config.fit_astrometry_niter, 1)
             shift_tol = float(getattr(config, "astrom_shift_tol", 0.02))

@@ -13,12 +13,6 @@ from .templates import Template, Templates
 import logging
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)  # show info for *this* logger only
-if not logger.handlers:  # avoid duplicate handlers on reloads
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.INFO)
-    handler.setFormatter(logging.Formatter("%(module)s.%(funcName)s: %(message)s"))
-    logger.addHandler(handler)
 
 # full weights need to be calcuate like
 # template_var = scipy.signal.fftconvolve(K**2, 1 / wht1, mode='same')  # same shape as template
@@ -48,11 +42,17 @@ class FitConfig:
 
     # condense fit astrometry flags into one: fit_astrometry_niter = 0, means not fitting astrometry
     fit_astrometry_niter: int = 5  # Max astrometry refinement passes (0 → disabled)
-    # Stop iterating early once the largest per-template shift increment of a
-    # pass drops below this tolerance (fit-grid pixels). The linearized shift
-    # solve only captures part of a large offset per pass, so set
+    # Stop iterating a scene once its largest per-template shift increment
+    # drops below this tolerance (fit-grid pixels). The linearized shift solve
+    # only captures part of a large offset per pass, so set
     # fit_astrometry_niter to the maximum passes allowed and let this tol stop.
-    astrom_shift_tol: float = 0.05
+    # 0.1 sits just above the statistical floor of the weakest scene the
+    # anchor cuts admit -- 5 bright members (scene_minimum_bright) at
+    # snr_thresh_astrom = 15 give a scene centroid good to ~0.08 fit pixels --
+    # and well below PSF-matching centroid systematics, which are a bias no
+    # tolerance can iterate away. The increment tested is the applied (damped)
+    # one, so the last sub-tolerance step is on the templates, not discarded.
+    astrom_shift_tol: float = 0.1
     # Damping applied to each pass's shift increment before it is applied to
     # the templates. The central-difference shift basis underestimates
     # gradients of sharp structure, so the linearized step can overshoot by

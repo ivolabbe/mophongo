@@ -2311,6 +2311,16 @@ class Pipeline:
         if root.level == logging.NOTSET or root.level > logging.INFO:
             root.setLevel(logging.INFO)
         old_showwarning = warnings.showwarning
+        # Long keywords from the input catalog's meta (PHOT_UNIT,
+        # WEBBSTARFILT, ...) round-trip as HIERARCH cards by design; the
+        # per-card VerifyWarning about it is pure noise at run scale.
+        old_filters = warnings.filters[:]
+        from astropy.io.fits.verify import VerifyWarning
+
+        warnings.filterwarnings(
+            "ignore", category=VerifyWarning,
+            message=".*a HIERARCH card will be created.*",
+        )
         # captureWarnings is a latch: if some earlier code in this process left
         # it on, another True call is a no-op and whatever hook is currently
         # installed (e.g. pytest's) stays in place. Reset it first so the
@@ -2348,6 +2358,7 @@ class Pipeline:
             # and the *next* run's captureWarnings(True) silently does nothing.
             logging.captureWarnings(False)
             warnings.showwarning = old_showwarning
+            warnings.filters[:] = old_filters
             sys.stdout, sys.stderr = old_out, old_err
             handle.close()
 

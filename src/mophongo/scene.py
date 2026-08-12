@@ -1122,13 +1122,15 @@ class Scene:
         seg_cut = seg_image[sl]
         img_cut = self.image[sl]
 
-        # Null foreign saturated segments so they don't dominate the display.
+        # Null foreign saturated segments in the *fit-side* panels (image,
+        # residual) so they don't dominate the display scale. The template
+        # panel deliberately keeps them visible: it shows the detection
+        # image as it is, saturated stars included.
         own_ids = {int(t.id) for t in self.templates}
         null_ids = [int(s) for s in (null_segments or []) if int(s) not in own_ids]
         if null_ids:
             null_mask = np.isin(seg_cut, np.asarray(null_ids))
             if null_mask.any():
-                tmpl_cut = np.where(null_mask, 0.0, tmpl_cut)
                 img_cut = np.where(null_mask, 0.0, img_cut)
         else:
             null_mask = None

@@ -126,6 +126,14 @@ def prep_configs() -> None:
             '"repair_psf_pattern": "UDS_NRC.._F444W_OS4_GRID5"',
             '"repair_psf_pattern": "UDS_NRC.._F444W_GRID5_OS4"',
         )
+        # one repair cache for the whole campaign: every band repairs the
+        # same sci_hi, so band 1 fits and the rest reload
+        if '"repair_saturated": true' in text and '"repair_cache_path"' not in text:
+            text = text.replace(
+                '"repair_saturated": true,',
+                '"repair_saturated": true,\n'
+                f'  "repair_cache_path": "{(RUNS / "repair_cache.fits")}",',
+            )
         if SCHEME is not None:
             assert '"extend_mode"' not in text
             text = text.replace('"fit": {', f'"fit": {{\n    "extend_mode": "{SCHEME}",')

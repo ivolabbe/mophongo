@@ -48,6 +48,10 @@ if not logger.handlers:  # avoid duplicate handlers on reloads
 
 memory = lambda: psutil.Process(os.getpid()).memory_info().rss / 1e9
 
+# shift-field arrows span this fraction of a scene's template extent, so that
+# the outermost samples stay inside the scene rather than sitting on its edge
+_SHIFT_SAMPLE_SPREAD = 0.7
+
 
 @dataclass
 class RunConfig:
@@ -106,6 +110,12 @@ class RunConfig:
     # extra kwargs for mophongo.repair.repair_in_memory (e.g. min_buffer_snr,
     # flux_frac, min_snr, stamp_npix)
     repair_kwargs: dict[str, Any] = field(default_factory=dict)
+    # Large-FOV STDPSF pattern (e.g. the 30" 'UDS_NRC.._F444W_OS4_GRID5'
+    # grids) for the repair's star model: full halo + diffraction spikes,
+    # so segments far from the core can be flagged. The core fit keeps
+    # pattern_hi (MJD-matched). Empty = use pattern_hi for both, which
+    # limits the flag reach to that ePSF's native field of view.
+    repair_psf_pattern: str = ""
     bg_filter_sigma: float = 64.0  # get_bg_and_ivar background filter
     footprint_filter: bool = True  # keep only sources with wht_lo > 0
     r_trial: float = 0.0  # trial-patch radius in arcmin; 0 = full run
@@ -1021,10 +1031,27 @@ class Pipeline:
             from .repair import repair_in_memory
 
             self._ensure_dpsfs(load_epsf=True)
+            # Large-FOV grids for the flag model (halo + spikes); the core
+            # fit keeps the MJD-matched pattern_hi ePSFs. Same two-PSF
+            # split as the original standalone repair flow.
+            stamp_dpsf = None
+            if cfg.repair_psf_pattern:
+                from .psf import DrizzlePSF
+
+                stamp_dpsf = DrizzlePSF(
+                    driz_image=str(cfg.sci_hi),
+                    info=(self.dpsf_hi.flt_keys, self.dpsf_hi.wcs,
+                          self.dpsf_hi.footprint, self.dpsf_hi.hdrs),
+                )
+                self._load_epsf(
+                    stamp_dpsf, cfg.repair_psf_pattern, cfg.csv_hi, "repair"
+                )
             rep = repair_in_memory(
                 tmpl_hi, fits.getdata(self.resolve_wht_hi()),
                 dpsf=self.dpsf_hi, wcs=wcs_hi, psf_pattern=cfg.pattern_hi,
                 catalog=cat, segmap=segmap,
+                stamp_dpsf=stamp_dpsf,
+                stamp_pattern=cfg.repair_psf_pattern or None,
                 out_dir=self.out_dir / "repaired",
                 plots=cfg.scene_plots,
                 **(cfg.repair_kwargs or {}),
@@ -1364,6 +1391,169 @@ class Pipeline:
             fig.savefig(save, dpi=180, bbox_inches="tight")
         return fig, axes
 
+    def _scene_shift_samples(self, scene) -> tuple[np.ndarray, np.ndarray] | None:
+        """Sample one scene's fitted shift field on a grid over the scene.
+
+        The number of samples follows the Chebyshev order of the scene's shift
+        basis: ``2**order``, laid out as ``nx x ny`` with the longer side along
+        the scene's longer axis. Order 0 gives a single sample at the scene
+        center, order 1 two spread along that axis, order 2 a 2x2 grid.
+
+        ``Scene.shifts`` holds only the last astrometric iteration, so the
+        field is refit at the same order to the accumulated
+        ``Template.shifted`` values, which are the total applied offsets.
+
+        Args:
+            scene: A :class:`~mophongo.scene.Scene` that solved for shifts.
+
+        Returns:
+            ``(xy, dxy)`` in reference-image pixels, both ``(n, 2)``, or None
+            when the scene has no usable shift solution.
+        """
+        from .astrometry import cheb_basis, n_terms
+
+        shifts = getattr(scene, "shifts", None)
+        basis = getattr(scene, "shift_basis", None)
+        if shifts is None or basis is None or len(shifts) < 2 or not scene.templates:
+            return None
+        _, (x0, y0), (Sx, Sy) = basis
+        # invert n_terms(order) = (order+1)(order+2)/2 on the dx half of shifts
+        p = len(shifts) // 2
+        order = int(round((np.sqrt(8.0 * p + 1.0) - 3.0) / 2.0))
+        if order < 0 or n_terms(order) != p:
+            logger.warning(
+                "scene %s: %d shift coefficients match no Chebyshev order; skipped",
+                getattr(scene, "id", -1), len(shifts),
+            )
+            return None
+
+        pos = np.array([t.position_original for t in scene.templates], dtype=float)
+        sh = np.array([t.shifted[:2] for t in scene.templates], dtype=float)
+        ok = np.isfinite(pos).all(axis=1) & np.isfinite(sh).all(axis=1)
+        if not ok.any():
+            return None
+        design = np.vstack(
+            [cheb_basis((px - x0) / Sx, (py - y0) / Sy, order) for px, py in pos[ok]]
+        )
+        beta, *_ = np.linalg.lstsq(design, sh[ok], rcond=None)  # (p, 2)
+
+        # sample grid: 2**order points spread over the scene's own extent
+        nx, ny = 2 ** ((order + 1) // 2), 2 ** (order // 2)
+        span = pos[ok].max(axis=0) - pos[ok].min(axis=0)
+        if span[1] > span[0]:
+            nx, ny = ny, nx
+
+        def step(n: int) -> np.ndarray:
+            return np.zeros(1) if n == 1 else np.linspace(-0.5, 0.5, n)
+
+        gu, gv = np.meshgrid(step(nx), step(ny))
+        xs = pos[ok][:, 0].mean() + gu.ravel() * span[0] * _SHIFT_SAMPLE_SPREAD
+        ys = pos[ok][:, 1].mean() + gv.ravel() * span[1] * _SHIFT_SAMPLE_SPREAD
+
+        phi = np.vstack(
+            [cheb_basis((x - x0) / Sx, (y - y0) / Sy, order) for x, y in zip(xs, ys)]
+        )
+        return np.column_stack([xs, ys]), phi @ beta
+
+    def plot_shift_field(
+        self,
+        *,
+        save: str | os.PathLike | None = None,
+        arrow_frac: float = 0.05,
+    ):
+        """Map of the fitted astrometric shift field over the whole field.
+
+        One arrow per sample point of every scene that solved for astrometry
+        (see :meth:`_scene_shift_samples` for the sampling), drawn from the
+        template position toward where the source is measured in the fitted
+        band. Shifts are sub-pixel, so arrows carry a common magnification and
+        the legend arrow gives the true scale; the scene id labels each scene
+        in light gray.
+
+        Args:
+            save: Optional path to save the figure to.
+            arrow_frac: Median arrow length as a fraction of the field span.
+
+        Returns:
+            ``(fig, ax)``, or None when no scene solved for astrometry.
+        """
+        import matplotlib.pyplot as plt
+
+        wcs = self.wcs[0] if getattr(self, "wcs", None) is not None else None
+        if wcs is None:
+            logger.warning("no reference WCS; skipping the shift field plot")
+            return None
+
+        xy, dxy, ids, anchors = [], [], [], []
+        for s in self.scenes or []:
+            sampled = self._scene_shift_samples(s)
+            if sampled is None:
+                continue
+            pix, shift = sampled
+            xy.append(pix)
+            dxy.append(shift)
+            ids.append(int(s.id))
+            # label sits by the first arrow, which for order 0 is the scene centre
+            anchors.append(pix[0])
+        if not xy:
+            logger.info("no scene solved for astrometry; no shift field plot")
+            return None
+        xy, dxy = np.vstack(xy), np.vstack(dxy)
+        anchors = np.vstack(anchors)
+
+        # positions and shift vectors on the sky; RA differences are tiny, so
+        # wrap only guards a field straddling RA = 0
+        ra, dec = wcs.wcs_pix2world(xy[:, 0], xy[:, 1], 0)
+        ra2, dec2 = wcs.wcs_pix2world(xy[:, 0] + dxy[:, 0], xy[:, 1] + dxy[:, 1], 0)
+        dra = (ra2 - ra + 180.0) % 360.0 - 180.0
+        ddec = dec2 - dec
+        ra_lab, dec_lab = wcs.wcs_pix2world(anchors[:, 0], anchors[:, 1], 0)
+
+        # display in raw RA/Dec degrees with aspect 1/cos(dec) so that angles
+        # are undistorted; all angular lengths below carry the same cos factor
+        cosd = float(np.cos(np.deg2rad(np.mean(dec))))
+        ang = np.hypot(dra * cosd, ddec)
+        span = max((ra.max() - ra.min()) * cosd, dec.max() - dec.min()) or 60.0 / 3600.0
+        # scale off a high percentile, not the median: a single scene with a
+        # runaway solution would otherwise shrink every other arrow to nothing
+        ref_ang = float(np.percentile(ang, 90)) if np.any(ang > 0) else 0.0
+        gain = arrow_frac * span / ref_ang if ref_ang > 0 else 1.0
+
+        fig, ax = plt.subplots(figsize=(9, 8))
+        q = ax.quiver(
+            ra, dec, dra * gain, ddec * gain,
+            angles="xy", scale_units="xy", scale=1,
+            color="tab:red", width=0.003, headwidth=4, headlength=5,
+        )
+        for sid, rl, dl in zip(ids, np.atleast_1d(ra_lab), np.atleast_1d(dec_lab)):
+            ax.text(rl, dl, str(sid), color="0.7", fontsize=7, ha="left", va="bottom")
+        mag = np.hypot(dxy[:, 0], dxy[:, 1])
+        if ref_ang > 0:
+            ref_pix = float(np.percentile(mag, 90))
+            pscale = self._pixel_scale_arcsec(wcs)
+            key = f"{ref_pix:.3f} pix" + (f' = {ref_pix * pscale:.3f}"' if pscale else "")
+            # quiverkey draws along x, whose data unit is RA degrees
+            ax.quiverkey(
+                q, 1.0 - arrow_frac, 1.02, arrow_frac * span / cosd, key,
+                labelpos="W", coordinates="axes", color="k", fontproperties={"size": 9},
+            )
+        ax.set_aspect(1.0 / cosd)
+        ax.invert_xaxis()
+        ax.ticklabel_format(useOffset=False, style="plain")
+        ax.tick_params(axis="x", labelrotation=30)
+        ax.set_xlabel("RA (deg)")
+        ax.set_ylabel("Dec (deg)")
+        ax.set_title(
+            f"{self.run_config.name if getattr(self, 'run_config', None) else 'shift field'}"
+            f": {len(ids)} scenes, {len(xy)} samples, "
+            f"median {np.median(mag):.3f} pix, max {mag.max():.3f} pix",
+            loc="left",
+        )
+        fig.tight_layout()
+        if save is not None:
+            fig.savefig(save, dpi=180, bbox_inches="tight")
+        return fig, ax
+
     # -- step 4: outputs ---------------------------------------------------
     def write_outputs(self) -> "Pipeline":
         """Write residual FITS, fit table, and scene diagnostics."""
@@ -1426,6 +1616,13 @@ class Pipeline:
         scene_table.write(
             f"{stem}_scene_catalog.csv", format="ascii.csv", overwrite=True
         )
+
+        # shift field: only exists when astrometry was actually solved
+        out = self.plot_shift_field(save=f"{stem}_shift_field.png")
+        if out is not None:
+            import matplotlib.pyplot as plt
+
+            plt.close(out[0])
         logger.info("outputs written to %s", self.out_dir)
         return self
 
@@ -2372,6 +2569,84 @@ class Pipeline:
         phot = aperture_photometry(tmpl.data, aper, method="exact")
         return float(phot["aperture_sum"][0])
 
+    def _totcor_cat(self, cat: Table) -> dict[int, float]:
+        """Catalog-side aperture-to-total per source id (band-independent).
+
+            totcor_cat = (f_kron / f_aper) / EE_H(k * R_kron)
+
+        This is the flux-estimator report's ``tcorH``, renamed: the
+        detection catalog's Kron-to-aperture flux ratio times the inverse
+        encircled energy of the high-resolution PSF at the scaled circularized
+        Kron radius.  Computed only when the three ``cat_*_col`` FitConfig
+        knobs name existing catalog columns; otherwise empty.  The Kron radius
+        column is in arcsec; ``cat_kron_k`` scales it (SExtractor AUTO: 2.5).
+        Written once to the band-independent ``totcor_cat`` catalog column.
+        """
+        cfg = self.config
+        cols = (cfg.cat_kron_flux_col, cfg.cat_aper_flux_col, cfg.cat_kron_radius_col)
+        source_cat = self.catalog
+        if source_cat is None or any(c is None for c in cols):
+            return {}
+        missing = [c for c in cols if c not in source_cat.colnames]
+        if missing:
+            logger.warning("totcor_cat skipped: catalog lacks column(s) %s", missing)
+            return {}
+        psf_hi, _ = self._band_psfs(1)
+        if psf_hi is None:
+            logger.warning("totcor_cat skipped: no high-resolution PSF available")
+            return {}
+        pscale = self._pixel_scale_arcsec(self.wcs[0] if self.wcs is not None else None)
+        if not pscale or pscale <= 0:
+            logger.warning("totcor_cat skipped: no reference pixel scale")
+            return {}
+
+        if "totcor_cat" not in cat.colnames:
+            cat["totcor_cat"] = cfg.bad_value
+        id_to_row = {int(i): k for k, i in enumerate(cat["id"])}
+        wcs_hi = self.wcs[0] if self.wcs is not None else None
+
+        out: dict[int, float] = {}
+        n_bad = 0
+        for row in source_cat:
+            sid = int(row["id"])
+            ci = id_to_row.get(sid)
+            if ci is None:
+                continue
+            f_kron = float(row[cfg.cat_kron_flux_col])
+            f_aper = float(row[cfg.cat_aper_flux_col])
+            r_kron = float(row[cfg.cat_kron_radius_col])  # arcsec
+            if not (np.isfinite(f_kron) and np.isfinite(f_aper) and f_aper > 0
+                    and np.isfinite(r_kron) and r_kron > 0):
+                n_bad += 1
+                continue
+            ra = dec = None
+            if wcs_hi is not None:
+                ra, dec = (float(v) for v in wcs_hi.wcs_pix2world(
+                    float(row["x"]), float(row["y"]), 0))
+            stamp = psf_hi.get_psf(ra, dec) if isinstance(psf_hi, PSFRegionMap) else np.asarray(psf_hi)
+            if stamp is None:
+                n_bad += 1
+                continue
+            r_pix = float(cfg.cat_kron_k) * r_kron / pscale
+            cy, cx = (stamp.shape[0] - 1) / 2.0, (stamp.shape[1] - 1) / 2.0
+            aper = CircularAperture((cx, cy), r=max(r_pix, 0.5))
+            ee_h = float(aperture_photometry(stamp, aper, method="exact")["aperture_sum"][0])
+            tot = float(np.nansum(stamp))
+            if not (np.isfinite(ee_h) and ee_h > 0 and tot > 0):
+                n_bad += 1
+                continue
+            ee_h = min(ee_h / tot, 1.0)
+            tcc = (f_kron / f_aper) / ee_h
+            out[sid] = tcc
+            cat["totcor_cat"][ci] = tcc
+        if n_bad:
+            logger.warning(
+                "totcor_cat: %d of %d sources skipped (non-finite Kron/aperture "
+                "inputs or unusable PSF); their ap_flux_cat stays unset",
+                n_bad, len(source_cat),
+            )
+        return out
+
     def _add_aperture_photometry(
         self,
         cat: Table,
@@ -2380,38 +2655,56 @@ class Pipeline:
         residual: np.ndarray,  # residual image (same grid as ref if you upsampled)
         psf: np.ndarray | PSFRegionMap | None,
         idx: int,  # current image index (>=1)
-        throughput: float = np.nan,  # filter-mean EE fallback for ap_flux_total
+        throughput: float = np.nan,  # filter-mean EE fallback for ee_psf_lo
     ) -> None:
         """
-        Measure aperture flux on (model+residual) and PSF-correct it using
-        the ratio of pre/post-convolution *template* aperture integrals:
+        Aperture photometry on (model + residual), with the classic-mophongo
+        (IDL subphot) correction names.  With ``src_tmpl`` the unit-normalized
+        high-resolution composite ``H`` and ``src_img`` the unit-normalized
+        band-convolved composite ``H*K``:
 
-            corr = F_cat(tmpl_ref_preconv) / F_img(tmpl_ref_postconv)
+            ap_F = aper(src_tmpl, R)      EE of the hi-res composite at R
+            ap_B = aper(src_img,  R)      EE of the band-convolved composite at R
+            psfcor = ap_F/ap_B            hi -> lo band EE ratio (shape corr.)
+            totcor = 1/(ap_B*ee_psf_lo)   aperture -> genuine total: ap_B is
+                                          the model-support EE and ee_psf_lo
+                                          the recorded flux fraction of the
+                                          finite PSF support itself, the same
+                                          factor ``flux_<i>_total`` divides by
+
+        (IDL's ``totcor`` is 1/ap_B alone: reconstruct it from the written
+        columns as ``totcor * ee_psf_lo`` for like-for-like comparisons.)
 
         Writes:
         ap_flux_{idx}        – raw aperture sum on model+residual
-        ap_corr_{idx}        – correction factor
-        ap_flux_corr_{idx}   – corrected flux, on the model's own support
-        ap_flux_total_{idx}  – ap_flux_corr / ee_psf_lo: total flux
-
-        ``ap_corr`` converts the aperture flux to the total of the *model*,
-        whose support is the finite PSF stamp; the flux beyond that support is
-        the recorded per-source ``ee_psf_lo`` (fallback: the filter mean), the
-        same factor ``flux_<i>_total`` divides by. Classic IDL's ``totcor``
-        includes this factor (measured on UDS F770W: IDL totcor 1.450 vs
-        ``ap_corr/ee_psf_lo`` 1.480, vs bare ``ap_corr`` 1.358), so
-        ``ap_flux_total`` is the column comparable to IDL totals.
+        ee_psf_lo_{idx}      – per-source box EE used (fallback: filter mean)
+        totcor_{idx}         – 1/(ap_B * ee_psf_lo)
+        psfcor_{idx}         – ap_F/ap_B
+        ap_flux_corr_{idx}   – ap_flux * totcor: total flux
+        totcor_cat           – catalog-side aperture-to-total (band-independent),
+                               (f_kron/f_aper) / EE_H(k*R_kron); needs the
+                               ``cat_*_col`` FitConfig knobs (the flux-estimator
+                               report's ``tcorH``, renamed)
+        ap_flux_cat_{idx}    – ap_flux * psfcor * totcor_cat: total flux on the
+                               detection catalog's Kron convention
         """
         from photutils.aperture import CircularAperture, aperture_photometry
 
         cfg = self.config
         id_to_row = {int(i): k for k, i in enumerate(cat["id"])}
+        # pre-convolution composites for ap_F, by id (reference grid, same
+        # pixel scale as the fit grid on the upsample path)
+        hi_by_id = {}
+        if getattr(self, "tmpls", None) is not None:
+            hi_by_id = {int(t.id): t for t in self.tmpls.templates}
 
         # ensure columns exist
-        for name in (f"ap_model_{idx}", f"ap_flux_{idx}", f"ap_corr_{idx}",
-                     f"ap_flux_corr_{idx}", f"ap_flux_total_{idx}"):
+        for name in (f"ap_model_{idx}", f"ap_flux_{idx}", f"ee_psf_lo_{idx}",
+                     f"totcor_{idx}", f"psfcor_{idx}", f"ap_flux_corr_{idx}",
+                     f"ap_flux_cat_{idx}"):
             if name not in cat.colnames:
                 cat[name] = cfg.bad_value
+        totcor_cat = self._totcor_cat(cat)
 
         # radii
         r_img_pix = self._resolve_image_ap_radius_pix(
@@ -2435,36 +2728,44 @@ class Pipeline:
             phot = aperture_photometry(patch, aper_img, method="exact")
             ap_raw = float(phot["aperture_sum"][0])
 
-            # --- correction from aperture flux to total flux via template EE -----------
-            # numerator: total flux of the convolved template (= post-conv sum).
-            # Using the post-conv total (rather than 1.0) accounts for any flux lost
-            # at the template boundary during convolution.
-            # denominator: flux of the convolved template within the photometric aperture.
-            # corr = num/den = post_conv_total / post_conv_aperture = 1/EE_source_MIRI(r),
-            # which converts ap_raw (partial aperture flux) to total flux.
-            # Previously num used aperture_sum(pre_conv_template, r), which gave
-            # EE_source_F444W(r) ~ 0.3 in the numerator and caused a ~1.2 mag offset.
+            # ap_B (times the post-conv total): the post-conv total rather
+            # than 1.0 accounts for any flux lost at the template boundary
+            # during convolution.
             num = float(tmpl.data.sum())
-
-            # denominator: current *convolved* template with *image* aperture
-            den = self._aperture_sum_on_template(tmpl, r_img_pix)
+            den = self._aperture_sum_on_template(tmpl, r_img_pix)  # ap_B * num
 
             ap_model = fl * den  # aperture flux on model only (for info)
 
-            # safe correction
-            corr = num / den if (np.isfinite(num) and np.isfinite(den) and den > 0) else 1.0
-            ap_corr = ap_raw * corr
-
-            cat[f"ap_model_{idx}"][row] = ap_model
-            cat[f"ap_flux_{idx}"][row] = ap_raw
-            cat[f"ap_corr_{idx}"][row] = corr
-            cat[f"ap_flux_corr_{idx}"][row] = ap_corr
-            # beyond-support flux: same per-source EE the fit totals divide by
+            inv_ap_b = num / den if (np.isfinite(num) and np.isfinite(den) and den > 0) else 1.0
+            # per-source box EE of the finite PSF support (filter-mean fallback)
             ee = float(getattr(tmpl, "ee_psf_lo", np.nan))
             if not (np.isfinite(ee) and ee > 0.0):
                 ee = float(throughput)
-            if np.isfinite(ee) and ee > 0.0:
-                cat[f"ap_flux_total_{idx}"][row] = ap_corr / ee
+            if not (np.isfinite(ee) and ee > 0.0):
+                ee = 1.0
+            totcor = inv_ap_b / ee
+            ap_corr = ap_raw * totcor
+
+            # psfcor = ap_F/ap_B: aperture sum of the unit-normalized pre-conv
+            # composite over that of the convolved one, both at R on the
+            # reference grid (identical grids on the upsample path)
+            psfcor = np.nan
+            t_hi = hi_by_id.get(int(tmpl.id))
+            if t_hi is not None:
+                num_hi = float(t_hi.data.sum())
+                ap_f = self._aperture_sum_on_template(t_hi, r_img_pix)
+                if np.isfinite(ap_f) and ap_f > 0 and num_hi > 0 and den > 0 and num > 0:
+                    psfcor = (ap_f / num_hi) / (den / num)
+
+            cat[f"ap_model_{idx}"][row] = ap_model
+            cat[f"ap_flux_{idx}"][row] = ap_raw
+            cat[f"ee_psf_lo_{idx}"][row] = ee
+            cat[f"totcor_{idx}"][row] = totcor
+            cat[f"psfcor_{idx}"][row] = psfcor
+            cat[f"ap_flux_corr_{idx}"][row] = ap_corr
+            tcc = totcor_cat.get(int(pid), np.nan)
+            if np.isfinite(psfcor) and np.isfinite(tcc):
+                cat[f"ap_flux_cat_{idx}"][row] = ap_raw * psfcor * tcc
 
     def _fit_catalog(self, config: _FitConfig) -> Table:
         """Output-catalog skeleton :meth:`run` fits into: id/x/y + provenance."""

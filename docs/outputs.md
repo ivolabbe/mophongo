@@ -11,6 +11,7 @@ file prefixed with the run `name` from the JSON config:
 | `<name>_stamps.fits` | {meth}`~mophongo.pipeline.Pipeline.write_stamps` (when `save_stamps` is set) | per-source template stamps and fit metadata |
 | `<name>_scene_catalog.csv` | `write_outputs` | one row per fitted scene |
 | `scenes/<name>_scene_<id>.png` | `write_outputs` (when `scene_plots` is set) | per-scene diagnostic figures |
+| `<name>_shift_field.png` | `write_outputs` (when astrometry was solved) | map of the fitted astrometric shift field |
 | `<name>_psf_hi.geojson`, `<name>_psf_lo.geojson`, `<name>_kernel.geojson` | `build_psfs` / `build_kernels` | cached PSF and kernel region maps ({doc}`psf_maps`) |
 | `<name>.json` | {meth}`~mophongo.pipeline.Pipeline.save_config`, called by `run` | fully explicit snapshot of the executed config |
 | `<name>.log` | {meth}`~mophongo.pipeline.Pipeline.run_all` | full log of the run |
@@ -117,28 +118,51 @@ aperture radius of 1.5 times the band PSF FWHM).
 : The aperture diameter used, in arcsec. Only written when
   `FitConfig.aperture_diam` is set.
 
+The correction names follow classic (IDL) mophongo. With `src_tmpl` the
+unit-normalized high-resolution composite `H` and `src_img` the
+unit-normalized band-convolved composite `H*K`, `ap_F = aper(src_tmpl, R)`
+and `ap_B = aper(src_img, R)` are their encircled energies at the aperture
+radius.
+
 `ap_flux_<i>`
 : Raw aperture sum on model + residual at the source position.
 
 `ap_model_<i>`
 : Aperture sum on the source's own model only.
 
-`ap_corr_<i>`
-: Aperture-to-total correction: total flux of the convolved template divided
-  by its flux inside the aperture, i.e. `1 / EE_template(r)`.
+`ee_psf_lo_<i>`
+: The per-source finite-support box encircled energy applied in
+  `totcor_<i>` (filter-mean fallback where a template has no recorded
+  value) — the same factor `flux_<i>_total` divides by.
+
+`totcor_<i>`
+: Aperture-to-total correction, `1 / (ap_B * ee_psf_lo)`. Note that classic
+  IDL's `totcor` is `1/ap_B` alone (no EE factor); reconstruct that
+  like-for-like quantity as `totcor_<i> * ee_psf_lo_<i>`.
+
+`psfcor_<i>`
+: `ap_F / ap_B`, the source's own high-res to low-res band EE ratio at the
+  aperture radius (classic mophongo's PSF/shape correction).
 
 `ap_flux_corr_<i>`
-: `ap_flux_<i> * ap_corr_<i>`, the aperture flux corrected to total.
+: `ap_flux_<i> * totcor_<i>`, the aperture flux corrected to total. On the
+  same absolute scale as `flux_<i>_total`; for an isolated point source the
+  two converge.
 
-```{warning}
-The aperture columns are never divided by the finite-stamp encircled energy
-`ee_psf_lo`, so they are not on the same absolute scale as `flux_<i>_total`:
-for an isolated point source `ap_flux_corr_<i>` converges to `flux_<i>` (the
-amplitude), not to `flux_<i>_total`. The two families differ by exactly the
-per-source factor `1/ee_psf_lo` (a few per cent to ~15% depending on band and
-stamp size). Use `flux_<i>_total` as the total flux; treat `ap_flux_corr_<i>`
-as an aperture-based cross-check on the amplitude scale.
-```
+`totcor_cat`
+: Band-independent catalog-side aperture-to-total,
+  `(f_kron / f_aper) / EE_H(k * R_kron)`: the detection catalog's
+  Kron-to-aperture flux ratio times the inverse encircled energy of the
+  high-resolution PSF at the scaled circularized Kron radius. Written only
+  when `FitConfig.cat_kron_flux_col`, `cat_aper_flux_col` and
+  `cat_kron_radius_col` name existing catalog columns (`cat_kron_k` scales
+  the radius; SExtractor AUTO convention is 2.5). This is the quantity the
+  flux-estimator report called `tcorH`.
+
+`ap_flux_cat_<i>`
+: `ap_flux_<i> * psfcor_<i> * totcor_cat`: the aperture flux carried onto
+  the detection catalog's Kron total convention, for catalog-type
+  comparisons.
 
 ### Header metadata
 
@@ -184,6 +208,30 @@ identifiers: membership depends on the scene-construction settings
 (`scene_coupling_thresh`, `scene_max_size`, `scene_max_merge_radius`), so
 scene-id-keyed products from runs with different settings are not comparable
 by id.
+
+## Shift field
+
+`<name>_shift_field.png` maps the astrometric solution over the field, and is
+written whenever at least one scene solved for shifts. Every such scene
+contributes `2**order` arrows, `order` being the Chebyshev order of its shift
+basis (`fit["astrom_kwargs"]["poly"]["order"]`, forced to 0 for a saturated-star
+scene): order 0 puts a single arrow at the scene center, order 1 two spread
+along the scene's longer axis, order 2 a 2x2 grid. Each arrow runs from the
+template position toward where the source is measured in the fitted band, so
+it points the same way as the `dx`, `dy` of the per-template fit table. The
+scene id labels each scene in light gray next to its first arrow.
+
+Positions and arrows are in RA/Dec degrees, drawn with aspect `1/cos(dec)` so
+angles are undistorted, RA increasing to the left. Shifts are sub-pixel, so
+arrows carry a common magnification set from the 90th percentile of their
+length — a single runaway scene would otherwise shrink every other arrow to
+nothing — and the legend arrow gives that percentile in pixels and arcsec.
+
+`Scene.shifts` holds the coefficients of the *last* astrometric iteration
+only, so the plotted field is refit at the same order to the accumulated
+`Template.shifted` values, which are the total applied offsets.
+{meth}`~mophongo.pipeline.Pipeline.plot_shift_field` returns `(fig, ax)`, or
+None when no scene solved for astrometry.
 
 ## The per-template fit table
 
@@ -311,8 +359,20 @@ As of this writing these flags live in the stamps file (and on the in-memory
 
 No parameters. Requires a completed {meth}`~mophongo.pipeline.Pipeline.run`
 on a config-driven pipeline. Writes the residual FITS, fit table,
-per-template fit table, scene catalog and plots, and (when the config's
-`save_stamps` is true) the stamps file. Returns `self`.
+per-template fit table, scene catalog and plots, the shift field, and (when
+the config's `save_stamps` is true) the stamps file. Returns `self`.
+
+### `Pipeline.plot_shift_field(*, save=None, arrow_frac=0.05)`
+
+`save` : `str | os.PathLike | None`, default `None`
+: Path to save the figure to.
+
+`arrow_frac` : `float`, default `0.05`
+: Length of the 90th-percentile arrow as a fraction of the field span, which
+  sets the common magnification.
+
+Returns `(fig, ax)`, or None when no scene solved for astrometry (or the
+pipeline has no reference WCS). See [Shift field](#shift-field).
 
 ### `Pipeline.write_stamps(path=None, *, ifilt=1)`
 

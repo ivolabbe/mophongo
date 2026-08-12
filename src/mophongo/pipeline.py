@@ -1349,6 +1349,10 @@ class Pipeline:
         if cfg.save_stamps:
             self.write_stamps()
 
+        scene_dir = self.out_dir / "scenes"
+        if cfg.scene_plots and self.scenes:
+            scene_dir.mkdir(parents=True, exist_ok=True)
+
         rows = []
         for s in self.scenes:
             xy = np.mean([t.position_original for t in s.templates], axis=0)
@@ -1358,7 +1362,7 @@ class Pipeline:
                 import matplotlib.pyplot as plt
 
                 fig, _ = s.plot(self.images[0], self.segmap, display_sig=5)
-                fig.savefig(f"{stem}_scene_{s.id}.png", dpi=300)
+                fig.savefig(scene_dir / f"{cfg.name}_scene_{s.id}.png", dpi=300)
                 plt.close(fig)
         scene_table = Table(
             rows=rows, names=["id", "n_templates", "is_bright", "ra", "dec"]
@@ -2305,6 +2309,7 @@ class Pipeline:
         residual: np.ndarray,  # residual image (same grid as ref if you upsampled)
         psf: np.ndarray | PSFRegionMap | None,
         idx: int,  # current image index (>=1)
+        throughput: float = np.nan,  # filter-mean EE fallback for ap_flux_total
     ) -> None:
         """
         Measure aperture flux on (model+residual) and PSF-correct it using
@@ -2313,9 +2318,18 @@ class Pipeline:
             corr = F_cat(tmpl_ref_preconv) / F_img(tmpl_ref_postconv)
 
         Writes:
-        ap_flux_{idx}       – raw aperture sum on model+residual
-        ap_corr_{idx}       – correction factor
-        ap_flux_corr_{idx}  – corrected flux
+        ap_flux_{idx}        – raw aperture sum on model+residual
+        ap_corr_{idx}        – correction factor
+        ap_flux_corr_{idx}   – corrected flux, on the model's own support
+        ap_flux_total_{idx}  – ap_flux_corr / ee_psf_lo: total flux
+
+        ``ap_corr`` converts the aperture flux to the total of the *model*,
+        whose support is the finite PSF stamp; the flux beyond that support is
+        the recorded per-source ``ee_psf_lo`` (fallback: the filter mean), the
+        same factor ``flux_<i>_total`` divides by. Classic IDL's ``totcor``
+        includes this factor (measured on UDS F770W: IDL totcor 1.450 vs
+        ``ap_corr/ee_psf_lo`` 1.480, vs bare ``ap_corr`` 1.358), so
+        ``ap_flux_total`` is the column comparable to IDL totals.
         """
         from photutils.aperture import CircularAperture, aperture_photometry
 
@@ -2323,7 +2337,8 @@ class Pipeline:
         id_to_row = {int(i): k for k, i in enumerate(cat["id"])}
 
         # ensure columns exist
-        for name in (f"ap_model_{idx}", f"ap_flux_{idx}", f"ap_corr_{idx}", f"ap_flux_corr_{idx}"):
+        for name in (f"ap_model_{idx}", f"ap_flux_{idx}", f"ap_corr_{idx}",
+                     f"ap_flux_corr_{idx}", f"ap_flux_total_{idx}"):
             if name not in cat.colnames:
                 cat[name] = cfg.bad_value
 
@@ -2373,6 +2388,12 @@ class Pipeline:
             cat[f"ap_flux_{idx}"][row] = ap_raw
             cat[f"ap_corr_{idx}"][row] = corr
             cat[f"ap_flux_corr_{idx}"][row] = ap_corr
+            # beyond-support flux: same per-source EE the fit totals divide by
+            ee = float(getattr(tmpl, "ee_psf_lo", np.nan))
+            if not (np.isfinite(ee) and ee > 0.0):
+                ee = float(throughput)
+            if np.isfinite(ee) and ee > 0.0:
+                cat[f"ap_flux_total_{idx}"][row] = ap_corr / ee
 
     def _fit_catalog(self, config: _FitConfig) -> Table:
         """Output-catalog skeleton :meth:`run` fits into: id/x/y + provenance."""
@@ -2767,6 +2788,7 @@ class Pipeline:
                 res,
                 psfs[ifilt] if psfs is not None else None,
                 ifilt,
+                throughput=throughput,
             )
 
             self.residuals.append(res)

@@ -61,147 +61,26 @@ are what {class}`mophongo.pipeline.Pipeline` consumes as its `catalog` and
 
 ## The Catalog class
 
-{class}`mophongo.catalog.Catalog` is a `@dataclass`. Constructor fields:
+{class}`mophongo.catalog.Catalog` is a `@dataclass` holding the science
+image, the weight map, and the products {meth}`~mophongo.catalog.Catalog.run`
+fills in: the segmentation map, the underlying photutils `SourceCatalog`,
+and the measurement `table`. Detection and deblending are configured through
+the `params` dict, whose user-supplied entries are merged over the defaults;
+the two most commonly tuned are `detect_threshold` (default 2.0, applied to
+the smoothed noise-equalised detection image — see Conventions above) and
+`kernel_size` (default 3.5, the FWHM in pixels of the Gaussian detection
+smoothing). Setting `deblend_mode=None` turns deblending off entirely. Every
+constructor field and `params` key, with defaults and behavior notes, is
+documented on the {class}`~mophongo.catalog.Catalog` API page.
 
-`sci` : `np.ndarray`
-: Science image (2D). When `estimate_background=True`, `run()` rebinds this
-  attribute to the background-subtracted image; the caller's array is not
-  modified.
-
-`wht` : `np.ndarray`
-: Weight map. Interpreted as inverse variance unless `estimate_ivar=True`.
-
-`nbin` : `int`, default `4`
-: Binning factor used by the {meth}`~mophongo.catalog.Catalog.plot_bg`
-  diagnostic display.
-
-`estimate_background` : `bool`, default `False`
-: Fit and subtract a smooth background via
-  {func}`mophongo.catalog.get_bg_and_ivar` before detection.
-
-`estimate_ivar` : `bool`, default `False`
-: Recalibrate the inverse variance from the measured background-pixel
-  scatter (also via {func}`~mophongo.catalog.get_bg_and_ivar`) instead of
-  trusting `wht`.
-
-`background` : `float` or `np.ndarray`, default `0.0`
-: Background level or map. Filled by `run()` when
-  `estimate_background=True`.
-
-`ivar` : `np.ndarray | None`, default `None`
-: Inverse-variance map. `run()` sets it to `wht` when no estimation is
-  requested, or to the recalibrated map when `estimate_ivar=True`. As of
-  this writing, `estimate_background=True` on its own leaves `ivar` unset
-  and `run()` fails; enable `estimate_ivar` as well (or pass `ivar`
-  yourself).
-
-`segmap` : `SegmentationImage | None`, default `None`
-: Segmentation map. If provided, detection is skipped; otherwise filled by
-  `run()`.
-
-`parent_segmap` : `SegmentationImage | None`, default `None`
-: Copy of the segmentation map before deblending; used to record deblend
-  provenance.
-
-`catalog` : `photutils.segmentation.SourceCatalog | None`, default `None`
-: The underlying photutils catalog object, filled by `run()`.
-
-`table` : `astropy.table.Table | None`, default `None`
-: The measurement table, filled by `run()`.
-
-`det_img` : `np.ndarray | None`, default `None`
-: The noise-equalised detection image, filled during detection.
-
-`params` : `dict[str, float | int]`, default `{}`
-: Detection and deblending parameters; user-supplied entries are merged
-  over the defaults listed below.
-
-`header` : `fits.Header | None`, default `None`
-: FITS header; used to construct a WCS when one is not given. Filled
-  automatically by `from_fits` when `sci` is a filename.
-
-`wcs` : `astropy.wcs.WCS | None`, default `None`
-: World coordinate system for sky positions. Built from `header` if absent.
-
-`default_columns` : `list[str]`
-: photutils `SourceCatalog` columns exported to `table`. The default list is
-  `label`, `xcentroid`, `ycentroid`, `sky_centroid`, `area`,
-  `semimajor_sigma`, `semiminor_sigma`, `kron_radius`, `eccentricity`,
-  `orientation`, `min_value`, `max_value`, `local_background`,
-  `segment_flux`, `segment_fluxerr`, `kron_flux`, `kron_fluxerr`.
-
-### Detection parameters (`params`)
-
-`kernel_size` : `float`, default `3.5`
-: FWHM in pixels of the Gaussian smoothing kernel applied to the detection
-  image (the kernel sigma is `kernel_size / 2.355`; the stamp is
-  `int(2 * kernel_size) | 1` pixels on a side).
-
-`detect_npixels` : `int`, default `5`
-: Minimum number of connected pixels for a detection; also passed to the
-  deblender.
-
-`detect_threshold` : `float`, default `2.0`
-: Threshold applied to the smoothed, noise-equalised detection image (see
-  Conventions above).
-
-`dilate_segmap` : `int`, default `2`
-: Radius of the disk used to dilate segments into background via
-  {func}`mophongo.catalog.safe_dilate_segmentation`. `0` disables dilation.
-
-`deblend_mode` : `str | None`, default `"exponential"`
-: Mode passed to `photutils.segmentation.deblend_sources`. `None` skips
-  deblending entirely.
-
-`deblend_nlevels` : `int`, default `32`
-: Number of multi-thresholding levels for the deblender.
-
-`deblend_contrast` : `float`, default `1e-4`
-: Minimum flux fraction for a deblended child.
-
-`deblend_compactness` : `float`, default `0.0`
-: Reserved; as of this writing it is not forwarded to the deblender.
-
-`background_filter_sigma` : `float`, default `64.0`
-: Forwarded to {func}`~mophongo.catalog.get_bg_and_ivar` as
-  `bg_filter_sigma`; sets the coarse-grid bin factor and the background
-  smoothing scale (see below).
-
-### `Catalog.from_fits`
-
-```python
-Catalog.from_fits(sci, wht, *, segmap=None, header=None, **kwargs)
-```
-
-`sci` : `str | Path | np.ndarray`
-: Science image or FITS filename. When a filename, the header is read and
-  stored for WCS construction.
-
-`wht` : `str | Path | np.ndarray`
-: Weight map or FITS filename.
-
-`segmap` : `str | Path | np.ndarray | SegmentationImage | None`, keyword-only, default `None`
-: External segmentation map. When given, detection and deblending are
-  skipped and sources are measured within the provided segments.
-
-`header` : `fits.Header | None`, keyword-only, default `None`
-: Header to use when `sci` is an array.
-
-`**kwargs`
-: Forwarded to the `Catalog` constructor (e.g. `estimate_background`,
-  `params`).
-
-`from_fits` constructs the object and immediately calls
+The usual entry point is {meth}`~mophongo.catalog.Catalog.from_fits`, which
+accepts arrays or FITS filenames (reading the header for WCS construction),
+builds the object, and immediately calls
 {meth}`~mophongo.catalog.Catalog.run`, so the returned instance has `table`
-and `segmap` populated.
-
-### `Catalog.run`
-
-Takes no arguments. Steps, in order: optional background/inverse-variance
-estimation; detection, dilation, and deblending (only if `segmap` is not
-already set); WCS construction from `header`; measurement with
-`SourceCatalog(sci, segmap, error=np.sqrt(1.0 / ivar), wcs=wcs)`; and
-assembly of `table`.
+and `segmap` populated — as in the examples above. `run()` estimates the
+background and inverse variance when requested, detects, dilates, and
+deblends (all skipped when a `segmap` was supplied), and measures sources
+with `SourceCatalog(sci, segmap, error=np.sqrt(1.0 / ivar), wcs=wcs)`.
 
 Columns in the resulting `table`, beyond `default_columns`:
 
@@ -216,43 +95,58 @@ Columns in the resulting `table`, beyond `default_columns`:
   provenance: the pre-deblend parent label, how many children that parent
   split into, and whether it split at all.
 
-### `Catalog.find_stars`
+The whole flow fits in a few lines on a synthetic two-source field; arrays
+work in place of filenames, and the weight map doubles as the inverse
+variance:
 
 ```python
-table, idx_stars = cat.find_stars(psf=None, snr_min=100, r50_max=5,
-                                  eccen_max=0.2, sharp_lohi=(0.2, 1.2),
-                                  chi2_max=3.0)
+import numpy as np
+from mophongo.catalog import Catalog
+from mophongo.psf import PSF
+
+rng = np.random.default_rng(11)
+sci = rng.normal(0, 1e-3, (101, 101))
+sci += 50 * PSF.gaussian(101, 3.0).array                        # source at (50, 50)
+sci += 30 * np.roll(PSF.gaussian(101, 3.0).array, 12, axis=1)   # neighbor at (62, 50)
+wht = np.full_like(sci, 1e6)                                    # ivar for sigma = 1e-3
+cat = Catalog.from_fits(sci, wht)
+print(len(cat.table))                       # 2
+print(cat.table["id", "x", "y", "snr"])     # one row per detected source
 ```
 
-Selects point-like sources from `cat.table` and optionally fits a PSF stamp
-to each. Adds a boolean `point_like` column to `cat.table` as a side effect.
-All arguments are keyword-only.
+### Star selection
 
-`psf` : `np.ndarray | None`, default `None`
-: PSF stamp. When given, each candidate is fit with
-  {func}`mophongo.catalog.fit_psf_stamp` and the returned table gains
-  `flux_psf` and `chi2_red` columns.
+{meth}`~mophongo.catalog.Catalog.find_stars` selects point-like sources from
+`cat.table` by keyword-only cuts on half-light radius, eccentricity, and the
+`sharpness` statistic, and returns `(table, idx_stars)`: the selected rows —
+those also passing the `snr_min` cut, default 100 — and their row indices in
+`cat.table`. A boolean `point_like` column recording the shape cuts (without
+the SNR cut) is added to `cat.table` as a side effect. When a PSF stamp is
+passed, each candidate is fit with {func}`mophongo.catalog.fit_psf_stamp`
+and the returned table gains `flux_psf` and `chi2_red` columns; as of this
+writing the `chi2_max` argument is not applied inside the method, so filter
+on `chi2_red` yourself.
 
-`snr_min` : `float`, default `100`
-: Minimum `snr` for a candidate.
+```python
+table, idx_stars = cat.find_stars(psf=psf_stamp, snr_min=50)
+```
 
-`r50_max` : `float`, default `5`
-: Maximum half-light radius in pixels.
+On a field with a single bright point source the shape cuts keep exactly that
+source, with its `sharpness` in the point-like range:
 
-`eccen_max` : `float`, default `0.2`
-: Maximum eccentricity.
+```python
+import numpy as np
+from mophongo.catalog import Catalog
+from mophongo.psf import PSF
 
-`sharp_lohi` : `tuple[float, float]`, default `(0.2, 1.2)`
-: Accepted range of the `sharpness` statistic.
-
-`chi2_max` : `float`, default `3.0`
-: As of this writing this cut is not applied inside the method; filter on
-  the returned `chi2_red` column yourself.
-
-`return_seg` : `bool`, default `False`
-: As of this writing this flag has no effect; the method always returns
-  `(table, idx_stars)` where `idx_stars` are the row indices of the
-  selected sources in `cat.table`.
+rng = np.random.default_rng(11)
+sci = rng.normal(0, 1e-3, (101, 101))
+sci += 200 * PSF.gaussian(101, 3.0).array   # one bright point source
+wht = np.full_like(sci, 1e6)
+cat = Catalog.from_fits(sci, wht)
+stars, idx_stars = cat.find_stars(snr_min=50)
+print(len(stars), round(float(stars["sharpness"][0]), 2))  # 1 0.7
+```
 
 #### Feeding the star selection into the fit
 
@@ -292,37 +186,17 @@ of this writing the documented `None` default raises `TypeError`.
 
 ## Background and noise estimation
 
-{func}`mophongo.catalog.get_bg_and_ivar` implements the estimator used by
-`Catalog.run`:
-
-```python
-bg_img, ivar_new = get_bg_and_ivar(sci, wht, bg_filter_sigma=64.0,
-                                   detect_thresh=1.0, dilate=3)
-```
-
-`sci`, `wht` : `np.ndarray`
-: Science image and weight map.
-
-`bg_filter_sigma` : `float`, keyword-only, default `64.0`
-: Sets the coarse-grid bin factor (`floor(sqrt(bg_filter_sigma))`) and the
-  scale of the mask-aware Gaussian background smoothing.
-
-`detect_thresh` : `float`, keyword-only, default `1.0`
-: Detection threshold, in units of the robust sigma of the coarse
-  noise-equalised image, for masking sources out of the background fit.
-
-`dilate` : `int`, keyword-only, default `3`
-: Disk radius for smoothing the coarse detection image and dilating the
-  background mask.
-
-The function bins the image, masks sources with a two-pass detection
-(bright, smoothed + faint, per-pixel), fits a mask-aware smoothed background
-on the coarse grid, measures the robust scatter of background pixels after
-subtraction, and returns the background interpolated back to full resolution
-together with the weight map rescaled so it is a calibrated inverse
-variance. A related function, `calibrate_ivar_with_bg_median`, appears in
-the module but is not called by `Catalog` and, as of this writing, raises a
-`NameError` when invoked; use `get_bg_and_ivar`.
+{func}`mophongo.catalog.get_bg_and_ivar`, the estimator behind
+`estimate_background` and `estimate_ivar`, returns `(bg_img, ivar_new)`. It
+bins the image (bin factor `floor(sqrt(bg_filter_sigma))`), masks sources
+with a two-pass detection (bright, smoothed + faint, per-pixel), fits a
+mask-aware smoothed background on the coarse grid, measures the robust
+scatter of background pixels after subtraction, and returns the background
+interpolated back to full resolution together with the weight map rescaled
+so it is a calibrated inverse variance. A related function,
+`calibrate_ivar_with_bg_median`, appears in the module but is not called by
+`Catalog` and, as of this writing, raises a `NameError` when invoked; use
+`get_bg_and_ivar`.
 
 ## Segmentation-map helpers
 

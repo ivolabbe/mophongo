@@ -3,6 +3,72 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Concept-first docs rewrite + executed snippets (2026-08-12). The
+  eight component pages now read as functionality overviews: per-parameter
+  listings deleted from the pages and their content MOVED into the source
+  docstrings (psf, psf_factory, psf_map, utils, templates, template_schemes,
+  catalog, scene, scene_fitter, saturate, astrometry, verification,
+  mock_mosaic, pipeline), so the autodoc API reference carries the detail;
+  conf.py enables `ignore-module-all` and `napoleon_use_ivar` so the
+  enriched docstrings all surface. Reference-style content kept on pages:
+  RunConfig/FitConfig tables, output glossaries, flag tables, the
+  extend_mode scheme table, the external-catalog contract. One wrong source
+  docstring fixed en route (`get_bg_and_ivar` claimed four return values;
+  it returns two). Then 21 small runnable snippets added across the pages,
+  each executed verbatim before embedding with observed outputs as inline
+  comments (deterministic seeds); an independent sweep re-extracted all 54
+  python fences, classified 26 as self-contained, and re-ran them: 26/26
+  pass, printed values match the inline comments (including the end-to-end
+  mock + wiener-map + pipeline scenario snippet on simulation.md). Full
+  pytest suite 216 passed; build has zero page-level warnings; examples
+  3/3; sweep clean. Docs style preference recorded in agent memory:
+  concept-first pages, details in docstrings/API.
+- [x] Rigid shift fit for saturated-star scenes (2026-08-12). A
+  saturated-star scene holds fragments of one star, which would fail
+  every astrometry anchor cut (isolation against each other, star
+  exclusion, sometimes minimum members) and so was solved flux-only —
+  leaving a centroid-offset dipole in the residual. `Scene.solve` now
+  detects an all-saturated scene, includes every member as an astrometry
+  anchor, and forces the shift basis to order 0: one rigid (dx, dy) for
+  the whole star. Verified on the UDS F770W satdemo patch: star 15871's
+  five fragments share dx=+1.47, dy=+0.86 px and the residual dipole
+  shrinks; synthetic regression test
+  (`test_saturated_scene_fits_rigid_shift`) recovers an injected rigid
+  shift under exclude-stars + isolation cuts. Note: per-fragment fluxes
+  within a star group are degenerate (overlapping templates of one
+  source) — the star's flux is the group sum.
+- [x] Repair setting in the MINERVA run database + real-data validation
+  (2026-08-12). `make_minerva_configs.py` now emits
+  `"repair_saturated": true` + `repair_kwargs` (min_buffer_snr 200) and
+  an explicit `wht_hi` (the bkgsub sci_hi breaks the `_sci`->`_wht`
+  guess; found by the validation run) in every generated config — all 17
+  field/band configs regenerated. Validated end-to-end on real UDS
+  F770W data (`scratch/satdemo/`, 1' patch on saturated star 15871):
+  in-memory repair at load (128 stars repaired/flagged on the full
+  mosaic, diagnostics in `out_dir/repaired/`), star's 5 fragments =
+  exactly one scene (scene 13, sole members, fitted flux 2.75e4 +- 80),
+  per-star before/after comparison written, and the star's segments
+  nulled in the neighbouring scenes' diagnostics while shown in its own.
+- [x] In-memory saturation repair in the pipeline + per-star scenes
+  (2026-08-12). `RunConfig.repair_saturated` (+ `repair_kwargs`) runs the
+  saturation repair on the loaded `sci_hi`/`wht_hi`/catalog/segmap at
+  `load_data` time via the new `repair.repair_in_memory` — mosaics on
+  disk stay untouched, diagnostics go to `out_dir/repaired/`, repaired
+  templates land in `*_stamps.fits` as usual, and the repaired wht
+  (cores restored to the median donut weight) feeds the detection ivar.
+  In-memory flagging keeps the wing segment labels
+  (`zero_segments=False`) so every flagged row still gets a template;
+  `Template.sat_group` (in `_META_ATTRS`) carries the star's group id
+  from `FLAG_SATURATED_*`, and `generate_scenes` now groups saturated
+  templates by it: one scene per saturated star (fragments fit jointly),
+  own scene per template for legacy 0/1 flags, still created after
+  `merge_small_scenes` so exempt from `scene_minimum_bright`.
+  `Scene.plot` gained `null_segments`: the pipeline nulls the saturated
+  stars' segments in every other scene's diagnostic (they'd dominate the
+  stretch) while their own scene shows them. Tests: `test_repair.py`
+  `repair_in_memory` (wht filled, labels kept, grouping),
+  `test_scene_saturated.py` group-scene/legacy/plot-null cases; docs
+  `repair.md` "Running inside the photometry pipeline" section.
 - [x] Docs feedback round (2026-08-12). (1) Parameter blocks now render as
   real definition lists — MyST's `deflist` extension was never enabled, so
   every `param:` block had rendered as plain paragraphs — styled by

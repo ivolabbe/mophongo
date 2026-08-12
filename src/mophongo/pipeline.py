@@ -1309,6 +1309,11 @@ class Pipeline:
     ):
         """Quicklook of the loaded inputs: hi-res, lo-res, weight, and segmap.
 
+        Shows ``images[0]``, the last low-resolution image, that image's
+        inverse-variance weight map (panel left blank when no weights are
+        loaded), and the segmentation map.  Requires loaded data (after
+        :meth:`load_data` or the array constructor).
+
         Args:
             sources: Overlay catalog positions on the hi-res panel.
             save: Optional path to save the figure to.
@@ -1388,6 +1393,15 @@ class Pipeline:
         if cfg.scene_plots and self.scenes:
             scene_dir.mkdir(parents=True, exist_ok=True)
 
+        # Saturated stars' segment ids: nulled in every OTHER scene's
+        # diagnostic (their brightness would dominate the display), shown in
+        # their own scene's plot.
+        sat_ids = [
+            int(t.id)
+            for s in self.scenes
+            for t in s.templates
+            if getattr(t, "is_saturated", False)
+        ]
         rows = []
         for s in self.scenes:
             xy = np.mean([t.position_original for t in s.templates], axis=0)
@@ -1396,7 +1410,10 @@ class Pipeline:
             if cfg.scene_plots:
                 import matplotlib.pyplot as plt
 
-                fig, _ = s.plot(self.images[0], self.segmap, display_sig=5)
+                fig, _ = s.plot(
+                    self.images[0], self.segmap, display_sig=5,
+                    null_segments=sat_ids,
+                )
                 fig.savefig(scene_dir / f"{cfg.name}_scene_{s.id}.png", dpi=300)
                 plt.close(fig)
         scene_table = Table(
@@ -1850,6 +1867,25 @@ class Pipeline:
         file, since the package emits through both. The console is unchanged.
         Appends, so successive runs against one output directory accumulate
         rather than overwrite.
+
+        Three channels are captured for the duration of the block: all
+        library loggers (a file handler on the root logger, so astropy,
+        drizzlepac, and stpsf records reach the file even when the caller
+        configured logging first; the root level is raised to INFO if unset
+        or higher), ``warnings.warn`` messages (via
+        ``logging.captureWarnings``, reset first so an earlier hook does not
+        shadow it), and teed stdout/stderr.  Each entry starts with a header
+        recording the run name, timestamp, Python version, platform, and
+        output directory, and ends with the elapsed time; if the block
+        raises, a ``FAILED after <t>s`` line is written and the exception
+        propagates.  All logging state is restored on exit.
+
+        Args:
+            path: Log file; parent directories are created. Defaults to
+                ``<out_dir>/<name>.log`` for config-driven runs.
+
+        Yields:
+            Path of the log file.
         """
         import platform
         import sys
@@ -2500,14 +2536,20 @@ class Pipeline:
                     tmpl.deblend_nchildren = nchildren_by_id.get(tmpl_id, 1)
             # FLAG_SATURATED_* (any filter): isolate these templates into
             # their own scenes in :func:`mophongo.scene.generate_scenes`.
+            # The flag value is the star's group id (lowest flagged segment
+            # id): rows sharing a value are one star and are fit together in
+            # one scene. Legacy 0/1 columns degrade to one scene per template.
             sat_cols = [c for c in cat.colnames if c.startswith("FLAG_SATURATED_")]
             if sat_cols:
-                sat_by_id: dict[int, bool] = {}
+                sat_by_id: dict[int, int] = {}
                 for row in cat:
-                    flagged = any(int(row[c]) != 0 for c in sat_cols)
-                    sat_by_id[int(row["id"])] = flagged
+                    group = max(int(row[c]) for c in sat_cols)
+                    if group:
+                        sat_by_id[int(row["id"])] = group
                 for tmpl in self.tmpls.templates:
-                    tmpl.is_saturated = sat_by_id.get(int(tmpl.id), False)
+                    group = sat_by_id.get(int(tmpl.id), 0)
+                    tmpl.is_saturated = group != 0
+                    tmpl.sat_group = group
             self.templates_extracted = deepcopy(self.tmpls)
             # Template extension is a shape operation. The extension code
             # normalizes finite PSF stamps to unit-sum shapes and keeps
@@ -3025,7 +3067,9 @@ class Pipeline:
                     tmpl.deblend_nchildren = int(row["deblend_nchildren"])
                 sat_cols = [c for c in self.catalog.colnames if c.startswith("FLAG_SATURATED_")]
                 if sat_cols:
-                    tmpl.is_saturated = any(int(row[c]) != 0 for c in sat_cols)
+                    group = max(int(row[c]) for c in sat_cols)
+                    tmpl.is_saturated = group != 0
+                    tmpl.sat_group = group
         before = self._snapshot_template(tmpl)
 
         work = Templates()
@@ -3076,6 +3120,26 @@ class Pipeline:
         6. low-resolution image stamp at the same fitting-grid location
         7. final best-fit model image at the same location, including neighbors
         8. final residual image
+
+        Columns 3 and 4 share one display scale so the effect of the
+        extension step is directly visible.  The segmentation panel shows the
+        target source in gray and each neighbor in a distinct color, with
+        label ids printed at the segment centroids.  Requires a completed
+        :meth:`run` (or :meth:`load_fit`); the three template panels are
+        re-derived for that one source through the primary extraction/
+        extension/convolution path, so later in-place mutations cannot alter
+        them — stored snapshots are the fallback for runs given externally
+        supplied templates.
+
+        Args:
+            source_ids: Source ids, one figure row per id. Must not be empty.
+            ifilt: Fitted image index (1-based, as elsewhere).
+            half_size: Window half-size in pixels; None uses the extracted
+                template's footprint.
+            save: Optional path to save the figure to.
+
+        Returns:
+            Tuple of the created figure and its (nsrc, 8) axes array.
         """
         import matplotlib.pyplot as plt
 

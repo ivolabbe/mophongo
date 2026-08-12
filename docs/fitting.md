@@ -31,6 +31,28 @@ $A_{ij}$ is the weighted integral of $T_i T_j$, so off-diagonal terms measure
 how much flux from one source leaks into the footprint of another — the same
 quantity later reused to partition the field into scenes.
 
+```python
+import numpy as np
+from mophongo.psf import PSF
+from mophongo.scene_fitter import build_normal
+from mophongo.templates import Templates
+
+rng = np.random.default_rng(11)
+hires = rng.normal(0, 1e-3, (101, 101))         # detection image, FWHM 3
+band = rng.normal(0, 1e-3, (101, 101))          # fit image, FWHM 5
+positions, fluxes = [(45.0, 50.0), (53.0, 50.0)], (50.0, 20.0)
+for (x, y), flux in zip(positions, fluxes):
+    sly, slx = slice(int(y) - 15, int(y) + 16), slice(int(x) - 15, int(x) + 16)
+    hires[sly, slx] += flux * PSF.gaussian(31, 3.0).array
+    band[sly, slx] += flux * PSF.gaussian(31, 5.0).array
+yy, xx = np.indices(hires.shape)
+near = np.argmin([np.hypot(xx - x, yy - y) for x, y in positions], axis=0)
+segmap = np.where(hires > 5e-3, near + 1, 0)    # nearest-source segments
+tmpls = Templates.from_image(hires, segmap, positions, kernel=PSF.gaussian(31, 4.0).array)
+ATA, ATb, _ = build_normal(list(tmpls), band, np.ones_like(band))
+print(np.round(ATA.toarray() / ATA.diagonal()[:, None], 3))  # [[1. 0.028], [0.028 1.]]
+```
+
 ### SparseFitter
 
 {class}`mophongo.fit.SparseFitter` is no longer part of the production
@@ -143,6 +165,29 @@ locally within that component, so strong couplings elsewhere in the field
 are never cut on behalf of one crowded region. The pipeline calls it
 through `generate_scenes`.
 
+```python
+import numpy as np
+from mophongo.psf import PSF
+from mophongo.scene import generate_scenes
+from mophongo.templates import Templates
+
+rng = np.random.default_rng(11)
+hires = rng.normal(0, 1e-3, (161, 161))         # detection image, FWHM 3
+band = rng.normal(0, 1e-3, (161, 161))          # fit image, FWHM 5
+xy = rng.uniform(20, 140, size=(40, 2))
+for (x, y), flux in zip(xy, rng.uniform(5, 50, size=40)):
+    sly, slx = slice(int(y) - 15, int(y) + 16), slice(int(x) - 15, int(x) + 16)
+    hires[sly, slx] += flux * PSF.gaussian(31, 3.0).array
+    band[sly, slx] += flux * PSF.gaussian(31, 5.0).array
+yy, xx = np.indices(hires.shape)
+near = np.argmin([np.hypot(xx - x, yy - y) for x, y in xy], axis=0)
+segmap = np.where(hires > 5e-3, near + 1, 0)    # nearest-source segments
+tmpls = Templates.from_image(hires, segmap, xy, kernel=PSF.gaussian(31, 4.0).array)
+for thresh in (1e-1, 1e-3):
+    scenes, labels = generate_scenes(list(tmpls), band, coupling_thresh=thresh, minimum_bright=0)
+    print(thresh, len(scenes), np.bincount(labels)[1:].max())  # 0.1 33 3 / 0.001 22 6
+```
+
 ### Merging small scenes
 
 The astrometric shift fit needs several bright anchors per scene, so
@@ -157,7 +202,15 @@ The pipeline calls it through `generate_scenes`.
 {func}`mophongo.scene.generate_scenes` is the one-call entry point used by the
 pipeline: it builds the normal system, partitions it, merges small scenes, and
 returns {class}`~mophongo.scene.Scene` objects carrying their sub-blocks of
-`ATA`/`ATb`.
+`ATA`/`ATb`. The partition is set by the coupling threshold (the pipeline
+passes `FitConfig.scene_coupling_thresh`, default `1e-3`) and the soft
+per-scene cap `max_size`; the merge step is set by the bright-anchor
+definition (SNR and isolation cuts) and the merge radius. Saturated or
+repaired templates are moved into singleton scenes by default
+(`isolate_saturated`): their PSF wings extend far beyond their segment and
+would corrupt the flux solution of every neighbor caught in the same
+coupling graph. All parameters and defaults are documented in the
+{doc}`api` reference.
 
 ```python
 from mophongo.fit import FitConfig
@@ -175,163 +228,79 @@ for scn in scenes:
     flux, err, shifts, info = scn.solve(config=cfg, apply_shifts=True)
 ```
 
-Parameters:
+### Working with a Scene
 
-`templates` (`Sequence[Template]`), `image` (`np.ndarray`), `weight`
-(`np.ndarray | None`, default `None`)
-: Fit inputs; `None` weight means unit weights.
+{class}`mophongo.scene.Scene` holds one scene's templates together with its
+fit state: the scene-local normal block, the band image and weights, the
+bright-anchor mask, and — after a solve — the full result on `solution`.
+The workflow is the loop in the example above:
+{meth}`~mophongo.scene.Scene.set_band` caches a band's image and weights,
+and {meth}`~mophongo.scene.Scene.solve` solves the scene, flux-only or
+jointly with the per-scene shift field when `FitConfig.fit_astrometry_joint`
+is on, writing per-source results onto each template (`tmpl.flux`,
+`tmpl.err`). With `apply_shifts=True` a joint solve also resamples the
+templates by the fitted, damped shifts and clears the cached normal block so
+the next pass rebuilds it against the shifted templates (see
+[Applying fitted shifts and iterating](#applying-fitted-shifts-and-iterating)).
 
-`coupling_thresh` (`float`, default `0.01`)
-: Passed to `build_scene_tree_from_normal`. The pipeline passes
-  `FitConfig.scene_coupling_thresh` (default `1e-3`).
+```python
+import numpy as np
+from mophongo.fit import FitConfig
+from mophongo.psf import PSF
+from mophongo.scene import generate_scenes
+from mophongo.templates import Templates
 
-`max_size` (`int | None`, default `None`)
-: Soft per-scene template cap (pipeline passes `FitConfig.scene_max_size`,
-  default 800).
+rng = np.random.default_rng(11)
+hires = rng.normal(0, 1e-3, (101, 101))         # detection image, FWHM 3
+band = rng.normal(0, 1e-3, (101, 101))          # fit image, FWHM 5
+positions, fluxes = [(45.0, 50.0), (53.0, 50.0)], (50.0, 20.0)
+for (x, y), flux in zip(positions, fluxes):
+    sly, slx = slice(int(y) - 15, int(y) + 16), slice(int(x) - 15, int(x) + 16)
+    hires[sly, slx] += flux * PSF.gaussian(31, 3.0).array
+    band[sly, slx] += flux * PSF.gaussian(31, 5.0).array
+yy, xx = np.indices(hires.shape)
+near = np.argmin([np.hypot(xx - x, yy - y) for x, y in positions], axis=0)
+segmap = np.where(hires > 5e-3, near + 1, 0)
+tmpls = Templates.from_image(hires, segmap, positions, kernel=PSF.gaussian(31, 4.0).array)
+wht = np.full(band.shape, 1e6)                  # inverse variance of the 1e-3 noise
+scenes, _ = generate_scenes(list(tmpls), band, wht, coupling_thresh=1e-3, minimum_bright=0)
+flux, err, shifts, info = scenes[0].solve(config=FitConfig(fit_astrometry_niter=0))
+print(np.round(flux, 2), np.round(err, 4))      # [50.01 19.95] [0.0075 0.0075]
+```
 
-`snr_thresh_astrom` (`float`, default `7.0`)
-: Bright-anchor cut on the SNR proxy $b_i/\sqrt{A_{ii}}$.
-
-`isolation_thresh` (`float`, default `0.0`)
-: If positive, a template only counts as a bright anchor when its own flux
-  dominance within its footprint (self flux over self plus neighbor flux,
-  from the full-field normal matrix) meets this fraction.
-
-`minimum_bright` (`int | None`, default `None`)
-: Minimum bright anchors per scene, forwarded to `merge_small_scenes`. Pass
-  an integer (the pipeline passes `FitConfig.scene_minimum_bright`): the
-  `None` default is forwarded unchanged and fails inside
-  `merge_small_scenes`.
-
-`max_merge_radius` (`float`, default `np.inf`)
-: Merge radius in pixels, forwarded to `merge_small_scenes`.
-
-`exclude_stars` (`bool`, default `False`)
-: Remove templates with `is_star` set from the bright-anchor mask.
-
-`isolate_saturated` (`bool`, default `True`)
-: Move saturated/repaired templates into singleton scenes. Their PSF wings
-  extend far beyond their segment and would corrupt the flux solution of
-  every neighbor caught in the same coupling graph.
-
-### The Scene dataclass
-
-{class}`mophongo.scene.Scene` is a container for one scene's templates and
-fit state. Fields:
-
-`id` (`int`)
-: 1-based scene label.
-
-`templates` (`list[Template]`)
-: Scene members, in scene-local order.
-
-`fitter` ({class}`~mophongo.scene_fitter.SceneFitter`)
-: Stateless solver instance.
-
-`bbox` (`tuple[int, int, int, int] | None`, default `None`)
-: Union bounding box `(y0, y1, x0, x1)` of the member templates.
-
-`image`, `weights` (`np.ndarray | None`, default `None`)
-: Full-frame band image and inverse-variance weights (sliced per template).
-
-`config` ({class}`~mophongo.fit.FitConfig` `| None`, default `None`)
-: Per-scene fit configuration.
-
-`shift_basis` (`list | None`, default `None`)
-: `[basis, (x0, y0), (Sx, Sy)]` stored by `solve()` for shift evaluation.
-
-`flux`, `err`, `shifts` (`np.ndarray | None`, default `None`)
-: `shifts` holds the fitted Chebyshev coefficients after a joint solve.
-  `flux` and `err` are declared but never filled by `solve()`: per-source
-  results are written onto `solution` and onto each template.
-
-`is_bright` (`np.ndarray | None`, default `None`)
-: Per-template bright-anchor mask.
-
-`solution` (`SimpleNamespace | None`, default `None`)
-: Full solver result (`flux`, `err`, `shifts`, `info`).
-
-`A` (`csr_matrix | None`), `b` (`np.ndarray | None`), `tree`
-(`STRtree | None`), all default `None`
-: Scene-local normal block, right-hand side, and spatial index; rebuilt from
-  the current band by `solve()` when absent.
-
-Methods:
-
-`set_band(image, weight=None, psf=None, config=None)`
-: Cache band data on the scene. `psf` is accepted but currently unused.
-
-`solve(*, config=None, apply_shifts=True, **kwargs)`
-: Solve the scene and return `(flux, err, shifts, info)`. Rebuilds `A`/`b`
-  from the current band if needed, recomputes the bright mask (SNR proxy
-  above `config.snr_thresh_astrom`, isolation above
-  `config.astrom_isolation_thresh`, optional star exclusion), then either
-  solves flux-only (when `config.fit_astrometry_joint` is false or
-  `fit_astrometry_niter <= 0`) or the joint flux+shift system. Results are
-  stored on the scene (`solution`, `shifts`) and on each template
-  (`tmpl.flux`, `tmpl.err`, `tmpl.is_bright`). After a joint solve the fitted
-  shift field is always evaluated at each template position, scaled by
-  `config.astrom_damping`, and stored on
-  `tmpl.to_shift`; `apply_shifts=True` additionally resamples the templates
-  (see below) and clears `A`/`b` so the next pass rebuilds them against the
-  shifted templates.
-
-`shift_at(x, y)`
-: Evaluate the already-applied shift at positions `(x, y)` by nearest-template
-  lookup; returns `(dx, dy)` arrays. It returns zeros unless the scene has both
-  a shift fit and a spatial index, and `tree` is only populated when `solve()`
-  rebuilds `A`/`b` itself — so a scene straight out of `generate_scenes`
-  returns zeros on its first pass.
-
-`model_image()` / `residual()`
-: Scene model and image-minus-model over the scene bounding box; residual
-  pixels with non-positive or NaN weight are zeroed.
-
-`plot(tmpl_image, seg_image, display_sig=3.0, display_sig_by_title=None,
-residual_image=None, ax=None, **imshow_kwargs)`
-: Six-panel diagnostic (template, image, model, segmap, residual, color
-  composite) with the fitted shift field drawn as arrows on the model panel.
-  `tmpl_image` and `seg_image` are the full-frame high-resolution image and
-  segmentation map; `display_sig` scales the grayscale stretch (per-panel
-  overrides via `display_sig_by_title`); `residual_image`, if given, is a
-  full-frame residual with all scenes subtracted (otherwise the panel shows
-  `self.residual()` with the segment pixels of other scenes blanked, so their
-  unsubtracted wings still show). See {doc}`diagnostics`.
-
-`create_scene_graph(templates)` / `overlay_scene_graph(templates, shape)`
-: Static helpers that label connected components by bounding-box overlap
-  alone (no coupling threshold), and paint those labels into an image of
-  `shape`. Diagnostic aids; the pipeline partition uses
-  `build_scene_tree_from_normal`.
+For inspection, {meth}`~mophongo.scene.Scene.model_image` and
+{meth}`~mophongo.scene.Scene.residual` render the scene model and
+image-minus-model over the scene bounding box,
+{meth}`~mophongo.scene.Scene.shift_at` evaluates the applied shift at
+arbitrary positions by nearest-template lookup, and
+{meth}`~mophongo.scene.Scene.plot` draws the six-panel scene diagnostic
+(template, image, model, segmap, residual, color composite) with the fitted
+shift field as arrows on the model panel — see {doc}`diagnostics`. The
+static helpers {meth}`~mophongo.scene.Scene.create_scene_graph` and
+{meth}`~mophongo.scene.Scene.overlay_scene_graph` label connected
+components by bounding-box overlap alone, as a diagnostic aid; the pipeline
+partition uses {func}`~mophongo.scene.build_scene_tree_from_normal`.
 
 ## The SceneFitter solver
 
 {class}`mophongo.scene_fitter.SceneFitter` is stateless: all inputs arrive as
 arguments and results are returned, so the same instance serves every scene.
-
-`SceneFitter.solve(A, b, *, AB=None, BB=None, bB=None, config=None,
-cg_kwargs=None)`
-: Solve the scene system and return a namespace with `flux`, `err`,
-  `shifts`, `info`. The flux block receives a small adaptive ridge:
-  `config.reg_flux` if positive, else `1e-6` times the median positive
-  diagonal of `A`. When shift blocks `AB`, `BB`, `bB` are supplied and
-  non-empty, the shift block is regularized by `config.reg_astrom` times the
-  median positive diagonal of `BB` and solved jointly; empty shift blocks (a
-  scene with fewer than two bright members) fall back to flux-only. Despite the
-  name, `cg_kwargs` is unused as of this writing: the solve is a direct
-  sparse factorization (`scipy.sparse.linalg.spsolve`), not conjugate
-  gradients, and `info` is always the dict `{"cg_info": 0}`.
-
-`SceneFitter.solve_flux(A, b, config=None)`
-: Flux-only path. The matrix is whitened by its diagonal,
-  $\hat A = D^{-1} A D^{-1}$ with $D = \mathrm{diag}(\sqrt{A_{ii}})$, solved
-  directly, and unwhitened. Errors are $\sqrt{\mathrm{diag}(\hat
-  A^{-1})}/d$. If `config.positivity` is true, negative fluxes are clipped
-  to zero after the solve (a post-hoc clamp, not a constrained NNLS solve).
-
-`build_normal(templates, image, weights)`
-: Module-level, stateless clone of `SparseFitter.build_normal_tree`; returns
-  `(ATA, ATb, rtree)`.
+`Scene.solve` hands it the normal block and optional shift blocks;
+{meth}`~mophongo.scene_fitter.SceneFitter.solve` returns a namespace with
+`flux`, `err`, `shifts`, `info`. The flux block receives a small adaptive
+ridge (`FitConfig.reg_flux`, or `1e-6` times the matrix scale when zero) and
+the shift block a relative ridge `FitConfig.reg_astrom`; a scene with fewer
+than two bright members has empty shift blocks and falls back to the
+flux-only path, {meth}`~mophongo.scene_fitter.SceneFitter.solve_flux`, which
+whitens the matrix by its diagonal as described under
+[Error estimates](#error-estimates-err-vs-err_pred) above. Despite some
+argument names, the solve is a direct sparse factorization
+(`scipy.sparse.linalg.spsolve`), not conjugate gradients, and `info` is
+always `{"cg_info": 0}`. If `FitConfig.positivity` is true, negative fluxes
+are clipped to zero after the solve (a post-hoc clamp, not a constrained
+NNLS solve). {func}`mophongo.scene_fitter.build_normal` is the module-level,
+stateless clone of `SparseFitter.build_normal_tree` that assembles
+`(ATA, ATb, rtree)` for a template list.
 
 ## Astrometric shift blocks
 

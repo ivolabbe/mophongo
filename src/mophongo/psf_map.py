@@ -154,21 +154,35 @@ class PSFRegionMap:
         """
         Build a PSFRegionMap from ``(frame_id → footprint polygon)``.
 
-        If dissolve_by_pa is True and pa_tol > 0, regions are dissolved by PA class,
-        resulting in one region per PA bucket. Otherwise, previous overlap logic is used.
+        Footprints are intersected sequentially; every distinct set of
+        overlapping frames becomes one region, stored with a ``frame_list``
+        column and an integer ``psf_key`` label. ``psf_key`` values are
+        renumbered to run consecutively from 0.
 
         Parameters
         ----------
         footprints : Mapping[Hashable, Polygon]
-            Mapping of frame identifier to footprint polygon.
+            Mapping of frame identifier to footprint polygon, in degrees.
+        crs : str, optional
+            Coordinate reference system assigned to the regions
+            GeoDataFrame. Default ``"EPSG:4326"``.
+        snap_tol, buffer_tol, area_factor : float, optional
+            Geometry-cleanup tolerances, in degrees; see the class docstring.
+            Note the factory defaults (``snap_tol=0.5/3600``,
+            ``area_factor=100.0``) differ from the dataclass defaults, and
+            the sliver-area threshold here is
+            ``area_factor * buffer_tol**2``.
         wcs : Mapping[Hashable, WCS], optional
-            Optional mapping of frame identifier to its ``WCS`` for orientation bucketing.
+            Optional mapping of frame identifier to its ``WCS``, used only
+            for orientation bucketing.
         pa_tol : float, optional
-            Tolerance in degrees for grouping frames by position angle.
-            ``0`` disables orientation coarsening.
-        dissolve_by_pa : bool, optional
-            If True, dissolve regions by PA class (one region per PA).
-        All other tolerances are given in degrees.
+            Tolerance in degrees for grouping frames by position angle. With
+            ``pa_tol > 0`` and ``wcs`` given, frames are tagged with a PA
+            class and regions are keyed by their set of PA classes rather
+            than the exact frame set, which coarsens the map. ``0`` (default)
+            disables orientation coarsening.
+        name : str, optional
+            Label for the resulting map.
         """
         self = cls.__new__(cls)
         self.snap_tol = snap_tol
@@ -251,14 +265,22 @@ class PSFRegionMap:
     @classmethod
     def from_geojson(cls, geojson_path, **kwargs):
         """
-        Create a PSFRegionMap from a GeoJSON file.
-        
+        Create a PSFRegionMap from a GeoJSON file written by :meth:`to_file`.
+
+        If a FITS file with the same base name (``.geojson`` replaced by
+        ``.fits``) exists, its data become ``psfs``; otherwise a warning is
+        logged and ``psfs`` stays ``None``. The map's ``name`` is set to the
+        file's base name. Only ``regions`` and ``psfs`` are stored on disk:
+        tolerances, ``pscale``, and ``footprints`` come back as constructor
+        defaults unless passed again via ``kwargs``.
+
         Parameters
         ----------
         geojson_path : str or Path
             Path to the GeoJSON file.
         kwargs : dict
-            Additional arguments for PSFRegionMap constructor.
+            Additional arguments for the PSFRegionMap constructor
+            (for example ``pscale``).
         """
         from astropy.io import fits
         regions_gdf = gpd.read_file(geojson_path)
@@ -395,7 +417,9 @@ class PSFRegionMap:
         """
         Compute the overlay (intersection) of this PSFRegionMap with another PSFRegionMap
         or a single Polygon. Returns a new PSFRegionMap whose regions are the spatial
-        intersections of the input maps, with psf_key pairs (or single key if Polygon).
+        intersections of the input maps, recording the parent keys as
+        ``psf_key_1``/``psf_key_2`` (``psf_key_1`` only for a Polygon). The
+        result carries no ``psfs``; the caller fills them in.
         """
         import geopandas as gpd
         from shapely.geometry import Polygon
@@ -547,6 +571,13 @@ class PSFRegionMap:
         return None
 
     def get_psf(self, ra: float | None, dec: float | None) -> np.ndarray | None:
+        """Return the 2-D stamp ``psfs[key]`` for the region at (ra, dec).
+
+        The position is in degrees (the CRS of ``regions``); the containing
+        region is used, or the nearest one outside the map. If either
+        coordinate is ``None`` or NaN, or the lookup fails, a warning is
+        logged and the stamp at index 0 is returned. Requires ``psfs``.
+        """
         if ra is None or dec is None or np.isnan(ra) or np.isnan(dec):
             key = 0
             logging.warning("RA/Dec is None or NaN, returning default kernel at index 0.")
@@ -633,6 +664,13 @@ class PSFRegionMap:
     def to_file(self, filename, driver="GeoJSON"):
         """
         Save regions to GeoJSON and PSFs to a .fits file with the same base name.
+
+        The regions table is written with all its columns (including
+        provenance), using any ``geopandas`` driver. :meth:`from_geojson`
+        reverses both files, but only ``regions`` and ``psfs`` round-trip;
+        tolerances, ``pscale``, and ``footprints`` are not stored, and
+        tuple-valued columns such as ``frame_list`` come back as their
+        string repr.
         """
         from astropy.io import fits
         # Save regions

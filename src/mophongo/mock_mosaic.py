@@ -336,7 +336,13 @@ def _as_tuple(v):
 
 @dataclass
 class Pointing:
-    """A single JWST pointing: (RA, Dec, PA_V3)."""
+    """A single JWST pointing: (RA, Dec, PA_V3).
+
+    Attributes:
+        ra: Right ascension of the aperture reference point, degrees.
+        dec: Declination of the aperture reference point, degrees.
+        pa: Position angle of the V3 axis, degrees.
+    """
 
     ra: float
     dec: float
@@ -421,6 +427,69 @@ class MockMosaic:
     Call :meth:`write` to emit per-filter wcs.csv + mosaic FITS stubs, then
     :meth:`inject_noise_all` for noise + wht maps. Mosaics are nested at
     20 / 40 / 80 mas (2× and 4× block-binnable).
+
+    Attributes:
+        out_dir: Output directory for all products.
+        center_radec: Sky center (RA, Dec) in degrees; used as CRVAL unless
+            ``mosaic_crval`` is set.
+        nircam_sw_frames: Filter name to list of :class:`Pointing`, NIRCam SW.
+            Each pointing expands to one WCS row per detector in the family
+            (8 SW detectors, 2 LW, 1 MIRI) unless restricted by ``detectors``.
+        nircam_lw_frames: Same, NIRCam LW.
+        miri_frames: Same, MIRI.
+        mosaic_pscale: Family key of :data:`DEFAULT_OUTPUT_PSCALE` defining
+            the reference grid; the other families nest from it via the
+            half-pixel CRPIX rule (:func:`nested_crpix`).
+        mosaic_npix: Reference-grid mosaic size ``(nx, ny)``. ``None``
+            auto-fits the union of all configured detector footprints.
+        mosaic_crval: Explicit CRVAL; ``None`` uses ``center_radec``.
+        mosaic_crpix: Explicit reference-grid CRPIX; ``None`` centers on the
+            footprint union, snapped so all nested scales land on
+            half-integer CRPIX values.
+        mjd_avg: ``MJD-AVG`` written to every WCS row (drives MJD-aware PSF
+            selection).
+        exptime: Per-frame exposure time in seconds; scalar or per-filter
+            dict.
+        noise_K: Per-filter noise constants overriding
+            :data:`DEFAULT_NOISE_K`.
+        pixfrac: Drizzle pixfrac; scalar, or dict keyed by filter or family.
+        noise_seed: Random seed for noise and source injection.
+        stpsf_dir: Directory holding STPSF ePSF grid files (falls back to
+            ``data/PSF``).
+        stpsf_patterns: Per-filter ePSF filename patterns overriding
+            :meth:`default_stpsf_pattern`.
+        detectors: Optional detector-key restriction keyed by filter or
+            family, e.g. ``{"f444w": ("NRCA5",)}`` for a single-detector
+            frame.
+        snr_range: Log-uniform matched-filter SNR range for injected
+            sources.
+        apertures_arcsec: Circular aperture diameters for truth
+            aperture-flux columns.
+        psf_size_arcsec: PSF stamp size in arcsec (scalar or per-filter
+            dict); must be large enough to hold the full ePSF footprint
+            (8 arcsec is safe for NIRCam LW and MIRI grids).
+        source_sigma_pix: Intrinsic circular Gaussian source sigma, in
+            pixels on ``source_sigma_pscale``. ``None``/0 injects pure point
+            sources; a two-value tuple draws log-uniform sizes between the
+            bounds.
+        source_sigma_pscale: Pixel scale (arcsec) on which
+            ``source_sigma_pix`` is defined.
+        point_source_fraction: Fraction of sources forced to be point
+            sources when ``source_sigma_pix`` requests extended profiles.
+        source_psf_normalization: ``"native"`` preserves the finite-stamp
+            PSF integral returned by :class:`~mophongo.psf.DrizzlePSF` (the
+            image then contains ``flux_true * psf_throughput`` within the
+            stamp, matching the package shape/throughput convention);
+            ``"unit"`` is an explicit legacy convention that renormalizes
+            stamps to unit sum.
+        psf_gaussian_fwhm_arcsec: Extra Gaussian PSF broadening per filter,
+            FWHM in arcsec; defaults to a copy of
+            :data:`DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC`. Pass ``0.0`` or ``{}``
+            to disable.
+        psf_gaussian_fwhm_pix: Legacy broadening override in output pixels;
+            takes precedence over the arcsec form when set. Prefer
+            ``psf_gaussian_fwhm_arcsec``.
+        bunit: ``BUNIT`` written to the science image headers.
     """
 
     out_dir: Path
@@ -988,6 +1057,24 @@ class MockMosaic:
         same true flux is painted in every filter. When ``source_sigma_pix`` is
         non-zero, each point-source PSF is convolved with a circular Gaussian of
         that intrinsic size before SNR calibration and painting.
+
+        Most keywords default to the corresponding :class:`MockMosaic` field
+        and override it per call. Beyond those:
+
+        Args:
+            sample_filters: Restrict position sampling to the coverage
+                intersection of these filters (default: ``ref_filter`` only),
+                so every source has a template in each listed band.
+            positions_radec: Explicit ``(ra, dec)`` arrays instead of random
+                sampling.
+            filter_position_offsets_pix: Per-filter ``(dx, dy)`` pixel offsets
+                applied when painting, for astrometric-recovery tests.
+            seed: Random seed overriding ``noise_seed``.
+
+        Returns:
+            Truth table with ``id``/``ra``/``dec``, source-profile metadata,
+            ``snr_<ref>``, and per filter ``x_<f>``, ``y_<f>``, ``flux_<f>``,
+            aperture fluxes, blur bookkeeping, and ``valid_<f>``.
         """
         if ref_filter not in dpsfs:
             raise KeyError(f"ref_filter {ref_filter!r} not in dpsfs ({list(dpsfs)})")

@@ -482,6 +482,31 @@ def build_wiener_psf_maps(
     Artificially subdividing PSF regions is not part of the standard
     verification path; PSFRegionMap already encodes the footprint overlap
     geometry needed for rotations and multi-frame coverage.
+
+    Parameters
+    ----------
+    reg_grid : sequence of float, optional
+        Wiener regularization scan grid; defaults to
+        ``DEFAULT_WIENER_REG_GRID``.
+    source_pattern, target_pattern : str, optional
+        ePSF filename patterns for the source and target filters; default to
+        the standard F444W/F770W patterns.
+    source_filter, target_filter : str, optional
+        Filter keys into ``paths``/``dpsfs`` (defaults ``"f444w"`` and
+        ``"f770w"``).
+    psf_size_arcsec : float, optional
+        PSF stamp size in arcsec (default 8.0).
+    target_label : str, optional
+        Display name of the target band in figure captions and labels;
+        defaults to the internal band name.
+
+    Returns
+    -------
+    WienerPSFMaps
+        Source, target, and kernel region maps with the chosen Wiener lambda
+        and per-region throughputs.  Also writes ``diagnostic_wiener.png``,
+        ``psf_kernel_wiener_lambda_scan.csv``, ``psf_kernel_wiener_results.csv``,
+        and the three GeoJSON region maps into ``out_dir``.
     """
 
     from mophongo.psf import PSF
@@ -967,6 +992,32 @@ def run_pipeline_extension_scenario(
     ``Pipeline.diagnose_sources`` plus the standard flux-recovery helper.
 
     Args:
+        scenario: Template build scheme passed to ``Pipeline(extend_mode=...)``:
+            ``"psf_convolution"``, ``"psf_wings"``, or ``"psf_model"``, with
+            ``"none"`` disabling extension.
+        out_dir, paths, noise_info, truth, psf_maps: Products of
+            :func:`build_realistic_two_detector_mock` and
+            :func:`build_wiener_psf_maps`.
+        mock_dilate_segmap: Dilation when building the truth-labelled
+            segmentation (not a template knob).
+        template_dilate_segmap: Pipeline ``FitConfig.template_dilate_segmap``;
+            0 matches the FitConfig default (wing recovery is extension's
+            job).
+        fit_astrometry_niter: Astrometric-shift iterations of the fit.
+        fit_background: Subtract a fitted background from F770W before
+            fitting.
+        source_diagnostic_count: Number of bright sources in the per-source
+            stage-diagnostic figure.
+        full_diagnostic_highres_size: Crop size of the full-image diagnostic;
+            ``None``/0 skips it.
+        scene_diagnostic_count: Number of scenes plotted in the scene
+            diagnostics.
+        f770w_position_shift_xy: The injected F770W source-position shift, for
+            recovered-vs-expected shift bookkeeping in ``summary``.
+        nsrc, sigma_range, point_source_fraction: Caption metadata only; do
+            not affect the fit.
+        max_match_offset_pix: Maximum segment-centroid offset before a row is
+            flagged position-mismatched and excluded from the recovery plots.
         fit_overrides: Extra :class:`~mophongo.fit.FitConfig` keyword overrides
             merged over the scenario defaults, e.g. a per-band
             ``aperture_diam`` or scene limits matching a production run.
@@ -2075,6 +2126,176 @@ def plot_saturated_catalog_repair(
         ax.legend(loc="upper right", fontsize=7)
         ax.set_title("after: merged parent (hole closed)")
         ax.set_xlim(extent[0], extent[1]); ax.set_ylim(extent[2], extent[3])
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def _segmap_rgb(seg: np.ndarray) -> np.ndarray:
+    """Random-color RGB rendering of a segmentation cutout (0 = black).
+
+    Colors are seeded per label, so the same label keeps the same color
+    across panels and figures.
+    """
+    rgb = np.zeros(seg.shape + (3,), dtype=np.float32)
+    for lbl in np.unique(seg[seg > 0]).tolist():
+        color = np.random.default_rng(int(lbl)).uniform(0.25, 1.0, size=3)
+        rgb[seg == lbl] = color
+    return rgb
+
+
+def plot_saturated_flag_diagnostic(
+    sci_before: np.ndarray,
+    sci_after: np.ndarray,
+    seg_before: np.ndarray,
+    seg_after: np.ndarray,
+    flag_log: Table,
+    *,
+    out_path: str | Path,
+    n_sources: int = 4,
+    half_size: int = 300,
+    select_ids: Sequence[int] | None = None,
+    asinh_a: float = 0.1,
+    sci_percentiles: tuple[float, float] = (1.0, 99.5),
+) -> Path:
+    """Before/after diagnostic for
+    :func:`mophongo.catalog.flag_saturated_segments`.
+
+    Per star: 5 panels —
+
+    1. segmap before;
+    2. science before the repair with the to-be-flagged segments
+       overlaid;
+    3. repaired science with the flagged segments overlaid;
+    4. segmap after, with the star (flagged segments + filled core)
+       painted in a single color on top of the surviving segments;
+    5. repaired science with the flagged segments zeroed, so the kept
+       neighbours stand out.
+
+    Parameters
+    ----------
+    sci_before, sci_after
+        Science image before and after the saturation repair.
+    seg_before, seg_after
+        Segmentation map before and after the flagging.
+    flag_log
+        Table from :func:`~mophongo.catalog.flag_saturated_segments`
+        (columns ``xc, yc, seg_id, flagged, group_id``).
+    out_path
+        Output PNG path.
+    n_sources
+        Number of stars to plot, picked by flagged-segment count
+        (ignored when ``select_ids`` is given).
+    half_size
+        Cutout half-size in pixels.
+    select_ids
+        Explicit ``group_id`` values to plot.
+    asinh_a, sci_percentiles
+        Image stretch parameters.
+
+    Returns
+    -------
+    Path
+        Path of the written figure.
+    """
+    import matplotlib.pyplot as plt
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    from .catalog import _bool_column
+
+    flagged = flag_log[_bool_column(flag_log["flagged"])]
+    if len(flagged) == 0:
+        raise ValueError("flag_log has no flagged segments; nothing to plot")
+    group_col = "group_id" if "group_id" in flagged.colnames else "fit_id"
+    all_flagged_labels = np.unique(np.asarray(flagged["seg_id"]))
+    all_gids = np.unique(np.asarray(flagged[group_col]))
+
+    star_ids, counts = np.unique(
+        np.asarray(flagged[group_col]), return_counts=True
+    )
+    if select_ids is not None:
+        stars = [s for s in select_ids if s in set(star_ids.tolist())]
+    else:
+        stars = star_ids[np.argsort(-counts)][: int(n_sources)].tolist()
+    if not stars:
+        raise ValueError("no stars selected to plot")
+
+    H, W = sci_before.shape
+    # Subsample large mosaics for the display stretch — full-image fancy
+    # indexing would copy gigabytes for two percentiles.
+    step = max(1, int(np.sqrt(sci_before.size / 4_000_000)))
+    sample = sci_before[::step, ::step]
+    finite = np.isfinite(sample) & (sample != 0)
+    if finite.any():
+        vmin, vmax = np.percentile(sample[finite], list(sci_percentiles))
+    else:
+        vmin, vmax = 0.0, 1.0
+    norm = ImageNormalize(vmin=vmin, vmax=vmax, stretch=AsinhStretch(a=asinh_a))
+
+    star_rgba = (1.0, 0.15, 0.15, 0.45)   # translucent overlay on sci
+    star_rgb = (0.9, 0.9, 0.9)            # solid star color in segmap panel
+
+    n = len(stars)
+    fig, axes = plt.subplots(n, 5, figsize=(20, 4 * n), squeeze=False)
+
+    for i, star in enumerate(stars):
+        rows = flagged[np.asarray(flagged[group_col]) == star]
+        labels = np.unique(np.asarray(rows["seg_id"]))
+        xc = float(rows["xc"][0])
+        yc = float(rows["yc"][0])
+        hs = int(half_size)
+        y0 = max(0, int(round(yc)) - hs)
+        y1 = min(H, int(round(yc)) + hs + 1)
+        x0 = max(0, int(round(xc)) - hs)
+        x1 = min(W, int(round(xc)) + hs + 1)
+
+        seg_b_cut = seg_before[y0:y1, x0:x1]
+        seg_a_cut = seg_after[y0:y1, x0:x1]
+        sci_b_cut = sci_before[y0:y1, x0:x1]
+        sci_a_cut = sci_after[y0:y1, x0:x1]
+
+        # Star footprints: flagged segments + the cores filled to their
+        # group ids. The core belongs to the flagged star, so the
+        # zeroed panel masks it too.
+        flag_mask = (np.isin(seg_b_cut, all_flagged_labels)
+                     | (np.isin(seg_a_cut, all_gids) & (seg_b_cut == 0)))
+        star_mask = (np.isin(seg_b_cut, labels)
+                     | ((seg_a_cut == star) & (seg_b_cut == 0)))
+        overlay = np.zeros(star_mask.shape + (4,), dtype=np.float32)
+        overlay[star_mask] = star_rgba
+
+        ax = axes[i, 0]
+        ax.imshow(_segmap_rgb(seg_b_cut), origin="lower")
+        ax.set_title(f"star {star}: segmap before")
+
+        ax = axes[i, 1]
+        ax.imshow(sci_b_cut, origin="lower", cmap="gray", norm=norm)
+        ax.imshow(overlay, origin="lower")
+        ax.set_title(f"sci before + {len(labels)} to-flag segments")
+
+        ax = axes[i, 2]
+        ax.imshow(sci_a_cut, origin="lower", cmap="gray", norm=norm)
+        ax.imshow(overlay, origin="lower")
+        ax.set_title("sci repaired + flagged segments")
+
+        ax = axes[i, 3]
+        rgb = _segmap_rgb(seg_a_cut)
+        rgb[star_mask] = star_rgb
+        ax.imshow(rgb, origin="lower")
+        ax.set_title("segmap after (star = one color)")
+
+        ax = axes[i, 4]
+        sci_zero = np.array(sci_a_cut, copy=True)
+        sci_zero[flag_mask] = 0.0
+        ax.imshow(sci_zero, origin="lower", cmap="gray", norm=norm)
+        ax.set_title("sci, flagged segments zeroed")
+
+        for ax in axes[i]:
+            ax.set_xticks([]); ax.set_yticks([])
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=140, bbox_inches="tight")

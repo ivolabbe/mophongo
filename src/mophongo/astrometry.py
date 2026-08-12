@@ -98,7 +98,19 @@ def measure_template_shifts(
     snr_threshold: float = 7.0,
     method: str = "quadratic",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return positions, dx, dy and weights for usable templates."""
+    """Measure per-source shifts against the current fit residual.
+
+    For each template with ``flux/err >= snr_threshold``, the local model
+    (``amplitude x template + residual``) is compared against the template
+    itself in a cutout of ``3 * box_size + 1`` pixels. ``method =
+    "correlation"`` selects the sub-pixel cross-correlation peak; any other
+    value selects quadratic centroids (with center-of-mass fallback).
+
+    Returns
+    -------
+    tuple
+        ``(positions, dx, dy, weights)`` arrays; weights are SNR squared.
+    """
     positions, dx, dy, wt = [], [], [], []
 
     method = method.lower()
@@ -159,7 +171,12 @@ def fit_polynomial_field(
     order: int,
     shape: tuple[int, int],
 ) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]:
-    """Fit a polynomial shift field and return a prediction function."""
+    """Fit a polynomial shift field and return a prediction function.
+
+    Weighted least-squares fit of 2D Chebyshev shift fields of the given
+    ``order`` over an image of the given ``shape``; returns a
+    ``predict(positions) -> (dx, dy)`` callable.
+    """
 
     phi = np.array(
         [
@@ -190,7 +207,16 @@ def fit_polynomial_field(
 
 @dataclass
 class AstroCorrect:
-    """Smooth, local astrometric correction."""
+    """Smooth, local astrometric correction.
+
+    Measures shifts from the fit residual during template fitting, fits a
+    smooth 2D shift field, and shifts the templates in place. The single
+    constructor field ``cfg`` (:class:`~mophongo.fit.FitConfig`) supplies
+    the astrometry options: ``astrom_model`` (``"poly"`` or ``"gp"``),
+    ``astrom_centroid`` (``"centroid"`` or ``"correlation"``),
+    ``snr_thresh_astrom``, and ``astrom_kwargs`` (per-model keyword dicts,
+    e.g. ``{"poly": {"order": 2}, "gp": {"length_scale": 400}}``).
+    """
 
     cfg: "FitConfig"
 
@@ -207,6 +233,16 @@ class AstroCorrect:
         Sx: float = 1.0,
         Sy: float = 1.0,
     ):
+        """Construct a shift predictor from flat Chebyshev coefficients.
+
+        The first ``n_terms(order)`` entries of ``coeffs`` are the ``dx``
+        coefficients, the next block the ``dy`` coefficients; positions are
+        centered on ``(x_cen, y_cen)`` and scaled by ``(Sx, Sy)``. Used to
+        evaluate shift solutions produced elsewhere, for example the joint
+        astrometric blocks solved during scene fitting. Returns a
+        ``predict(x, y=None) -> (dx, dy)`` callable with the same input
+        conventions as :meth:`__call__`.
+        """
         p = len(cheb_basis(0.0, 0.0, order))
         bx = np.asarray(coeffs[:p], float)
         by = np.asarray(coeffs[p : 2 * p], float) if coeffs.size >= 2 * p else np.zeros(p)
@@ -233,6 +269,13 @@ class AstroCorrect:
     def __call__(
         self, x: float | np.ndarray, y: float | None = None
     ) -> tuple[np.ndarray, np.ndarray]:
+        """Evaluate the fitted shift field.
+
+        Accepts either an ``(N, 2)`` array of ``(x, y)`` positions or
+        separate ``x`` and ``y`` arrays; returns ``(dx, dy)`` arrays with
+        matching shape. Before :meth:`fit` is called, the predictor returns
+        zeros.
+        """
         if y is None:
             pts = np.asarray(x, float).reshape(-1, 2)
             shape = pts.shape[:-1]
@@ -248,6 +291,26 @@ class AstroCorrect:
         residual: np.ndarray,
         coeffs: np.ndarray,
     ) -> None:
+        """Measure shifts from the current fit state and shift templates.
+
+        ``templates`` is a sequence of
+        :class:`~mophongo.templates.Template`, ``residual`` the current
+        residual image, and ``coeffs`` the fitted amplitudes. Shifts are
+        measured at templates with ``flux/err >= cfg.snr_thresh_astrom``
+        (see :func:`measure_template_shifts`) and fit with the configured
+        field model. For the polynomial model the basis order comes from
+        ``astrom_kwargs["poly"]["order"]`` (fallback 2); for the Gaussian
+        process, ``astrom_kwargs["gp"]["length_scale"]`` (fallback 300
+        pixels) sets the RBF kernel scale. The cutout ``box_size``
+        (fallback 7) is read from the same per-model dict. These fallbacks
+        apply only when ``astrom_kwargs`` omits the key; an unmodified
+        :class:`~mophongo.fit.FitConfig` supplies order 0 and a 400-pixel
+        length scale.
+
+        After fitting, each template is resampled in place by cubic-spline
+        interpolation with the predicted shift (accumulated in
+        ``Template.shifted``) unless both components are below 0.01 pixel.
+        """
         # copy: .pop() below must not mutate the caller's FitConfig
         astrom_kw = dict(self.cfg.astrom_kwargs.get(self.cfg.astrom_model.lower(), {}))
         pos, dx, dy, w = measure_template_shifts(
@@ -321,7 +384,29 @@ class AstroCorrect:
 
 @dataclass
 class AstroMap:
-    """Map relative shifts between two images using segmentation labels."""
+    """Map relative shifts between two images at catalog positions.
+
+    :meth:`fit` measures shifts of ``img2`` relative to ``img1`` at the
+    positions of catalog sources above ``snr_threshold`` (column
+    ``snr_key``, default ``"snr"``), using quadratic centroids or
+    cross-correlation in cutouts of ``3 * box_size + 1`` pixels, and fits a
+    Chebyshev shift field of the configured ``order``. Passing ``wcs1`` and
+    ``wcs2`` to :meth:`fit` compares the images through the WCS pair at the
+    same sky position, with shifts optionally scaled by ``pixel_scale``.
+    Calling the instance evaluates the field, with the same conventions as
+    :meth:`AstroCorrect.__call__`.
+
+    Attributes
+    ----------
+    order : int
+        Chebyshev order of the fitted shift field.
+    snr_threshold : float
+        Minimum catalog SNR for a source to contribute a measurement.
+    method : str
+        ``"quadratic"`` centroids or ``"correlation"``.
+    box_size : int
+        Measurement box size in pixels.
+    """
 
     order: int = 2
     snr_threshold: float = 5.0

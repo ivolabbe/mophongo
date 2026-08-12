@@ -476,7 +476,24 @@ def _donut_significance(
 
 @dataclass
 class RepairDiagnostic:
-    """Per-source diagnostic stamps and fit metadata."""
+    """Per-source diagnostic stamps and fit metadata.
+
+    Collected by :func:`repair_saturated_holes` when
+    ``return_diagnostics=True`` for holes that reached the fitting stage;
+    holes rejected by the buffer-SNR pre-filter or the residual-fraction
+    guard get a table row but no diagnostic, and a hole whose fit failed
+    gets a stub diagnostic with ``ok=False``.
+
+    Scalar fields: ``id, yc, xc, r_equiv, r_in, r_out`` (geometry);
+    ``amplitude, chi2_red, n_pix, n_iter, shift_total, significance,
+    center`` plus the no-shift comparison fit ``amplitude_noshift,
+    chi2_red_noshift, center_noshift`` (fit results); ``resid_frac,
+    ring_snr, buffer_snr, pedestal, rho_psf, data_to_model`` (quality
+    metrics); ``fit_mode`` (``"donut"`` or ``"donut+pedestal"``),
+    ``action_mode`` (``"repair"`` or ``"subtract"``), ``ok``, ``status``.
+    Array fields hold the cutouts and masks used by
+    :func:`plot_repair_diagnostic`.
+    """
 
     id: int
     yc: float
@@ -603,29 +620,75 @@ def repair_saturated_holes(
     Parameters
     ----------
     sci, wht
-        2D science and weight arrays.
+        2D science and weight arrays. Weights are inverse variance; only
+        ``wht > eps_wht`` pixels are considered valid.
     dpsf
         :class:`mophongo.psf.DrizzlePSF` configured with the same drizzle
         WCS as ``sci`` and an ePSF model already loaded.
     wcs
         :class:`astropy.wcs.WCS` for ``sci``.
-    holes, only_ids
-        See parameter list.
-    buffer, factor, fwhm_pix
-        Donut geometry.
+    holes
+        Precomputed hole table from :func:`find_wht_holes`. ``None`` runs
+        hole detection internally.
+    only_ids
+        Restrict processing to these hole ids.
+    buffer
+        Pixels added to ``r_equiv`` to form the donut inner radius ``r_in``.
+    factor
+        Multiplier on ``r_in`` for the donut outer radius ``r_out``.
+    fwhm_pix
+        PSF FWHM in pixels; sets the floor ``r_out >= 2 * fwhm_pix``.
+    eps_wht
+        Pixels with ``wht <= eps_wht`` count as zero-weight.
+    return_diagnostics
+        Collect per-source :class:`RepairDiagnostic` objects in the return
+        value.
     fit_shift, max_shift_iter, shift_tol
-        Iterative joint amplitude+position fit controls. Set
-        ``fit_shift=False`` for amplitude-only.
+        Iterative joint amplitude+position fit controls: ``fit_shift=False``
+        for amplitude-only, at most ``max_shift_iter`` drizzle-and-fit
+        iterations, converged when the per-iteration shift is below
+        ``shift_tol`` pixels.
+    merge_radius
+        Dilation radius (pixels) used during hole detection so disconnected
+        fragments of one saturated core share a label.
     sat_significance
         Minimum median-donut significance (in σ above sky) for the hole
-        to be classed as a saturated star. Default 10σ.
+        to be classed as a saturated star. Default 10σ. Currently not
+        applied as a filter: the measured significance is recorded in the
+        output and the acceptance filter uses ``min_buffer_snr`` instead.
+    hole_dilate
+        Dilation (pixels) of the zero-weight mask; the dilated footprint
+        defines the repair region and the inner boundary of the fit ring.
+    max_resid_frac
+        Intended threshold for the residual fraction. Currently not
+        consulted: the applied guard is hard-coded to reject fits with
+        residual fraction above 1.0 (no action taken on the image).
+    min_ring_snr
+        Intended minimum median ring SNR. Currently not applied: the
+        measured ring SNR is stored in the diagnostics only.
+    min_buffer_snr
+        Minimum median sky-subtracted flux of the buffer pixels, in units
+        of the global sky noise, for the hole to be treated as genuine
+        saturation. The main pre-filter.
+    max_shift_pix
+        Hard cap on the cumulative fitted position shift, in pixels.
+    extended_max_data_to_model
+        If ``Σ data / Σ (A·ψ)`` over the donut exceeds this ratio, refit
+        with an additive pedestal to absorb host-galaxy flux (the pedestal
+        is reported, never subtracted).
+    mode
+        ``"repair"`` fills the saturated core with the model;
+        ``"subtract"`` removes ``A·ψ`` over the full cutout and blanks the
+        core plus strongly discrepant residual pixels.
+    psf_size_pix_subtract
+        Cutout size in drizzle pixels for subtract mode. ``None`` uses
+        ``min(400, native ePSF field of view)``.
     psf_filter, psf_pixfrac, psf_kernel
         Forwarded to :meth:`DrizzlePSF.get_psf`. ``None`` falls back to
-        the dpsf defaults.
+        the dpsf defaults (drizzle-header ``PIXFRAC``/``KERNEL``).
     sky_sample
         Number of valid pixels sampled to estimate sky and sky_noise
         (``mad_std``). 0 → use all pixels.
-
     output_csv
         If given, write the fit table as CSV to this path.
     plot_dir
@@ -636,7 +699,14 @@ def repair_saturated_holes(
     -------
     dict
         ``{"sci", "wht", "fits", "diagnostics", "holes",
-        "sky", "sky_noise"}``.
+        "sky", "sky_noise"}``. ``"sci"`` is the repaired science image
+        (``float32``), ``"wht"`` the repaired weight map. ``"fits"`` is an
+        astropy Table with one row per hole, including rejected ones, with
+        columns ``id, yc, xc, r_equiv, r_in, r_out, amplitude, amp_err,
+        chi2_red, n_pix, n_iter, shift_x, shift_y, significance,
+        buffer_snr, flux_added, pedestal, fit_mode, data_to_model,
+        amplitude_noshift, chi2_red_noshift, ok, status``; ``ok=False``
+        rows record why a hole was skipped in ``status``.
     """
     if holes is None:
         holes = find_wht_holes(wht, eps_wht=eps_wht, merge_radius=merge_radius)
@@ -769,7 +839,8 @@ def repair_saturated_holes(
         if not np.isfinite(buffer_snr) or buffer_snr < min_buffer_snr:
             # Pre-filter: no fit attempted, so no diagnostic. The CSV row
             # records the rejection so the source is still accounted for.
-            status = (f"low buffer SNR ({buffer_snr:.1f}σ) — "
+            # ASCII only: the status column must survive a FITS table write.
+            status = (f"low buffer SNR ({buffer_snr:.1f} sig) - "
                       f"not saturation")
             fit_rows.append(_failed_row(
                 hid, yc0, xc0, r_eq, r_in, r_out, status,
@@ -1002,7 +1073,7 @@ def repair_saturated_holes(
         # untouched is safer than corrupting it. We still record the
         # row (with status=bad-fit) so the source is accounted for.
         if np.isfinite(resid_frac) and resid_frac > 1.0:
-            status = (f"bad fit (Σ|r|/Σ|fit|={resid_frac:.2f}>1) — "
+            status = (f"bad fit (|resid|/|fit|={resid_frac:.2f}>1) - "
                       f"no action")
             fit_rows.append(_failed_row(
                 hid, yc0, xc0, r_eq, r_in, r_out, status,

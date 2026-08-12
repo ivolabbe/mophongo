@@ -52,6 +52,19 @@ psf = prm.get_psf(ra, dec)         # 2-D stamp for that region
 fig, ax = prm.plot()               # colored region overview
 ```
 
+```python
+from shapely.geometry import box
+from mophongo.psf_map import PSFRegionMap
+
+footprints = {
+    "expA": box(10.000, 0.000, 10.010, 0.010),
+    "expB": box(10.005, 0.000, 10.015, 0.010),
+    "expC": box(10.000, 0.005, 10.010, 0.015),
+}
+prm = PSFRegionMap.from_footprints(footprints, name="demo")
+print(len(prm.regions), prm.lookup_key(10.0075, 0.0025), prm.lookup_key(10.002, 0.012))  # 6 1 5
+```
+
 ```{figure} images/region_map_tiling.png
 :width: 100%
 :alt: Region maps for a hi-res and a lo-res band, their kernel overlay, and a zoom.
@@ -108,94 +121,54 @@ The spatial index (`tree`, a Shapely `STRtree`) is derived state, rebuilt by
 is not dropped, so as of this writing pickling or deep-copying a region map
 raises `PicklingError: Prepared geometries cannot be pickled`.
 
-### Constructors
+### Building and loading maps
 
-#### `from_footprints`
+{meth}`~mophongo.psf_map.PSFRegionMap.from_footprints` builds a map from a
+`(frame_id -> footprint polygon)` mapping as described above; note its
+factory defaults for the geometry tolerances (`snap_tol=0.5/3600`,
+`area_factor=100.0`) differ from the dataclass defaults. Passing per-frame
+`wcs` together with a position-angle tolerance, `pa_tol`, keys regions by
+their set of PA classes instead of the exact frame set, which coarsens the
+map; `pa_tol=0` (the default) disables orientation coarsening.
 
-```python
-PSFRegionMap.from_footprints(
-    footprints,
-    *,
-    crs="EPSG:4326",
-    snap_tol=0.5 / 3600,
-    buffer_tol=1.0 / 3600,
-    area_factor=100.0,
-    wcs=None,
-    pa_tol=0.0,
-    name=None,
-)
-```
+{meth}`~mophongo.psf_map.PSFRegionMap.to_file` writes the regions table
+(geometry plus all columns, including provenance) to GeoJSON and, when
+`psfs` is set, the stamp cube to a FITS file with the same base name.
+{meth}`~mophongo.psf_map.PSFRegionMap.from_geojson` reverses both, but only
+`regions` and `psfs` are stored: the tolerances, `pscale`, and `footprints`
+come back as constructor defaults unless passed again as keyword arguments,
+and `name` is reset to the file's base name.
 
-`footprints` : `Mapping[Hashable, Polygon]`
-: Mapping of frame identifier to footprint polygon, in degrees.
+{meth}`~mophongo.psf_map.PSFRegionMap.plot` draws the regions colored by a
+column (default `psf_key`), forwarding extra keywords to
+`GeoDataFrame.plot`, and returns `(fig, ax)` with the x-axis inverted (RA
+increasing left).
 
-`crs` : `str | None`, default `"EPSG:4326"`
-: Coordinate reference system assigned to the regions GeoDataFrame.
+### Looking up the PSF at a position
 
-`snap_tol`, `buffer_tol`, `area_factor`
-: Geometry tolerances as above. The factory defaults
-  (`snap_tol=0.5/3600`, `area_factor=100.0`) differ from the dataclass
-  defaults; both are in degrees.
-
-`wcs` : `Mapping[Hashable, WCS] | None`, default `None`
-: Optional per-frame WCS used only for orientation bucketing.
-
-`pa_tol` : `float`, default `0.0`
-: Tolerance in degrees for grouping frames by position angle. With
-  `pa_tol > 0` and `wcs` given, frames are tagged with a PA class and regions
-  are keyed by their set of PA classes rather than the exact frame set, which
-  coarsens the map. `0` disables orientation coarsening.
-
-`name` : `str | None`, default `None`
-: Label for the resulting map.
-
-#### `from_geojson`
+{meth}`~mophongo.psf_map.PSFRegionMap.lookup_key` returns the integer
+`psf_key` at a sky position in degrees (the CRS of `regions`), an O(log N)
+STRtree point-in-polygon query. When the point falls inside no region (for
+example just outside the mosaic edge) it returns the key of the nearest
+region, or `None` with `nearest=False`.
+{meth}`~mophongo.psf_map.PSFRegionMap.get_psf` returns the corresponding
+2-D stamp `psfs[key]`; a `None`/NaN position or failed lookup logs a warning
+and returns the stamp at index 0.
 
 ```python
-PSFRegionMap.from_geojson(geojson_path, **kwargs)
+import numpy as np
+from shapely.geometry import box
+from mophongo.psf import PSF
+from mophongo.psf_map import PSFRegionMap
+
+footprints = {"expA": box(10.000, 0.0, 10.010, 0.010),
+              "expB": box(10.005, 0.0, 10.015, 0.010)}
+prm = PSFRegionMap.from_footprints(footprints)
+prm.psfs = np.stack([PSF.gaussian(25, fwhm=2.0 + k).array
+                     for k in range(len(prm.regions))])
+key = prm.lookup_key(10.0075, 0.005)        # inside the A-B overlap
+print(key, prm.get_psf(10.0075, 0.005).shape)  # 1 (25, 25)
 ```
-
-`geojson_path` : `str`
-: Path to a GeoJSON file previously written by
-  {meth}`~mophongo.psf_map.PSFRegionMap.to_file`. If a FITS file with the
-  same base name (`.geojson` replaced by `.fits`) exists, its data become
-  `psfs`; otherwise a warning is logged and `psfs` stays `None`.
-
-`**kwargs`
-: Passed to the `PSFRegionMap` constructor (for example `pscale`).
-
-The map's `name` is set to the file's base name.
-
-### Lookup
-
-#### `lookup_key`
-
-```python
-prm.lookup_key(ra, dec, nearest=True)
-```
-
-`ra`, `dec` : `float`
-: Sky position in degrees (the CRS of `regions`).
-
-`nearest` : `bool`, default `True`
-: When the point falls inside no region (for example just outside the mosaic
-  edge), return the key of the nearest region instead of `None`.
-
-Returns the integer `psf_key`, or `None` on a miss with `nearest=False`. The
-query uses the STRtree plus prepared geometries and is O(log N).
-
-#### `get_psf`
-
-```python
-prm.get_psf(ra, dec)
-```
-
-`ra`, `dec` : `float | None`
-: Sky position in degrees. If either is `None` or NaN, or the lookup fails,
-  a warning is logged and the stamp at index 0 is returned.
-
-Returns the 2-D stamp `psfs[key]` for the region containing (or nearest to)
-the position. Requires `psfs` to be set.
 
 ### Derived maps
 
@@ -229,32 +202,19 @@ lookups `get_ee_box(ra, dec)` / `get_ee_rlim(ra, dec)`, which share the
 NaN/miss fallback of `get_psf`. Accessing any of these on a map without
 `psfs` raises `ValueError`.
 
-### Serialization
-
-#### `to_file`
-
 ```python
-prm.to_file(filename, driver="GeoJSON")
+import numpy as np
+from shapely.geometry import box
+from mophongo.psf import PSF
+from mophongo.psf_map import PSFRegionMap
+
+footprints = {"expA": box(10.000, 0.0, 10.010, 0.010),
+              "expB": box(10.005, 0.0, 10.015, 0.010)}
+prm = PSFRegionMap.from_footprints(footprints, name="demo")
+wide = PSF.gaussian(101, fwhm=10.0).array
+prm.psfs = np.stack([wide[38:63, 38:63]] * len(prm.regions))  # truncated stamps
+print(np.round(prm.ee_box, 3), round(prm.get_ee_box(10.0075, 0.005), 3))  # [0.994 0.994 0.994] 0.994
 ```
-
-`filename` : path-like
-: Output path for the regions table (conventionally `.geojson`).
-
-`driver` : `str`, default `"GeoJSON"`
-: Any `geopandas.GeoDataFrame.to_file` driver.
-
-Writes the regions (geometry plus all columns, including provenance) to
-`filename`; if `psfs` is set, the cube is written to a FITS file with the
-same base name. `from_geojson` reverses both, but only `regions` and `psfs`
-are stored: `snap_tol`, `buffer_tol`, `area_factor`, `pscale`, and
-`footprints` are not written to the file and come back as constructor
-defaults unless passed again via `from_geojson` kwargs, and `name` is reset
-to the file's base name.
-
-{meth}`~mophongo.psf_map.PSFRegionMap.plot` draws the regions colored by a
-column (default `psf_key`), forwarding extra keywords to
-`GeoDataFrame.plot`, and returns `(fig, ax)` with the x-axis inverted (RA
-increasing left).
 
 ## How the pipeline builds and consumes region maps
 

@@ -562,6 +562,41 @@ def generate_scenes(
            - per-scene ATA, ATb blocks
            - links to image, weight
 
+    Parameters
+    ----------
+    templates : Sequence[Template]
+        Templates to partition.
+    image : np.ndarray
+        Fit image.
+    weight : np.ndarray, optional
+        Inverse-variance weights; ``None`` means unit weights.
+    coupling_thresh : float
+        Passed to :func:`build_scene_tree_from_normal`. The pipeline passes
+        ``FitConfig.scene_coupling_thresh`` (default ``1e-3``).
+    max_size : int, optional
+        Soft per-scene template cap (pipeline passes
+        ``FitConfig.scene_max_size``, default 800).
+    snr_thresh_astrom : float
+        Bright-anchor cut on the SNR proxy ``b_i / sqrt(A_ii)``.
+    isolation_thresh : float
+        If positive, a template only counts as a bright anchor when its own
+        flux dominance within its footprint (self flux over self plus
+        neighbor flux, from the full-field normal matrix) meets this
+        fraction.
+    minimum_bright : int, optional
+        Minimum bright anchors per scene, forwarded to
+        :func:`merge_small_scenes`. Pass an integer (the pipeline passes
+        ``FitConfig.scene_minimum_bright``): the ``None`` default is
+        forwarded unchanged and fails inside ``merge_small_scenes``.
+    max_merge_radius : float
+        Merge radius in pixels, forwarded to :func:`merge_small_scenes`.
+    exclude_stars : bool
+        Remove templates with ``is_star`` set from the bright-anchor mask.
+    isolate_saturated : bool
+        Move saturated/repaired templates into singleton scenes. Their PSF
+        wings extend far beyond their segment and would corrupt the flux
+        solution of every neighbor caught in the same coupling graph.
+
     Returns
     -------
     scenes : list[Scene]
@@ -612,6 +647,13 @@ def generate_scenes(
     # 3b) Isolate saturated/repaired templates into their own scenes.
     # Their PSF wings span far beyond their segment and would corrupt the
     # flux solution of every neighbour caught in the same coupling graph.
+    # Templates sharing a ``sat_group`` id (the star's lowest flagged
+    # segment id from FLAG_SATURATED_*) are the fragments of ONE star and
+    # go into ONE scene together, fit jointly against the repaired image.
+    # Ungrouped saturated templates (legacy 0/1 flags, or group id 1 which
+    # is indistinguishable from a legacy flag) each get their own scene.
+    # Isolation runs after merge_small_scenes, so these scenes are exempt
+    # from the minimum_bright merging criterion by construction.
     if isolate_saturated:
         sat_mask = np.asarray(
             [bool(getattr(t, "is_saturated", False)) for t in templates],
@@ -619,9 +661,27 @@ def generate_scenes(
         )
         if sat_mask.any():
             next_label = int(labels.max()) + 1
+            group_label: dict[int, int] = {}
             for i in np.where(sat_mask)[0]:
-                labels[i] = next_label
-                next_label += 1
+                group = int(getattr(templates[i], "sat_group", 0) or 0)
+                if group > 1:
+                    if group not in group_label:
+                        group_label[group] = next_label
+                        next_label += 1
+                    labels[i] = group_label[group]
+                else:
+                    labels[i] = next_label
+                    next_label += 1
+            if group_label:
+                logger.info(
+                    "isolated %d saturated star(s) into their own scenes "
+                    "(%d templates)",
+                    len(group_label) + int(
+                        sum(1 for i in np.where(sat_mask)[0]
+                            if int(getattr(templates[i], "sat_group", 0) or 0) <= 1)
+                    ),
+                    int(sat_mask.sum()),
+                )
 
     # 4) Instantiate per-scene objects with sub-blocks of ATA/ATb and links to data
     scenes: List[Scene] = []
@@ -668,7 +728,40 @@ def generate_scenes(
 
 @dataclass
 class Scene:
-    """Container for templates belonging to a single scene."""
+    """Container for templates belonging to a single scene.
+
+    Attributes
+    ----------
+    id : int
+        1-based scene label.
+    templates : list[Template]
+        Scene members, in scene-local order.
+    fitter : SceneFitter
+        Stateless solver instance.
+    bbox : tuple[int, int, int, int], optional
+        Union bounding box ``(y0, y1, x0, x1)`` of the member templates.
+    image, weights : np.ndarray, optional
+        Full-frame band image and inverse-variance weights (sliced per
+        template).
+    config : FitConfig, optional
+        Per-scene fit configuration.
+    shift_basis : list, optional
+        ``[basis, (x0, y0), (Sx, Sy)]`` stored by :meth:`solve` for shift
+        evaluation.
+    flux, err : np.ndarray, optional
+        Declared but never filled by :meth:`solve`: per-source results are
+        written onto ``solution`` and onto each template.
+    shifts : np.ndarray, optional
+        Fitted Chebyshev coefficients after a joint solve.
+    is_bright : np.ndarray, optional
+        Per-template bright-anchor mask.
+    solution : SimpleNamespace, optional
+        Full solver result (``flux``, ``err``, ``shifts``, ``info``).
+    A, b, tree
+        Scene-local normal block (``csr_matrix``), right-hand side
+        (``ndarray``), and spatial index (``STRtree``); rebuilt from the
+        current band by :meth:`solve` when absent.
+    """
 
     id: int
     templates: List[Template]
@@ -699,7 +792,12 @@ class Scene:
         psf: np.ndarray | None = None,
         config: Optional[object] = None,
     ) -> None:
-        """Cache per-band data for this scene."""
+        """Cache per-band data for this scene.
+
+        ``psf`` is accepted but currently unused. ``weight=None`` means unit
+        weights; ``config``, if given, replaces the scene's fit
+        configuration.
+        """
         # cache I/O for this band
         self.image = image
         self.weights = np.ones_like(image, dtype=np.float32) if weight is None else weight
@@ -713,10 +811,26 @@ class Scene:
         apply_shifts: bool = True,
         **kwargs,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray | None, int]:
-        """
-        Solve this scene. If A/b are not provided and not cached, build them.
-        Only build AB/BB/bB when cfg.fit_astrometry_joint is True; else flux-only.
-        Stores results on the Scene (stateless fitter).
+        """Solve the scene and return ``(flux, err, shifts, info)``.
+
+        Rebuilds ``A``/``b`` from the current band if needed, recomputes the
+        bright mask (SNR proxy above ``config.snr_thresh_astrom``, isolation
+        above ``config.astrom_isolation_thresh``, optional star exclusion),
+        then either solves flux-only (when ``config.fit_astrometry_joint``
+        is false or ``fit_astrometry_niter <= 0``) or the joint flux+shift
+        system. Results are stored on the scene (``solution``, ``shifts``)
+        and on each template (``tmpl.flux``, ``tmpl.err``,
+        ``tmpl.is_bright``).
+
+        After a joint solve the fitted shift field is always evaluated at
+        each template position, scaled by ``config.astrom_damping``, and
+        stored on ``tmpl.to_shift``; ``apply_shifts=True`` additionally
+        resamples the templates
+        (:meth:`~mophongo.templates.Templates.apply_template_shifts`) and
+        clears ``A``/``b`` so the next pass rebuilds them against the
+        shifted templates. Scenes with fewer than two bright members fall
+        back to flux-only and leave their templates unshifted (logged as a
+        warning).
         """
         cfg = config or self.config or FitConfig()
         if self.image is None or self.weights is None:
@@ -743,6 +857,18 @@ class Scene:
         if getattr(cfg, "astrom_exclude_stars", False):
             self.is_bright &= ~np.array([t.is_star for t in self.templates], dtype=bool)
 
+        # A saturated-star scene holds the fragments of ONE star: fit a
+        # single rigid shift for the whole group. The usual anchor cuts
+        # would disable astrometry here — the fragments fail the isolation
+        # cut against each other (and star exclusion) — yet the star is by
+        # far the brightest thing in its scene and its repaired centroid
+        # can be off by a fraction of a pixel.
+        sat_scene = bool(self.templates) and all(
+            getattr(t, "is_saturated", False) for t in self.templates
+        )
+        if sat_scene:
+            self.is_bright = np.ones(len(self.templates), dtype=bool)
+
         # flux-only path
         if (not cfg.fit_astrometry_joint) or int(getattr(cfg, "fit_astrometry_niter", 0)) <= 0:
             sol = SceneFitter.solve(A, b, config=cfg, **kwargs)
@@ -752,6 +878,8 @@ class Scene:
             alpha0 = np.divide(b, d, out=np.zeros_like(b, dtype=float), where=d > 0)
             # joint path: build basis and coupling blocks
             order = int(cfg.astrom_kwargs["poly"]["order"])  # assume defined in cfg
+            if sat_scene:
+                order = 0  # one constant (dx, dy) — the fragments move rigidly
 
             basis, (x0, y0), (Sx, Sy) = make_scene_basis(
                 self.templates, self.is_bright, order=order
@@ -838,7 +966,14 @@ class Scene:
         return sol.flux, sol.err, sol.shifts, sol.info
 
     def shift_at(self, x: ndarray, y: ndarray) -> Tuple[ndarray, ndarray]:
-        """Evaluate the fitted shift at positions (x, y)."""
+        """Evaluate the already-applied shift at positions ``(x, y)``.
+
+        Nearest-template lookup; returns ``(dx, dy)`` arrays. Returns zeros
+        unless the scene has both a shift fit and a spatial index — ``tree``
+        is only populated when :meth:`solve` rebuilds ``A``/``b`` itself, so
+        a scene straight out of :func:`generate_scenes` returns zeros on its
+        first pass.
+        """
 
         if self.shifts is None or self.shift_basis is None or self.tree is None:
             return np.zeros_like(x), np.zeros_like(y)
@@ -917,17 +1052,26 @@ class Scene:
         display_sig: float = 3.0,
         display_sig_by_title: dict[str, float] | None = None,
         residual_image: np.ndarray | None = None,
+        null_segments: Sequence[int] | None = None,
         ax=None,
         **imshow_kwargs,
     ) -> tuple["matplotlib.figure.Figure", np.ndarray]:
-        """Plot diagnostic view of the scene.
+        """Plot the six-panel scene diagnostic (template, image, model,
+        segmap, residual, color composite), with the fitted shift field
+        drawn as arrows on the model panel.
 
         Parameters
         ----------
-        image
-            High-resolution template image corresponding to ``self.image``.
+        tmpl_image
+            Full-frame high-resolution template image corresponding to
+            ``self.image``.
+        seg_image
+            Full-frame segmentation map on the same grid as ``tmpl_image``.
         display_sig
             Sigma level used to scale grayscale panels. Defaults to ``3``.
+        display_sig_by_title
+            Optional per-panel overrides of ``display_sig``, keyed by panel
+            title.
         residual_image
             Optional full-frame residual on the fit grid with *all* scene
             models subtracted. If given, the residual panel shows this global
@@ -935,6 +1079,12 @@ class Scene:
             ``self.residual()``, which subtracts only this scene's model and
             therefore still contains the (masked) light of sources belonging
             to other scenes.
+        null_segments
+            Segmentation labels to null in the grayscale panels — typically
+            the saturated stars' segments, whose brightness would otherwise
+            dominate every neighbouring scene's display. Labels belonging to
+            THIS scene's templates are never nulled, so a saturated star is
+            shown in its own scene's diagnostic.
         ax
             Optional array of matplotlib axes to draw on.
         **imshow_kwargs
@@ -963,6 +1113,17 @@ class Scene:
         seg_cut = seg_image[sl]
         img_cut = self.image[sl]
 
+        # Null foreign saturated segments so they don't dominate the display.
+        own_ids = {int(t.id) for t in self.templates}
+        null_ids = [int(s) for s in (null_segments or []) if int(s) not in own_ids]
+        if null_ids:
+            null_mask = np.isin(seg_cut, np.asarray(null_ids))
+            if null_mask.any():
+                tmpl_cut = np.where(null_mask, 0.0, tmpl_cut)
+                img_cut = np.where(null_mask, 0.0, img_cut)
+        else:
+            null_mask = None
+
         scene_cut = np.zeros_like(seg_cut)
         scene_cut[seg_cut > 0] = int(self.id)
 
@@ -977,6 +1138,8 @@ class Scene:
             res_cut[(self.weights[sl] <= 0) | np.isnan(self.weights[sl])] = 0.0
         else:
             res_cut = self.residual()
+        if null_mask is not None and null_mask.any():
+            res_cut = np.where(null_mask, 0.0, res_cut)
 
         b = tmpl_cut / np.nanstd(tmpl_cut) if np.nanstd(tmpl_cut) != 0 else tmpl_cut
         r = img_cut / np.nanstd(img_cut) if np.nanstd(img_cut) != 0 else img_cut

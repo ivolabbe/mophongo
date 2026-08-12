@@ -700,10 +700,30 @@ def matching_kernel(
     psf_hi, psf_lo:
         High- and low-resolution PSF arrays. They may have different shapes.
     window : optional
-        Fourier-domain window function. Defaults to SplitCosineBellWindow.
+        Fourier-domain window function used when ``method="window"``.
+        Defaults to ``SplitCosineBellWindow(alpha=0.4, beta=0.1)``.
     recenter : bool, optional
-        If ``True`` the resulting kernel is shifted to its centroid using
-        bicubic interpolation. Defaults to ``False``.
+        If ``True`` the resulting kernel is shifted to its centroid: a
+        center-of-mass first guess refined by a quadratic centroid, applied
+        with cubic interpolation and zero padding so the shift conserves
+        flux. Defaults to ``False``.
+    pixel_ratio : float, optional
+        Pixel-scale ratio between the two PSFs. A ratio above one upsamples
+        ``psf_lo`` onto the finer grid (how the pipeline passes it, as the
+        low-to-high pixel-scale ratio); a ratio below one downsamples
+        ``psf_hi`` instead. The resize is flux-conserving cubic interpolation
+        (:func:`resize_flux_conserving_inter_cubic`) using the same
+        pixel-extent convention as the pipeline's nested block grids, so
+        integer scale ratios stay registered. Defaults to ``1.0`` (no
+        resampling).
+    method : str, optional
+        ``"window"`` (default), ``"tikhonov"``, ``"wiener"``, or ``"forward"``
+        (ForWaRD Fourier+wavelet regularized deconvolution).
+    reg : float, optional
+        Regularization parameter for the non-window methods, scaled
+        internally by the peak of the inversion denominator
+        (``max(|H_hi|^2)``; ``max(|H_hi|^2 P_xx)`` for Wiener) so it is
+        dimensionless.
 
     Returns
     -------

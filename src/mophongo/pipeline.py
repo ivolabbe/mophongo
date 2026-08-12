@@ -98,6 +98,14 @@ class RunConfig:
     # (FitConfig.extend_mode): 'default' -> 'psf_wings'. Without an extension
     # the total flux is biased low, badly so for faint sources.
     # --- preprocessing ----------------------------------------------------
+    # In-memory saturated-star repair at load time: fill wht=0 cores in
+    # sci_hi/wht_hi with the fitted PSF model and flag the star-dominated
+    # segments in the catalog (FLAG_SATURATED_TMPL group ids; one scene per
+    # star). Nothing on disk changes; diagnostics go to out_dir/repaired/.
+    repair_saturated: bool = False
+    # extra kwargs for mophongo.repair.repair_in_memory (e.g. min_buffer_snr,
+    # flux_frac, min_snr, stamp_npix)
+    repair_kwargs: dict[str, Any] = field(default_factory=dict)
     bg_filter_sigma: float = 64.0  # get_bg_and_ivar background filter
     footprint_filter: bool = True  # keep only sources with wht_lo > 0
     r_trial: float = 0.0  # trial-patch radius in arcmin; 0 = full run
@@ -942,7 +950,9 @@ class Pipeline:
             )
         return guess
 
-    def _load_detection_ivar(self, sci_hi: np.ndarray) -> np.ndarray | None:
+    def _load_detection_ivar(
+        self, sci_hi: np.ndarray, wht_hi: np.ndarray | None = None
+    ) -> np.ndarray | None:
         """Detection-band inverse variance, or None when the run does not read it.
 
         The weight map is always resolved (:meth:`resolve_wht_hi`, which raises
@@ -951,6 +961,11 @@ class Pipeline:
         weight, ``'classic'`` for its low-SNR point-source branch.
         ``'default'`` and ``'psf_convolution'`` never touch ``weights[0]``, and a
         full-field hi-res weight map costs as much memory as the mosaic itself.
+
+        Args:
+            wht_hi: In-memory weight override — the saturation-repaired
+                weights when ``repair_saturated`` is on, so the filled cores
+                keep their restored (non-zero) weights.
         """
         from astropy.io import fits
         from .catalog import get_bg_and_ivar
@@ -964,7 +979,9 @@ class Pipeline:
             return None
 
         bg_hi, ivar_hi = get_bg_and_ivar(
-            sci_hi, fits.getdata(path), bg_filter_sigma=cfg.bg_filter_sigma
+            sci_hi,
+            wht_hi if wht_hi is not None else fits.getdata(path),
+            bg_filter_sigma=cfg.bg_filter_sigma,
         )
         # The detection background is measured but NOT subtracted: that would
         # change 'default' templates too. It matters for the extended schemes,
@@ -999,6 +1016,24 @@ class Pipeline:
         segmap = as_label_array(fits.getdata(cfg.segmap))
         cat = Table.read(cfg.catalog)
 
+        wht_hi_repaired: np.ndarray | None = None
+        if cfg.repair_saturated:
+            from .repair import repair_in_memory
+
+            self._ensure_dpsfs(load_epsf=True)
+            rep = repair_in_memory(
+                tmpl_hi, fits.getdata(self.resolve_wht_hi()),
+                dpsf=self.dpsf_hi, wcs=wcs_hi, psf_pattern=cfg.pattern_hi,
+                catalog=cat, segmap=segmap,
+                out_dir=self.out_dir / "repaired",
+                plots=cfg.scene_plots,
+                **(cfg.repair_kwargs or {}),
+            )
+            tmpl_hi = rep["sci"]
+            wht_hi_repaired = rep["wht"]
+            cat = rep["catalog"]
+            segmap = as_label_array(rep["segmap"])
+
         if cfg.footprint_filter:
             scale_hi = proj_plane_pixel_scales(wcs_hi)[0]
             scale_lo = proj_plane_pixel_scales(wcs_lo)[0]
@@ -1032,7 +1067,7 @@ class Pipeline:
         ivar[bad] = 0.0
         ivar[~np.isfinite(ivar)] = 0.0
 
-        ivar_hi = self._load_detection_ivar(tmpl_hi)
+        ivar_hi = self._load_detection_ivar(tmpl_hi, wht_hi=wht_hi_repaired)
         bad_hi = ~np.isfinite(tmpl_hi)
         np.nan_to_num(tmpl_hi, copy=False)
         if ivar_hi is not None:
@@ -2597,7 +2632,6 @@ class Pipeline:
         list of ndarray
             Residual images corresponding to each fitted image.
         """
-        from .fit import SparseFitter
         from . import utils
         import warnings
 

@@ -3,6 +3,31 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Docs feedback round (2026-08-12). (1) Parameter blocks now render as
+  real definition lists — MyST's `deflist` extension was never enabled, so
+  every `param:` block had rendered as plain paragraphs — styled by
+  `docs/_static/custom.css` as quiet astropy-style panels (theme-aware,
+  scoped to hand-written pages). (2) Component pages trimmed: driver and
+  user-facing entry points keep full parameter documentation, internal
+  helpers collapsed to one-line summaries with API links (psf, psf_maps,
+  templates, catalog, fitting, preprocessing, simulation, diagnostics).
+  (3) New/fixed figures: EE growth curve in the drizzled-stamps section;
+  region montage regenerated with F444W roll diversity (106-133 deg, new
+  generator scratch/wren/make_psf_report_figs_rolls.py); composite-anatomy
+  figure rebuilt with all segments nulled in the halo panel and a
+  full-coverage object (scratch/wren/tmplfig/mk_idl_figs_docfix.py);
+  generated scene-partition illustration (scratch/docfigs/
+  scene_partition_fig.py); saturation-repair diagnostic embedded in
+  preprocessing.md. (4) catalog.md documents the external-catalog column
+  contract (required id/x/y 0-indexed; optional deblend/saturation/
+  flag_star/ra/dec/aperture columns), verified against _fit_catalog.
+  (5) fitting.md states SparseFitter is not in the production path (scene
+  solver does all fitting); the dead import in Pipeline.run removed.
+  (6) Real bug found by the figure generation and fixed:
+  `Templates.convolve_templates(inplace=True)` discarded the convolved
+  result (kept unconvolved originals) — the path `from_image` uses;
+  production (`inplace=False`) unaffected. Fixed + regression test;
+  stale docs caveat updated. Examples 3/3, build and sweep clean.
 - [x] Verification v4 (2026-08-12): `psf_wings` from main with the
   aperture estimator corrected by the recorded box EE
   (`ap_flux_total_<i> = ap_flux_corr_<i>/ee_psf_lo`; est1 panel reads it).

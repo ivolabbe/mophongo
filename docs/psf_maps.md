@@ -199,44 +199,19 @@ the position. Requires `psfs` to be set.
 
 ### Derived maps
 
-#### `group_by_pa`
+{meth}`~mophongo.psf_map.PSFRegionMap.group_by_pa` returns a new map in
+which regions whose contributing frames share a single position-angle class
+(derived from the supplied FITS headers) and the same relative per-detector
+exposure-time profile are dissolved into one region, reducing the region
+count on mosaics with many same-orientation exposures.
 
-```python
-prm.group_by_pa(pa_tol, hdrs, crs="EPSG:4326")
-```
-
-`pa_tol` : `float`
-: PA class width in degrees.
-
-`hdrs` : `Mapping[Hashable, fits.Header]`
-: FITS headers per frame identifier; used to derive each frame's WCS (for the
-  PA class), detector name (parsed from the identifier), and `EXPTIME`.
-
-`crs` : `str | None`, default `"EPSG:4326"`
-: Accepted for interface symmetry; as of this writing it is not used in the
-  merge.
-
-Returns a new `PSFRegionMap` in which regions whose contributing frames share
-a single PA class and the same relative per-detector exposure-time profile
-are dissolved into one region. Regions mixing PA classes are kept separate.
-This reduces the region count on mosaics with many same-orientation
-exposures.
-
-#### `overlay_with`
-
-```python
-prm.overlay_with(other)
-```
-
-`other` : `PSFRegionMap | shapely.geometry.Polygon`
-: A second region map, or a single clipping polygon.
-
-Returns a new `PSFRegionMap` whose regions are the pairwise intersections.
-Each output region records the parent keys as `psf_key_1` (and `psf_key_2`
-for a map-map overlay) and gets a fresh consecutive `psf_key`. The pipeline
-uses the map-map form to build the kernel map on the joint hi/lo geometry,
-and the polygon form to clip a footprint map to the drizzled mosaic outline.
-The result carries no `psfs`; the caller fills them in.
+{meth}`~mophongo.psf_map.PSFRegionMap.overlay_with` returns a new map whose
+regions are the pairwise intersections with a second map (or a single
+clipping polygon), recording the parent keys as `psf_key_1`/`psf_key_2`.
+The pipeline uses the map-map form to build the kernel map on the joint
+hi/lo geometry, and the polygon form to clip a footprint map to the
+drizzled mosaic outline; the result carries no `psfs`, the caller fills
+them in.
 
 ### Encircled energy
 
@@ -244,31 +219,15 @@ When `psfs` holds absolutely calibrated stamps, their finite sums are
 realized encircled energies (the shape-versus-throughput convention of
 {doc}`psf`). The map measures and caches them:
 
-#### `refresh_ee`
-
-```python
-prm.refresh_ee()
-```
-
-No parameters. Measures the encircled energy of every stamp via
-{func}`mophongo.psf.stamp_encircled_energy`. Called automatically on
-construction; call it again only if `psfs` is mutated in place, since
-replacement of the array is detected automatically.
-
-`ee_box` : property, `np.ndarray`
-: Encircled energy in the full square stamp, one value per `psf_key`.
-
-`ee_rlim` : property, `np.ndarray`
-: Encircled energy within the inscribed circle, one value per `psf_key`.
-
-`r_lim` : property, `float`
-: Inscribed-circle radius of the stamps, in units of `pscale`.
-
-`get_ee_box(ra, dec)` / `get_ee_rlim(ra, dec)` : `float`
-: Position lookups of the two arrays; `ra`, `dec` in degrees, with the same
-  NaN/miss fallback to index 0 as `get_psf`.
-
-Accessing any of these on a map without `psfs` raises `ValueError`.
+{meth}`~mophongo.psf_map.PSFRegionMap.refresh_ee` measures the encircled
+energy of every stamp via {func}`mophongo.psf.stamp_encircled_energy`; it
+runs automatically on construction and needs a manual call only if `psfs`
+is mutated in place. The results are exposed as the per-`psf_key` arrays
+`ee_box` (full square stamp) and `ee_rlim` (inscribed circle), the
+inscribed-circle radius `r_lim` (in units of `pscale`), and the position
+lookups `get_ee_box(ra, dec)` / `get_ee_rlim(ra, dec)`, which share the
+NaN/miss fallback of `get_psf`. Accessing any of these on a map without
+`psfs` raises `ValueError`.
 
 ### Serialization
 
@@ -292,22 +251,10 @@ are stored: `snap_tol`, `buffer_tol`, `area_factor`, `pscale`, and
 defaults unless passed again via `from_geojson` kwargs, and `name` is reset
 to the file's base name.
 
-#### `plot`
-
-```python
-prm.plot(column="psf_key", ax=None, edgecolor="k", cmap="tab20", **kwargs)
-```
-
-`column` : `str`, default `"psf_key"`
-: Regions column to color by.
-
-`ax` : matplotlib axis, optional
-: Axis to draw into; a new figure is created when `None`.
-
-`edgecolor` : default `"k"`; `cmap` : default `"tab20"`; `**kwargs`
-: Forwarded to `GeoDataFrame.plot`.
-
-Returns `(fig, ax)` with the x-axis inverted (RA increasing left).
+{meth}`~mophongo.psf_map.PSFRegionMap.plot` draws the regions colored by a
+column (default `psf_key`), forwarding extra keywords to
+`GeoDataFrame.plot`, and returns `(fig, ax)` with the x-axis inverted (RA
+increasing left).
 
 ## How the pipeline builds and consumes region maps
 
@@ -341,9 +288,10 @@ kernel carries no flux scale of its own, and the map is written to
 :width: 100%
 :alt: Per-region PSFs for three bands and the corresponding matching kernels.
 
-Per-region stamps from the built maps; each column is one region. The PSF
-drizzled at the region centroid changes with the number and roll angles of
-the contributing frames (top three rows: F444W, F770W, F1800W), and each
+Per-region stamps from the built maps; each column is one region, ordered by
+the mean position angle of the contributing F444W frames (106–133 deg). The
+PSF drizzled at the region centroid changes with the number and roll angles
+of the contributing frames (top three rows: F444W, F770W, F1800W), and each
 region of the overlay carries its own matching kernel (bottom row).
 ```
 

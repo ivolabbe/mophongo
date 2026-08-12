@@ -208,84 +208,67 @@ Module constants:
 
 ### Methods
 
-`write()` — emits the per-filter `wcs.csv` and empty mosaic FITS stubs, and
-returns the `paths` dict (per filter: `csv`, `fits`, `wcs`, `n_rows`,
-`crpix`, `size`, `pscale`, `family`) that all later steps consume.
-
-`inject_noise(filter_name, paths, K=None, pixfrac=None, seed=None,
-bunit=None, dpsf=None)` — rasterizes the exposure-time map from detector
-footprints, draws Gaussian noise, overwrites `_sci.fits`, and writes
-`_wht.fits`. Parameters override the corresponding config fields; `dpsf`
-supplies a pre-built {class}`mophongo.psf.DrizzlePSF`. Returns a dict with
-`sci`, `wht`, `texp`, `sigma_nom`, `sigma_pix`, `R`, `K`, `p_in`, `p_out`,
-`pixfrac`. `inject_noise_all(paths, **kwargs)` runs it for every filter with
-a known `K` (skipping the rest) and forwards `kwargs`.
-
-`load_drizzle_psfs(paths, psf_dir=None, stpsf_patterns=None)` — returns a
-per-filter `DrizzlePSF` with its STPSF ePSF grid loaded from `psf_dir`
-(default: `stpsf_dir` or `data/PSF`); `stpsf_patterns` overrides filename
-patterns per filter.
-
-`sample_positions(n, dpsf, seed=None, oversample=4, coverage=None)` —
-rejection-samples `n` (RA, Dec) positions uniformly inside the valid
-drizzled-PSF coverage of `dpsf` (or an explicit shapely `coverage`
-geometry); `oversample` controls the candidate batch size.
-
-`inject_point_sources(paths, dpsfs, n=100, snr_range=None,
-ref_filter="f444w", apertures_arcsec=None, psf_size_arcsec=None,
-source_sigma_pix=None, source_sigma_pscale=None,
-point_source_fraction=None, source_psf_normalization=None,
-sample_filters=None, positions_radec=None,
-filter_position_offsets_pix=None, seed=None)` — injects `n` sources and
-returns the truth table. `None` for any config-mirroring parameter falls
-back to the corresponding field. Positions are sampled inside the
-`ref_filter` coverage, or inside the intersection of the filters named in
-`sample_filters` so every source has a template in each; `positions_radec`
-supplies explicit position arrays instead. Per-source flux is set from the
-target SNR via the matched filter on the `ref_filter` weight map
-(`SNR = F * sqrt(sum(P**2 * wht))`), and the same true flux is painted in
-every filter through {meth}`~mophongo.mock_mosaic.MockMosaic.get_filter_psf_radec`.
-`filter_position_offsets_pix` shifts painted positions in named filters by
-(dx, dy) mosaic pixels, for astrometric-recovery tests. `source_sigma_pix`
-may also be a length-`n` array of per-source sigmas. Truth columns: `id`,
-`ra`, `dec`, `source_sigma_pix`, `source_sigma_arcsec`, `is_point_source`,
-`source_psf_normalization`, `snr_<ref>`, and per filter `x_<f>`, `y_<f>`,
-`flux_<f>`, `flux_aper_D<ddd>_<f>` (one per aperture diameter),
-`psf_gaussian_fwhm_pix_<f>`, `psf_gaussian_fwhm_arcsec_<f>`, `valid_<f>`.
-
-`source_model_templates(filter_name, *, paths=None, ids=None,
-normalize=False)` — returns the exact unit-flux source models painted into
-the mock as a {class}`mophongo.templates.Templates` collection, useful for
-separating template-extraction errors from the linear flux solve. `ids`
-restricts to a source-id subset; `normalize` forwards to
-`Templates.from_cutout_models`.
-
 `build(n_sources=200, psf_dir=None, ref_filter="f444w",
-sample_filters=None)` — chains `write`, `inject_noise_all`,
+sample_filters=None)` — the driver: chains `write`, `inject_noise_all`,
 `load_drizzle_psfs`, and `inject_point_sources`, writes `mock_truth.ecsv`,
 and returns `(paths, noise_info, dpsfs, truth)`.
 
-`report()` — logs per-filter mosaic shape, coverage, and valid-source
-counts. `plot(save=True, figsize=None, ref_snr="snr_f444w",
-stretch_sigma=2.0, dpi=900)` — diagnostic figure with the science mosaics,
-detector footprints, and truth sources; `save=True` writes
-`mock_diagnostic.png` in `out_dir`, a path saves there instead.
+The step methods it chains, and the remaining utilities, are summarized
+below; follow the links for full signatures.
 
-`blur_filter_psf(filter_name, psf, *, pscale=None)` — applies the configured
-extra Gaussian blur to a PSF stamp or cube on its own grid (`pscale` in
-arcsec; `None` uses the filter's output scale). The operator is an exact
-analytic Gaussian transfer function in Fourier space
+{meth}`~mophongo.mock_mosaic.MockMosaic.write` — emits the per-filter
+`wcs.csv` and empty mosaic FITS stubs, and returns the per-filter `paths`
+dict that all later steps consume.
+
+{meth}`~mophongo.mock_mosaic.MockMosaic.inject_noise` — rasterizes the
+exposure-time map from the detector footprints, draws Gaussian noise
+following the convention above, overwrites `_sci.fits`, and writes
+`_wht.fits`; returns a per-filter noise-info dict.
+{meth}`~mophongo.mock_mosaic.MockMosaic.inject_noise_all` runs it for every
+filter with a known `K`.
+
+{meth}`~mophongo.mock_mosaic.MockMosaic.load_drizzle_psfs` — returns a
+per-filter {class}`~mophongo.psf.DrizzlePSF` with its STPSF ePSF grid
+loaded.
+
+{meth}`~mophongo.mock_mosaic.MockMosaic.sample_positions` —
+rejection-samples (RA, Dec) positions uniformly inside the valid
+drizzled-PSF coverage.
+
+{meth}`~mophongo.mock_mosaic.MockMosaic.inject_point_sources` — injects `n`
+sources and returns the truth table. Per-source flux is set from a
+log-uniform target SNR via the matched filter on the reference-filter
+weight map, and the same true flux is painted in every filter through
+{meth}`~mophongo.mock_mosaic.MockMosaic.get_filter_psf_radec`; keyword
+options select the sampling footprint, explicit positions, per-filter
+position offsets (for astrometric-recovery tests), and source-profile
+overrides. Truth columns record `id`/`ra`/`dec`, source-profile metadata,
+`snr_<ref>`, and per filter `x_<f>`, `y_<f>`, `flux_<f>`, aperture fluxes,
+blur bookkeeping, and `valid_<f>`.
+
+{meth}`~mophongo.mock_mosaic.MockMosaic.source_model_templates` — returns
+the exact unit-flux source models painted into the mock as a
+{class}`mophongo.templates.Templates` collection, useful for separating
+template-extraction errors from the linear flux solve.
+
+{meth}`~mophongo.mock_mosaic.MockMosaic.report` — logs per-filter mosaic
+shape, coverage, and valid-source counts.
+{meth}`~mophongo.mock_mosaic.MockMosaic.plot` — diagnostic figure with the
+science mosaics, detector footprints, and truth sources
+(`mock_diagnostic.png`).
+
+{meth}`~mophongo.mock_mosaic.MockMosaic.blur_filter_psf` — applies the
+configured extra Gaussian blur to a PSF stamp or cube on its own grid. The
+operator is an exact analytic Gaussian transfer function in Fourier space
 ({func}`mophongo.mock_mosaic.gaussian_blur_fourier`), so it is
 grid-independent and exact for sub-pixel sigmas.
-`get_filter_psf_radec(filter_name, dpsf, positions, *, filter_pattern=None,
-size=None, verbose=False)` — the mock's PSF creation hook: delegates to
+{meth}`~mophongo.mock_mosaic.MockMosaic.get_filter_psf_radec` — the mock's
+PSF creation hook: delegates to
 {meth}`mophongo.psf.DrizzlePSF.get_psf_radec`, then applies
 `blur_filter_psf`.
 
-`default_stpsf_pattern(filter_name)` (static) — default ePSF filename
-pattern; as of this writing the literal values are
-`"UDS_MIRI_<FILTER>_OS4_GRID1"` for MIRI and
-`"UDS_NRC.._<FILTER>_OS4_GRID1"` for NIRCam.
+{meth}`~mophongo.mock_mosaic.MockMosaic.default_stpsf_pattern` (static) —
+default ePSF filename pattern per filter.
 
 `to_dict()` / `from_dict(d)` / `to_json(path)` / `from_json(path)` — full
 config round-trip; JSON-loaded lists are coerced back to tuples and
@@ -340,21 +323,21 @@ orange predicted-error envelope indicates.
 
 ### Result dataclasses
 
-All four are frozen dataclasses.
+All four are frozen dataclasses; follow the links for field-level detail.
 
-- `PSFShape` — `shape` (unit-sum PSF array) and `throughput` (finite-stamp
-  sum). Encodes the package convention that fitting uses unit-sum shapes
-  while the finite stamp sum is filter-level throughput metadata.
-- `WHTNoiseCheck` — summary of `(sci - truth) * sqrt(wht)`: `filter_name`,
-  `n_pix`, `std`, `mad`, `median`, plus `wht_type` and `rnoise` header
-  values (both default `None`).
-- `WienerPSFMaps` — `source_map`, `target_map`, `kernel_map`
-  ({class}`mophongo.psf_map.PSFRegionMap` instances), `wiener_lambda`, and
-  `source_throughputs`/`target_throughputs` arrays.
-- `PipelineScenarioResult` — `scenario`, `pipeline`, `table`,
-  `source_table`, `residuals`, `residual_native`, `model_native`,
-  `output_dir`, `summary`. The `summary` dict carries the recovery
-  statistics downstream scripts consume: `med_hi`/`med_lo` and
+- {class}`~mophongo.verification.PSFShape` — a unit-sum PSF `shape` with
+  its finite-stamp `throughput`, encoding the package convention that
+  fitting uses unit-sum shapes while the stamp sum is filter-level
+  throughput metadata.
+- {class}`~mophongo.verification.WHTNoiseCheck` — summary statistics of
+  `(sci - truth) * sqrt(wht)` for one filter.
+- {class}`~mophongo.verification.WienerPSFMaps` — the source, target, and
+  kernel {class}`mophongo.psf_map.PSFRegionMap` trio with the chosen Wiener
+  lambda and per-region throughputs.
+- {class}`~mophongo.verification.PipelineScenarioResult` — one scenario
+  run: the pipeline, fit and source-recovery tables, residual and model
+  images, output directory, and `summary`. The `summary` dict carries the
+  recovery statistics downstream scripts consume: `med_hi`/`med_lo` and
   `p16_lo`/`p84_lo` (recovered/true flux medians and quantiles),
   `pull_lo_median`/`pull_lo_std` (error-normalized pulls),
   `resid_std_over_noise`, plus run bookkeeping (`template_extension`,
@@ -363,48 +346,46 @@ All four are frozen dataclasses.
 
 ### PSF shape and throughput helpers
 
-- `prepare_psf_shape(psf, label="PSF")` — returns a `PSFShape` without
-  renormalizing the native stamp in place; raises on a non-positive sum.
-- `filter_average_throughput(values)` — mean of the finite positive stamp
-  sums; 1.0 when none are usable. Feeds `Pipeline(psf_throughputs=...)`.
-- `parse_regularization_grid(value)` — parses a comma-separated string or
-  sequence into a validated positive float array
-  (`DEFAULT_WIENER_REG_GRID` spans 1e-6 to 0.1).
-- `psf_centroid_info(psf, prefix)` — peak and center-of-mass centroid of a
-  stamp, returned as `<prefix>_*` dict entries; measurement only.
-- `apply_mock_filter_blur_on_grid(mock, filter_name, psf, *, grid_pscale)` —
-  applies `MockMosaic.blur_filter_psf` on the given grid so PSF/kernel maps
-  receive the identical blur operator as the painted sources.
+- {func}`~mophongo.verification.prepare_psf_shape` — wraps a stamp as a
+  `PSFShape` without renormalizing the native stamp in place.
+- {func}`~mophongo.verification.filter_average_throughput` — mean of the
+  finite positive stamp sums; feeds `Pipeline(psf_throughputs=...)`.
+- {func}`~mophongo.verification.parse_regularization_grid` — parses a
+  string or sequence into a validated positive float array.
+- {func}`~mophongo.verification.psf_centroid_info` — peak and
+  center-of-mass centroid of a stamp; measurement only.
+- {func}`~mophongo.verification.apply_mock_filter_blur_on_grid` — applies
+  `MockMosaic.blur_filter_psf` on the given grid so PSF/kernel maps receive
+  the identical blur operator as the painted sources.
 
 ### Pointing generators
 
-- `offset_pointing(center, *, dx_arcsec, dy_arcsec, pa)` — `Pointing`
-  offset from `center` by small sky offsets.
-- `native_phase_dither_pointings(center, *, family, n_dither, pa)` — up to 8
-  deterministic dithers sampling native-pixel sub-pixel phases for the given
-  detector family; `n_dither <= 1` returns the center pointing.
-- `nircam_lw_phase_pointings(center, *, pa=0.0, n_dither=6)` — the NIRCam LW
-  specialization.
-- `miri_center_for_nircam_detector(center, *, detector, pa=0.0,
-  miri_detector=("MIRIM",))` — MIRI pointing center whose footprint centroid
-  matches one named NIRCam LW detector.
-- `miri_two_macro_phase_pointings(center, *, pa=0.0,
-  nircam_detectors=("NRCA5", "NRCB5"), miri_detector=("MIRIM",),
-  n_dither=8)` — two MIRI macro positions aligned to the LW detectors, each
-  with deterministic phase dithers.
-- `write_pointing_summary(paths, out_dir)` — writes `wcs_products.csv`
-  listing the WCS CSV and mosaic FITS paths, frame counts, and pixel scales.
+- {func}`~mophongo.verification.offset_pointing` — `Pointing` offset from a
+  center by small sky offsets.
+- {func}`~mophongo.verification.native_phase_dither_pointings` —
+  deterministic dithers sampling native-pixel sub-pixel phases for a
+  detector family; {func}`~mophongo.verification.nircam_lw_phase_pointings`
+  is the NIRCam LW specialization.
+- {func}`~mophongo.verification.miri_center_for_nircam_detector` — MIRI
+  pointing center whose footprint centroid matches one named NIRCam LW
+  detector.
+- {func}`~mophongo.verification.miri_two_macro_phase_pointings` — two MIRI
+  macro positions aligned to the LW detectors, each with deterministic
+  phase dithers.
+- {func}`~mophongo.verification.write_pointing_summary` — writes
+  `wcs_products.csv` listing the WCS CSV and mosaic FITS paths, frame
+  counts, and pixel scales.
 
 ### Weight sanity checks
 
-- `wht_noise_check(sci, truth, wht, *, filter_name="", header=None)` —
-  verifies that a weight map is actual inverse variance: over valid pixels,
+- {func}`~mophongo.verification.wht_noise_check` — verifies that a weight
+  map is actual inverse variance: over valid pixels,
   `(sci - truth) * sqrt(wht)` should have unit scatter. Returns a
-  `WHTNoiseCheck`. `wht_noise_check_from_fits(sci_path, truth_path,
-  wht_path, *, filter_name="")` is the FITS-loading wrapper.
-- `actual_inverse_variance(noise_info, filter_name, fallback_wht)` —
-  inverse variance rebuilt from the mock's stored `sigma_pix`, falling back
-  to the given weight map.
+  `WHTNoiseCheck`; {func}`~mophongo.verification.wht_noise_check_from_fits`
+  is the FITS-loading wrapper.
+- {func}`~mophongo.verification.actual_inverse_variance` — inverse variance
+  rebuilt from the mock's stored `sigma_pix`, falling back to the given
+  weight map.
 
 ### The standard two-detector mock
 
@@ -418,29 +399,13 @@ noise and sources, saves `mock_config.json`, `wcs_products.csv`,
 (`ref_filter="f770w"`) and sampled inside the F444W/F770W footprint
 intersection, so every source has a template in both bands.
 
-`out_dir` (path, required); `psf_dir` (path, required, keyword-only) — STPSF
-grid directory. Remaining keyword parameters:
-
-- `nsrc` (`int`, 300) — number of injected sources.
-- `center` (`tuple`, `(34.50, -5.20)`) — field center (RA, Dec) degrees.
-- `pa` (`float`, 0.0) — position angle.
-- `snr_range` (`tuple`, `(1.0, 500.0)`) — log-uniform SNR range.
-- `sigma_range` (`tuple`, `(1.0, 5.0)`) — intrinsic source sigma range in
-  40 mas pixels.
-- `point_source_fraction` (`float`, 0.10) — fraction forced to point
-  sources.
-- `seed` (`int`, 42) — random seed.
-- `image_size` (`int | None`, `None`) — square mosaic size on the reference
-  grid; `None` auto-fits the footprints.
-- `source_pattern` / `target_pattern` (`str`, `DEFAULT_F444W_PATTERN` /
-  `DEFAULT_F770W_PATTERN`) — ePSF filename patterns for F444W and F770W.
-- `nircam_detectors` (`Sequence[str]`, `("NRCA5", "NRCB5")`) and
-  `miri_detector` (`Sequence[str]`, `("MIRIM",)`) — detector restrictions.
-- `f770w_position_shift_xy` (`tuple | None`, `None`) — deliberate F770W
-  source-position shift in F770W mosaic pixels (limited to ±1 per axis), for
-  astrometric-recovery tests.
-- `psf_gaussian_fwhm_arcsec` (`float | dict | None`, `None`) — extra PSF
-  broadening; `None` keeps the `MockMosaic` default, `0.0` or `{}` disables.
+Keyword parameters (see
+{func}`~mophongo.verification.build_realistic_two_detector_mock` for the
+full list and defaults) control the source count and seed, SNR and
+intrinsic-size ranges and point-source fraction, field center and mosaic
+size, ePSF filename patterns and detector restrictions, an optional
+deliberate F770W source-position shift for astrometric-recovery tests, and
+the extra PSF broadening.
 
 ### PSF and kernel maps
 
@@ -478,31 +443,20 @@ defaulting to the internal band name.
 
 ### Truth matching and recovery tables
 
-- `remap_detection_to_truth(sci_path, wht_path, truth, *, ndilate=0)` —
-  runs {class}`mophongo.catalog.Catalog` detection on the high-resolution
-  mock image and relabels the segmentation map with truth-source ids
-  (`ndilate` optionally dilates segments first). A blended segment
-  containing several truth sources is assigned to its brightest member;
-  other members and undetected sources get a 3x3 stamp. Returns
-  `(segmap, catalog)` with catalog deblend metadata (`is_deblended`,
-  `deblend_parent_label`, `deblend_nchildren`) propagated.
-- `build_source_recovery_table(fit_table, truth, *, true_flux_col,
-  fitted_indices, snr_col=None, sigma_col="source_sigma_pix",
-  point_source_col="is_point_source", template_extension=None)` — joins a
-  pipeline catalog ({doc}`outputs`) to the truth table by id. For each
-  fitted image index `i`, raw amplitudes are kept as `flux_<i>_model`;
-  `flux_<i>_total` is read from the catalog when present, otherwise computed
-  from `throughput_<i>`; ratio and pull columns (`ratio_<i>`,
-  `pull_<i>_pred`, `pull_<i>_cov`) compare totals to `flux_true`. The
-  optional `snr_col`/`sigma_col`/`point_source_col` columns are copied when
-  present in `truth`, the deblend metadata columns when present in
-  `fit_table`; `template_extension` stamps a constant label column.
-- `segment_weighted_positions(image, segmap, ids)` — flux-weighted mean
-  (x, y) per segment; NaN for segments without positive flux. Used to flag
-  truth/segment mismatches.
-- `residual_to_native(residual, native_shape)` — block-sums an upsampled
-  residual back to the native low-resolution grid (inverse of the
-  flux-conserving block replication used by multi-resolution fitting).
+- {func}`~mophongo.verification.remap_detection_to_truth` — runs
+  {class}`mophongo.catalog.Catalog` detection on the high-resolution mock
+  image and relabels the segmentation map with truth-source ids; a blended
+  segment is assigned to its brightest truth member, and other members and
+  undetected sources get a 3x3 stamp.
+- {func}`~mophongo.verification.build_source_recovery_table` — joins a
+  pipeline catalog ({doc}`outputs`) to the truth table by id, keeping raw
+  amplitudes as `flux_<i>_model` and totals as `flux_<i>_total`, with
+  ratio and pull columns (`ratio_<i>`, `pull_<i>_pred`, `pull_<i>_cov`)
+  comparing totals to `flux_true`.
+- {func}`~mophongo.verification.segment_weighted_positions` — flux-weighted
+  mean (x, y) per segment; used to flag truth/segment mismatches.
+- {func}`~mophongo.verification.residual_to_native` — block-sums an
+  upsampled residual back to the native low-resolution grid.
 
 ### Scenario runner
 
@@ -544,58 +498,37 @@ labels, so the F770W-keyed mock slots can carry another band's name.
 ### Diagnostic figure helpers
 
 These emit the standard verification figures; see {doc}`diagnostics` for the
-pipeline-side diagnostics they build on.
+pipeline-side diagnostics they build on, and the API links for full
+signatures.
 
-- `diagnostic_note(*, nsrc, sigma_range, point_source_fraction,
-  template_dilate_segmap, wiener_lambda=None, template_extension=None,
-  f770w_position_shift_xy=None)` — compact caption string summarizing a
-  scenario.
-- `diagnostic_lupton_norm(img)` — the shared asinh display normalization.
-- `label_segmap(ax, segmap, catalog, fontsize=10)` — overlays catalog
-  positions as index labels; no-op without `x`/`y` columns.
-- `save_diagnostic_image(filename, truth, hires, lowres, model, residual,
-  *, segmap=None, catalog=None, caption=None, stamp_grid=None,
-  stamp_grid_title="bright-source residual pulls",
-  stamp_grid_labels=None, dpi=None)` — the standard
+- {func}`~mophongo.verification.diagnostic_note` — compact caption string
+  summarizing a scenario.
+- {func}`~mophongo.verification.diagnostic_lupton_norm` — the shared asinh
+  display normalization.
+- {func}`~mophongo.verification.label_segmap` — overlays catalog positions
+  as index labels.
+- {func}`~mophongo.verification.save_diagnostic_image` — the standard
   truth/hires/segmap/lowres/model/residual panel figure, with an optional
-  residual-pull stamp grid; `dpi=None` picks a DPI that samples every image
-  pixel.
-- `bright_source_residual_stamp_grid(residual, ivar, ids, truth_by_id,
-  is_deblended_by_id, *, filt="f770w", n_stamps=16, half_size=6)` —
-  residual/noise stamps of the brightest sources plus label annotations
-  marking deblended detections; returns `(grid, labels)`.
-- `crop_from_origin(arr, shape, origin_yx)` and
-  `segmap_lower_left_origin(segmap)` — cropping utilities used by
-  `save_realistic_full_diagnostic(path, *, paths, img_444, img_770_bgsub,
-  model_770, resid_770, segmap, caption, stamp_grid, stamp_grid_labels,
-  highres_size)`, which crops all panels to the lower-left covered tile of
-  size `highres_size` (high-resolution pixels) and calls
+  residual-pull stamp grid.
+- {func}`~mophongo.verification.bright_source_residual_stamp_grid` —
+  residual/noise stamps of the brightest sources, annotated to mark
+  deblended detections.
+- {func}`~mophongo.verification.crop_from_origin` and
+  {func}`~mophongo.verification.segmap_lower_left_origin` — cropping
+  utilities used by
+  {func}`~mophongo.verification.save_realistic_full_diagnostic`, which
+  crops all panels to the lower-left covered tile and calls
   `save_diagnostic_image`.
-- `save_scene_diagnostics(pipe, tmpl_image, segmap, out_dir, *,
-  scene_collection_index=-1, max_scenes=12, display_sig=5.0)` — writes
-  `scene_catalog.csv` (per-scene template counts, bounding boxes, median
-  fitted astrometric shifts), a `scene_overview.png` via
-  `save_scene_overview(image, segmap, scenes, filename, *, alpha=0.42)`,
-  and per-scene `Scene.plot` figures for the `max_scenes` largest scenes of
-  the selected fitted-scene collection.
-- `save_flux_recovery_plot(filename, truth, recovered, *, error=None,
-  label="Recovered Flux", xlabel="True Flux", ylabel="Recovered Flux",
-  snr_values=None, point_source_mask=None, deblended_mask=None,
-  error_label="Error", systematic_error_fraction=0.0, caption=None)` — the
-  standard four-panel recovery figure: flux vs truth, ratio vs truth with a
-  SNR axis, pull histogram with MAD Gaussian fits, and pull vs recovered
-  flux. `systematic_error_fraction` adds a fractional error floor in
-  quadrature; the masks highlight point sources and deblended children.
-- `plot_saturated_catalog_repair(sci, seg_before, seg_after, cat_before,
-  cat_after, merge_log, *, out_path, n_sources=4, half_size=None,
-  pad_factor=1.8, id_col="id", x_col="x", y_col="y", select_ids=None,
-  asinh_a=0.1, sci_percentiles=(1.0, 99.5))` — before/after cutout panels
-  for {func}`mophongo.catalog.repair_saturated_catalog` merges: science
-  image, oversplit children, and merged parent per selected `merge_log` row
-  (`select_ids` picks explicit parents, otherwise the `n_sources` rows with
-  most children); `half_size=None` sizes cutouts from the parent segment
-  area scaled by `pad_factor`; `asinh_a` and `sci_percentiles` set the
-  stretch.
+- {func}`~mophongo.verification.save_scene_diagnostics` — writes
+  `scene_catalog.csv`, a `scene_overview.png` via
+  {func}`~mophongo.verification.save_scene_overview`, and per-scene
+  `Scene.plot` figures for the largest fitted scenes.
+- {func}`~mophongo.verification.save_flux_recovery_plot` — the standard
+  four-panel recovery figure: flux vs truth, ratio vs truth with a SNR
+  axis, pull histogram with MAD Gaussian fits, and pull vs recovered flux.
+- {func}`~mophongo.verification.plot_saturated_catalog_repair` —
+  before/after cutout panels for
+  {func}`mophongo.catalog.repair_saturated_catalog` merges.
 
 ## Relation to real-data runs
 

@@ -10,9 +10,9 @@ and the catalog, without running the photometry pipeline:
    ring around each one, and fill the core with the best-fit PSF model.
    The result is a repaired science/weight FITS pair that can be used as
    the detection image for any catalog software.
-2. **Catalog repair** (optional) — merge the fragmented segments of each
-   repaired star into a single parent source and add a
-   `FLAG_SATURATED_<FILTER>` column to the catalog.
+2. **Catalog repair** (optional) — flag the fragmented segments of each
+   repaired star in a `FLAG_SATURATED_TMPL` column and clean them out of
+   the segmentation map, keeping one segment per star.
 
 ## Quick start
 
@@ -48,10 +48,12 @@ when the filename does not contain it.
 - **PSF grids.** STDPSF FITS grids are loaded from `--psf-dir` (default
   `<sci dir>/PSF`); filenames are matched against `--psf-pattern` (a
   regex, default `NRC.._<FILTER>` for NIRCam and `<FILTER>` otherwise).
-  When none match, one is generated per detector at the modal exposure
-  epoch with [stpsf](https://stpsf.readthedocs.io), which requires the
-  stpsf reference data to be installed. Pass `--no-build-psf` to fail
-  instead of generating.
+  When none match, grids are generated with
+  [stpsf](https://stpsf.readthedocs.io) — one per detector per
+  observation epoch (`date_mode="cluster"`, the same policy as the
+  pipeline's PSF generation), and the grid nearest in MJD is used for
+  each contributing exposure. Requires the stpsf reference data. Pass
+  `--no-build-psf` to fail instead of generating.
 
 ## Outputs
 
@@ -62,10 +64,11 @@ names are built from the input stems:
 | --- | --- |
 | `<sci>_repaired.fits` | science image, saturated cores replaced by the PSF model |
 | `<wht>_repaired.fits` | weight map, repaired pixels restored to the local weight |
-| `<sci>_saturate_repair.csv` | per-hole fit table (amplitude, quality metrics, status) |
-| `<catalog>_repaired.fits` | catalog with merged parents and `FLAG_SATURATED_<FILTER>` |
-| `<segmap>_repaired.fits` | segmentation map with child labels merged per star |
-| `<catalog>_mergelog.csv` | one row per merged star: parent id and child labels |
+| `<sci>_saturate_repair.csv` (+ `.fits`) | per-hole fit table (amplitude, quality metrics, status) |
+| `<catalog>_flagged.fits` | catalog with `FLAG_SATURATED_TMPL` on star-dominated segments |
+| `<segmap>_flagged.fits` | segmentation map with the flagged segments set to 0 |
+| `<catalog>_flaglog.csv` | per (star, segment): observed flux, model flux, flag decision |
+| `<catalog>_flag_diagnostic.png` | per-star before/after panels (see below) |
 
 With `--mode subtract` the image outputs are named `<sci>_subtracted.fits`
 / `<wht>_subtracted.fits` and the CSV `<sci>_saturate_subtract.csv`; in
@@ -80,26 +83,54 @@ filter is known) header keywords for provenance.
 
 ### The saturation flag
 
-`FLAG_SATURATED_<FILTER>` (e.g. `FLAG_SATURATED_F444W`) is `1` for
-catalog rows whose photometry rests on a repaired core: the fragmented
-child rows are removed and replaced by one parent row at the PSF-fit
-position. Downstream users can select or reject these sources with a
-single column cut. The parent row is inherited from the largest child
-segment, with its `id`, `x` and `y` replaced by the PSF-fit values.
+Catalogs built before the repair split each saturated star into many
+spurious sources: an empty core, wedges of PSF wing, and diffraction
+spike fragments. The catalog step identifies those segments by comparing
+fluxes: the best-fit star model from the image repair (`A · PSF`) is
+placed at each star, and a segment is considered saturated when the
+model accounts for more than `--flux-frac` (default 0.3) of the observed
+flux in its pixels *and* the model flux exceeds a noise floor
+(`min_snr x sky_noise x sqrt(n_pix)`, default 5σ — without it every
+noise-level segment in the far wings would flag on a near-zero
+denominator). A genuine neighbour whose own light dominates over the
+star's wings fails the flux test and is kept.
 
-The merge is conservative when it can be: a candidate segment inside the
-merge circle is absorbed only if the scaled PSF model accounts for at
-least `flux_frac_thresh` (default 0.5) of the science flux in its pixels,
-so a neighbour whose own light dominates over the star's wings stays a
-separate source (see
-{func}`mophongo.catalog.repair_saturated_catalog`). Without that test the
-merge is geometric: every segment inside the circle becomes part of the
-star.
+The flag column encodes star membership: all flagged segments of one
+star get the same **group id** — the lowest flagged segment id of that
+star — in `FLAG_SATURATED_TMPL` (e.g. segments 6, 7, 9, 100 of one
+star all get 6). `flag > 0` is the boolean cut; equal values group rows
+belonging to the same star. The column name is band-independent
+(`TMPL` = the template band the repair ran on) so downstream code does
+not change when the detection band does; pass `filter_name` to override.
+No rows are dropped or added, so row order and matching to other
+versions of the catalog are preserved.
+
+In the output segmentation map the flagged labels are set to 0, and the
+star's core — the undetected `seg = 0` region plus the repaired pixels
+within the fit radius `r_in` — is set to the group id. The group-id
+row therefore keeps a segment covering the PSF-repaired core, and a
+mophongo run on the repaired image models the star as a normal source
+while the flag column marks its photometry as saturated-repaired.
+
+Every decision is recorded in `<catalog>_flaglog.csv` (observed flux,
+model flux, ratio, and group id per segment), and a diagnostic PNG is
+written by default with five panels per star: segmap before; science
+before the repair with the to-flag segments overlaid; repaired science
+with the flagged segments overlaid; segmap after with the whole star
+(flagged segments + filled core) in a single color; and the repaired
+science with the flagged segments zeroed, so the kept neighbours stand
+out.
+
+With `--merge` the flagged children are instead merged destructively
+into a single parent row at the PSF-fit position, inherited from the
+largest child segment (see
+{func}`mophongo.catalog.repair_saturated_catalog`); outputs then use the
+`_repaired` suffix and a `_mergelog.csv`.
 
 ## Python API
 
 ```python
-from mophongo.repair import repair_image, flag_catalog
+from mophongo.repair import repair_image, flag_catalog, drizzled_psf_stamp
 
 res = repair_image("mosaic-f444w_drc_sci.fits", "mosaic-f444w_drc_wht.fits")
 res["fits"]        # per-hole fit table
@@ -107,18 +138,24 @@ res["sci_out"]     # path of the repaired science image
 
 flag_catalog(
     "SUPER_CATALOG.fits", "SEGMAP.fits", res["fits"],
-    filter_name=res["filter"], fwhm_pix=res["fwhm_pix"],
+    sci=res["sci"],                       # repaired image
+    psf_stamp=drizzled_psf_stamp(res["dpsf"], res["psf_pattern"], npix=401),
+    flux_frac=0.3,
 )
 ```
 
 Both functions are thin wrappers around
 {func}`mophongo.saturate.repair_saturated_holes` and
-{func}`mophongo.catalog.repair_saturated_catalog`; keywords of the
-underlying functions pass through, except the ones the wrappers set
-themselves (`wcs`, `psf_filter`, `output_csv`, `plot_dir` for
-`repair_image`). The neighbour-protection flux filter needs both `sci`
-and a unit-sum `psf_stamp` passed to `flag_catalog` — the command line
-does this automatically.
+{func}`mophongo.catalog.flag_saturated_segments` /
+{func}`mophongo.catalog.repair_saturated_catalog` (`merge=True`);
+keywords of the underlying functions pass through, except the ones the
+wrappers set themselves (`wcs`, `psf_filter`, `output_csv`, `plot_dir`
+for `repair_image`). Segments are compared only where the model is
+non-zero, so the `psf_stamp` support sets how far from each star
+segments can be flagged: an ePSF is identically zero beyond its native
+field of view. For bright stars whose diffraction spikes fragment the
+segmentation map, drizzle the stamp from a large-FOV (~30") ePSF and use
+a generous `npix`, as in the example notebook.
 
 ## Tuning
 
@@ -134,9 +171,13 @@ does this automatically.
 - `--merge-radius` (default 3) closes gaps between nearby `wht = 0`
   fragments before hole labelling, so a saturation footprint broken up
   by the dither pattern counts as one star.
-- `--n-fwhm` (default 5) sets the catalog merge radius in units of the
-  FWHM. Increase it when diffraction spikes fragment the segmentation map
-  far from the core.
+- `--flux-frac` (default 0.3) is the catalog flag threshold: a segment
+  is flagged when the star model exceeds this fraction of its observed
+  flux. Lower values flag more aggressively.
+- `--merge` switches the catalog step from flag-only to the destructive
+  merge; `--n-fwhm` (default 5) then sets the merge radius in units of
+  the FWHM. Increase it when diffraction spikes fragment the
+  segmentation map far from the core.
 - `--plots` writes one diagnostic PNG per hole that reached the fitting
   stage — data, fitted model, fitting ring, and the repaired result —
   into `<sci>_saturate_<mode>_png/`.

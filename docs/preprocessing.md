@@ -86,6 +86,20 @@ sequence is:
    residual pixels are blanked (`sci = wht = 0`) so downstream photometry
    skips them.
 
+```{figure} images/saturation_repair_diagnostic.png
+:width: 100%
+:alt: Two rows of five panels showing the data, scaled PSF model, residuals, hole and fit-ring overlays, repaired image, radial profile, and polar residual map for one repaired saturated star.
+
+Per-source repair diagnostic for a saturated star in an F444W mosaic, as
+rendered by `plot_repair_diagnostic`. Top row: data, shifted PSF model
+`A·ψ`, shifted and no-shift residuals, and a radially calibrated SNR map.
+Bottom row: hole (red) and fit-ring (cyan) overlays, the repaired image
+with the filled region outlined, a 2x zoom, the radial profile of data,
+model, and repaired image, and a polar-remapped residual SNR map. The
+donut fit reproduces the PSF wings (residual fraction 0.17), and the
+repaired core continues the profile smoothly across the filled region.
+```
+
 ### `repair_saturated_holes`
 
 {func}`mophongo.saturate.repair_saturated_holes` is the main entry point.
@@ -207,114 +221,40 @@ n_pix, n_iter, shift_x, shift_y, significance, buffer_snr, flux_added,
 pedestal, fit_mode, data_to_model, amplitude_noshift, chi2_red_noshift,
 ok, status`. `ok=False` rows record why a hole was skipped in `status`.
 
-### `find_wht_holes`
+### Helper functions
 
-{func}`mophongo.saturate.find_wht_holes` locates interior zero-weight
-regions. A hole is a connected component of `wht <= eps_wht` that does not
-touch the image border, so chip gaps and out-of-field regions are dropped
-automatically.
+`repair_saturated_holes` drives these internally; call them directly only
+when building a custom repair flow. See the {doc}`api` reference for full
+signatures.
 
-`wht` (`np.ndarray`)
-: 2D weight image.
+{func}`mophongo.saturate.find_wht_holes`
+: Locates interior zero-weight regions — connected components of
+  `wht <= eps_wht` that do not touch the image border, so chip gaps and
+  out-of-field regions are dropped automatically — optionally dilating by
+  `merge_radius` so fragments of one saturated core share an id. Returns
+  the hole table (`id, yc, xc, area, r_equiv`, bounding box).
 
-`min_area` (`int`, default `1`)
-: Minimum hole area in pixels to be reported.
+{func}`mophongo.saturate.fit_psf_donut`
+: Fits `data ≈ A·psf [+ C]` by weighted linear least squares on the ring
+  `r_in <= r <= r_out`, returning the amplitude, its error, reduced
+  chi-square, optional pedestal, and the shape-mismatch diagnostic
+  `rho_psf` (an amplitude-invariant weighted data–PSF correlation over the
+  ring).
 
-`eps_wht` (`float`, default `0.0`)
-: Zero-weight threshold.
+{func}`mophongo.saturate.fit_amp_and_shift`
+: One linearised step of the joint amplitude + sub-pixel shift fit of step
+  2 above; the caller applies the recovered shift, re-drizzles the ePSF,
+  and calls again until convergence.
 
-`merge_radius` (`int`, default `0`)
-: If greater than 0, dilate the hole mask by this radius before labeling so
-  nearby fragments of one saturated star share an id. Reported areas and
-  centroids use the original, undilated pixels.
+{func}`mophongo.saturate.refine_center_from_donut`
+: Refines a source center by iterating a flux-weighted centroid of the
+  background-subtracted donut; PSF wings are azimuthally symmetric about
+  the true center, so this converges even for asymmetric holes.
 
-Returns a `Table` with columns
-`id, yc, xc, area, r_equiv, ymin, ymax, xmin, xmax`.
-
-### `fit_psf_donut`
-
-{func}`mophongo.saturate.fit_psf_donut` fits `data ≈ A·psf [+ C]` by
-weighted linear least squares on the ring `r_in <= r <= r_out`. Pixels with
-`wht <= 0`, `bad_mask == True`, or `psf <= 0` are excluded.
-
-`sci`, `wht`, `psf` (`np.ndarray`)
-: Science, weight, and PSF cutouts on a common pixel grid.
-
-`center` (`tuple[float, float]`)
-: `(y, x)` ring center in cutout pixels. Keyword-only, as are all
-  parameters below.
-
-`r_in`, `r_out` (`float`)
-: Inner and outer ring radii in pixels.
-
-`bad_mask` (`np.ndarray | None`, default `None`)
-: Boolean mask of pixels to exclude.
-
-`min_pix` (`int`, default `10`)
-: Minimum usable ring pixels; below this the fit returns NaN amplitude.
-
-`fit_pedestal` (`bool`, default `False`)
-: Add an additive constant `C` to the model. The pedestal is reported but
-  never included in the flux that is repaired or subtracted.
-
-Returns a dict with keys `amplitude, amp_err, chi2_red, pedestal,
-rho_psf, n_pix, ring_mask`. `rho_psf` is a weighted Pearson correlation
-between the data and the PSF over the ring. It is amplitude-invariant and
-sensitive only to shape mismatch: near 1 when the ring data match the PSF
-shape, lower when a halo, kernel mismatch, or pedestal distorts it.
-
-### `refine_center_from_donut`
-
-{func}`mophongo.saturate.refine_center_from_donut` refines a source center
-by iterating a flux-weighted centroid of the background-subtracted donut;
-PSF wings are azimuthally symmetric about the true center, so this converges
-even for asymmetric holes.
-
-`sci`, `wht` (`np.ndarray`)
-: Science and weight cutouts.
-
-`center` (`tuple[float, float]`)
-: Initial `(y, x)` guess (keyword-only, as below).
-
-`r_in`, `r_out` (`float`)
-: Donut radii in pixels. The background is the median of the outer 25% of
-  the donut.
-
-`bad_mask` (`np.ndarray | None`, default `None`)
-: Pixels to exclude.
-
-`n_iter` (`int`, default `3`)
-: Maximum centroid iterations; stops early when the update falls below
-  0.05 pixels.
-
-Returns the refined `(y, x)` center.
-
-### `plot_repair_diagnostic`
-
-{func}`mophongo.saturate.plot_repair_diagnostic` renders a diagnostic figure
-of two rows of five panels per source. Top row: data, scaled model, shifted
-residual, an SNR map with per-radial-bin calibrated noise, and the no-shift
-residual. Bottom row: data with hole and fit-ring overlays, the repaired or
-subtracted image, the same image at 2x zoom, a radial profile, and a
-polar-remapped residual SNR map.
-
-`diag` (`RepairDiagnostic`)
-: One entry of the `diagnostics` list returned by
-  `repair_saturated_holes`.
-
-`to_file` (`str | None`, default `None`)
-: If given, save a PNG and close the figure; otherwise return the
-  matplotlib figure. Keyword-only, as are all parameters below.
-
-`pixel_scale` (`float | None`, default `None`)
-: Accepted for interface stability; currently unused by the plotting code.
-
-`offset` (`float`, default `2e-5`)
-: Additive offset for the log stretch of the image panels.
-
-`include_gradient`, `include_flux`, `include_floor` (`bool`, defaults
-`False`, `True`, `True`)
-: Accepted for interface stability; currently unused by the plotting code.
+{func}`mophongo.saturate.plot_repair_diagnostic`
+: Renders the two-row, five-panel per-source diagnostic figure shown above
+  from one `RepairDiagnostic`; pass `to_file` to save a PNG instead of
+  returning the matplotlib figure.
 
 ### `RepairDiagnostic` fields
 
@@ -412,41 +352,15 @@ Methods:
 
 ### `AstroMap`
 
-Dataclass for image-to-image shift mapping at catalog positions.
-Constructor fields:
-
-`order` (`int`, default `2`)
-: Chebyshev polynomial order of the fitted shift field.
-
-`snr_threshold` (`float`, default `5.0`)
-: Minimum catalog SNR for a source to be measured.
-
-`method` (`str`, default `"quadratic"`)
-: `"quadratic"` for quadratic centroids; `"correlation"` for
-  cross-correlation (used only when no WCS pair is given).
-
-`box_size` (`int`, default `5`)
-: Centroid fitting box; cutouts are `3 * box_size + 1` pixels on a side.
-
-Methods:
-
-`fit(img1, img2, catalog, **kwargs)`
-: Measure shifts of `img2` relative to `img1` at catalog positions and fit
-  the polynomial field. `catalog` must contain `x`/`y` columns (or
-  `ra`/`dec` when WCS objects are passed). Keyword arguments are forwarded
-  to the measurement step: `snr_threshold` (default 5.0), `snr_key`
-  (default `"snr"`; a missing column is filled with the threshold value,
-  and the cut is strictly `snr > snr_threshold`, so such sources do not
-  pass),
-  `wcs1`/`wcs2` (default `None`; when both are given, cutouts in each image
-  are centered on the same sky position and centroids are compared through
-  the WCS), and `pixel_scale` (default 1.0, a multiplicative scale applied to
-  the centroid-difference shifts; the cross-correlation branch ignores it).
-  The raw samples are stored as `self.pos` and `self.dxy`.
-
-`__call__(x, y=None)`
-: Evaluate the fitted field, with the same calling conventions as
-  `AstroCorrect.__call__`.
+{class}`mophongo.astrometry.AstroMap` is a dataclass for image-to-image
+shift mapping at catalog positions, independent of any fit:
+{meth}`~mophongo.astrometry.AstroMap.fit` measures shifts of `img2` relative
+to `img1` at the positions of sufficiently high-SNR catalog sources
+(quadratic centroids or cross-correlation, optionally comparing through a
+WCS pair) and fits a Chebyshev shift field of the configured `order`;
+calling the instance evaluates the field, with the same conventions as
+`AstroCorrect.__call__`. See the {doc}`api` reference for the constructor
+fields and measurement keywords.
 
 ```python
 from mophongo.astrometry import AstroMap

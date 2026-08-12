@@ -10,7 +10,7 @@ file prefixed with the run `name` from the JSON config:
 | `<name>_templates.fits` | `write_outputs` | per-template fit state: amplitudes, applied shifts, scene membership |
 | `<name>_stamps.fits` | {meth}`~mophongo.pipeline.Pipeline.write_stamps` (when `save_stamps` is set) | per-source template stamps and fit metadata |
 | `<name>_scene_catalog.csv` | `write_outputs` | one row per fitted scene |
-| `<name>_scene_<id>.png` | `write_outputs` (when `scene_plots` is set) | per-scene diagnostic figures |
+| `scenes/<name>_scene_<id>.png` | `write_outputs` (when `scene_plots` is set) | per-scene diagnostic figures |
 | `<name>_psf_hi.geojson`, `<name>_psf_lo.geojson`, `<name>_kernel.geojson` | `build_psfs` / `build_kernels` | cached PSF and kernel region maps ({doc}`psf_maps`) |
 | `<name>.json` | {meth}`~mophongo.pipeline.Pipeline.save_config`, called by `run` | fully explicit snapshot of the executed config |
 | `<name>.log` | {meth}`~mophongo.pipeline.Pipeline.run_all` | full log of the run |
@@ -176,7 +176,8 @@ high-resolution science header. The matching model images are in
 `id` (scene id), `n_templates`, `is_bright` (number of bright anchor sources),
 and `ra`, `dec` of the scene center, plus a URL column linking each position
 to an external sky viewer. With `scene_plots` enabled, each scene also gets a
-`<name>_scene_<id>.png` diagnostic figure.
+`<name>_scene_<id>.png` diagnostic figure, written to a `scenes/`
+subdirectory of `out_dir` (created only when the plots are requested).
 
 Scene ids are labels of one run's fit partition, not stable source
 identifiers: membership depends on the scene-construction settings

@@ -1,0 +1,25 @@
+/* Parameter / field definition lists in the hand-written pages: set them
+   apart from running text with a quiet panel, astropy-style. Scoped to
+   MyST definition lists so autodoc API listings keep the theme default. */
+article dl.myst {
+  background: var(--color-background-secondary);
+  border-left: 3px solid var(--color-background-border);
+  border-radius: 0.25rem;
+  padding: 0.55rem 0.9rem 0.45rem;
+  margin: 0.9rem 0;
+}
+article dl.myst > dt {
+  font-family: var(--font-stack--monospace);
+  font-size: 0.85em;
+  font-weight: 600;
+  margin-top: 0.45rem;
+}
+article dl.myst > dt:first-child {
+  margin-top: 0;
+}
+article dl.myst > dd {
+  margin: 0.1rem 0 0.35rem 1.1rem;
+}
+article dl.myst > dd > p {
+  margin: 0.15rem 0;
+}

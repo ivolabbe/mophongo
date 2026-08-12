@@ -280,58 +280,15 @@ Without a `flag_star` column no templates are marked as stars. Marking them
 is necessary but not sufficient: `astrom_exclude_stars` is `False` by
 default, so the flag changes the astrometry only once that option is on.
 
-### `Catalog.show_stamp`
+### Display diagnostics
 
-```python
-fig, ax = cat.show_stamp(idnum, offset=3e-5, buffer=20, ax=None,
-                         cmap="gray", alpha=0.2, keys=None)
-```
-
-Displays a cutout of one source with its segmentation footprint overlaid.
-
-`idnum` : `int`
-: Catalog `id` (segment label) of the source.
-
-`offset` : `float`, default `3e-5`
-: Additive offset inside the log10 display stretch.
-
-`buffer` : `int`, default `20`
-: Padding in pixels around the segment bounding box.
-
-`ax` : matplotlib axis, default `None`
-: Axis to draw on. As of this writing the stamp is drawn only when an
-  existing axis is passed; with `None` a new figure is created but left
-  empty.
-
-`cmap` : `str`, default `"gray"`
-: Image colormap.
-
-`alpha` : `float`, default `0.2`
-: Opacity of the segmentation overlay.
-
-`keys` : `list[str] | None`, default `None`
-: Table column names printed as text in the stamp corner.
-
-### `Catalog.plot_bg`
-
-```python
-fig, ax = cat.plot_bg(nbin=None, fac=1.0, figsize=(20, 10))
-```
-
-Four-panel diagnostic on a binned grid: the image, the image with the
-segmentation overlay, the fitted background, and the background-subtracted
-noise-equalised image.
-
-`nbin` : `int | None`, default `None`
-: Binning factor for display. As of this writing the display stretch
-  divides by this argument directly, so the documented `None` default
-  raises `TypeError`; pass `nbin` explicitly.
-
-`fac` : `float`, keyword-only, default `1.0`
-: Display-stretch scale factor.
-
-`figsize` : `tuple[int, int]`, keyword-only, default `(20, 10)`
-: Figure size in inches.
+{meth}`~mophongo.catalog.Catalog.show_stamp` displays a cutout of one source
+by catalog `id` with its segmentation footprint overlaid; pass an existing
+axis, since as of this writing a fresh figure is created but left empty when
+`ax=None`. {meth}`~mophongo.catalog.Catalog.plot_bg` is a four-panel
+diagnostic on a binned grid — image, segmentation overlay, fitted background,
+and background-subtracted noise-equalised image; pass `nbin` explicitly, as
+of this writing the documented `None` default raises `TypeError`.
 
 ## Background and noise estimation
 
@@ -370,109 +327,34 @@ the module but is not called by `Catalog` and, as of this writing, raises a
 ## Segmentation-map helpers
 
 {func}`mophongo.catalog.safe_dilate_segmentation` grows each segment into
-background pixels only, so neighbouring segments never overwrite each other:
-
-`segmap` : `SegmentationImage`
-: Input segmentation map.
-
-`selem` : `np.ndarray`, default `disk(1.5)`
-: Structuring element for the dilation.
-
-Returns the dilated label array (`np.ndarray`); the input object is not
-modified.
-
+background pixels only, so neighbouring segments never overwrite each other;
+it returns the dilated label array without modifying the input.
 {func}`mophongo.catalog.fit_psf_stamp` fits a PSF plus a constant to a small
-stamp by weighted least squares:
-
-`data`, `sigma`, `psf_model` : `np.ndarray`
-: Stamp, per-pixel 1-sigma noise, and PSF model, all the same shape.
-
-Returns `(flux, chi2_red)`.
+stamp by weighted least squares and returns `(flux, chi2_red)`; `find_stars`
+uses it for its per-candidate PSF fits.
 
 ## Saturated stars
 
 {func}`mophongo.catalog.find_saturated_stars` locates bright stars whose
-cores have zero weight (the usual signature of saturation):
-
-```python
-tbl = find_saturated_stars(sci, wht, nbin=8, ncen=3, sigma=5.0, npixels=50)
-```
-
-`nbin` : `int`, keyword-only, default `8`
-: Binning factor: science is block-averaged, weight block-minimum reduced.
-
-`ncen` : `int`, keyword-only, default `3`
-: Odd window size (binned pixels) over which the minimum weight around each
-  centroid is taken; a source is flagged saturated when that minimum is
-  zero or negative.
-
-`sigma` : `float`, keyword-only, default `5.0`
-: Detection threshold in units of the MAD standard deviation of the binned
-  noise-equalised image.
-
-`npixels` : `int`, keyword-only, default `50`
-: Minimum connected binned pixels per detection.
-
-`return_seg` : `bool`, keyword-only, default `False`
-: Also return the binned `SegmentationImage`.
-
-Returns a Table with columns `id`, `x_b`, `y_b` (binned-grid centroids),
-`x`, `y` (full-resolution centroids), `npix_b`, and `sat_flag`.
+cores have zero weight (the usual signature of saturation) by detecting on a
+binned noise-equalised image and testing the minimum weight around each
+centroid; it returns a Table of binned and full-resolution centroids with a
+`sat_flag` column.
 
 Two further helpers consume the per-star tables produced by the
 saturated-pixel repair step described in {doc}`preprocessing`:
 
 {func}`mophongo.catalog.merge_segments_at_holes` is a read-only inspection:
 for each repaired hole it lists the segmentation labels within a search
-radius `max(r_equiv * dilate_factor, dilate_min)` pixels
-(defaults `dilate_factor=8.0`, `dilate_min=5.0`) and returns
-`{hole_id: [label, ...]}` without modifying the segmap.
+radius and returns `{hole_id: [label, ...]}` without modifying the segmap.
 
 {func}`mophongo.catalog.repair_saturated_catalog` merges the oversplit
 segments of a repaired saturated star into a single parent segment and
-catalog row:
-
-`catalog` : `Table`
-: Source catalog; must contain `id_col` matching segmap labels.
-
-`segmap` : `np.ndarray`
-: 2D integer segmentation map. A modified copy is returned.
-
-`fit_table` : `Table`
-: Per-star repair table with columns `xc`, `yc` and optionally `ok` (only
-  `ok=True` rows are processed).
-
-`fwhm_pix` : `float`, keyword-only
-: PSF FWHM in segmap pixels.
-
-`filter_name` : `str`, keyword-only
-: Filter name; the flag column is `FLAG_SATURATED_<FILTER>`.
-
-`n_fwhm` : `float`, keyword-only, default `5.0`
-: Merge radius in FWHM units.
-
-`id_col`, `x_col`, `y_col` : `str`, keyword-only, defaults `"id"`, `"x"`, `"y"`
-: Catalog column names.
-
-`pad` : `int | None`, keyword-only, default `None`
-: Extra padding around each merge box; default `max(8, ceil(r_merge/2))`.
-
-`sci`, `psf_stamp` : `np.ndarray | None`, keyword-only, default `None`
-: When both are given, a candidate child segment is merged only if the PSF
-  model flux within it is at least `flux_frac_thresh` of the science flux
-  there, so unrelated neighbours are preserved. `psf_stamp` must be
-  sum-normalised at the segmap pixel scale.
-
-`amplitude_col` : `str`, keyword-only, default `"amplitude"`
-: Column of `fit_table` holding the per-star PSF scaling.
-
-`flux_frac_thresh` : `float`, keyword-only, default `0.5`
-: Threshold for the PSF-flux filter.
-
-Returns `(new_catalog, new_segmap, merge_log)`: the catalog with child rows
-replaced by one parent row per star, the relabelled segmap with the
-saturated core filled, and a log table with columns `parent_id`, `fit_id`,
-`xc`, `yc`, `n_children`, `children`.
+catalog row, optionally keeping unrelated neighbours by requiring a minimum
+PSF-model flux fraction in each candidate child. It returns the merged
+catalog (with a `FLAG_SATURATED_<FILTER>` column, which the pipeline reads —
+see below), the relabelled segmap with the saturated core filled, and a merge
+log.
 
 ## Feeding the pipeline
 
@@ -489,6 +371,53 @@ cat = Catalog.from_fits("image.fits", "weight.fits")
 from mophongo.pipeline import Pipeline
 pipe = Pipeline(images, cat.segmap.data, catalog=cat.table)
 ```
+
+### Columns for a user-supplied catalog
+
+The catalog does not have to come from `Catalog`: any table with the right
+columns works, for example one converted from a SExtractor run, together with
+its matching segmentation map. Required columns:
+
+`id` : `int`
+: Must equal the segmentation label at the source position. The pipeline
+  extracts each template at `(x, y)`, takes the segment label found there as
+  the template id, and matches fitted fluxes back to catalog rows through
+  `id` — a mismatch silently attaches fluxes to the wrong rows.
+
+`x`, `y` : `float`
+: Source position in **0-indexed** pixel coordinates on the high-resolution
+  detection grid, pixel-center convention (integer value = center of that
+  pixel). SExtractor's `X_IMAGE`/`Y_IMAGE` follow the 1-based FITS
+  convention, so subtract 1 from each. Rows whose position is non-finite,
+  outside the image, or lands on segmentation background are skipped
+  silently: those sources get no template and their flux columns keep the
+  bad value.
+
+Optional columns the pipeline consumes when present:
+
+`flag_star` : `int`
+: Rows with `flag_star == 1` mark their templates `is_star` (see the star
+  selection above).
+
+`is_deblended`, `deblend_parent_label`, `deblend_nchildren`
+: Deblend provenance, copied onto the templates and carried into the output
+  catalog; the parent/children columns are read only when `is_deblended` is
+  present.
+
+`FLAG_SATURATED_*`
+: Any column whose name starts with `FLAG_SATURATED_`; a nonzero value marks
+  the template saturated, which isolates it into its own scene.
+
+`ra`, `dec` : `float`, degrees
+: Not read by the fit itself. The run-config driver needs them only when the
+  `r_trial` patch cut is enabled.
+
+*aperture column*
+: When `FitConfig.aperture_catalog` names a column, that column must exist
+  and hold per-source aperture **diameters**, in the units set by
+  `FitConfig.aperture_units` (arcsec or pixels).
+
+All other columns are dropped from the fit's output catalog.
 
 See {doc}`pipeline` for the full argument list, {doc}`templates` for how
 segments become fit templates, and {doc}`outputs` for the flux columns the

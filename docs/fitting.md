@@ -33,65 +33,29 @@ quantity later reused to partition the field into scenes.
 
 ### SparseFitter
 
-{class}`mophongo.fit.SparseFitter` assembles the normal equations and provides
-model/residual images and quick covariance-free estimators. Flux solving
-itself lives in {class}`mophongo.scene_fitter.SceneFitter`.
+{class}`mophongo.fit.SparseFitter` is no longer part of the production
+fitting path: {meth}`mophongo.pipeline.Pipeline.run` never instantiates it,
+and all fitting is done by the scene solver — {class}`~mophongo.scene.Scene`,
+{class}`~mophongo.scene_fitter.SceneFitter`, and
+{func}`mophongo.scene_fitter.build_normal`, a stateless clone of
+`SparseFitter.build_normal_tree`. `SparseFitter` remains a public standalone
+class, exercised by the test suite, that assembles the normal equations
+described above for a flat template list. In brief:
 
-Constructor parameters:
-
-`templates` (`list[Template]`)
-: Templates on the fit grid, one per source. Each template gets
-  `is_flux = True` and a column index `col_idx` assigned.
-
-`image` (`np.ndarray`)
-: The low-resolution science image being fit.
-
-`weights` (`np.ndarray | None`, default `None`)
-: Inverse-variance weight map, same shape as `image`. `None` uses unit
-  weights.
-
-`config` ({class}`~mophongo.fit.FitConfig` `| None`, default `None`)
-: Fit configuration; `None` uses a default `FitConfig()`.
-
-Public methods:
-
-`build_normal()`
-: Dispatches on `config.normal`; only `"tree"` (the STRtree builder) is
-  implemented, and any other value raises `ValueError`.
-
-`build_normal_tree()`
-: Builds the sparse normal matrix and right-hand side, cached on the `ata`
-  and `atb` properties (which build lazily on first access). Templates whose
-  weighted norm falls below `1e-6` times the median norm are counted and
-  logged but kept.
-
-`add_flux_priors(idx, mu, sigma, *, floor=1e-12)`
-: Adds Gaussian flux priors $(x_i-\mu_i)^2/\sigma_i^2$ for the templates
-  selected by `idx`: each selected diagonal gains a precision
-  $\lambda_i = 1/\sigma_i^2$ and the right-hand side gains
-  $\lambda_i \mu_i$. `mu` and `sigma` may be scalars or arrays; `floor`
-  bounds `sigma` away from zero. Pass `idx` as a boolean mask of length
-  $n$ — the internal broadcasting assumes a mask, so an integer index array
-  raises `IndexError` unless every index is smaller than the number of
-  selected templates. Nothing in the package calls this method; it is a hook
-  for interactive use.
-
-`model_image()` / `residual()`
-: Full-frame model $\sum_i \alpha_i T_i$ from the stored `solution`, and
-  `image - model`. Model pixels with non-positive or NaN weight are zeroed.
-
-`quick_flux(templates=None)`
-: Per-template estimate $\sum I\,T_i / \sum T_i^2$ over each template's own
-  footprint, ignoring neighbors (delegates to
-  {func}`mophongo.templates.Templates.quick_flux`).
-
-`predicted_errors(templates=None)`
-: Per-template $1/\sqrt{\sum w\,T_i^2}$, ignoring covariance (see
-  [Error estimates](#error-estimates-err-vs-err_pred)).
-
-`flux_and_rms(templates=None)`
-: Returns `(flux, rms)`; uses fluxes already stored on the templates when
-  present, otherwise `quick_flux`, paired with `predicted_errors`.
+- {meth}`~mophongo.fit.SparseFitter.build_normal` (and the STRtree builder
+  {meth}`~mophongo.fit.SparseFitter.build_normal_tree` behind it) builds the
+  sparse normal matrix and right-hand side, cached on the lazy `ata`/`atb`
+  properties.
+- {meth}`~mophongo.fit.SparseFitter.add_flux_priors` adds per-template
+  Gaussian flux priors to the system; an interactive hook, unused by the
+  package.
+- {meth}`~mophongo.fit.SparseFitter.model_image` /
+  {meth}`~mophongo.fit.SparseFitter.residual` render the full-frame model
+  $\sum_i \alpha_i T_i$ from a stored solution, and `image - model`.
+- {meth}`~mophongo.fit.SparseFitter.quick_flux`,
+  {meth}`~mophongo.fit.SparseFitter.predicted_errors`, and
+  {meth}`~mophongo.fit.SparseFitter.flux_and_rms` give quick per-template
+  flux and error estimates that ignore neighbor covariance.
 
 ## Error estimates: `err` vs `err_pred`
 
@@ -143,6 +107,18 @@ independently with a direct method. Besides speed, scenes are the natural
 unit for local astrometric corrections: each scene fits its own smooth shift
 field.
 
+```{figure} images/scene_partition.png
+:width: 100%
+:alt: Three panels showing a synthetic field with segmentation outlines, the same segments colored by scene membership, and a histogram of scene sizes.
+
+Scene partition of a synthetic field of 120 sources. Left: the fit image with
+segmentation outlines. Middle: each segment colored by the scene it belongs
+to — templates whose cross-coupling exceeds the threshold share a scene and
+are solved together, while isolated sources form single-template scenes.
+Right: the resulting scene-size distribution, from singletons to one
+34-source group.
+```
+
 ### Coupling threshold
 
 {func}`mophongo.scene.build_scene_tree_from_normal` builds the partition from
@@ -160,59 +136,21 @@ $$
 i.e. the neighbor's flux inside source $i$'s footprint relative to $i$'s own.
 An edge connects $i$ and $j$ when $s_{ij}$ reaches the coupling threshold;
 scenes are the connected components. A lower threshold merges more sources
-into fewer, larger scenes.
-
-Parameters of `build_scene_tree_from_normal(ATA, ATb, *, coupling_thresh=0.01,
-max_size=None, return_0_based=False)`:
-
-`ATA` (sparse `(n, n)`), `ATb` (`(n,)` array)
-: Unwhitened normal matrix and right-hand side.
-
-`coupling_thresh` (`float`, default `0.01`)
-: Leakage score above which two templates are joined into one scene.
-
-`max_size` (`int | None`, default `None`)
-: Soft cap on templates per scene. An oversized component is split by
-  bisecting over that component's own edge scores for the smallest *local*
-  threshold whose pieces all fit, so strong couplings elsewhere in the field
-  are never cut on behalf of one crowded region. The accepted local leakage
-  is logged. `None` disables the cap.
-
-`return_0_based` (`bool`, default `False`)
-: Return labels `0..K-1` instead of the default `1..K`.
-
-Returns `(labels, nscene)`.
+into fewer, larger scenes. Given the unwhitened `ATA`/`ATb`,
+`build_scene_tree_from_normal` returns `(labels, nscene)`; an optional soft
+`max_size` cap splits an oversized component by raising the threshold
+locally within that component, so strong couplings elsewhere in the field
+are never cut on behalf of one crowded region. The pipeline calls it
+through `generate_scenes`.
 
 ### Merging small scenes
 
-The astrometric shift fit needs several bright anchors per scene, so scenes
-with too few bright members are merged into their nearest neighbor by
-{func}`mophongo.scene.merge_small_scenes`:
-
-`labels` (`np.ndarray`)
-: Scene labels per template.
-
-`templates` (`list[Template]`)
-: Templates, for centroid positions.
-
-`bright_mask` (`np.ndarray` of bool)
-: Which templates count as bright anchors.
-
-`order` (`int`, default `1`)
-: Present in the signature but unused by the current implementation.
-
-`minimum_bright` (`int`, default `10`)
-: Scenes with fewer bright members than this are merged.
-
-`max_merge_radius` (`float`, default `np.inf`)
-: Maximum centroid distance in pixels over which an underfilled scene may
-  merge, keeping merges local. Underfilled scenes with no neighbor within
-  the radius stay as they are.
-
-`max_iter` (`int`, default `64`)
-: Maximum merge rounds.
-
-Returns 1-based labels and the scene count.
+The astrometric shift fit needs several bright anchors per scene, so
+{func}`mophongo.scene.merge_small_scenes` iteratively merges scenes with
+fewer than `minimum_bright` bright members into their nearest neighboring
+scene, out to at most `max_merge_radius` pixels so merges stay local
+(underfilled scenes with no neighbor within the radius stay as they are).
+The pipeline calls it through `generate_scenes`.
 
 ### generate_scenes
 
@@ -444,33 +382,14 @@ effectively exact.
 
 ### Building the blocks
 
-{func}`mophongo.scene.make_scene_basis`, called as
-`make_scene_basis(templates, bright, order=1)`, returns
-per-template basis vectors (or `None` for faint members), the scene center
-`(x0, y0)`, and half-range scales `(Sx, Sy)` computed from the bright members.
-
-{func}`mophongo.scene.assemble_scene_system_AB` builds `AB`, `BB`, `bB` for
-one scene:
-
-`templates` (`list[Template]`), `image`, `weights` (`np.ndarray`)
-: Scene members and full-frame arrays (sliced per template).
-
-`basis_vals` (`list[np.ndarray | None]`)
-: Output of `make_scene_basis`, aligned to `templates`.
-
-`alpha0` (`np.ndarray | float | None`)
-: Flux seeds scaling the gradient terms — an array of shape `(n_scene,)`, a
-  scalar broadcast to all, or `None` for zeros. `Scene.solve` passes the
-  diagonal-only estimates $b_i/A_{ii}$.
-
-`order` (`int`, default `1`)
-: Chebyshev order (sizes the shift block).
-
-`include_y` (`bool`, default `True`)
-: Fit $\delta y$ as well as $\delta x$.
-
-`ab_from_bright_only` (`bool`, default `True`)
-: Restrict flux–shift coupling rows to bright members.
+Two helpers, both called by `Scene.solve`, assemble the shift blocks.
+{func}`mophongo.scene.make_scene_basis` returns per-template Chebyshev basis
+vectors (or `None` for faint members) plus the scene center and half-range
+scales computed from the bright members.
+{func}`mophongo.scene.assemble_scene_system_AB` then builds the flux–shift
+coupling block `AB`, the shift block `BB`, and the right-hand side `bB` for
+one scene, seeding the gradient terms with the diagonal-only flux estimates
+$b_i/A_{ii}$.
 
 A scene needs at least two bright members; otherwise empty blocks are
 returned and the solver falls back to flux-only, leaving that scene's

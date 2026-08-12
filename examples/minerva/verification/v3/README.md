@@ -50,12 +50,15 @@ F770W morphology slice: point sources 0.968 (v2: 1.008), extended 0.972
    scheme. That is fixed post-run: `ap_flux_total_<i> =
    ap_flux_corr_<i>/ee_psf_lo` (measured on F770W: IDL totcor 1.450, bare
    ap_corr 1.358, ap_corr/ee 1.480 — within 2% of IDL).
-3. Scene structure: wren's broader support merges more sources — 4867
-   scenes (F1500W) vs psf_wings' 6031, with a handful of 500-800-template
-   scenes from bisecting one giant coupled component. Fits cost ~10-16
-   min/band (the single 310-min F1500W wall time shows normal per-scene
-   progress and spans a likely machine sleep; F1800W with a broader kernel
-   took 10.1 min).
+3. Scene structure (final, from the run logs): F1500W solves in **34
+   scenes** of 118-800 templates — every source in a 100+-source scene,
+   77% in >=500-template scenes, and every scene contains bright members.
+   psf_wings gives the same structure (36 scenes). The much larger numbers
+   in the logs (4867/6031) are pre-merge coupling components; the
+   `scene_max_merge_radius` merge step absorbs them into the big scenes.
+   Fits cost ~10-16 min/band (the single 310-min F1500W wall time shows
+   normal per-scene progress and spans a likely machine sleep; F1800W with
+   a broader kernel took 10.1 min).
 
 ## Scheme scoreboard (injected truth, F770W med_lo)
 

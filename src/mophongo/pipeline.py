@@ -2740,30 +2740,30 @@ class Pipeline:
         high-resolution composite ``H`` and ``src_img`` the unit-normalized
         band-convolved composite ``H*K``:
 
-            ap_F = aper(src_tmpl, R)      EE of the hi-res composite at R
-            ap_B = aper(src_img,  R)      EE of the band-convolved composite at R
-            psfcor = ap_F/ap_B            hi -> lo band EE ratio (shape corr.)
-            totcor = 1/(ap_B*ee_psf_lo)   aperture -> genuine total: ap_B is
+            ap_hi = aper(src_tmpl, R)      EE of the hi-res composite at R
+            ap_lo = aper(src_img,  R)      EE of the band-convolved composite at R
+            psfcor = ap_hi/ap_lo            hi -> lo band EE ratio (shape corr.)
+            totcor = 1/(ap_lo*ee_psf_lo)   aperture -> genuine total: ap_lo is
                                           the model-support EE and ee_psf_lo
                                           the recorded flux fraction of the
                                           finite PSF support itself, the same
                                           factor ``flux_<i>_total`` divides by
 
-        (IDL's ``totcor`` is 1/ap_B alone: reconstruct it from the written
+        (IDL's ``totcor`` is 1/ap_lo alone: reconstruct it from the written
         columns as ``totcor * ee_psf_lo`` for like-for-like comparisons.)
 
         Writes:
         ap_flux_{idx}        – raw aperture sum on model+residual
         ee_psf_lo_{idx}      – per-source box EE used (fallback: filter mean)
-        tot_stamp_{idx}      – 1/ap_B alone: aperture-to-stamp-total on the
+        tot_stamp_{idx}      – 1/ap_lo alone: aperture-to-stamp-total on the
                                model's own support, NO EE factor.  This is the
                                like-for-like quantity against classic IDL's
                                released ``totcor`` — but only when the two
                                runs use the same PSF support.
-        totcor_{idx}         – 1/(ap_B * ee_psf_lo): ``totcor`` by convention
+        totcor_{idx}         – 1/(ap_lo * ee_psf_lo): ``totcor`` by convention
                                ALWAYS includes the beyond-support EE, like a
                                catalog aperture-to-total
-        psfcor_{idx}         – ap_F/ap_B
+        psfcor_{idx}         – ap_hi/ap_lo
         ap_flux_corr_{idx}   – ap_flux * totcor: total flux
         totcor_cat           – catalog-side aperture-to-total (band-independent),
                                (f_kron/f_aper) / EE_H(k*R_kron); needs the
@@ -2776,7 +2776,7 @@ class Pipeline:
 
         cfg = self.config
         id_to_row = {int(i): k for k, i in enumerate(cat["id"])}
-        # pre-convolution composites for ap_F, by id (reference grid, same
+        # pre-convolution composites for ap_hi, by id (reference grid, same
         # pixel scale as the fit grid on the upsample path)
         hi_by_id = {}
         if getattr(self, "tmpls", None) is not None:
@@ -2812,11 +2812,11 @@ class Pipeline:
             phot = aperture_photometry(patch, aper_img, method="exact")
             ap_raw = float(phot["aperture_sum"][0])
 
-            # ap_B (times the post-conv total): the post-conv total rather
+            # ap_lo (times the post-conv total): the post-conv total rather
             # than 1.0 accounts for any flux lost at the template boundary
             # during convolution.
             num = float(tmpl.data.sum())
-            den = self._aperture_sum_on_template(tmpl, r_img_pix)  # ap_B * num
+            den = self._aperture_sum_on_template(tmpl, r_img_pix)  # ap_lo * num
 
             ap_model = fl * den  # aperture flux on model only (for info)
 
@@ -2830,7 +2830,7 @@ class Pipeline:
             totcor = inv_ap_b / ee
             ap_corr = ap_raw * totcor
 
-            # psfcor = ap_F/ap_B: aperture sum of the unit-normalized pre-conv
+            # psfcor = ap_hi/ap_lo: aperture sum of the unit-normalized pre-conv
             # composite over that of the convolved one, both at R on the
             # reference grid (identical grids on the upsample path)
             psfcor = np.nan

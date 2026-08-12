@@ -3,6 +3,136 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] CANFAR staged configs carry the repair settings (2026-08-12).
+  All 36 `examples/canfar/*_canfar.json` (17 patch + 17 `_full` + 2
+  `_test`) regenerated with `arcify.py` from the updated MINERVA
+  sources, so they now carry explicit `wht_hi` (the bkgsub `sci_hi`
+  breaks the `_sci`→`_wht` guess and `resolve_wht_hi` would raise),
+  `repair_saturated: true` and `repair_kwargs: {min_buffer_snr: 200}`.
+  No explicit `repair_psf_pattern`: the halo pattern is derived from
+  `pattern_hi`, so the canonical `_FOV30_GRID1_OS4` spelling follows the
+  code. `submit.py push` now also ships those halo grids
+  (`*_NRC*_F444W_MJD*_FOV30_GRID1_OS4.fits`), and
+  `campaign.has_shared_grids` counts them when `repair_saturated` is set,
+  so a field without them (COSMOS, EGS) still runs one band alone first
+  rather than racing several node-side builds into one `psf_dir`.
+- [x] Region-wise image convolution (2026-08-12).
+  `PSFRegionMap.convolve_image(image, wcs, buffer=None, fill_value=0.0)`
+  applies a kernel map to a whole mosaic: each region is cut with a
+  convolution border (default half the largest stamp), convolved with its
+  own stamp, and only the pixels inside the region polygon are written
+  back, so cutouts overlap but kept pixels never do. Polygons are mapped
+  into pixel space once (`shapely.ops.transform` + `contains_xy`) rather
+  than running the WCS over every pixel. Levels stay separate: the method is
+  array-in/array-out, and module-level `convolve_fits(sci, region_map,
+  out_path)` does the file work, taking the map as an object or as the
+  GeoJSON a run left behind and writing the input header plus
+  CONVMAP/CONVNREG. Fixed `from_geojson` along the way: it called
+  `.replace()` on its argument, so a `Path` hit `Path.replace` (rename) with
+  a TypeError instead of finding the stamp sidecar.
+  Lives in `psf_map.py` because that module owns both the geometry and
+  the stamps; it borrows only `utils.fftconvolve`. Validated on the real
+  uds_f770w kernel map (2911 regions): a 2000^2 cutout convolves in 1.3 s,
+  89% covered (the rest outside the MIRI footprint), and inside a region
+  it matches a plain single-kernel convolution to 6e-10. Documented in
+  docs/psf_maps.md; tests in tests/test_psf_map_convolve.py.
+- [x] Per-scene astrometric convergence (2026-08-12). The refinement
+  loop in `Pipeline.run` iterated *every* scene until the global maximum
+  increment fell under `astrom_shift_tol`, so converged scenes were
+  re-solved for as long as the slowest one kept moving. Scenes are
+  independent (`Scene.solve` reads only its own templates/image/weights),
+  so each now drops out of the pass list as it converges. `Scene` gained
+  `astrom_step`, `astrom_niter`, `astrom_converged`; scenes still moving
+  when the budget runs out are logged as a warning with the five worst.
+  Every source inherits its scene's verdict as `flag_astrom_<i>` in the fit
+  table (0 converged / 1 still moving / -1 no template), and the scene
+  catalog gained `astrom_niter`, `astrom_step`, `flag_astrom`.
+- [x] Run-path `print` calls converted to `logger.info` (2026-08-12), so
+  the memory/config/upsampling/kernel lines carry the timestamp and level
+  of the rest of the log instead of arriving bare on stdout
+  (`pipeline.py` × 12, `templates.py` template pruning). The interactive
+  `summary()` display print stays a print.
+- [x] Interactive single-star repair + diagnostic stretch (2026-08-12).
+  New `repair.repair_star(sci, wht, ra=/dec= or x=/y=, ...)`: cuts a box
+  around the coordinate, finds the nearest interior wht=0 hole (clear
+  error beyond `search_radius`), runs the donut fit + core fill, and
+  returns `{fit, diagnostic, fig, sci, wht, slices}` — the ten-panel
+  diagnostic displays live in a notebook or saves via `to_file`.
+  Verified on UDS star 15871 (A=7.97e5, shift +2.9 px, matching the
+  full-mosaic run). The diagnostic's residual panels (shifted and
+  no-shift) now use the same 2-dex log stretch as the data / A·psi
+  panels (negatives clip to sky tone) instead of their own MAD
+  grayscale. Documented in docs/repair.md ("Repairing a single star
+  interactively") and demoed in the example notebook (section 3).
+  Cross-session hardening: the halo-grid loader falls back to
+  pattern_hi with a warning on ValueError too (unparseable/legacy
+  pattern spellings no longer crash load_data — hit by the verification
+  session that copied configs carrying the interim explicit
+  `repair_psf_pattern`).
+- [x] Halo grids: canonical naming, autobuild, hybrid flag model
+  (2026-08-12). The `UDS_*_OS4_GRID5` files were a misnomer (num_psfs=1,
+  fov 30") — renamed on disk to
+  `UDS_{det}_F444W_MJD59967_FOV30_GRID1_OS4.fits`; `PSFFactory.filename`
+  gained an `include_fov` `_FOV{int}` token (parsed back by
+  `_psf_factory_kwargs`/`_PSF_PATTERN_RE`) so large-FOV grids can't
+  collide with the standard 4" GRID1 epoch files. stpsf has no
+  "automatic maximum" FOV (backend default is 5") — 30" is explicit.
+  The pipeline now auto-derives the halo pattern from `pattern_hi`
+  (`_repair_halo_pattern`) and builds missing grids by default through
+  the existing `psf_autobuild` path (one-off ~minutes per detector,
+  cached; the log says so), falling back to `pattern_hi` with a warning
+  only when autobuild is off. The flag model is now a hybrid
+  (`repair.hybrid_psf_stamp`, via `jwst_psf.blend_psf`): the MJD-matched
+  `pattern_hi` PSF verbatim inside its support, the 30" halo model
+  grafted outside (rescaled over the seam annulus), unit-sum — and the
+  star's fitted centre incl. sub-pixel shift positions the whole model.
+  All GRID5 references updated (configs regenerated without an explicit
+  `repair_psf_pattern`, notebook, docs, SATURATE.md, v1 README). Tests:
+  FOV-token round-trip, halo-pattern derivation, hybrid-stamp shape and
+  core-fidelity, hybrid trigger in `repair_in_memory`.
+- [x] Scene catalog carries the total shift (2026-08-12).
+  `<name>_scene_catalog.csv` gained `dx`, `dy`: the accumulated astrometric
+  shift at the scene center in reference-grid pixels, NaN where the scene
+  solved no astrometry. Same quantity as the per-template table's `dx`, `dy`
+  (`Template.shifted`), evaluated through the refit total field, so it is
+  not the last iteration's increment — `Scene.shifts` was and stays an
+  in-memory attribute that is never written. Test
+  `test_scene_catalog_carries_total_shift` asserts the value matches the
+  applied shifts and differs from the last increment.
+- [x] Shift field is a standard output (2026-08-12).
+  `write_outputs` now writes `<name>_shift_field.png` whenever at least one
+  scene solved for astrometry, from the new `Pipeline.plot_shift_field()`.
+  Each solved scene contributes `2**order` arrows sampled over its own
+  extent (order 0: one at the scene centre, order 1: two along the longer
+  axis, order 2: 2x2), drawn from the template position toward where the
+  source is measured in the fitted band, with the scene id in light gray
+  next to the first arrow. Positions and arrows are in RA/Dec degrees at
+  aspect `1/cos(dec)` with RA increasing left; arrows carry a common
+  magnification set from the 90th percentile of their length, and the
+  legend arrow gives that length in pixels and arcsec.
+  `Scene.shifts` holds only the last astrometric iteration, so
+  `Pipeline._scene_shift_samples` refits the same-order Chebyshev field to
+  the accumulated `Template.shifted` values (the total applied offsets)
+  before sampling. Order is recovered per scene by inverting `n_terms` on
+  the coefficient count, so a saturated-star scene (forced to order 0)
+  plots correctly. Four tests in `test_pipeline.py`: sample counts per
+  order, sampled field consistent with the applied shifts, arrow sign
+  against an injected image offset, and the `write_outputs` product with
+  its label and arrow counts. Full suite 221 passed.
+- [x] Large-FOV flag model for the in-pipeline repair (2026-08-12).
+  `RunConfig.repair_psf_pattern` loads a second STDPSF set (the 30"
+  `..._OS4_GRID5` grids) into a dedicated DrizzlePSF sharing the hi
+  band's exposure info; `repair_in_memory` gained `stamp_dpsf` /
+  `stamp_pattern` so the flag model (halo + spikes) comes from it while
+  the core fit keeps the MJD-matched `pattern_hi` — the same two-PSF
+  split as the original standalone repair flow
+  (`scratch/run_saturate.py`). Default stamp size = the stamp PSF's
+  native FOV. `make_minerva_configs.py` emits the pattern when the
+  large grids are staged (UDS yes, COSMOS/EGS not yet). Clarified:
+  `RunConfig.psf_size` never clipped the repair (it only trims the
+  photometry region-map stamps — the repair drizzles onto its own
+  cutouts at full native ePSF support), and `EffectivePSF.extended_epsf`
+  is vestigial (no loader fills it; `get_extended=True` is a no-op).
 - [x] Concept-first docs rewrite + executed snippets (2026-08-12). The
   eight component pages now read as functionality overviews: per-parameter
   listings deleted from the pages and their content MOVED into the source
@@ -99,7 +229,7 @@ This file records completed implementations, validation runs, and the current wo
   (`ap_flux_total_<i> = ap_flux_corr_<i>/ee_psf_lo`; est1 panel reads it).
   Against IDL the offset flips from +0.04..+0.06 to -0.03..-0.07 mag
   (SNR>25, four bands). Settled from the recorded formalism: IDL `totcor
-  = 1/ap_B` on the unit-normalized model — NOT ee-corrected — so
+  = 1/ap_lo` on the unit-normalized model — NOT ee-corrected — so
   `ap_flux_corr` is the like-for-like column vs `flux_F` (its +0.05
   offset is a real model-EE difference in the composites' wings) and
   `ap_flux_total` is the truth-convention total, brighter than IDL by
@@ -714,8 +844,8 @@ This file records completed implementations, validation runs, and the current wo
   shx/shy/fmodel/emodel/chi_red/chi_red_half/bg_ann/chi_ann, released
   flux_F/eflux_F/flux_contam/chi*/rbg_ann/contam/snr_nn/psfcor/totcor/wht/use
   and the full `use`-flag boolean). Released `psfcor` = internal `apcor1` =
-  ap_F/ap_B measured on the source composite (psf_apercor defaults off, so the
-  PSF branch is the fallback); released `totcor` = 1/ap_B; `eflux_F` correctly
+  ap_hi/ap_lo measured on the source composite (psf_apercor defaults off, so the
+  PSF branch is the fallback); released `totcor` = 1/ap_lo; `eflux_F` correctly
   carries the totcor1 scaling (Estimator-1 error convention).
 - [x] Checked `examples/run_uds_770_wren.py` inputs: the wren run extracted
   templates from the aperpy-homogenized image
@@ -741,7 +871,7 @@ This file records completed implementations, validation runs, and the current wo
     `project_to_block_replicated_grid` does not copy it, so every source falls back to
     the filter-level mean and the encircled-energy chain is inactive on any k>1 run.
     Confirmed by execution. See TODO.
-  * main implements Estimator 1 *in full*: `ap_corr_<i> = 1/ap_B` = `totcor1`. The
+  * main implements Estimator 1 *in full*: `ap_corr_<i> = 1/ap_lo` = `totcor1`. The
     earlier reading that it "stopped one factor short" is obsolete.
   * the aperture family and the total family are on absolute scales differing by
     `1/S_lo`; `ap_flux_corr_<i>` is never divided by `ee_psf_lo`.
@@ -1656,7 +1786,7 @@ This file records completed implementations, validation runs, and the current wo
   residual-region choice, and an assessment against catalogue-matching and
   low-SNR robustness. Key conclusions: the total correction cancels in colour
   only if the same factor is used for all bands, so totals should use the
-  catalogue's `tot_cor`; and bounding `ap_F`/`ap_B` by the PSF EE removes the
+  catalogue's `tot_cor`; and bounding `ap_hi`/`ap_lo` by the PSF EE removes the
   40x correction tail without touching templates.
 - [x] `docs/FLUX_ESTIMATORS.md`: analysis of the three total-flux estimators in
   `scratch/wren/flux_estimator_comparison.pdf` against the legacy IDL in

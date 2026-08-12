@@ -48,10 +48,10 @@ python `num` and `den`:
 
 | PDF | python | meaning |
 |---|---|---|
-| `ap_F = aper(src_tmpl, R_φ)` | `num` (`pipeline.py:1000`) | high-res composite EE at `R_φ` |
-| `ap_B = aper(src_img, R_φ)` | `den` (`pipeline.py:1007`) | band-convolved composite EE at `R_φ` |
-| `apcor1 = ap_F/ap_B` | `ap_corr_<i>` | high-res → low-res band EE ratio |
-| `totcor1 = 1/ap_B` | *not computed* | band aperture → total |
+| `ap_hi = aper(src_tmpl, R_φ)` | `num` (`pipeline.py:1000`) | high-res composite EE at `R_φ` |
+| `ap_lo = aper(src_img, R_φ)` | `den` (`pipeline.py:1007`) | band-convolved composite EE at `R_φ` |
+| `apcor1 = ap_hi/ap_lo` | `ap_corr_<i>` | high-res → low-res band EE ratio |
+| `totcor1 = 1/ap_lo` | *not computed* | band aperture → total |
 | `aper(_phot, R_φ)` | `ap_flux_<i>` | raw neighbour-subtracted aperture flux |
 | `aper(_phot, R_φ)·apcor1` = `fcor1` | `ap_flux_corr_<i>` | band-PSF-corrected aperture flux |
 | `A` (NNLS amplitude, `fmodel`) | `flux_<i>` | fitted template amplitude |
@@ -232,7 +232,7 @@ default of `None`. Both MINERVA runs therefore used truncated templates with
 only `template_dilate_segmap=2` applied.
 
 The consequence is not primarily in `apcor1`. For a compact source with
-`seg ⊆ disk(R_φ)`, `ap_F → 1` and `apcor1 → 1/ap_B`, which is bounded and
+`seg ⊆ disk(R_φ)`, `ap_hi → 1` and `apcor1 → 1/ap_lo`, which is bounded and
 well behaved. The damage is in any factor that references an **external total**:
 
 - the fitted amplitude `A` is the total of a template that has no wings, so `A`
@@ -285,8 +285,8 @@ f2 = aper(_phot - _res, R_φ)·totcor1     + Σ_Ω(_res)   = A + Σ_Ω(_res)    
 f3 = aper(_phot - _res, R_φ)·apcor1·tcor_H + Σ_Ω(_res) ≈ A + Σ_Ω(_res)
 ```
 
-The collapse to `A` is exact for `f2` because `A·ap_B·(1/ap_B) = A` (PDF
-Eq. 14); `f3` differs only by `apcor1·tcor_H·ap_B`, which is unity to the ~10%
+The collapse to `A` is exact for `f2` because `A·ap_lo·(1/ap_lo) = A` (PDF
+Eq. 14); `f3` differs only by `apcor1·tcor_H·ap_lo`, which is unity to the ~10%
 by which the two constructions of the aperture-to-total correction disagree.
 
 `f1 - f2` (PDF Eq. 17) splits into two terms:

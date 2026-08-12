@@ -131,8 +131,8 @@ aperture radius of 1.5 times the band PSF FWHM).
 
 The correction names follow classic (IDL) mophongo. With `src_tmpl` the
 unit-normalized high-resolution composite `H` and `src_img` the
-unit-normalized band-convolved composite `H*K`, `ap_F = aper(src_tmpl, R)`
-and `ap_B = aper(src_img, R)` are their encircled energies at the aperture
+unit-normalized band-convolved composite `H*K`, `ap_hi = aper(src_tmpl, R)`
+and `ap_lo = aper(src_img, R)` are their encircled energies at the aperture
 radius.
 
 `ap_flux_<i>`
@@ -147,18 +147,18 @@ radius.
   value) — the same factor `flux_<i>_total` divides by.
 
 `tot_stamp_<i>`
-: `1 / ap_B` alone: the aperture-to-total of the model on its own finite
+: `1 / ap_lo` alone: the aperture-to-total of the model on its own finite
   stamp support, with no EE factor. This is the quantity classic IDL
   releases as `totcor` — compare the two only when both runs use the same
   PSF support.
 
 `totcor_<i>`
-: Aperture-to-total correction, `1 / (ap_B * ee_psf_lo)`. By convention
+: Aperture-to-total correction, `1 / (ap_lo * ee_psf_lo)`. By convention
   `totcor` always includes the beyond-support encircled energy, like a
   catalog aperture-to-total; the support-only piece is `tot_stamp_<i>`.
 
 `psfcor_<i>`
-: `ap_F / ap_B`, the source's own high-res to low-res band EE ratio at the
+: `ap_hi / ap_lo`, the source's own high-res to low-res band EE ratio at the
   aperture radius (classic mophongo's PSF/shape correction).
 
 `ap_flux_corr_<i>`

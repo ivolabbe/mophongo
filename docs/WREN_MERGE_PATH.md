@@ -457,7 +457,7 @@ Per band `i`, unless marked band-independent:
 | `flux_<i>`, `err_<i>`, `err_pred_<i>` | fitted amplitude and errors | exists |
 | `flux_<i>_total`, `err_<i>_total`, `err_pred_<i>_total` | `A/S_lo`, summed per template | exists |
 | `throughput_<i>` | the *filter-level* mean stamp sum, constant per row — **not** the per-source `S_lo` the `_total` columns used | exists |
-| `ap_model_<i>`, `ap_flux_<i>`, `ap_flux_corr_<i>` | `A·ap_B`; the neighbour-subtracted aperture sum; and their product with `ap_corr_<i>`, which is Estimator 1 | exists |
+| `ap_model_<i>`, `ap_flux_<i>`, `ap_flux_corr_<i>` | `A·ap_lo`; the neighbour-subtracted aperture sum; and their product with `ap_corr_<i>`, which is Estimator 1 | exists |
 | `apcor1_<i>`, `totcor1_<i>` | `apF_corr/apB_corr`, `1/apB_corr` | replaces `ap_corr_<i>` |
 | `apF_book`, `apB_book_<i>`, `apF_blank`, `apB_blank_<i>` | raw and blanking terms | new |
 | `clip_apF`, `clip_apB_<i>` | EE bound engaged | new |
@@ -551,7 +551,7 @@ must hold before any estimator column is meaningful. None was visible from the f
 | # | blocker | site |
 |---|---|---|
 | 1 | **`ee_psf_lo` is destroyed in the default multi-resolution path.** `multi_resolution_method` defaults to `"upsample"`; at `k>1` `Pipeline.run` calls `convolve_templates` (which sets `ee_psf_lo`) and *then* rebuilds every template through `project_to_block_replicated_grid`, which copies only `flag`, `deblend_parent_label`, `deblend_nchildren`. Confirmed by execution: `0.917` in, `nan` out. Every source falls back to the filter-level mean, so `flux_<i>_total` silently reverts to pre-encircled-energy behaviour. MINERVA (40 mas ref, 80 mas MIRI, `k=2`) is exactly this case. | `templates.py:746-748`, `pipeline.py:1700-1704` |
-| 2 | **Templates have no wings in a config-driven run.** `extend_templates` is a `Pipeline.__init__` keyword defaulting to `None`, is not a `RunConfig` or `FitConfig` field, and `load_data` never passes it. `template_norm`, `ap_F` and `model_total` have no meaning until this is wired. | `pipeline.py:448` |
+| 2 | **Templates have no wings in a config-driven run.** `extend_templates` is a `Pipeline.__init__` keyword defaulting to `None`, is not a `RunConfig` or `FitConfig` field, and `load_data` never passes it. `template_norm`, `ap_hi` and `model_total` have no meaning until this is wired. | `pipeline.py:448` |
 | 3 | **`S_hi` is unreachable.** `self.prm_hi` is `None` and `_ensure_maps` reloads only the low-resolution map. | `pipeline.py:831` |
 | 4 | **The catalogue columns are dropped before fitting.** `run()` keeps `id`, `x`, `y` plus `is_deblended`/`deblend_*`, `FLAG_SATURATED_*`, and the one column named by `aperture_catalog`. `fauto_KRON`, `faper_KRON`, `tot_cor`, `kron_radius_circ`, `use_aper`, `f_f444w`, `ra`, `dec` never reach the estimator code, and `RunConfig` has no `f444w_*` fields. | `pipeline.py:1537-1547` |
 | 5 | **`R_cat` is dead code.** `_resolve_catalog_ap_radius_pix` has zero callers in `src/`, `tests/` or `examples/`; `aperture_catalog` only names a column to copy through. | `pipeline.py:1338` |
@@ -567,7 +567,7 @@ Two further defects worth folding in here because they are cheap:
   passes a value, works.
 
 Also corrected against this audit: `main` now implements Estimator 1 *in full* —
-`ap_corr_<i> = sum(T_conv)/aper(T_conv, R_img) = 1/ap_B`, which is `totcor1`. The
+`ap_corr_<i> = sum(T_conv)/aper(T_conv, R_img) = 1/ap_lo`, which is `totcor1`. The
 `apF`-for-post-conv-total substitution that caused a 1.2 mag offset is gone, so the earlier
 reading that `main` "stopped one factor short of a total" no longer holds.
 

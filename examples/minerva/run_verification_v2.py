@@ -52,18 +52,23 @@ RUNS = V2 / "runs"
 IDL_OUT = V2 / "uds_monu"
 MOCK_OUT = V2 / "uds_sims"
 SCHEME: str | None = None
+PSF_DIR: str | None = None
+PSF_SIZE: float | None = None
 SRC_RUNS = BASE / "examples" / "minerva"
 BANDS = ["f770w", "f1280w", "f1500w", "f1800w"]
 PY = sys.executable
 
 
-def _set_version(version: str, scheme: str | None) -> None:
-    global V2, RUNS, IDL_OUT, MOCK_OUT, SCHEME
+def _set_version(version: str, scheme: str | None,
+                 psf_dir: str | None = None, psf_size: float | None = None) -> None:
+    global V2, RUNS, IDL_OUT, MOCK_OUT, SCHEME, PSF_DIR, PSF_SIZE
     V2 = VER_ROOT / version
     RUNS = V2 / "runs"
     IDL_OUT = V2 / "uds_monu"
     MOCK_OUT = V2 / "uds_sims"
     SCHEME = scheme
+    PSF_DIR = psf_dir
+    PSF_SIZE = psf_size
 
 log = logging.getLogger("v2")
 
@@ -112,16 +117,31 @@ def prep_configs() -> None:
         if SCHEME is not None:
             assert '"extend_mode"' not in text
             text = text.replace('"fit": {', f'"fit": {{\n    "extend_mode": "{SCHEME}",')
+        if PSF_DIR is not None:
+            lines = text.splitlines()
+            for k, line in enumerate(lines):
+                if '"psf_dir"' in line:
+                    lines[k] = f'  "psf_dir": "{Path(PSF_DIR).resolve()}",'
+            text = "\n".join(lines)
+        if PSF_SIZE is not None:
+            lines = text.splitlines()
+            for k, line in enumerate(lines):
+                if '"psf_size"' in line:
+                    lines[k] = f'  "psf_size": {PSF_SIZE},'
+            text = "\n".join(lines)
         (RUNS / f"{name}.json").write_text(text)
         # seed the PSF/kernel caches: each .geojson pairs with a sibling
         # .fits holding the PSF cube (PSFRegionMap.to_file); both are needed,
         # a geojson alone loads with psfs=None. Provenance-checked on load,
-        # so a stale copy is rebuilt rather than silently reused.
-        for cache in (SRC_RUNS / name).glob("*.geojson"):
-            for src in (cache, cache.with_suffix(".fits")):
-                dest = out_dir / src.name
-                if src.exists() and not dest.exists():
-                    shutil.copy2(src, dest)
+        # so a stale copy is rebuilt rather than silently reused. With a
+        # nonstandard psf_dir/psf_size the caches are stale by construction
+        # (provenance records psf_size) and are not seeded at all.
+        if PSF_DIR is None and PSF_SIZE is None:
+            for cache in (SRC_RUNS / name).glob("*.geojson"):
+                for src in (cache, cache.with_suffix(".fits")):
+                    dest = out_dir / src.name
+                    if src.exists() and not dest.exists():
+                        shutil.copy2(src, dest)
         log.info("prepared %s (caches: %d geojson + %d fits)", name,
                  len(list(out_dir.glob("*.geojson"))),
                  len([f for f in out_dir.glob("*.fits") if "psf" in f.name or "kernel" in f.name]))
@@ -217,7 +237,7 @@ def run_mock_leg() -> list[dict]:
 
 
 def main(argv: list[str]) -> None:
-    version, scheme = "v2", None
+    version, scheme, psf_dir, psf_size = "v2", None, None, None
     args = []
     it = iter(argv)
     for a in it:
@@ -225,10 +245,18 @@ def main(argv: list[str]) -> None:
             version = next(it)
         elif a == "--scheme":
             scheme = next(it)
+        elif a == "--psf-dir":
+            psf_dir = next(it)
+        elif a == "--psf-size":
+            psf_size = float(next(it))
         else:
             args.append(a)
-    _set_version(version, scheme)
+    _set_version(version, scheme, psf_dir, psf_size)
     _setup_logging()
+    global BANDS
+    picked = [a for a in args if a in BANDS]
+    if picked:
+        BANDS = picked
     steps = [a for a in args if a in ("fits", "idl", "mock")] or ["fits", "idl", "mock"]
     head = _git_head()
     log.info("verification %s on commit %s; scheme: %s; steps: %s",

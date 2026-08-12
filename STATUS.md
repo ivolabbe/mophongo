@@ -3,6 +3,80 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Verification v6 (2026-08-12): the first fully like-for-like IDL
+  comparison — 8" PSF support (matching monu's measured 7.8"; parity
+  check passes), saturated-star repair active (30" halo grids, flagged +
+  isolated scenes), IDL-parity columns (`tot_stamp` = 1/ap_lo, `psfcor`
+  = ap_hi/ap_lo, EE-inclusive `totcor`), r<1.5'. Agreement: tot_stamp/
+  IDL-totcor 0.987/0.991/0.975/0.955 across the four bands, psfcor
+  1.240 vs 1.261, est1 -0.01..-0.03 mag at SNR>25 — percent-level
+  reconciliation, with the est1 offset being exactly the beyond-8" EE
+  our totcor includes and IDL's does not. Session infrastructure landed
+  along the way: shared `repair_cache_path` (band 1 fits, bands 2..N
+  reload), global provenance-guarded PSF/kernel cache seeding in the
+  driver, single-print logging (module handlers removed), HIERARCH
+  VerifyWarning silenced in log_run, weight-calibration log names its
+  band and verdict, template panel keeps saturated stars visible.
+  `examples/minerva/verification/v6/` has README + figures + json +
+  logs.
+- [x] Astrometry convergence: tolerance 0.1, honest verdicts (2026-08-12).
+  Three changes on top of the per-scene freeze loop:
+  * `astrom_shift_tol` default 0.05 -> 0.1 fit-grid pixels. The MINERVA logs
+    show the increment falling ~10x per pass, so 0.05 buys one extra pass
+    and no precision: on a synthetic field with an injected (1.5, -0.8) px
+    offset, 0.05 converges in 4 passes and 0.1 in 3, both recovering
+    (1.487, -0.791). 0.1 px also sits just above the ~0.08 px statistical
+    floor of the weakest scene the anchor cuts admit (5 anchors at
+    `snr_thresh_astrom` = 15) and well below PSF-matching centroid
+    systematics, which are a bias no tolerance iterates away.
+  * `flag_astrom` = 0 now means solved-and-converged, not never-moved. A
+    flux-only run, and scenes with too few bright anchors to carry a shift
+    block, never move and previously came out flagged converged; they now
+    keep `astrom_converged = None` and flag -1, as `docs/outputs.md` already
+    specified. Test
+    `test_astrometry_verdict_is_none_where_no_shift_was_fitted`.
+  * The tolerance is logged in mas as well as pixels: on the upsample path
+    the fit grid is the hi-res grid, not the grid of the band being fitted,
+    so "0.1 pix" alone is ambiguous (4 mas at 40 mas/pix hi-res, not at the
+    80 mas MIRI scale).
+  Also confirmed by test that the increment the loop stops on has already
+  been applied — `Scene.solve(apply_shifts=True)` applies before the caller
+  measures `Template.shifted`
+  (`test_final_sub_tolerance_shift_is_applied_to_the_templates`). Increments
+  below 0.01 px in both axes are never applied at all, which is the floor
+  the regenerated `docs/images/shift_iteration_damping.png` now shows,
+  alongside the flux error already sitting at its floor by pass two.
+  Full suite 238 passed.
+- [x] Saturated stars: held out of scene building, core-named groups,
+  spike flagging (2026-08-12). Three defects found from the uds_f770w v5
+  scene plots:
+  1. Saturated templates were part of the coupling graph and merge, then
+     relabelled afterwards, so a star's wings glued its neighbours into
+     one scene that then lost the member that shaped it.
+     `generate_scenes` now partitions the non-saturated templates on
+     their own (submatrix of ATA/ATb) and adds the saturated scenes
+     after.
+  2. The group id was the *lowest* flagged segment id. On UDS star
+     1017146 that named a spike fragment 291 px (11.6") from the centre,
+     whose catalog row has `wht_lo = 0` and was cut by
+     `footprint_filter`; the filled core carried that label, so nothing
+     modelled the core (the dipole in scene 60's residual) and a fragment
+     absorbed by the fill lost its segment entirely. The group id is now
+     the flagged segment reaching closest to the fitted centre (lowest id
+     among equals, within 1 px + 5 %).
+  3. The 30 % ratio test misses bright diffraction spikes: a saturated
+     star's real spikes run far above its ePSF (spike segments at
+     frac 0.03-0.29 where flagged segments sit at 0.85-1.30; smoothing
+     the model does not recover them, so it is not misregistration).
+     Added `halo_nsigma` (default 5): a segment is also flagged when the
+     model's mean surface brightness over it exceeds
+     `halo_nsigma x sky_noise` per pixel. UDS: 555 -> 568 segments
+     (128 stars), the 13 new ones at median frac 0.12 / halo 13.5 sigma.
+     The flag log gained `npix` and `halo_sig`.
+  Also: the repair diagnostic's residual panel is back to its own linear
+  MAD stretch (the data's log stretch made a few-percent residual a flat
+  gray field), and `flag_astrom_<i>` is int16 -- astropy writes an int8
+  column as a FITS logical and -1 came back as True.
 - [x] CANFAR staged configs carry the repair settings (2026-08-12).
   All 36 `examples/canfar/*_canfar.json` (17 patch + 17 `_full` + 2
   `_test`) regenerated with `arcify.py` from the updated MINERVA

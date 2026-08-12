@@ -33,9 +33,10 @@ from vos import Client
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("arcify")
 
-# Run tree on arc. Everything the run writes lives under here, in the user's
-# own home rather than the shared project space.
-RUN = "/arc/home/ilabbe/run"
+from runroot import run_root
+
+# Run tree on arc; $CANFAR_RUN overrides the default home location.
+RUN, _ = run_root(Path(__file__).resolve().parent.parent.parent)
 
 ARC = "arc:projects/minerva"
 

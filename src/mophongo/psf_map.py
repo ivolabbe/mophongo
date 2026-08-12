@@ -283,6 +283,8 @@ class PSFRegionMap:
             (for example ``pscale``).
         """
         from astropy.io import fits
+        # str(): a Path would take .replace below as the rename method
+        geojson_path = str(geojson_path)
         regions_gdf = gpd.read_file(geojson_path)
 
         # load PSFs if available
@@ -661,6 +663,109 @@ class PSFRegionMap:
         """Encircled energy in the inscribed circle at a sky position."""
         return self._ee_at(self.ee_rlim, ra, dec)
 
+    # -------------------------------------------------------------------
+    # region-wise convolution
+    # -------------------------------------------------------------------
+    def convolve_image(
+        self,
+        image: np.ndarray,
+        wcs: WCS,
+        *,
+        buffer: int | None = None,
+        fill_value: float = 0.0,
+    ) -> np.ndarray:
+        """Convolve a full image with the per-region stamp of this map.
+
+        The stamps of a kernel map vary from region to region, so a whole
+        mosaic cannot be convolved in one pass. Each region is instead cut out
+        with a border wide enough that its own pixels see no edge (half the
+        kernel, ``buffer``), convolved with that region's stamp, and only the
+        pixels *inside* the region polygon are written back. Overlaps between
+        cutouts are therefore never double-counted and the seams carry no
+        discontinuity beyond the difference between the two kernels.
+
+        For FITS files on disk use :func:`convolve_fits`, which wraps this
+        with the I/O.
+
+        Args:
+            image: 2-D science image.
+            wcs: WCS of ``image``, used to place the region polygons (which
+                are in degrees) on the pixel grid.
+            buffer: Border in pixels added around each region before
+                convolving. Defaults to half the largest stamp, which is the
+                width at which a region's own pixels are unaffected by the
+                cut.
+            fill_value: Value for pixels covered by no region -- outside the
+                exposure footprint the map was built from.
+
+        Returns:
+            Convolved image, same shape and dtype as ``image``.
+
+        Raises:
+            ValueError: If the map has no ``psfs`` to convolve with.
+        """
+        from shapely import contains_xy as _contains_xy
+        from shapely.ops import transform as _shapely_transform
+
+        from .utils import fftconvolve
+
+        if self.psfs is None:
+            raise ValueError("this PSFRegionMap has no psfs to convolve with")
+
+        image = np.asarray(image)
+        if image.ndim != 2:
+            raise ValueError(f"image must be 2-D, got shape {image.shape}")
+
+        stamps = np.asarray(self.psfs)
+        if buffer is None:
+            buffer = int(max(stamps.shape[-2:]) // 2 + 1)
+        buffer = int(buffer)
+
+        out = np.full(image.shape, fill_value, dtype=image.dtype)
+        covered = np.zeros(image.shape, dtype=bool)
+        ny, nx = image.shape
+
+        for geom, key in zip(self._geoms, self._keys):
+            if geom.is_empty:
+                continue
+            # Work in pixel space: map the polygon once (vertices, holes and
+            # all parts) instead of running the WCS over every pixel of the
+            # cutout, which for a detector-sized region is millions of points.
+            poly = _shapely_transform(
+                lambda x, y, z=None: tuple(
+                    wcs.all_world2pix(np.asarray(x), np.asarray(y), 0)
+                ),
+                geom,
+            )
+            bx0, by0, bx1, by1 = poly.bounds
+            x0 = max(int(np.floor(bx0)) - buffer, 0)
+            x1 = min(int(np.ceil(bx1)) + buffer + 1, nx)
+            y0 = max(int(np.floor(by0)) - buffer, 0)
+            y1 = min(int(np.ceil(by1)) + buffer + 1, ny)
+            if x1 <= x0 or y1 <= y0:
+                continue
+
+            cut = image[y0:y1, x0:x1]
+            conv = fftconvolve(np.nan_to_num(cut, copy=True), stamps[int(key)], mode="same")
+
+            # keep only the pixels of this region, tested against the polygon
+            # itself rather than its bounding box
+            yy, xx = np.mgrid[y0:y1, x0:x1]
+            inside = _contains_xy(poly, xx.astype(float), yy.astype(float))
+            if not inside.any():
+                continue
+            out[y0:y1, x0:x1][inside] = conv[inside].astype(out.dtype, copy=False)
+            covered[y0:y1, x0:x1] |= inside
+
+        n_missing = int((~covered).sum())
+        if n_missing:
+            logger.info(
+                "convolve_image: %d of %d pixels (%.2f%%) lie in no region and "
+                "were set to %g", n_missing, image.size,
+                100.0 * n_missing / image.size, fill_value,
+            )
+        return out
+
     def to_file(self, filename, driver="GeoJSON"):
         """
         Save regions to GeoJSON and PSFs to a .fits file with the same base name.
@@ -678,3 +783,57 @@ class PSFRegionMap:
         # Save PSFs if present
         if self.psfs is not None:
             fits.writeto(str(filename).replace('.geojson', '.fits'), self.psfs, overwrite=True)
+
+
+# ────────────────────────────────────────────────────────────────────
+#  file-level convenience
+# ────────────────────────────────────────────────────────────────────
+def convolve_fits(
+    sci: str | os.PathLike,
+    region_map: "PSFRegionMap | str | os.PathLike",
+    out_path: str | os.PathLike,
+    *,
+    ext: int | str = 0,
+    buffer: int | None = None,
+    fill_value: float = 0.0,
+    overwrite: bool = True,
+) -> str:
+    """Convolve a science image on disk with a region-mapped kernel map.
+
+    File-level wrapper around :meth:`PSFRegionMap.convolve_image`: reads the
+    image and its WCS, convolves region by region, and writes the result with
+    the original header plus the provenance of the map used.
+
+    Args:
+        sci: Path to the science FITS file.
+        region_map: A :class:`PSFRegionMap`, or the path of a GeoJSON written
+            by :meth:`PSFRegionMap.to_file` (its ``.fits`` sidecar of stamps
+            is picked up alongside).
+        out_path: Where to write the convolved image.
+        ext: Extension of ``sci`` holding the image.
+        buffer: Border in pixels around each region, see
+            :meth:`PSFRegionMap.convolve_image`.
+        fill_value: Value for pixels covered by no region.
+        overwrite: Overwrite ``out_path`` if it exists.
+
+    Returns:
+        The path written, as a string.
+    """
+    from astropy.io import fits
+
+    prm = (region_map if isinstance(region_map, PSFRegionMap)
+           else PSFRegionMap.from_geojson(region_map))
+
+    with fits.open(sci) as hdul:
+        header = hdul[ext].header.copy()
+        data = np.asarray(hdul[ext].data)
+    out = prm.convolve_image(data, WCS(header), buffer=buffer,
+                             fill_value=fill_value)
+
+    header["CONVMAP"] = (os.path.basename(str(prm.name or region_map))[:40],
+                         "kernel region map")
+    header["CONVNREG"] = (len(prm.regions), "regions convolved separately")
+    fits.writeto(out_path, out, header, overwrite=overwrite)
+    logger.info("wrote %s (%d regions, buffer %s)", out_path, len(prm.regions),
+                buffer if buffer is not None else "auto")
+    return str(out_path)

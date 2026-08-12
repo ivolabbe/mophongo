@@ -41,7 +41,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 PSF_DIR = REPO / "data" / "PSF"
 PYTHON = sys.executable
-STEPS = ["push", "setup", "arcify", "stage", "run"]
+STEPS = ["push", "setup", "arcify", "seed", "stage", "run"]
 
 
 def run_step(args: list[str], dry: bool) -> None:
@@ -75,12 +75,22 @@ def has_shared_grids(cfg_path: Path) -> bool:
 
     ``push`` uploads whatever is in ``data/PSF``, so local presence stands in
     for what the run will find on arc.
+
+    With ``repair_saturated`` the 30" halo grids are shared the same way -
+    every band of the field derives the same ``_FOV30_GRID1_OS4`` names from
+    ``pattern_hi`` - so they count here too.
     """
     cfg = json.loads(re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text()))
     pattern = cfg.get("pattern_hi")
     if not pattern:
         return True
-    return any(re.search(pattern, p.name) for p in PSF_DIR.glob("*.fits"))
+    patterns = [pattern]
+    if cfg.get("repair_saturated"):
+        # same derivation as Pipeline._repair_halo_pattern
+        patterns.append(cfg.get("repair_psf_pattern")
+                        or re.sub(r"_MJD.*$", r"_MJD\\d+_FOV30_GRID1_OS4", pattern))
+    names = [p.name for p in PSF_DIR.glob("*.fits")]
+    return all(any(re.search(pat, n) for n in names) for pat in patterns)
 
 
 def main() -> None:
@@ -92,12 +102,19 @@ def main() -> None:
     ap.add_argument("--ram", type=int, default=64)
     ap.add_argument("--cores", type=int, default=None,
                     help="override; default is 4 for a full field, 1 for a trial patch")
+    ap.add_argument("--r-trial", type=float, default=None,
+                    help="override the trial radius in arcmin; 0 runs the full field")
+    ap.add_argument("--suffix", default="",
+                    help="append to every run name, e.g. _full, to keep outputs separate")
+    ap.add_argument("--seed-from", default=None, metavar="SUFFIX",
+                    help="seed PSF/kernel caches from the runs with this suffix "
+                         "(use '' for the unsuffixed ones); skips rebuilding them")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     todo = STEPS[STEPS.index(args.start):]
     cfgs = configs_for(args.fields)
-    names = [c.stem for c in cfgs]
+    names = [c.stem + args.suffix for c in cfgs]
     log.info("campaign over %d config(s): %s", len(names), ", ".join(names))
 
     if "push" in todo:
@@ -105,7 +122,15 @@ def main() -> None:
     if "setup" in todo:
         run_step(["submit.py", "setup"], args.dry_run)
     if "arcify" in todo:
-        run_step(["arcify.py", *[str(c) for c in cfgs]], args.dry_run)
+        arcify = ["arcify.py", *[str(c) for c in cfgs]]
+        if args.r_trial is not None:
+            arcify += ["--r-trial", str(args.r_trial)]
+        if args.suffix:
+            arcify += ["--suffix", args.suffix]
+        run_step(arcify, args.dry_run)
+    if "seed" in todo and args.seed_from is not None:
+        pairs = [f"{c.stem}{args.seed_from}:{c.stem}{args.suffix}" for c in cfgs]
+        run_step(["submit.py", "seed", *pairs], args.dry_run)
     if "stage" in todo:
         run_step(["submit.py", "stage", *names], args.dry_run)
     if "run" not in todo:
@@ -116,12 +141,13 @@ def main() -> None:
         common += ["--cores", str(args.cores)]
 
     # Group by field so a field missing its PSF grids can send one band first.
-    by_field: dict[str, list[str]] = {}
-    for name in names:
-        by_field.setdefault(name.split("_")[0], []).append(name)
+    by_field: dict[str, list[tuple[str, Path]]] = {}
+    for name, cfg in zip(names, cfgs):
+        by_field.setdefault(name.split("_")[0], []).append((name, cfg))
 
-    for field, bands in by_field.items():
-        needs_build = not has_shared_grids(HERE.parent / "minerva" / f"{bands[0]}.json")
+    for field, entries in by_field.items():
+        bands = [n for n, _ in entries]
+        needs_build = not has_shared_grids(entries[0][1])
         if needs_build and len(bands) > 1:
             log.info("%s: no F444W grids yet, running %s alone to build them", field, bands[0])
             run_step(["submit.py", "run", bands[0], *common], args.dry_run)

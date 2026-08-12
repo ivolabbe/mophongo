@@ -143,7 +143,8 @@ In `examples/uds_770_dr0.1/`:
 | `uds_770_fit_table.fits` | fitted catalog. `flux_1` = raw fitted F770W template amplitude, `flux_1_total` = throughput-corrected total, plus errors, chi², astrometric shifts |
 | `uds_770_residual.fits` | F444W-grid residual image |
 | `uds_770_psf_hi.geojson`, `uds_770_psf_lo.geojson`, `uds_770_kernel.geojson` | PSF/kernel region maps (+ matching `.fits` cubes) |
-| `uds_770_scene_*.png`, `uds_770_scene_catalog.csv` | per-scene diagnostic plots and their positions |
+| `scenes/uds_770_scene_*.png`, `uds_770_scene_catalog.csv` | per-scene diagnostic plots and their positions |
+| `uds_770_shift_field.png` | map of the fitted astrometric shift field, one set of arrows per scene |
 
 First things to check: the residual image around bright sources, `err_1/err_pred_1`
 ≈ 1 (error calibration), and the astrometry log lines reporting the bulk MIRI-vs-NIRCam

@@ -199,13 +199,13 @@ fits.writeto("wht_repaired.fits", res["wht"], overwrite=True)
 #    position at detector centre, built once via scratch/build_large_psf.py).
 dpsf_lg = DrizzlePSF(driz_image="sci.fits", csv_file="exposures_wcs.csv")
 dpsf_lg.epsf_obj.load_jwst_stdpsf(local_dir="data/PSF",
-    filter_pattern="UDS_NRC.._F444W_OS4_GRID5")
+    filter_pattern=r"UDS_NRC.._F444W_MJD\d+_FOV30_GRID1_OS4")
 
 ok = res["fits"][res["fits"]["ok"]]
 sub = repair_saturated_holes(
     sci, wht,                       # ORIGINAL — not the repaired image
     dpsf=dpsf_lg, wcs=wcs, holes=ok,
-    psf_filter="UDS_NRC.._F444W_OS4_GRID5",
+    psf_filter=r"UDS_NRC.._F444W_MJD\d+_FOV30_GRID1_OS4",
     mode="subtract",
     output_csv="subtract_fits.csv",
     plot_dir="diagnostics/",
@@ -235,7 +235,7 @@ psf_grid_from_csv(
     oversample=4,
     fov_arcsec=30.0,
     prefix="UDS",
-    postfix="OS4_GRID5",    # NIRCam convention
+    postfix="FOV30_GRID1_OS4",  # NIRCam convention (30" halo grids)
     outdir="data/PSF",
     save=True,
 )
@@ -251,7 +251,7 @@ This:
 * writes a STDPSF-format cube the existing loader reads, so subsequent
   `DrizzlePSF.get_psf` calls work unchanged.
 
-NIRCam → `OS4_GRID5`, MIRI → `OS4_GRID3`. See
+NIRCam → `FOV30_GRID1_OS4` (formerly misnamed `OS4_GRID5`), MIRI → `OS4_GRID3`. See
 `scratch/build_large_psf.py` for the reference build script.
 
 ---

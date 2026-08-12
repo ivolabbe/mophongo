@@ -222,12 +222,16 @@ def band_configs(rel: Release) -> list[dict]:
     log.info("=== %s", rel.local)
 
     sci_hi = _find(root / rel.nircam, "*-f444w-clear_drc_sci_bkgsub.fits", "F444W bkgsub sci")
+    # The bkgsub sci breaks the automatic '_sci.fits' -> '_wht.fits' guess,
+    # so name the weight map explicitly (needed by the SNR-weighted build
+    # schemes and by repair_saturated).
+    wht_hi = _find(root / rel.nircam, "*-f444w-clear_drc_wht.fits", "F444W wht")
     csv_hi = _find(root / rel.nircam, "*-f444w-clear_wcs.csv", "F444W wcs csv")
     # both detection flavours ship a segmap; the SUPER catalog is keyed to the
     # ACS+WEBB chi-mean one, so take that
     segmap = _find_release(root, rel.seg_dir, "*ACS+WEBB*SEGMAP.fits", "segmap")
     catalog = _find_release(root, rel.cat_dir, "*SUPER_CATALOG*.fits", "SUPER catalog")
-    if not all([sci_hi, csv_hi, segmap, catalog]):
+    if not all([sci_hi, wht_hi, csv_hi, segmap, catalog]):
         log.warning("  %s incomplete, skipped", rel.local)
         return []
 
@@ -262,6 +266,7 @@ def band_configs(rel: Release) -> list[dict]:
                 "name": f"{rel.field}_{band}",
                 "out_dir": f"{rel.field}_{band}",
                 "sci_hi": str(sci_hi),
+                "wht_hi": str(wht_hi),
                 "segmap": str(segmap),
                 "catalog": str(catalog),
                 "csv_hi": str(csv_hi),
@@ -281,6 +286,17 @@ def band_configs(rel: Release) -> list[dict]:
                 "psf_size": 4.0,
                 "psf_blur_fwhm": "default",
                 "footprint_filter": True,
+                # In-memory saturation repair at load time: fill the wht=0
+                # cores in the F444W template image with the fitted PSF,
+                # flag the star-dominated segments (FLAG_SATURATED_TMPL
+                # group ids -> one scene per star), and write the per-star
+                # before/after comparison to <out_dir>/repaired/. Mosaics
+                # on disk stay untouched.
+                # The 30" halo grids for the flag model are derived from
+                # pattern_hi ({prefix}_.._FOV30_GRID1_OS4) and built once
+                # on demand, so no explicit repair_psf_pattern is needed.
+                "repair_saturated": True,
+                "repair_kwargs": {"min_buffer_snr": 200},
                 "r_trial": R_TRIAL_ARCMIN if patch else 0.0,
                 "trial_center": [round(patch[0], 5), round(patch[1], 5)] if patch else None,
                 "bg_filter_sigma": 64.0,

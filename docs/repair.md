@@ -95,11 +95,27 @@ noise-level segment in the far wings would flag on a near-zero
 denominator). A genuine neighbour whose own light dominates over the
 star's wings fails the flux test and is kept.
 
+That ratio test alone misses the bright diffraction spikes. A saturated
+star's real spikes run well above what its ePSF predicts — measured on
+the UDS F444W mosaic, spike segments carry only 3–29 % of their observed
+flux in the model, where flagged segments sit at 85–130 % — so a clearly
+star-dominated spike fragment can fail a 30 % cut. A second, independent
+criterion catches them: a segment is also flagged when the model's own
+mean surface brightness over it exceeds `halo_nsigma × sky_noise` per
+pixel (default 5σ), whatever the ratio. The two are OR-ed. On UDS this
+adds 13 segments to 555 (median ratio 0.12, median halo significance
+13.5σ). Set `halo_nsigma=0` for the ratio test alone.
+
 The flag column encodes star membership: all flagged segments of one
-star get the same **group id** — the lowest flagged segment id of that
-star — in `FLAG_SATURATED_TMPL` (e.g. segments 6, 7, 9, 100 of one
-star all get 6). `flag > 0` is the boolean cut; equal values group rows
-belonging to the same star. The column name is band-independent
+star get the same **group id** in `FLAG_SATURATED_TMPL` (e.g. segments
+6, 7, 9, 100 of one star all get 6). `flag > 0` is the boolean cut;
+equal values group rows belonging to the same star. The id is that of
+the star's *core* segment — the flagged segment reaching closest to the
+fitted centre, lowest id among equals. That id is also the label stamped
+on the filled core, so it must belong to a row that sits on the star: a
+distant spike fragment can carry a lower id and be dropped by the
+photometry run's footprint or trial-radius cut, and then nothing models
+the core. The column name is band-independent
 (`TMPL` = the template band the repair ran on) so downstream code does
 not change when the detection band does; pass `filter_name` to override.
 No rows are dropped or added, so row order and matching to other
@@ -157,6 +173,32 @@ field of view. For bright stars whose diffraction spikes fragment the
 segmentation map, drizzle the stamp from a large-FOV (~30") ePSF and use
 a generous `npix`, as in the example notebook.
 
+## Repairing a single star interactively
+
+To inspect or repair one star — e.g. while examining a mosaic in DS9 —
+{func}`mophongo.repair.repair_star` takes coordinates and does the whole
+chain on a cutout: locate the nearest `wht = 0` hole, fit the PSF on the
+donut, fill the core, and hand back the ten-panel diagnostic:
+
+```python
+from mophongo.repair import repair_star
+
+out = repair_star(
+    "mosaic-f444w_drc_sci.fits", "mosaic-f444w_drc_wht.fits",
+    ra=34.238546, dec=-5.133834,        # or x=, y= in pixels
+)
+out["fig"]          # ten-panel diagnostic figure (displays in a notebook)
+out["fit"]          # single-row fit table: amplitude, shift, status
+out["sci"], out["wht"], out["slices"]   # repaired cutout + where it goes
+```
+
+PSF setup resolves exactly as in `repair_image` (pass `psf_pattern=` /
+`psf_dir=` to control it; `dpsf=` to reuse one you already have). The
+target must be within `search_radius` (default 50 px) of an interior
+`wht = 0` hole — a clear error explains when it is not. `to_file=` saves
+the diagnostic PNG instead of returning a live figure, and
+`**repair_kwargs` forwards the usual tuning (e.g. `min_buffer_snr`).
+
 ## Running inside the photometry pipeline
 
 The repair can also run in memory when the {doc}`pipeline` loads its
@@ -173,10 +215,30 @@ with the PSF model, weights restored), flags the catalog and
 segmentation map in memory, and proceeds — nothing on disk changes, and
 the repaired templates are what lands in the run's `*_stamps.fits`, so
 they can be inspected there as usual. Diagnostics (fit table, flag log,
-per-star PNGs) are written to `out_dir/repaired/`. The PSF model reuses
+per-star PNGs) are written to `out_dir/repaired/`. The core fit reuses
 the pipeline's own `pattern_hi` ePSFs and the same epoch policy, so no
 extra PSF setup is needed; `repair_kwargs` forwards tuning options
-(`min_buffer_snr`, `flux_frac`, `min_snr`, `stamp_npix`).
+(`min_buffer_snr`, `flux_frac`, `min_snr`, `halo_nsigma`, `stamp_npix`).
+
+The *flag model* — the star model compared against each segment — is
+only defined where its ePSF is, and the MJD-matched `pattern_hi` grids
+typically span a few arcsec. The pipeline therefore uses a second,
+large-FOV halo grid set: 30" single-position grids named
+`{prefix}_{det}_{filt}_MJD{...}_FOV30_GRID1_OS4`. The pattern is derived
+from `pattern_hi` automatically, and missing grids are built once with
+stpsf (`psf_autobuild`; a few minutes per detector, cached in
+`psf_dir` — the run logs the one-off build). `repair_psf_pattern`
+overrides the pattern when needed.
+
+The flag model itself is a **hybrid**: inside the small ePSF's support
+the MJD-matched PSF is used verbatim (best epoch accuracy — the same
+PSF the core fit and fill use), and the halo grid continues the wings
+and diffraction spikes outside it, rescaled to match over the graft
+annulus ({func}`mophongo.repair.hybrid_psf_stamp`). The star's fitted
+centre — including the fitted sub-pixel shift — positions the whole
+model. The `RunConfig.psf_size` stamp trim does not apply to any of
+this: the repair drizzles PSFs onto its own cutouts at full native ePSF
+support.
 
 Differences from the file-based flow, because the products feed a
 photometry run instead of a catalog release: flagged wing segments keep

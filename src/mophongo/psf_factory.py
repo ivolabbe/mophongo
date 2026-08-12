@@ -218,6 +218,10 @@ class PSFFactory:
     span: float = 5.0
     delta_day: float = 2.0
     include_mjd: bool = True
+    # Embed the field of view in saved filenames as ``_FOV{int}``. Set for
+    # non-default FOVs (e.g. the 30" halo grids) so they cannot collide
+    # with the standard small-FOV grids of the same GRID/OS layout.
+    include_fov: bool = False
     overwrite: bool = False
     verbose: bool = False
 
@@ -230,22 +234,29 @@ class PSFFactory:
         num_psfs: int | None = None,
         use_detsampled_psf: bool | None = None,
         mjd: float | None = None,
+        fov_arcsec: float | None = None,
     ) -> str:
         """Build canonical PSF filename.
 
-        Order: ``{prefix}_{DET}_{FILT}[_MJD{int}]_GRID{N}_{OS4|DET}.fits``.
+        Order:
+        ``{prefix}_{DET}_{FILT}[_MJD{int}][_FOV{int}]_GRID{N}_{OS4|DET}.fits``.
         The MJD slot sits between the physical-identity prefix
         (project/detector/filter/epoch) and the sampling tail
-        (grid layout / oversampling factor). Stripping ``_MJD\\d+`` yields
-        the canonical sampling key used by :class:`DrizzlePSF` for
-        nearest-MJD lookup.
+        (FOV / grid layout / oversampling factor). Stripping ``_MJD\\d+``
+        yields the canonical sampling key used by :class:`DrizzlePSF` for
+        nearest-MJD lookup. The FOV token appears only when
+        ``include_fov`` is set, so large-FOV halo grids cannot collide
+        with the standard grids of the same GRID/OS layout.
         """
         n = num_psfs if num_psfs is not None else self.num_psfs
         det_samp = use_detsampled_psf if use_detsampled_psf is not None else self.use_detsampled_psf
         sampling = "DET" if det_samp else "OS4"
+        fov = fov_arcsec if fov_arcsec is not None else self.fov_arcsec
         parts = [self.prefix, detector, filt]
         if self.include_mjd and mjd is not None:
             parts.append(f"MJD{int(round(mjd))}")
+        if self.include_fov and fov is not None:
+            parts.append(f"FOV{int(round(fov))}")
         parts += [f"GRID{n}", sampling]
         return "_".join(p for p in parts if p) + ".fits"
 

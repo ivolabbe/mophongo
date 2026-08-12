@@ -45,6 +45,12 @@ def _region_map(n_psf: int = 2) -> PSFRegionMap:
             dict(prefix="COSMOS", num_psfs=1, oversample=4,
                  use_detsampled_psf=True, include_mjd=False),
         ),
+        (
+            r"UDS_NRC.._F444W_MJD\d+_FOV30_GRID1_OS4",
+            dict(prefix="UDS", num_psfs=1, oversample=4,
+                 use_detsampled_psf=False, include_mjd=True,
+                 fov_arcsec=30.0, include_fov=True),
+        ),
     ],
 )
 def test_psf_factory_kwargs_recovers_generator_settings(pattern, expected):
@@ -55,6 +61,39 @@ def test_psf_factory_kwargs_recovers_generator_settings(pattern, expected):
 def test_psf_factory_kwargs_rejects_unparseable_pattern():
     with pytest.raises(ValueError, match="cannot derive PSFFactory settings"):
         _psf_factory_kwargs("not-a-stdpsf-pattern")
+
+
+def test_psf_factory_filename_fov_token_round_trips():
+    """include_fov names parse back to the same generator settings."""
+    from mophongo.psf_factory import PSFFactory
+
+    fac = PSFFactory(prefix="UDS", num_psfs=1, oversample=4,
+                     fov_arcsec=30.0, include_mjd=True, include_fov=True)
+    name = fac.filename(detector="NRCA5", filt="F444W", mjd=59967.2)
+    assert name == "UDS_NRCA5_F444W_MJD59967_FOV30_GRID1_OS4.fits"
+    kw = _psf_factory_kwargs(name[:-5])
+    assert kw["fov_arcsec"] == 30.0 and kw["include_fov"] is True
+    # without include_fov the token is absent (legacy naming unchanged)
+    fac_plain = PSFFactory(prefix="UDS", num_psfs=25, fov_arcsec=4.0,
+                           include_mjd=True)
+    assert fac_plain.filename(detector="NRCA5", filt="F444W", mjd=59967.2) \
+        == "UDS_NRCA5_F444W_MJD59967_GRID25_OS4.fits"
+
+
+def test_repair_halo_pattern_derivation():
+    from mophongo.pipeline import Pipeline, RunConfig
+
+    obj = Pipeline.__new__(Pipeline)
+    obj.run_config = RunConfig(
+        name="x", out_dir="x", sci_hi="a.fits", segmap="s.fits",
+        catalog="c.fits", sci_lo="lo.fits", wht_lo="w.fits",
+        csv_hi="h.csv", csv_lo="l.csv",
+        pattern_hi=r"UDS_NRC.._F444W_MJD\d+_GRID25_OS4",
+    )
+    assert obj._repair_halo_pattern() == \
+        r"UDS_NRC.._F444W_MJD\d+_FOV30_GRID1_OS4"
+    obj.run_config.pattern_hi = "garbage"
+    assert obj._repair_halo_pattern() == ""
 
 
 # ------------------------------------------------------------- provenance

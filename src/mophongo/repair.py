@@ -60,8 +60,10 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "build_drizzle_psf",
     "drizzled_psf_stamp",
+    "hybrid_psf_stamp",
     "repair_image",
     "repair_in_memory",
+    "repair_star",
     "flag_catalog",
     "main",
 ]
@@ -374,6 +376,197 @@ def repair_image(
 # --------------------------------------------------------------------------
 
 
+def repair_star(
+    sci: str | Path | np.ndarray,
+    wht: str | Path | np.ndarray,
+    *,
+    ra: float | None = None,
+    dec: float | None = None,
+    x: float | None = None,
+    y: float | None = None,
+    wcs: WCS | None = None,
+    dpsf: DrizzlePSF | None = None,
+    psf_pattern: str | None = None,
+    csv: str | Path | None = None,
+    psf_dir: str | Path | None = None,
+    filter_name: str | None = None,
+    cutout: int = 1024,
+    search_radius: float = 50.0,
+    fwhm_pix: float | None = None,
+    to_file: str | Path | None = None,
+    **repair_kwargs: Any,
+) -> dict[str, Any]:
+    r"""Interactively repair ONE saturated star at given coordinates.
+
+    Convenience wrapper for notebook / console use: cut a box around the
+    target, find the nearest interior ``wht = 0`` hole, run the full
+    donut fit + core fill on it, and return the ten-panel diagnostic
+    figure alongside the numbers.
+
+    ::
+
+        from mophongo.repair import repair_star
+        out = repair_star("sci.fits", "wht.fits", ra=34.2385, dec=-5.1338)
+        out["fig"]          # ten-panel diagnostic (displays in a notebook)
+        out["fit"]          # single-row fit table
+        out["sci"], out["wht"], out["slices"]   # repaired cutout + place
+
+    Parameters
+    ----------
+    sci, wht
+        Science / weight images: FITS paths, or arrays (then *wcs* and
+        *dpsf* are required).
+    ra, dec / x, y
+        Target position, world (needs a WCS) or pixel coordinates.
+    wcs, dpsf, psf_pattern, csv, psf_dir, filter_name
+        PSF setup; defaults resolve exactly as in :func:`repair_image` /
+        :func:`build_drizzle_psf` when *sci* is a path.
+    cutout
+        Cutout size in pixels around the target; the fit and the
+        returned repaired images live on this cutout.
+    search_radius
+        Maximum distance (pixels) between the target and the nearest
+        detected hole.
+    to_file
+        Save the diagnostic PNG here instead of returning a live figure.
+    \*\*repair_kwargs
+        Forwarded to :func:`mophongo.saturate.repair_saturated_holes`
+        (e.g. ``min_buffer_snr``).
+
+    Returns
+    -------
+    dict
+        ``{"fit", "diagnostic", "fig", "sci", "wht", "slices", "hole"}``
+        — repaired sci/wht are cutout-sized; ``slices`` places them in
+        the parent image.
+    """
+    from .saturate import find_wht_holes, plot_repair_diagnostic
+
+    if isinstance(sci, (str, Path)):
+        sci_path = Path(sci)
+        with fits.open(sci_path) as hdul:
+            for hdu in hdul:
+                if hdu.data is not None:
+                    sci_arr = np.asarray(hdu.data, dtype=np.float32)
+                    if wcs is None:
+                        wcs = WCS(hdu.header)
+                    break
+        if dpsf is None:
+            dpsf, psf_pattern = build_drizzle_psf(
+                sci_path, csv=csv, psf_dir=psf_dir,
+                psf_pattern=psf_pattern, filter_name=filter_name,
+            )
+    else:
+        sci_arr = np.asarray(sci)
+        if wcs is None or dpsf is None:
+            raise ValueError("array input requires wcs and dpsf")
+    if psf_pattern is None:
+        raise ValueError("psf_pattern could not be resolved; pass it")
+    wht_arr = (np.asarray(fits.getdata(wht), dtype=np.float32)
+               if isinstance(wht, (str, Path)) else np.asarray(wht))
+
+    if x is None or y is None:
+        if ra is None or dec is None:
+            raise ValueError("give either (ra, dec) or (x, y)")
+        x, y = (float(v) for v in wcs.world_to_pixel_values(ra, dec))
+    H, W = sci_arr.shape
+    half = int(cutout) // 2
+    y0 = max(0, int(round(y)) - half)
+    x0 = max(0, int(round(x)) - half)
+    sly = slice(y0, min(H, int(round(y)) + half))
+    slx = slice(x0, min(W, int(round(x)) + half))
+    sci_cut = sci_arr[sly, slx].astype(np.float32)
+    wht_cut = wht_arr[sly, slx].astype(np.float32)
+    sub_wcs = get_slice_wcs(wcs, slx, sly)
+    sub_wcs.pixel_shape = (slx.stop - slx.start, sly.stop - sly.start)
+    sub_wcs.pscale = get_wcs_pscale(sub_wcs)
+
+    holes = find_wht_holes(wht_cut, merge_radius=3, min_area=1)
+    if len(holes) == 0:
+        raise ValueError("no interior wht=0 holes in the cutout")
+    d = np.hypot(np.asarray(holes["yc"]) - (y - y0),
+                 np.asarray(holes["xc"]) - (x - x0))
+    j = int(np.argmin(d))
+    if d[j] > float(search_radius):
+        raise ValueError(
+            f"nearest wht=0 hole is {d[j]:.1f} px from the target "
+            f"(> search_radius={search_radius}); is the star saturated?"
+        )
+    hole = holes[[j]]
+
+    if fwhm_pix is None:
+        fwhm_pix = psf_fwhm_pix(dpsf, psf_pattern)
+    res = repair_saturated_holes(
+        sci_cut, wht_cut, dpsf=dpsf, wcs=sub_wcs,
+        holes=hole, mode="repair", fwhm_pix=float(fwhm_pix),
+        psf_filter=psf_pattern, return_diagnostics=True,
+        **repair_kwargs,
+    )
+    diag = res["diagnostics"][0] if res["diagnostics"] else None
+    fig = None
+    if diag is not None:
+        fig = plot_repair_diagnostic(
+            diag, to_file=str(to_file) if to_file else None,
+        )
+    row = res["fits"][0] if len(res["fits"]) else None
+    if row is not None:
+        logger.info(
+            "[repair_star] id=%d  ok=%s  A=%.4g  shift=(%+.2f, %+.2f)  %s",
+            int(row["id"]), bool(row["ok"]), float(row["amplitude"]),
+            float(row["shift_x"]), float(row["shift_y"]), str(row["status"]),
+        )
+    return {
+        "fit": res["fits"], "diagnostic": diag, "fig": fig,
+        "sci": res["sci"], "wht": res["wht"], "slices": (sly, slx),
+        "hole": hole,
+    }
+
+
+def hybrid_psf_stamp(core: np.ndarray, halo: np.ndarray) -> np.ndarray:
+    """Graft an MJD-matched core PSF into a large-FOV halo PSF.
+
+    Best of both worlds for the saturation flag model: inside the core
+    stamp's support the (more accurate) epoch-matched PSF is used
+    verbatim; outside it the large-FOV halo model continues the wings
+    and diffraction spikes. The halo is rescaled to match the core's
+    enclosed flux over the graft region
+    (:func:`mophongo.jwst_psf.blend_psf`) and the result is unit-sum.
+
+    Parameters
+    ----------
+    core
+        Small epoch-matched PSF stamp (e.g. drizzled from the
+        ``pattern_hi`` grids).
+    halo
+        Large-FOV stamp (e.g. the 30" ``_FOV30_GRID1`` grids). Must be
+        at least as large as *core*; both on the same pixel grid,
+        centred.
+    """
+    from .jwst_psf import blend_psf
+
+    c = core.shape[0] // 2
+    yy, xx = np.indices(core.shape)
+    rr = np.hypot(yy - c, xx - c)
+    nz = core > 0
+    if not nz.any():
+        total = float(halo.sum())
+        return halo / total if total > 0 else halo
+    rmax = float(rr[nz].max())
+    r_core = max(4, int(0.9 * rmax))
+    out = blend_psf(
+        core, halo,
+        Rcore_px=r_core,
+        Rtaper_px=max(5, int(0.1 * rmax)),
+        Rnorm_px=r_core,
+        subtract_bg=False,
+    )
+    out = np.maximum(out, 0.0)
+    total = float(out.sum())
+    if total <= 0:
+        raise RuntimeError("hybrid PSF stamp has zero flux")
+    return out / total
+
+
 def repair_in_memory(
     sci: np.ndarray,
     wht: np.ndarray,
@@ -383,10 +576,13 @@ def repair_in_memory(
     psf_pattern: str,
     catalog: Table | None = None,
     segmap: np.ndarray | None = None,
+    stamp_dpsf: DrizzlePSF | None = None,
+    stamp_pattern: str | None = None,
     out_dir: str | Path | None = None,
     fwhm_pix: float | None = None,
     flux_frac: float = 0.3,
     min_snr: float = 5.0,
+    halo_nsigma: float = 5.0,
     stamp_npix: int | None = None,
     zero_segments: bool = False,
     plots: bool = True,
@@ -419,16 +615,27 @@ def repair_in_memory(
         PSF model, image WCS, and the ePSF key pattern for the fit.
     catalog, segmap
         Optional catalog + segmentation map to flag. Both or neither.
+    stamp_dpsf, stamp_pattern
+        Separate large-FOV PSF for the *flag model* (e.g. the 30"
+        ``.._FOV30_GRID1_OS4`` grids), so the halo and diffraction
+        spikes are modeled far beyond the core-fit ePSF. When given, the
+        flag model is a hybrid (:func:`hybrid_psf_stamp`): the
+        MJD-matched fit PSF inside its own support, the halo model
+        outside. Default: the fit's *dpsf* / *psf_pattern* alone — which
+        limits the flag reach to that ePSF's native field of view. The
+        star's fitted centre (including the fitted sub-pixel shift)
+        positions the model either way.
     out_dir
         Directory for diagnostics. ``None`` disables all file output.
     fwhm_pix
         PSF FWHM in pixels; measured from a drizzled stamp when None.
-    flux_frac, min_snr
+    flux_frac, min_snr, halo_nsigma
         Flag thresholds, see
         :func:`mophongo.catalog.flag_saturated_segments`.
     stamp_npix
         Flag-model stamp size in pixels. Default: the native ePSF field
-        of view (the model reach — segments beyond it cannot flag).
+        of view of the stamp PSF (the model reach — segments beyond it
+        cannot flag).
     plots
         Write per-star repair PNGs and the flag diagnostic to *out_dir*.
     \*\*repair_kwargs
@@ -470,13 +677,22 @@ def repair_in_memory(
         res["fits"].write(out_dir / "saturate_repair.fits", overwrite=True)
 
     if catalog is not None and n_ok:
+        sd = stamp_dpsf if stamp_dpsf is not None else dpsf
+        sp = stamp_pattern if stamp_pattern is not None else psf_pattern
         if stamp_npix is None:
-            stamp_npix = _native_psf_drz_size(dpsf)
-        stamp = drizzled_psf_stamp(dpsf, psf_pattern, npix=int(stamp_npix))
+            stamp_npix = _native_psf_drz_size(sd)
+        stamp = drizzled_psf_stamp(sd, sp, npix=int(stamp_npix))
+        if sd is not dpsf or sp != psf_pattern:
+            # Best of both worlds: keep the MJD-matched fit PSF inside its
+            # own support and continue with the halo model outside it.
+            core_npix = min(_native_psf_drz_size(dpsf), stamp.shape[0])
+            core = drizzled_psf_stamp(dpsf, psf_pattern, npix=int(core_npix))
+            stamp = hybrid_psf_stamp(core, stamp)
         new_cat, new_seg, flag_log = _flag_segments(
             catalog, segmap, res["fits"],
             sci=res["sci"], psf_stamp=stamp,
             flux_frac=flux_frac, min_snr=min_snr,
+            halo_nsigma=halo_nsigma,
             zero_segments=zero_segments,
         )
         res.update(catalog=new_cat, segmap=new_seg, flag_log=flag_log)

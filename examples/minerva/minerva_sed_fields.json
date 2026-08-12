@@ -1,0 +1,49 @@
+{
+  "description": "One distinct current ACS+WEBB chi-mean SUPER catalog per MINERVA science field.",
+  "fields": [
+    {
+      "name": "COSMOS",
+      "release": "n3.0_m3.0_v1.0.1",
+      "catalog": "/Users/ivo/Astro/PROJECTS/MINERVA/data/COSMOS/n3.0_m3.0_v1.0.1/ACS+WEBB_chi-mean/MINERVA-COSMOS_n3.0_m3.0_v1.0.1_ACS+WEBB_Kf444w_SUPER_CATALOG_wMIRI.fits",
+      "photoz": "/Users/ivo/Astro/PROJECTS/MINERVA/data/COSMOS/n3.0_m3.0_v1.0.1/ACS+WEBB_chi-mean/EAzY/MINERVA-COSMOS_n3.0_m3.0_v1.0.1_ACS+WEBB_Kf444w_SUPER_CATALOG_wMIRI.eazypy.zout.fits",
+      "bands": [
+        "f275wu", "f336wu", "f435w", "f475w", "f606w", "f814w",
+        "f850lp", "f098m", "f070w", "f090w", "f105w", "f115w",
+        "f125w", "f140w", "f140m", "f150w", "f160w", "f162m",
+        "f182m", "f200w", "f210m", "f250m", "f277w", "f300m",
+        "f335m", "f356w", "f360m", "f410m", "f430m", "f444w",
+        "f460m", "f480m", "f770w", "f1000w", "f1280w", "f1500w",
+        "f1800w", "f2100w"
+      ]
+    },
+    {
+      "name": "EGS",
+      "release": "n2.0_m2.1_v1.3.1",
+      "catalog": "/Users/ivo/Astro/PROJECTS/MINERVA/data/EGS/n2.0_m2.1_v1.3.1/ACS+WEBB_chi-mean/MINERVA-EGS_n2.0_m2.1_v1.3.1_ACS+WEBB_Kf444w_SUPER_CATALOG_wMIRI.fits",
+      "photoz": "/Users/ivo/Astro/PROJECTS/MINERVA/data/EGS/n2.0_m2.1_v1.3.1/ACS+WEBB_chi-mean/EAzY/MINERVA-EGS_n2.0_m2.1_v1.3.1_ACS+WEBB_Kf444w_SUPER_CATALOG_wMIRI.eazypy.zout.fits",
+      "bands": [
+        "f275wu", "f435w", "f606w", "f814w", "f098m", "f105w",
+        "f125w", "f140w", "f160w", "f070w", "f090w", "f115w",
+        "f140m", "f150w", "f162m", "f182m", "f200w", "f210m",
+        "f250m", "f277w", "f300m", "f335m", "f356w", "f360m",
+        "f410m", "f430m", "f444w", "f460m", "f470n", "f480m",
+        "f560w", "f770w", "f1000w", "f1280w", "f1500w", "f1800w",
+        "f2100w"
+      ]
+    },
+    {
+      "name": "UDS",
+      "release": "n3.0_m3.1_v1.2.1",
+      "catalog": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/n3.0_m3.1_v1.2.1/ACS+WEBB_chi-mean/MINERVA-UDS_n3.0_m3.1_v1.2.1_ACS+WEBB_Kf444w_SUPER_CATALOG_wMIRI.fits",
+      "photoz": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/n3.0_m3.1_v1.2.1/ACS+WEBB_chi-mean/EAzY/MINERVA-UDS_n3.0_m3.1_v1.2.1_ACS+WEBB_Kf444w_SUPER_CATALOG_wMIRI.eazypy.zout.fits",
+      "bands": [
+        "f435w", "f606w", "f775w", "f814w", "f850lp", "f098m",
+        "f105w", "f125w", "f140w", "f160w", "f090w", "f115w",
+        "f140m", "f150w", "f162m", "f182m", "f200w", "f210m",
+        "f250m", "f277w", "f300m", "f335m", "f356w", "f360m",
+        "f410m", "f430m", "f444w", "f460m", "f480m", "f770w",
+        "f1280w", "f1500w", "f1800w"
+      ]
+    }
+  ]
+}

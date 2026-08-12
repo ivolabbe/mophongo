@@ -79,10 +79,17 @@ from .utils import as_label_array, fftconvolve
 
 
 def bg_gaussian_normalized(img, bgmask, sigma=20.0, truncate=3.0):
-    """Mask-aware smoothing: (G*(I*M)) / (G*M)."""
-    M = bgmask.astype(np.float32)
+    """Mask-aware smoothing: (G*(I*M)) / (G*M).
+
+    Non-finite samples are dropped from the mask and replaced explicitly.
+    ``NaN * 0`` is ``NaN``, so zeroing them through the mask alone lets one
+    bad pixel spread across the whole smoothing footprint even when the mask
+    already excludes it.
+    """
+    M = (np.asarray(bgmask, dtype=bool) & np.isfinite(img)).astype(np.float32)
     num = gaussian_filter(
-        img.astype(np.float32) * M, sigma=sigma, truncate=truncate, mode="nearest"
+        np.where(M > 0, img, 0.0).astype(np.float32),
+        sigma=sigma, truncate=truncate, mode="nearest",
     )
     den = gaussian_filter(M, sigma=sigma, truncate=truncate, mode="nearest")
     out = np.zeros_like(num, dtype=np.float32)
@@ -124,12 +131,89 @@ def expand_to_full(img_binned: np.ndarray, step: int, full_shape: tuple[int, int
     return out.astype(np.float32)
 
 
+#: Minimum fraction of valid coarse blocks that must survive the source mask
+#: for the weight calibration to be believable. Below this the background fit
+#: has nothing to smooth over and the measured scatter collapses; the
+#: estimator warns and leaves the weight map unscaled instead.
+MIN_BG_FRACTION = 0.02
+
+
+def coarse_source_mask(
+    det: np.ndarray,
+    sigma0: float,
+    *,
+    detect_thresh: float = 2.5,
+    faint_thresh: float = 4.0,
+    dilate: int = 3,
+    min_npixels_bright: int = 64,
+    min_npixels_faint: int = 3,
+) -> np.ndarray:
+    """Flag source pixels on a coarse noise-equalised detection image.
+
+    Two passes: a smoothed one for extended flux and an unsmoothed per-pixel
+    one for compact sources, unioned and then dilated.
+
+    Args:
+        det: Coarse detection image (science times sqrt(weight)), already
+            median-subtracted.
+        sigma0: Robust per-pixel sigma of ``det``.
+        detect_thresh: Bright-pass threshold in units of the sigma of the
+            *smoothed* image.
+        faint_thresh: Faint-pass threshold in units of ``sigma0``. Higher
+            than ``detect_thresh`` because nothing suppresses the noise
+            behind it.
+        dilate: Disk radius for the smoothing kernel and the final dilation.
+        min_npixels_bright: Minimum connected area for the bright pass.
+        min_npixels_faint: Minimum connected area for the faint pass. A lone
+            pixel over threshold is a noise spike, not a source.
+
+    Returns:
+        Boolean array, ``True`` where a source is flagged.
+    """
+    # The smoothing kernel is normalised so that ``detect_thresh`` is in units
+    # of the smoothed noise. An unnormalised disk multiplies white noise by
+    # sqrt(N) while the 1/sqrt(N) factor belongs to the normalised kernel, so
+    # mixing them puts the threshold a factor N (29 for disk(3)) too low and
+    # flags roughly half of a pure noise field.
+    kern = disk(max(dilate, 1)).astype(np.float32)
+    kern_norm = kern / kern.sum()
+    detc = fftconvolve(det, kern_norm, mode="same")
+    sigma_smooth = np.sqrt((kern_norm**2).sum()) * sigma0
+
+    seg_bright = detect_sources(
+        detc,
+        threshold=detect_thresh * sigma_smooth,
+        npixels=min_npixels_bright,
+        connectivity=8,
+    )
+    seg_faint = detect_sources(
+        det,
+        threshold=faint_thresh * sigma0,
+        npixels=min_npixels_faint,
+        connectivity=8,
+    )
+
+    src_mask = np.zeros(det.shape, dtype=bool)
+    if seg_bright is not None:
+        src_mask |= np.asarray(seg_bright.data) > 0
+    if seg_faint is not None:
+        src_mask |= np.asarray(seg_faint.data) > 0
+
+    # Dilate the SOURCE mask. Dilating the background mask instead grows
+    # background *into* the sources and erodes the exclusion, which re-admits
+    # most of a compact source's own pixels.
+    if dilate > 0:
+        src_mask = binary_dilation(src_mask, structure=kern > 0)
+    return src_mask
+
+
 def get_bg_and_ivar(
     sci: np.ndarray,
     wht: np.ndarray,
     *,
     bg_filter_sigma: float = 64.0,
-    detect_thresh: float = 1.0,
+    detect_thresh: float = 2.5,
+    faint_thresh: float = 4.0,
     dilate: int = 3,
     label: str = "",
 ):
@@ -150,12 +234,15 @@ def get_bg_and_ivar(
         Sets the coarse-grid bin factor (``floor(sqrt(bg_filter_sigma))``)
         and the scale of the mask-aware Gaussian background smoothing.
     detect_thresh
-        Detection threshold, in units of the robust sigma of the coarse
-        noise-equalised image, for masking sources out of the background
-        fit.
+        Bright-pass threshold for masking sources out of the background fit,
+        in units of the sigma of the *smoothed* coarse detection image.
+    faint_thresh
+        Faint-pass threshold, in units of the per-pixel sigma of the
+        unsmoothed coarse detection image. Higher than ``detect_thresh``
+        because this pass has no smoothing to suppress noise behind it.
     dilate
-        Disk radius for smoothing the coarse detection image and dilating
-        the background mask.
+        Disk radius for smoothing the coarse detection image and for
+        dilating the source mask before it is excluded.
 
     Returns
     -------
@@ -166,53 +253,70 @@ def get_bg_and_ivar(
     """
     step = np.floor(np.sqrt(bg_filter_sigma)).astype(int)
     min_npixels_bright = step**2
-    min_npixels_faint = 1
+    # a single pixel over threshold is a noise spike, not a source: at the
+    # faint pass's per-pixel threshold, requiring a connected triple is what
+    # keeps the mask off the noise field
+    min_npixels_faint = 3
 
     s = np.asarray(sci, dtype=np.float32)
     w = np.asarray(wht, dtype=np.float32)
     valid_w = np.isfinite(w) & (w > 0)
-    w = np.where(valid_w, w, 0.0).astype(np.float32)
+    # One common mask: a pixel counts only where BOTH science and weight are
+    # finite. Non-finite science is replaced here rather than downstream --
+    # a single NaN otherwise spreads over its whole block in the mean, into
+    # the median and MAD, and makes every statistic and both outputs NaN.
+    valid = valid_w & np.isfinite(s)
+    s = np.where(valid, s, 0.0).astype(np.float32)
+    w = np.where(valid, w, 0.0).astype(np.float32)
 
-    # 1) coarse block means
-    s_bin = _mean_downsample(s, step)
-    w_bin = _mean_downsample(w, step)
-    pos = w_bin > 0
+    # 1) coarse block means, taken over the valid pixels of each block, so a
+    #    bad pixel costs its block sample size instead of poisoning it
+    vfrac = _mean_downsample(valid.astype(np.float32), step)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        s_bin = np.where(vfrac > 0, _mean_downsample(s, step) / vfrac, 0.0).astype(np.float32)
+        w_bin = np.where(vfrac > 0, _mean_downsample(w, step) / vfrac, 0.0).astype(np.float32)
+    pos = (vfrac > 0) & (w_bin > 0)
 
     # 2) coarse detection image (S/N)
     det = np.zeros_like(s_bin, dtype=np.float32)
     det[pos] = s_bin[pos] * np.sqrt(w_bin[pos], dtype=np.float32)
 
     # 3) robust baseline
-    med0 = np.median(det).astype(np.float32)
-    nmad0 = np.median(np.abs(det - med0) * np.float32(1.4826)).astype(np.float32)
-    sigma0 = nmad0 if nmad0 > 0 else np.std(det).astype(np.float32)
+    # Robust baseline over the *valid* blocks only. Pixels outside the
+    # footprint -- a mosaic edge, a chip gap, a trial patch clipped at the
+    # boundary -- are zero-filled, and folding those zeros into the median and
+    # the MAD drags sigma0 down. That is not a harmless bias: the detection
+    # threshold below scales with sigma0, so an underestimate flags the whole
+    # field as source, leaves no background pixels, and the calibration then
+    # measures the scatter of a background fit that has interpolated the data.
+    if np.any(pos):
+        med0 = np.median(det[pos]).astype(np.float32)
+        nmad0 = np.median(np.abs(det[pos] - med0) * np.float32(1.4826)).astype(np.float32)
+        sigma0 = nmad0 if nmad0 > 0 else np.std(det[pos]).astype(np.float32)
+    else:
+        med0 = np.float32(0.0)
+        sigma0 = np.float32(0.0)
 
-    # 4) quick source mask & local bg pre-estimate (on det)
-    mask_src0 = det > (med0 + 3.0 * sigma0)
-
-    # smooth DET for bright detection; use convolution noise factor
-    kern = disk(max(dilate, 1)).astype(np.float32)
-    detc = fftconvolve(det - med0, kern, mode="same")
-    sigma_correct = np.sqrt((kern**2).sum()) / kern.sum()
-
-    seg_bright = detect_sources(
-        detc,
-        threshold=detect_thresh * sigma_correct * sigma0,
-        npixels=min_npixels_bright,
-        connectivity=8,
+    # 4) source mask (smoothed bright pass + unsmoothed faint pass, dilated)
+    bgmask = ~coarse_source_mask(
+        det - med0,
+        sigma0,
+        detect_thresh=detect_thresh,
+        faint_thresh=faint_thresh,
+        dilate=dilate,
+        min_npixels_bright=min_npixels_bright,
+        min_npixels_faint=min_npixels_faint,
     )
-    seg_faint = detect_sources(
-        det, threshold=detect_thresh * sigma0, npixels=min_npixels_faint, connectivity=8
-    )
-
-    seg_all = (seg_bright.data if seg_bright is not None else 0) + (
-        seg_faint.data if seg_faint is not None else 0
-    )
-
-    bgmask = seg_all == 0
-    if dilate > 0:
-        bgmask = binary_dilation(bgmask, structure=kern)
     bgmask &= pos  # exclude zero-weight tiles
+
+    # A background fit needs background. When the source mask has eaten the
+    # field there is nothing to smooth over, the fit tracks the data pixel for
+    # pixel, and the residual scatter -- hence sigma_true -- collapses towards
+    # zero, which would scale the inverse variance up without bound. Refuse
+    # rather than return a calibration measured on nothing.
+    n_pos = int(pos.sum())
+    bg_frac = float(bgmask.sum()) / max(n_pos, 1)
+    degenerate = n_pos == 0 or bg_frac < MIN_BG_FRACTION
 
     # 5) fit smooth background on the COARSE SCI (not det)
     #    convert sigma to coarse pixels
@@ -224,11 +328,15 @@ def get_bg_and_ivar(
     det_bsub = np.zeros_like(det, dtype=np.float32)
     det_bsub[pos] = s_bin_bsub[pos] * np.sqrt(w_bin[pos], dtype=np.float32)
 
-    bg_ok = bgmask & np.isfinite(det_bsub)
+    # the step**2 block-averaging factor below assumes a full block, so
+    # measure sigma on blocks that are (almost) entirely valid
+    bg_ok = bgmask & np.isfinite(det_bsub) & (vfrac > 0.9)
+    if not np.any(bg_ok):
+        bg_ok = bgmask & np.isfinite(det_bsub)
     if not np.any(bg_ok):
         # fallback: use all valid pixels
         bg_ok = pos
-    sigma_bin = mad_std(det_bsub[bg_ok].astype(np.float32))
+    sigma_bin = mad_std(det_bsub[bg_ok].astype(np.float32)) if np.any(bg_ok) else np.nan
     # ``det_bsub`` is the coarse residual in units of the weight map's own claimed
     # sigma. Block-averaging step^2 independent pixels divides its scatter by
     # ``step``, so ``sigma_true`` is 1 exactly when ``wht`` IS a calibrated
@@ -238,6 +346,18 @@ def get_bg_and_ivar(
     # and the drizzle pixel-to-pixel correlation, because it is measured after
     # resampling on a step x step block scale.
     sigma_true = np.float32(step) * np.float32(sigma_bin)
+    if degenerate or not np.isfinite(sigma_true) or sigma_true <= 0:
+        # no usable background sample (blank input, or the source mask covered
+        # the field): leave the weights as they are rather than scaling them
+        # by a number measured on a background fit that had nothing to fit
+        logger.warning(
+            "weight calibration%s: unusable background sample "
+            "(%.1f%% of %d valid blocks, sigma_true=%r); leaving the weight "
+            "map unscaled",
+            f" [{label}]" if label else "", 100.0 * bg_frac, n_pos,
+            float(sigma_true),
+        )
+        sigma_true = np.float32(1.0)
 
     # 7) rescale full-res weights
     scale = np.float32(1.0) / (sigma_true * sigma_true + np.float32(1e-30))

@@ -32,13 +32,39 @@ def _write_config(tmp_path, extra=None):
 
 
 def test_config_roundtrip_with_comments(tmp_path):
-    cfg = RunConfig.from_json(_write_config(tmp_path, {"psf_size": None, "r_trial": 0.5}))
+    trial = {"center": [34.4, -5.26], "radius": 0.5}
+    cfg = RunConfig.from_json(
+        _write_config(tmp_path, {"psf_size": None, "trial": trial})
+    )
     assert cfg.name == "test_run"
     assert cfg.psf_size is None
-    assert cfg.r_trial == 0.5
+    assert cfg.trial_geometry() == ((34.4, -5.26), 0.5, 60.0)
     out = tmp_path / "echo.json"
     cfg.to_json(out)
     assert RunConfig.from_json(out) == cfg
+
+
+def test_retired_trial_keys_raise(tmp_path):
+    """r_trial/trial_center were folded into `trial`; say so, don't ignore."""
+    for extra in ({"r_trial": 0.5}, {"trial_center": [34.4, -5.26]}):
+        with pytest.raises(ValueError, match="replaced by a single `trial`"):
+            RunConfig.from_json(_write_config(tmp_path, extra))
+
+
+def test_trial_geometry_validates():
+    def cfg(trial):
+        return RunConfig(**{**MINIMAL, "trial": trial})
+
+    assert cfg(None).trial_geometry() is None
+    # radius 0 means a full-field run whatever the centre says
+    assert cfg({"center": [1, 2], "radius": 0}).trial_geometry() is None
+    with pytest.raises(ValueError, match="center"):
+        cfg({"radius": 1.0}).trial_geometry()
+    with pytest.raises(ValueError, match="unknown trial keys"):
+        cfg({"center": [1, 2], "radius": 1.0, "radius_arcmin": 2}).trial_geometry()
+    assert cfg(
+        {"center": [1, 2], "radius": 1.5, "margin": 30.0}
+    ).trial_geometry() == ((1.0, 2.0), 1.5, 30.0)
 
 
 def test_config_unknown_key_raises(tmp_path):
@@ -199,3 +225,47 @@ def test_load_outputs_resume(tmp_path):
     assert fresh.residuals[0].shape == (4, 4)
     assert "fitted" in repr(fresh)
     assert "results: table 2 rows" in fresh.info()
+
+
+def test_trial_pixel_box_and_partial_read(tmp_path):
+    """Only the trial box is read, into a full-shape array.
+
+    The point of the box is that a trial run costs the patch, not the mosaic,
+    while every pixel coordinate keeps its full-frame meaning.
+    """
+    import numpy as np
+    from astropy.io import fits
+    from astropy.wcs import WCS
+
+    from mophongo.pipeline import _read_image, _trial_pixel_box
+
+    ny, nx = 600, 800
+    w = WCS(naxis=2)
+    w.wcs.crpix = [nx / 2, ny / 2]
+    w.wcs.crval = [150.0, 2.0]
+    w.wcs.cdelt = [-1 / 3600.0, 1 / 3600.0]  # 1 arcsec / pixel
+    w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+
+    data = np.arange(ny * nx, dtype=np.float32).reshape(ny, nx)
+    path = tmp_path / "img.fits"
+    fits.PrimaryHDU(data, header=w.to_header()).writeto(path)
+
+    # 1 arcmin radius + 60 arcsec margin at 1 arcsec/pix -> 120 px half-width
+    box = _trial_pixel_box(w, (ny, nx), (150.0, 2.0), 1.0, 60.0)
+    y0, y1, x0, x1 = box
+    # 2 * 120 px of half-width, +/- a pixel of rounding at the box edges
+    assert abs((y1 - y0) - 241) <= 1 and abs((x1 - x0) - 241) <= 1
+    assert y0 < ny / 2 < y1 and x0 < nx / 2 < x1
+
+    full = _read_image(path)
+    part = _read_image(path, box)
+
+    assert part.shape == full.shape          # full-frame coordinates preserved
+    assert np.array_equal(part[y0:y1, x0:x1], full[y0:y1, x0:x1])
+    outside = np.ones((ny, nx), dtype=bool)
+    outside[y0:y1, x0:x1] = False
+    assert not part[outside].any()           # nothing outside the box was read
+
+    # a box clipped by the image edge still works
+    edge = _trial_pixel_box(w, (ny, nx), (150.0, 2.0), 30.0, 0.0)
+    assert edge == (0, ny, 0, nx)

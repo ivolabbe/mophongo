@@ -27,10 +27,10 @@
   "psf_size": null,
   "psf_blur_fwhm": "default",
 
-  # preprocessing: footprint cut + trial patch (set r_trial 0 for full run)
+  # preprocessing: footprint cut + trial patch (set "trial": null for a full
+  # run). Only the patch plus its margin is read off disk.
   "footprint_filter": true,
-  "r_trial": 0.5,
-  "trial_center": [34.4, -5.26],
+  "trial": {"center": [34.4, -5.26], "radius": 0.5},
   "bg_filter_sigma": 64.0,
 
   # FitConfig overrides

@@ -170,6 +170,10 @@ key = prm.lookup_key(10.0075, 0.005)        # inside the A-B overlap
 print(key, prm.get_psf(10.0075, 0.005).shape)  # 1 (25, 25)
 ```
 
+For a map cached by a run, `mophongo psf <map.geojson> <ra> <dec>` writes
+that stamp to FITS with a WCS centered on the position (see
+{doc}`diagnostics`).
+
 ### Convolving a whole image with a map
 
 A map holds a different stamp in every region, so a mosaic cannot be

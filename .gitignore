@@ -19,6 +19,8 @@ examples/minerva/*
 !examples/minerva/*.md
 !examples/minerva/*.py
 !examples/minerva/*.sh
+!examples/minerva/*.ecsv
+!examples/minerva/sed_stack/
 # CANFAR toolkit: track the scripts and docs, not the generated arc configs
 # (they carry a hardcoded username), the uploads, or the fetched outputs
 !examples/canfar/

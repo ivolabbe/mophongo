@@ -19,6 +19,7 @@ API reference
    mophongo.astrometry
    mophongo.saturate
    mophongo.repair
+   mophongo.cli
    mophongo.mock_mosaic
    mophongo.verification
    mophongo.utils

@@ -297,8 +297,14 @@ def band_configs(rel: Release) -> list[dict]:
                 # on demand, so no explicit repair_psf_pattern is needed.
                 "repair_saturated": True,
                 "repair_kwargs": {"min_buffer_snr": 200},
-                "r_trial": R_TRIAL_ARCMIN if patch else 0.0,
-                "trial_center": [round(patch[0], 5), round(patch[1], 5)] if patch else None,
+                "trial": (
+                    {
+                        "center": [round(patch[0], 5), round(patch[1], 5)],
+                        "radius": R_TRIAL_ARCMIN,
+                    }
+                    if patch
+                    else None
+                ),
                 "bg_filter_sigma": 64.0,
                 "fit": {
                     "fit_astrometry_joint": True,
@@ -324,9 +330,9 @@ HEADER = """\
 # F444W background-subtracted mosaic as the template image, the release segmap
 # and SUPER catalog, one 80 mas MIRI band fitted.
 #
-# expect_frames are the row counts of the two WCS tables; trial_center is the
-# deepest fully covered {r} arcmin patch of the MIRI weight map. Set r_trial to
-# 0 for a full-field run.
+# expect_frames are the row counts of the two WCS tables; trial.center is the
+# deepest fully covered {r} arcmin patch of the MIRI weight map. Set
+# "trial" to null for a full-field run.
 #
 # Run from examples/minerva/:  python -m mophongo.pipeline {name}.json
 """

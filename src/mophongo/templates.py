@@ -712,7 +712,12 @@ class Template(Cutout2D):
             parent_image,  # original full image reference
             position=(center_x, center_y),  # note (x, y)
             size=(ny_even, nx_even),  # (ny, nx)
-            wcs=self.wcs,  # note wcs origin is wrong
+            # the parent WCS, not self.wcs: self.wcs is this cutout's WCS
+            # (parent CRPIX shifted by the stamp origin), so feeding it back
+            # in as a parent shifts the new template's world coordinates by
+            # that origin again -- hundreds of arcsec, and the PSF region
+            # lookup in convolve_templates reads exactly this WCS
+            wcs=self.wcs_original,
             label=self.id,
             copy=False,  # do not copy the data, we are replacing later
         )
@@ -860,7 +865,7 @@ class Template(Cutout2D):
             parent_image,
             position=(center_x, center_y),
             size=(ah, aw),
-            wcs=self.wcs,
+            wcs=self.wcs_original,  # the parent WCS, not this cutout's
             label=self.id,
             copy=False,
         )
@@ -1908,7 +1913,19 @@ class Templates:
                 continue
 
 
-            new_tmpl = tmpl.convolve_cutout(kern, parent_image=dummy_image)
+            # Convolve on the stamp footprint (shared mode="same" convention):
+            # the expansion to full support and the truncation back happen
+            # inside the convolution. Everything beyond the original stamp is
+            # a truncated-PSF x truncated-kernel outer product — extrapolation,
+            # not model (0.08% of the flux for a point source) — so keeping
+            # the stamp keeps totals meaning "flux within the stamp box",
+            # corrected onward by the finite-support EE (``ee_psf_lo``), the
+            # same convention as the PSF throughput.
+            new_tmpl = tmpl if inplace else deepcopy(tmpl)
+            new_tmpl.data = _convolve2d(tmpl.data.astype(float), kern).astype(
+                tmpl.data.dtype, copy=False
+            )
+            new_tmpl.flag = tmpl.flag | Template.FLAG_CONVOLVED
             new_tmpl.ee_psf_lo = ee_lo
 
             if inplace:

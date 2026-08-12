@@ -1733,6 +1733,49 @@ def save_scene_diagnostics(
     return table
 
 
+def scene_label_map(
+    segmap: np.ndarray,
+    scenes: Sequence[Any],
+    *,
+    step: int = 1,
+) -> np.ndarray:
+    """Map every segment to the 1-based index of the scene that fitted it.
+
+    A single lookup-table pass over the labels, so the cost is set by the
+    field size and not by the number of scenes. Background pixels and segments
+    no scene claimed stay 0.
+
+    Args:
+        segmap: Segmentation map; labels equal catalog ids.
+        scenes: Fitted scenes, each with ``templates`` carrying an ``id``.
+        step: Decimation factor. Blocks are reduced by their largest label
+            rather than subsampled, so a segment smaller than the block
+            survives instead of falling between the samples.
+
+    Returns:
+        Scene indices, of shape ``(ny // step, nx // step)``.
+    """
+    labels = np.asarray(segmap)
+    if labels.dtype.kind not in "iu":
+        labels = labels.astype(np.int64)
+    step = int(step)
+    if step > 1:
+        ny, nx = (n // step for n in labels.shape)
+        labels = (
+            labels[: ny * step, : nx * step]
+            .reshape(ny, step, nx, step)
+            .max(axis=(1, 3))
+        )
+    nmax = int(labels.max()) if labels.size else 0
+    lut = np.zeros(nmax + 1, dtype=np.int32)
+    for scene_index, scene in enumerate(scenes, start=1):
+        for tmpl in getattr(scene, "templates", []):
+            tid = int(tmpl.id)
+            if 0 < tid <= nmax:
+                lut[tid] = scene_index
+    return lut[labels]
+
+
 def save_scene_overview(
     image: np.ndarray,
     segmap: np.ndarray,
@@ -1740,21 +1783,31 @@ def save_scene_overview(
     filename: str | Path,
     *,
     alpha: float = 0.42,
+    max_side: int = 4000,
+    max_boxes: int = 250,
 ) -> None:
-    """Save a full-field overview with segmentation colored by fitted scene."""
+    """Save a full-field overview with segmentation colored by fitted scene.
+
+    Args:
+        image: Detection-band image the segments live on.
+        segmap: Segmentation map; labels equal catalog ids.
+        scenes: Fitted scenes, drawn as colored segments plus a bounding box.
+        filename: Output image path.
+        alpha: Opacity of the scene coloring over the image.
+        max_side: Fields longer than this are decimated for the display, so a
+            full mosaic costs no more than a mock (see
+            :func:`scene_label_map`, which reduces by block maximum so small
+            segments survive).
+        max_boxes: Scene bounding boxes are drawn only up to this many
+            scenes; on a full field they overlap into noise.
+    """
 
     import matplotlib.pyplot as plt
     from matplotlib.colors import ListedColormap
 
-    image = np.asarray(image, dtype=float)
-    segmap = np.asarray(segmap)
-    scene_map = np.zeros(segmap.shape, dtype=np.int32)
-    for scene_index, scene in enumerate(scenes, start=1):
-        scene_template_ids = {int(t.id) for t in getattr(scene, "templates", [])}
-        if not scene_template_ids:
-            continue
-        mask = np.isin(segmap, list(scene_template_ids))
-        scene_map[mask] = int(scene_index)
+    step = max(1, int(np.ceil(max(np.shape(segmap)) / float(max_side))))
+    scene_map = scene_label_map(segmap, scenes, step=step)
+    image = np.asarray(image)[::step, ::step].astype(float)
 
     finite = np.isfinite(image)
     med = float(np.nanmedian(image[finite])) if np.any(finite) else 0.0
@@ -1785,18 +1838,22 @@ def save_scene_overview(
         vmin=0,
         vmax=n_colors,
     )
-    for scene_index, scene in enumerate(scenes, start=1):
-        if getattr(scene, "bbox", None) is None:
-            continue
-        y0, y1, x0, x1 = scene.bbox
-        ax.plot(
-            [x0, x1, x1, x0, x0],
-            [y0, y0, y1, y1, y0],
-            color=colors[scene_index],
-            linewidth=0.8,
-            alpha=0.65,
-        )
-    ax.set_title(f"Scene overview ({len(scenes)} fitted scenes)")
+    if len(scenes) <= max_boxes:
+        for scene_index, scene in enumerate(scenes, start=1):
+            if getattr(scene, "bbox", None) is None:
+                continue
+            y0, y1, x0, x1 = (b / step for b in scene.bbox)
+            ax.plot(
+                [x0, x1, x1, x0, x0],
+                [y0, y0, y1, y1, y0],
+                color=colors[scene_index],
+                linewidth=0.8,
+                alpha=0.65,
+            )
+    title = f"Scene overview ({len(scenes)} fitted scenes)"
+    if step > 1:
+        title += f", displayed 1:{step}"
+    ax.set_title(title)
     ax.set_xticks([])
     ax.set_yticks([])
     overview_dpi = _diagnostic_pixel_sampling_dpi(

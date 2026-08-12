@@ -785,14 +785,16 @@ def test_write_outputs_puts_scene_plots_in_scenes_subdir(tmp_path):
     assert sorted(p.name for p in (on / "scenes").glob("*.png")) == sorted(
         f"t_scene_{sid}.png" for sid in scene_ids
     )
-    # nothing left at the old flat location
-    assert not list(on.glob("*_scene_*.png"))
-    # the scene catalog stays in out_dir
+    # no per-scene PNG left at the old flat location
+    assert not [p for p in on.glob("t_scene_*.png") if p.stem.split("_")[-1].isdigit()]
+    # the scene catalog and the full-field scene map stay in out_dir
     assert (on / "t_scene_catalog.csv").exists()
+    assert (on / "t_scene_map.png").exists()
 
     off = tmp_path / "off"
     fresh_pipe(off, False).write_outputs()
     assert not (off / "scenes").exists()
+    assert not (off / "t_scene_map.png").exists()
 
 
 def _shift_field_pipeline(tmp_path, order, nsrc=24, size=161, offset=(0.0, 0.0)):
@@ -869,7 +871,9 @@ def test_shift_field_arrows_track_applied_template_shifts(tmp_path):
     import matplotlib
     matplotlib.use("Agg")
 
-    pipe = _shift_field_pipeline(tmp_path, 1)
+    # a real injected offset: with exact shift blocks an aligned band fits
+    # zero shift, so there would be nothing for the arrows to track
+    pipe = _shift_field_pipeline(tmp_path, 1, offset=(0.6, -0.4))
     checked = 0
     for s in pipe.scenes:
         if s.shifts is None or len(s.shifts) < 2:
@@ -883,6 +887,58 @@ def test_shift_field_arrows_track_applied_template_shifts(tmp_path):
         assert dxy.max() <= applied.max() + 0.05
         checked += 1
     assert checked, "no scene had non-trivial applied shifts"
+
+
+def test_final_fluxes_are_stationary_on_the_shifted_templates(tmp_path):
+    """The written solution belongs to the basis that is actually written.
+
+    Each astrometry pass solves fluxes on the templates as they stood before
+    that pass's shift was applied, so without a final flux-only pass the
+    stored fluxes, errors, model and residual describe a template basis that
+    no longer exists -- the last applied shift is never accounted for.
+    """
+    from mophongo.scene_fitter import SceneFitter, build_normal
+
+    pipe = _shift_field_pipeline(tmp_path, 1, offset=(0.6, -0.4))
+
+    moved = max(
+        float(np.abs(np.asarray(t.shifted[:2], dtype=float)).max())
+        for s in pipe.scenes
+        for t in s.templates
+    )
+    assert moved > 0.05, "no template moved; the test would be vacuous"
+
+    checked = 0
+    for s in pipe.scenes:
+        A, b, _ = build_normal(s.templates, s.image, s.weights)
+        flux = np.array([t.flux for t in s.templates], dtype=float)
+
+        # re-solving on the final templates must reproduce the stored fluxes
+        again = SceneFitter.solve(A, b, config=pipe.config)
+        assert np.allclose(flux, again.flux, rtol=1e-8, atol=1e-12)
+        assert np.allclose(
+            np.array([t.err for t in s.templates], dtype=float),
+            again.err, rtol=1e-8, atol=1e-12,
+        )
+
+        # and they satisfy the normal equations of those templates, up to the
+        # ridge the solver adds (A + lam I) x = b
+        resid = np.abs(A @ flux - b).max()
+        assert resid < 1e-4 * max(float(np.abs(b).max()), 1e-30)
+
+        # the model is built from the same fluxes and the same stamps
+        expected = np.zeros_like(s.model_image())
+        bb = s.bbox
+        for t in s.templates:
+            sl = t.slices_original
+            expected[
+                sl[0].start - bb[0] : sl[0].stop - bb[0],
+                sl[1].start - bb[2] : sl[1].stop - bb[2],
+            ] += t.flux * t.data[t.slices_cutout]
+        assert np.array_equal(s.model_image(), expected)
+        checked += 1
+
+    assert checked, "no scenes to check"
 
 
 def test_write_outputs_writes_shift_field(tmp_path):
@@ -1043,8 +1099,9 @@ def test_astrometry_passes_skip_converged_scenes(monkeypatch):
     assert any(s.astrom_converged is not None for s in scenes)
     for s in scenes:
         assert 1 <= s.astrom_niter <= niter
-        # solved once per recorded pass and never again after converging
-        assert calls[id(s)] == s.astrom_niter
+        # solved once per recorded pass and never again after converging, plus
+        # the one final flux-only pass every scene gets on its final templates
+        assert calls[id(s)] == s.astrom_niter + 1
         if s.astrom_niter < niter:
             assert s.astrom_converged is not False
 
@@ -1064,7 +1121,7 @@ def test_astrometry_passes_skip_converged_scenes(monkeypatch):
         if s.shifts is None or len(s.shifts) == 0:
             continue  # no shift block: no verdict to give
         assert s.astrom_converged is False
-        assert s.astrom_niter == niter == calls[id(s)]
+        assert s.astrom_niter == niter == calls[id(s)] - 1
 
     # every fitted source inherits its scene's verdict
     for pipe_, expected in ((pipe, None), (pipe2, None)):
@@ -1160,3 +1217,34 @@ def test_final_sub_tolerance_shift_is_applied_to_the_templates():
             assert total > 0.0
         checked += 1
     assert checked, "no scene converged"
+
+
+def test_aperture_sum_follows_the_fitted_shift():
+    """The aperture tracks the position the template was resampled onto.
+
+    An off-centre aperture loses EE; measuring at the catalog position on a
+    shifted template understated ap_flux by ~1% and inflated stampcor.
+    """
+    from scipy.ndimage import shift as nd_shift
+    from mophongo.templates import Template
+
+    n = 41
+    yy, xx = np.mgrid[0:n, 0:n]
+    g = np.exp(-0.5 * (((xx - n // 2) / 2.0) ** 2 + ((yy - n // 2) / 2.0) ** 2))
+    g /= g.sum()
+    parent = np.zeros((80, 80), dtype=float)
+    tmpl = Template(parent, (40.0, 40.0), (n, n), label=1)
+    tmpl.data = g.copy()
+
+    pipe = object.__new__(pipeline.Pipeline)
+    centered = pipe._aperture_sum_on_template(tmpl, 5.0)
+
+    dx, dy = 1.4, -0.9
+    tmpl.data = nd_shift(g, (dy, dx), order=3)
+    tmpl.shifted[:] = [dx, dy]
+
+    off = pipe._aperture_sum_on_template(tmpl, 5.0)
+    followed = pipe._aperture_sum_on_template(tmpl, 5.0, offset=(dx, dy))
+
+    assert followed > off                       # following recovers EE
+    np.testing.assert_allclose(followed, centered, rtol=2e-3)

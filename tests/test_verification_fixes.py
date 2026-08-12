@@ -18,7 +18,7 @@ from mophongo.fit import FitConfig, SparseFitter
 from mophongo.psf import PSF
 from mophongo.psf_map import PSFRegionMap
 from mophongo.scene import generate_scenes
-from mophongo.templates import Templates
+from mophongo.templates import Template, Templates
 from utils import make_simple_data
 
 
@@ -142,12 +142,18 @@ def test_convolve_templates_inplace_stores_result():
     tmpls = Templates.from_image(
         images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel=None
     )
-    shapes_before = [t.data.shape for t in tmpls.templates]
+    data_before = [t.data.copy() for t in tmpls.templates]
     kernel = matching_kernel(psfs[0] / psfs[0].sum(), psfs[1] / psfs[1].sum())
 
     out = tmpls.convolve_templates(kernel, inplace=True)
     assert out is tmpls.templates or out == tmpls._templates
-    grew = [
-        t.data.shape > s for t, s in zip(tmpls.templates, shapes_before)
+    # convolution keeps the stamp footprint (mode="same"); the signal that it
+    # ran is changed pixels and the CONVOLVED flag, not a grown shape
+    changed = [
+        t.data.shape == d.shape and not np.array_equal(t.data, d)
+        for t, d in zip(tmpls.templates, data_before)
     ]
-    assert any(grew), "inplace convolution left every template unconvolved"
+    assert any(changed), "inplace convolution left every template unconvolved"
+    assert all(
+        t.flag & Template.FLAG_CONVOLVED for t, c in zip(tmpls.templates, changed) if c
+    )

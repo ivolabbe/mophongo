@@ -68,7 +68,26 @@ python -m mophongo.pipeline f770w.json psfs fit # selected steps
 ```
 
 Valid step names are `psfs`, `kernels`, `load`, `loadfit`, `info`, `fit`,
-`outputs`, and `all`. {meth}`mophongo.pipeline.Pipeline.from_config` is
+`outputs`, and `all`. The `mophongo` console script runs the same steps and
+reaches the products of a finished run without opening a session:
+
+```bash
+mophongo run    f770w.json psfs fit          # same steps as above
+mophongo info   runs/f770w                   # summarize a run, no pixels read
+
+# the matching kernel at a sky position, as FITS with a WCS
+mophongo psf    runs/f770w 34.5202 -5.2566 --map-kind kernel -o kernel.fits
+
+# one source: cutouts, PSFs, and fit row as a multi-extension FITS, plus the
+# subphot six-panel diagnostic
+mophongo stamps runs/f770w 4711 --half-size 40
+mophongo diag   runs/f770w 4711 --size 101
+```
+
+Every subcommand takes the config JSON or the run directory. `psf` reads only
+the cached region map, so it is instant; `stamps` and `diag` restore the run
+with `load_fit()` and share that single load across the ids given. See
+{doc}`diagnostics` for what they write. {meth}`mophongo.pipeline.Pipeline.from_config` is
 lazy: images are read when `run()` (or `load_data()`) is first called.
 {meth}`mophongo.pipeline.Pipeline.write_outputs` writes
 `<out_dir>/<name>_residual.fits` (on the detection grid),
@@ -469,5 +488,6 @@ See {doc}`psf` for kernel diagnostics and regularization scans.
   estimates.
 - {doc}`catalog` — building the detection catalog and segmentation map.
 - {doc}`outputs` — every output column and file.
+- {doc}`diagnostics` — per-source inspection and the `mophongo` command line.
 - {doc}`simulation` — synthetic mosaics and injected-truth verification.
 - {doc}`api` — full API reference.

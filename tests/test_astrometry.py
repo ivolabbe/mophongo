@@ -391,7 +391,7 @@ def test_scene_shift_depends_on_alpha0_scale():
         alpha0 = alpha0_true * scale
         AB, BB, bB = assemble_scene_system_AB(
             scene.templates, science, weight, basis,
-            alpha0=alpha0, order=0, include_y=True, ab_from_bright_only=False,
+            alpha0=alpha0, order=0, include_y=True,
         )
         sol = SceneFitter.solve(A, b, AB=AB, BB=BB, bB=bB, config=cfg)
         if sol.shifts is not None and len(sol.shifts) >= 2:
@@ -543,7 +543,7 @@ def test_leverage_cap_bounds_one_bright_anchor(tmp_path):
     def solve(cap):
         _AB, BB, bB = assemble_scene_system_AB(
             templates, image, weights, basis, alpha0=alpha0, order=0,
-            include_y=True, ab_from_bright_only=True, leverage_cap=cap,
+            include_y=True, leverage_cap=cap,
         )
         BB = BB.toarray()
         return float(np.linalg.solve(BB + 1e-12 * np.eye(BB.shape[0]), bB)[0])

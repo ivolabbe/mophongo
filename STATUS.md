@@ -3,6 +3,363 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Added a science-safe interpolated companion to the all-field MINERVA SED
+  stack (2026-08-12). Interpolate each galaxy only between adjacent valid
+  field bands in linear normalized F-lambda versus log wavelength, retain
+  signed fluxes, keep broken/missing-band intervals uncovered, and preserve
+  the equal-galaxy redshift-bin denominator. The existing half-maximum
+  filter-footprint stack remains the raw measurement view. The final cell
+  reconstruction uses each galaxy's connected union of valid half-maximum
+  supports, holds component endpoints only to their physical edges, and
+  arithmetic-averages effectively coincident pivots. Its observed evaluation
+  grid is <=0.0025 dex and includes every filter edge/pivot; rest stays at the
+  requested 100 A. Added raw interpolated mean/count FITS extensions and a
+  separate contrast panel that continuum-subtracts only for rendering, with
+  masked 4x redshift interpolation that never crosses a finite-support gap.
+  The full COSMOS+EGS+UDS render completed for 357,044 normalized galaxies;
+  `tests/test_sed_stack.py`: 23 passed, including nested broad-filter union
+  connectivity and full component endpoint support.
+- [x] Band convolution back on the stamp footprint (2026-08-12).
+  `convolve_templates` had switched to `convolve_cutout`, growing every
+  convolved template to full linear support (8" stamp + 8" kernel = 16",
+  402 px at 40 mas) — outer half a truncated-PSF x truncated-kernel outer
+  product (0.08% of a point source's flux), 6.7 GB stamps files, inflated
+  scene overlaps. Restored the shared `_convolve2d` (mode="same")
+  convention: footprint unchanged, truncated sum kept (no renormalisation
+  hides the boundary; `stampcor` relies on it), totals mean "flux within
+  the stamp box" corrected by `ee_psf_lo`, matching the PSF-throughput
+  convention. `convolve_cutout` itself is untouched (the `extend_with_psf`
+  smearing path needs full support). Tests updated to the contract:
+  footprint + truncated-sum checks, interior-alignment check for the
+  parity test, changed-pixels+flag check for the inplace test. 320 passed.
+  Predicted effect on the faint-template aperture correction: 1.4389 ->
+  1.4377 (matched-support pure-PSF ladder).
+- [x] stampcor-vs-IDL offset attributed by measurement (2026-08-12).
+  Panel (b)'s ~1.3% (F770W) / ~3.7% (F1800W) offset and the IDL fan are
+  NOT the PSF (matched-support 1/EE ours/theirs = 1.0043), NOT support
+  (P_det x kernel puts 0.08% outside the 8" box), NOT the mosaics (same-sky
+  raw apertures on 40 mas native vs 80 mas replicated agree to 0.2-0.3%).
+  Measured on 735 QA sources with `legacy` subphot fully reproduced
+  (totcor re-derived from their saved model fits to 0.02%): subphot
+  computes totcor with the aperture at the UNSHIFTED catalog position on
+  the SHIFTED best-fit model (their own `@@@` comment fixes this for flux
+  but totcor is computed 25 lines earlier) — inflation med +1.2%, scaling
+  with |fitted shift|: +0.2% (<1 px) to +42% (>4 px) = the fan. At model
+  centroids IDL totcor = 1.4400 ~= its pure-PSF value 1.4373. Python's
+  centered measurement on near-PSF faint templates = the flat pinned band
+  (its own centering term +0.8%). Matched pairs (n=12, QA-cluster trial
+  run): released py/IDL 0.9746 -> 0.9819 with both apertures at
+  centroids; faint subset 0.905 -> 0.982. Residual ~1.5-2%: python blends
+  data cores down to segment SNR 5 where subphot switches to pure PSF at
+  15 (`tmpl_snrlo`), and segment-truncated cores are sharper than the PSF.
+  The ~2% raw-flux offset is the same centering story: subphot measures at
+  the fitted position (`xaper = xc - p`), python at the catalog position.
+  Analysis scripts + decomposition table in the session scratchpad
+  (`decompose_stampcor.py`, `qa_run/decomposition.ecsv`).
+- [x] Astrometric-anchor messages corrected (2026-08-12, wording only).
+  Three of them described filters that are not what the code does:
+  * `Scene.solve`'s skip warning said "no bright **non-star** isolated
+    sources", naming a cut that is off by default (`astrom_exclude_stars`
+    is False — unsaturated stars are the best anchors). It now states the
+    real condition and the thresholds in force: "fewer than 2 sources pass
+    the astrometric anchor cuts (SNR > 15, isolation >= 0.7)", with
+    ", stars excluded" appended only when that option is on.
+  * Its TODO claimed isolation filtering "can't be applied at merge time";
+    `generate_scenes` has applied it there since (`scene.py:751-757`). The
+    note now says what is actually true — merge-time cuts run against the
+    full-field normal matrix, where a source competes with neighbours
+    outside its scene as well, so a scene can pass there and still fall
+    short at solve time.
+  * `_prepare_hi_templates` logged "Marked N templates as stars (excluded
+    from astrometry)" unconditionally; it now reports "excluded" or "kept
+    as anchors" from `config.astrom_exclude_stars`.
+  No behavior change; full suite 312 passed.
+- [x] MINERVA UDS "mother of all SEDs" diagnostic (2026-08-12). Added the
+  reusable NumPy raster/stack helpers in `src/mophongo/sed_stack.py` and the
+  survey-specific `examples/minerva/plot_uds_sed_stack.py`. The current
+  n3.0_m3.1_v1.2.1 catalog is paired with its exact 345,792-row EAzY table
+  only after row-ID and sky-position assertions; positive `z_spec` replaces
+  `z_phot`. All 33 HST/JWST filters are included, including F770W/F1280W/
+  F1500W/F1800W. Raw F-nu is converted to relative F-lambda, normalized by
+  bracketed interpolation at rest 5000 A, painted over each filter's actual
+  half-maximum interval, and unweighted-nanmeaned in bins with
+  `Delta log(1+z)=log(1.05)`. Negative measurements survive and uncovered
+  pixels remain NaN. The default S/N >= 5 normalization sample contains
+  98,752 galaxies. Generated rest/observed comparison PNG+PDF, count PNG,
+  summary JSON, and a FITS product carrying both mean/count images and all
+  redshift, wavelength, and filter tables. `tests/test_sed_stack.py` covers
+  conversion, normalization/bracketing, zero/negative valid-flux averaging,
+  overlap semantics, rest-frame support, nanmean/chunk invariance, and count
+  thresholds. The
+  science raster now uses fixed 100 A wavelength bins for the rest frame
+  (1,992 pixels over the default range), with H-alpha and [O III] 5007 guides
+  in both frames and separate wide rest- and observed-frame exports. The
+  observed frame uses cells bounded by the filters' actual half-maximum edges:
+  isolated cells span one complete band, while overlaps are split only at a
+  physical filter edge so valid measurements are still averaged once per
+  galaxy. Fixed filter footprints remain vertical while rest-frame features
+  trace diagonals with redshift. All wavelength cells are drawn with their true
+  edges on the log-wavelength display axis.
+  `stack_filter_seds` now sweeps
+  exact per-galaxy filter interval events into redshift-bin difference arrays,
+  preserving the original overlap average and valid-galaxy denominator
+  without allocating a source-by-wavelength cube. The rest-5000 A divisor is
+  now an inverse-variance weighted local linear fit using the nearest three
+  valid bands with mandatory bracketing (two-band interpolation fallback),
+  increasing the default normalized sample from 98,752 to 113,356 galaxies.
+  The PDF embeds the raster at the requested output DPI.
+  Generalized the diagnostic to the three distinct current MINERVA fields:
+  COSMOS n3.0_m3.0_v1.0.1 (38 bands), EGS n2.0_m2.1_v1.3.1 (37), and UDS
+  n3.0_m3.1_v1.2.1 (33). Their exact EAzY tables are required and fully
+  row/ID/sky validated. Each field is normalized independently, absent bands
+  are padded invalid on a 41-filter union, and 357,044 selected galaxies are
+  concatenated before stacking, so the combined mean is galaxy-weighted rather
+  than an equal-field mean. The all-field product includes combined and
+  per-field mean/count planes plus FIELDS and FIELD_FILTERS provenance tables.
+  The observed union grid has 79 physical filter-boundary cells; the rest grid
+  remains fixed at 100 A.
+- [x] `trial` patch replaces `r_trial`/`trial_center`, and a trial run now
+  reads only its patch (2026-08-12). `RunConfig.trial` is
+  `{"center": [ra, dec], "radius": <arcmin>}` with an optional `"margin"`
+  (arcsec, default 60) for the PSF support, template stamps and convolution
+  wings that reach outside the patch; `None` is a full-field run. The old
+  pair is retired outright — `from_json` raises and names the replacement
+  rather than ignoring them. `RunConfig.trial_geometry()` validates and
+  returns `((ra, dec), radius, margin)`.
+  Previously `r_trial` only trimmed the *catalog*: the full mosaic was read,
+  background-fitted and saturation-repaired regardless, which is why
+  `examples/canfar/submit.py` told users to keep `--ram 48` "even for a small
+  patch". On UDS F770W the repair scanned 22455 holes and repaired 129 stars
+  across the field so that 4 saturated templates could reach an
+  `r_trial=1.5'` fit.
+  `_read_image(path, box)` now pulls just the patch off disk with
+  `hdu.section` and places it in a full-shape array. Untouched pages of that
+  array are never faulted in (measured: `np.zeros(876 Mpx)` costs 0.026 GB
+  RSS), so **no pixel coordinate, slice, catalog x/y or WCS changes** — the
+  whole point of doing it this way. The background/ivar estimate takes the
+  same box (`Pipeline._bg_and_ivar_boxed`) because running it on a
+  full-shape array would both fault in the mosaic and measure the noise of a
+  field of zeros. The trial box is hashed into `_repair_provenance`, so a
+  trial cache can no longer satisfy a full-field run.
+  Measured on MINERVA UDS F770W, radius 0.5': file reads 12.24 GB -> 0.88 GB,
+  `load_data` 8.1 s, reading 2.3% of the hi-res mosaic. Peak RSS fell 22.3 ->
+  15.5 GB only, because full-grid arithmetic downstream still touches every
+  page; the remaining offenders are listed in TODO.md.
+  A trial run is deliberately *not* a subset of a production run: the
+  background and the ivar calibration are measured on the patch, so
+  `sigma_true` and the flux errors differ. `load_data` logs that as a warning
+  on every trial run.
+  Migrated 58 configs (`examples/canfar/*.json`, `examples/minerva/*.json`,
+  the DR0/DR0.1 examples) with a line-based script, so the `#` comment lines
+  a JSON round-trip would have dropped survive. Also updated
+  `make_minerva_configs.py`, `canfar/arcify.py` (`--r-trial` now overrides
+  only the radius and keeps the config's centre), `canfar/submit.py`,
+  `canfar/MANUAL.md`, `compare_dr0_dr0.1.py` and
+  `minerva/run_verification_v2.py`.
+- [x] Scene diagnostic: the colour panel no longer inherits the saturated
+  nulling (2026-08-12). `Scene.plot` overwrote `img_cut` in place, so the
+  colour composite's red and green channels were built from the nulled image
+  while the blue (template) channel was not. The composite now uses the raw
+  image and is byte-identical with and without `null_segments`.
+- [x] Verification v8 (2026-08-12): first run on the P1-01..P1-05 fixes.
+  `run_verification_v2.py --version v8 --scheme psf_wings --psf-dir data/PSF8
+  --psf-size 8.0 --r-trial 1.5`, all three stages (~48 min). Unlike v7, the
+  real-data fits were re-run rather than reused, because P1-03/P1-04 change
+  the ivar calibration and P1-05 changes which PSF region each source reads.
+  Mock leg moved +0.5 to +0.8% toward unity in every band (F770W 0.9533 ->
+  0.9608, F1280W 0.9573 -> 0.9645, F1500W 0.9606 -> 0.9673, F1800W 0.9637 ->
+  0.9688), so the `psf_wings` extended-source deficit is 3.1-3.9% rather than
+  v7's 3.6-4.7%; the bluest-worst band trend survives. IDL leg is stable
+  (psfcor within 0.003 of v7). Five fixes landed together, so this does not
+  attribute the improvement — a per-fix run is needed for that.
+  Also noted: the fitted-band `sigma_true` moved 3518 -> 3921 (+11.5%, so
+  ~20% lower ivar and ~11% larger flux errors) and the detection band 1.047
+  -> 1.013. That is the P1-03 retune landing on real data; the detection
+  band moved toward the honest value of 1.0, but the MIRI band's arbitrary
+  drizzle normalisation makes its number uncheckable on its own. This is the
+  "validate on a real mosaic" item already in TODO.md.
+- [x] Full-field scene map as a run output (2026-08-12).
+  `write_outputs` now writes `<name>_scene_map.png` next to the scene
+  catalog, under the same `scene_plots` switch: every segment colored by the
+  scene that fitted it, each scene's bbox drawn over it. It reuses
+  `verification.save_scene_overview`, which was written for mock fields and
+  did not scale — it built the scene map with one `np.isin` over the full
+  segmap *per scene* (3000 scenes x 219 Mpx on a MINERVA mosaic). The new
+  `verification.scene_label_map` does it as a single label lookup-table pass,
+  and fields wider than `max_side=4000` are reduced by block *maximum* so a
+  3-pixel segment survives the decimation instead of falling between
+  samples. Measured at UDS scale (17280x12672, 50k segments, 3000 scenes):
+  0.41 s, peak RSS set by the segmap itself. Bounding boxes are drawn up to
+  `max_boxes=250` scenes, past which they overlap into noise.
+- [x] Scene diagnostics keep foreign saturated stars in the image panel
+  (2026-08-12). `Scene.plot(null_segments=...)` zeroed those pixels in the
+  image panel; it now draws them and only excludes them from that panel's
+  grayscale stretch, which is what the nulling was protecting. The residual
+  panel still nulls them (the fit residual under a saturated core is
+  meaningless). `tests/test_scene_saturated.py` checks the new contract:
+  image pixels identical with and without `null_segments`, stretch strictly
+  narrower with it.
+- [x] `mophongo` console script: command-line access to a finished run's
+  products (2026-08-12, new `src/mophongo/cli.py`). Five subcommands, each a
+  wrapper over an existing method, with no algorithmic logic of its own:
+  * `psf <map.geojson|run.json> RA DEC` writes the PSF or matching kernel of
+    the region containing that position to FITS. It reads only the cached
+    region map, so it is instant. The stamp gets a WCS centered on the
+    requested position that inherits the CD matrix of the mosaic the map was
+    drizzled onto — `psf_hi` and `kernel` are on the detection grid, `psf_lo`
+    on the band's own — resolved through the run config beside the map;
+    `--pixel-scale` builds a north-up tangent plane when there is none. The
+    header carries the region key, the stamp's encircled energy
+    (`EE_BOX`/`EE_RLIM`/`R_LIM`), and the map's provenance columns.
+  * `stamps <run.json> ID...` writes one source's
+    `Pipeline.source_products` dict as a multi-extension FITS: `IMG_HI`,
+    `SEGMAP`, `TMPL_HI`, `IMG_LO`, `TMPL_LO`, `MODEL`, `RESID`, `PSF_HI`,
+    `PSF_LO`, each carrying the sliced WCS of its parent grid, the fitted
+    scalars in the primary header, and the fit-table row as `FITROW`.
+  * `diag <run.json> ID...` writes the subphot six-panel PNG
+    (`--style stages` for the template-construction row).
+  * `info` and `run` delegate to `Pipeline.info` and `pipeline.main`.
+  `stamps`/`diag` restore the run through `load_fit` once and loop over the
+  ids given. Non-finite floats (an unmeasured `ee_psf_lo`, an unregularized
+  kernel) are written as undefined FITS cards rather than dropped, since
+  `nan` is illegal in a header but is a real product value.
+  A config argument may be the JSON or the run directory, as for
+  `Pipeline.from_config`; when a relative `out_dir` does not hold the map
+  (it resolves against the process CWD, as everywhere else) the directory
+  the config sits in is used instead, so a finished run opens from anywhere.
+  New `tests/test_cli.py` (10 tests) covers region lookup by position, both
+  WCS paths, the provenance header, the stamps layout and its cutout WCS,
+  both diagnostic styles, and an end-to-end config -> `load_fit` -> files
+  run. Smoke-tested against the real `examples/uds_770_dr0.1` products:
+  80 mas `psf_lo`, 40 mas `kernel`, both centered on the requested position.
+  Full suite 270 passed; the one failure, `tests/test_background_masking.py
+  ::test_dilation_grows_the_exclusion`, is in concurrent untracked work and
+  is untouched by this change.
+- [x] P1-05 fixed: template geometry ops kept the parent WCS (2026-08-12).
+  `Template.convolve_cutout` and `project_to_block_replicated_grid` built
+  the new `Template` on a parent-sized image but passed `self.wcs` -- this
+  cutout's WCS, i.e. the parent with CRPIX shifted by the stamp origin -- as
+  that image's WCS. The new template's `wcs_original` was therefore off by
+  the stamp origin, and the next operation shifted it again. Both now pass
+  `self.wcs_original`; the `# note wcs origin is wrong` comment is resolved
+  rather than annotated. Measured on a 1 arcsec/px TAN WCS, a source at
+  (260, 190) in a 41x41 stamp moved (-240, +170) arcsec through either
+  operation and is now invariant to 1e-6 arcsec.
+  Not cosmetic: `Templates.convolve_templates` converts `position_original`
+  through `wcs_original` to choose the `PSFRegionMap` region and the
+  encircled-energy correction, so a spatially varying PSF was being read
+  from the wrong part of the mosaic.
+  Checked the neighbours: `Template.downsample` takes an explicit `wcs_lo`
+  from its caller and is correct. `AlignedCutout.downsample`/`upsample`
+  share the pattern but return `AlignedCutout`, which has no `wcs_original`
+  to pass -- left alone and recorded in TODO.md.
+  New `tests/test_template_wcs_provenance.py` (13 tests) asserts world
+  coordinates survive convolution, block projection, padding and repeated
+  operations, across translated, rotated, fine-scale and SIP WCSs, and that
+  `wcs` and `wcs_original` keep agreeing about where the source is. 11 of
+  the 13 failed before the fix.
+- [x] P1-04 fixed: non-finite science no longer poisons preprocessing
+  (2026-08-12). `get_bg_and_ivar` masked only the weight map, so a single
+  non-finite science pixel spread over its whole block in the coarse mean,
+  through the median and MAD, and made every statistic NaN: one NaN (or
+  inf) anywhere returned a background and an inverse variance that were
+  **0% finite**, and a four-row NaN border left the background 19.5%
+  finite. There is now one common `valid = isfinite(sci) & isfinite(wht) &
+  (wht > 0)` mask applied before binning, block means taken over each
+  block's valid pixels (`vfrac`) so a bad pixel costs sample size instead of
+  poisoning the block, the sigma measured only on blocks that are >90%
+  valid, and a warning plus an unscaled weight map when no usable background
+  sample exists at all. `bg_gaussian_normalized` now drops non-finite
+  samples from the mask and replaces them explicitly: `NaN * 0` is `NaN`, so
+  a pixel the mask already excluded still spread across the smoothing
+  footprint (15% of the output). A single NaN now changes the recovered
+  calibration by 0.1% (1.012 vs 1.013). The `0 + 0` scalar `seg_all` path
+  went away with the P1-03 rewrite, which allocates a full-shape mask.
+- [x] P1-03 fixed: background source mask had coupled polarity and
+  threshold errors (2026-08-12). Three defects that partly cancelled:
+  (a) the bright pass convolved with an *unnormalised* 29-pixel disk, whose
+  white-noise RMS is `sqrt(N) sigma`, but scaled the threshold by the
+  normalised kernel's `1/sqrt(N)` -- a factor of 29 too low, flagging 47% of
+  a pure noise field; (b) `binary_dilation(seg_all == 0)` dilated the
+  *background* mask, growing background into the sources and re-admitting
+  100% of an r<=2 source and 59% of an r=8 source; (c) the faint pass ran at
+  1 sigma with `npixels=1`, which alone flags 16% of pure noise. Together
+  they produced a mask that looked reasonable (3.9% of pure noise excluded)
+  by accident, with no predictable dependence on `detect_thresh` or
+  `dilate` -- mask extent was not even monotone in `dilate`
+  (`{1: 547, 2: 527, 3: 555, 5: 1099}`).
+  The mask construction moved into `catalog.coarse_source_mask`, which
+  normalises the smoothing kernel, dilates the *source* mask, and runs the
+  faint pass at `faint_thresh` (new parameter, default 4.0) with
+  `npixels=3`. `detect_thresh` now means "sigma of the smoothed image" and
+  its default moved 1.0 -> 2.5. Chosen against measurements, not by
+  inspection: on injected sources over correlated noise at two depths, the
+  chosen setting recovers `sigma_true` to 1.007 (shipped: 1.016), masks 96%
+  of injected source flux (shipped: 88%), and flags 0.0% of a pure-noise
+  field. The `mask_src0` line, computed and never used, is gone.
+  New `tests/test_background_masking.py` (20 tests) covers background bias,
+  recovered variance, mask occupancy, source coverage, `dilate` monotonicity,
+  depth dependence, correlated noise, and the non-finite cases above. Two of
+  them fail on the shipped logic; the compact-source polarity test passes
+  either way (the bright pass's smoothing halo absorbed the inverted
+  dilation) and is labelled a regression guard, not a reproduction.
+- [x] P1-02 fixed: final flux-only solve on the shifted templates
+  (2026-08-12). Each astrometry pass solved fluxes and shifts together and
+  *then* resampled the templates, so the fluxes it produced belonged to the
+  pre-shift basis and the last applied shift was never accounted for. The
+  pipeline then built the model, residual and stamps from the shifted
+  templates using those stale fluxes. `Pipeline.run` now runs one flux-only
+  pass per scene after the loop (`replace(config, fit_astrometry_niter=0)`),
+  for every scene regardless of the convergence verdict; fitted shifts are
+  untouched. On the `offset=(0.6, -0.4)` mock the fluxes moved by 0.18% max
+  and 0.027% median, and scene chi2 dropped 22105.05 -> 22101.18. The
+  correction is smaller than the review measured because the P1-01 fix lands
+  a more accurate step and leaves less residual shift at stop; it does not
+  remove it.
+  New `test_final_fluxes_are_stationary_on_the_shifted_templates` re-solves
+  each scene from `build_normal` on the final templates and requires the
+  stored fluxes and errors to match, the normal equations to be stationary,
+  and `model_image` to be built from those same fluxes and stamps. Verified
+  to fail with the pipeline change reverted.
+  `test_astrometry_passes_skip_converged_scenes` counts `Scene.solve` calls
+  and now expects `astrom_niter + 1`; the loop still drops converged scenes.
+  Full suite 254 passed.
+- [x] P1-01 fixed: exact joint astrometric blocks (2026-08-12).
+  `assemble_scene_system_AB` accumulated only each template's own gradient
+  products, so `AB`, `BB` omitted every cross-template term and the x-y
+  block; `bB` was already scene-wide, which made the system inconsistent.
+  It now forms the scene-wide derivative columns
+  `B_k = sum_i -alpha_i phi_k(u_i,v_i) grad(T_i)` over the union footprint
+  of the bright anchors and contracts them, so the blocks are the exact
+  normal equations of the design in `docs/fitting.md`. The `continue` that
+  dropped faint flux rows from `AB` is gone -- a faint row is simply its
+  overlap with the anchors' columns -- and `ab_from_bright_only` went with
+  it (it only selected the defect; three call sites).
+  Measured against a dense reference design: the old blocks were exact for
+  isolated anchors and wrong only in blends. At order 0 the error cancelled
+  by symmetry (`B_x = -d(model)/dx`), so the fixed point was accidentally
+  right but the step was undersized -- a 0.30 px offset came back as
+  0.18 px at 6 px separation, and with `astrom_shift_tol=0.1` the loop
+  tol-stopped 0.05 px short. At order 1 (the default) the cancellation dies
+  and a perfectly aligned 12-source blend fitted a spurious shift field of
+  0.054 px rms, 0.16 px peak; it is now machine zero (1e-15 px unregularized,
+  2.5e-6 px under the default `reg_flux` ridge). Single-pass flux error in a
+  4 px blend: 11.6% -> 0.34%. Flux errors now inherit the shift covariance
+  through `S_w = A_w - AB_w AB_w^T`, which the near-zero `AB` had suppressed
+  by up to 40%.
+  `leverage_cap` keeps its meaning: it is a weight on the shift equations,
+  entering `AB`/`bB` linearly as `wl_i` and `BB` as `sqrt(wl_i wl_j)` so the
+  diagonal stays `wl_i` and the implied shift `dx_i` is untouched. It
+  reduces exactly to the old per-anchor form when nothing overlaps.
+  New `tests/test_scene_astrometry_blocks.py` (14 tests) checks block
+  equivalence against an independent dense design (orders 0/1/2, both axes,
+  bright+faint, non-uniform weights), zero spurious shift on an aligned
+  blend, separation-independent recovery, error inflation, and both cap
+  properties. 11 of the 14 failed before the fix.
+  `tests/test_pipeline.py::test_shift_field_arrows_track_applied_template_shifts`
+  had been passing *on* the bug: it ran with no injected offset and needed
+  the spurious shifts to have anything to track; it now injects
+  `offset=(0.6, -0.4)`. Full suite 253 passed.
 - [x] `FitConfig.astrom_leverage_cap` (2026-08-12, default `0.9`).
   Anchor leverage in the shift block goes as flux squared
   (`I_i = a_i^2 <Gx,w,Gx>`), so one bright source can carry a scene's

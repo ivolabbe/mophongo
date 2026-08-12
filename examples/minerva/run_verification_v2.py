@@ -54,14 +54,16 @@ MOCK_OUT = V2 / "uds_sims"
 SCHEME: str | None = None
 PSF_DIR: str | None = None
 PSF_SIZE: float | None = None
+R_TRIAL: float | None = None
 SRC_RUNS = BASE / "examples" / "minerva"
 BANDS = ["f770w", "f1280w", "f1500w", "f1800w"]
 PY = sys.executable
 
 
 def _set_version(version: str, scheme: str | None,
-                 psf_dir: str | None = None, psf_size: float | None = None) -> None:
-    global V2, RUNS, IDL_OUT, MOCK_OUT, SCHEME, PSF_DIR, PSF_SIZE
+                 psf_dir: str | None = None, psf_size: float | None = None,
+                 r_trial: float | None = None) -> None:
+    global V2, RUNS, IDL_OUT, MOCK_OUT, SCHEME, PSF_DIR, PSF_SIZE, R_TRIAL
     V2 = VER_ROOT / version
     RUNS = V2 / "runs"
     IDL_OUT = V2 / "uds_monu"
@@ -69,6 +71,7 @@ def _set_version(version: str, scheme: str | None,
     SCHEME = scheme
     PSF_DIR = psf_dir
     PSF_SIZE = psf_size
+    R_TRIAL = r_trial
 
 log = logging.getLogger("v2")
 
@@ -114,6 +117,15 @@ def prep_configs() -> None:
                     else:
                         raise FileNotFoundError(f"no detection wht for {sci}")
                     break
+        # the generated configs spell repair_psf_pattern in the legacy
+        # OS4_GRID5 order, which matches no file and defeats autobuild
+        # (see TODO.md); respell to the canonical GRID5_OS4 so the repair
+        # grids are autobuilt into this run's psf_dir and saturated stars
+        # are flagged and isolated as in production
+        text = text.replace(
+            '"repair_psf_pattern": "UDS_NRC.._F444W_OS4_GRID5"',
+            '"repair_psf_pattern": "UDS_NRC.._F444W_GRID5_OS4"',
+        )
         if SCHEME is not None:
             assert '"extend_mode"' not in text
             text = text.replace('"fit": {', f'"fit": {{\n    "extend_mode": "{SCHEME}",')
@@ -129,19 +141,36 @@ def prep_configs() -> None:
                 if '"psf_size"' in line:
                     lines[k] = f'  "psf_size": {PSF_SIZE},'
             text = "\n".join(lines)
+        if R_TRIAL is not None:
+            lines = text.splitlines()
+            for k, line in enumerate(lines):
+                if '"r_trial"' in line:
+                    lines[k] = f'  "r_trial": {R_TRIAL},'
+            text = "\n".join(lines)
         (RUNS / f"{name}.json").write_text(text)
-        # seed the PSF/kernel caches: each .geojson pairs with a sibling
-        # .fits holding the PSF cube (PSFRegionMap.to_file); both are needed,
-        # a geojson alone loads with psfs=None. Provenance-checked on load,
-        # so a stale copy is rebuilt rather than silently reused. With a
-        # nonstandard psf_dir/psf_size the caches are stale by construction
-        # (provenance records psf_size) and are not seeded at all.
-        if PSF_DIR is None and PSF_SIZE is None:
-            for cache in (SRC_RUNS / name).glob("*.geojson"):
-                for src in (cache, cache.with_suffix(".fits")):
-                    dest = out_dir / src.name
-                    if src.exists() and not dest.exists():
-                        shutil.copy2(src, dest)
+        # seed the PSF/kernel caches from the newest prior copy anywhere —
+        # other verification versions or the production run dirs. Each
+        # .geojson pairs with a sibling .fits (PSFRegionMap.to_file); both
+        # are needed, a geojson alone loads with psfs=None. Provenance is
+        # checked on load (pattern, psf_size, blur, kernel method), so a
+        # non-matching seed is rebuilt rather than silently reused: seeding
+        # is always safe, at worst useless.
+        for stem in (f"{name}_psf_hi", f"{name}_psf_lo", f"{name}_kernel"):
+            dest = out_dir / f"{stem}.geojson"
+            if dest.exists():
+                continue
+            candidates = sorted(
+                (p for p in [
+                    *VER_ROOT.glob(f"v*/runs/{name}/{stem}.geojson"),
+                    SRC_RUNS / name / f"{stem}.geojson",
+                ] if p.exists() and p.parent != out_dir and p.with_suffix(".fits").exists()),
+                key=lambda p: p.stat().st_mtime, reverse=True,
+            )
+            if candidates:
+                src = candidates[0]
+                shutil.copy2(src, dest)
+                shutil.copy2(src.with_suffix(".fits"), dest.with_suffix(".fits"))
+                log.info("seeded %s from %s", stem, src.parent)
         log.info("prepared %s (caches: %d geojson + %d fits)", name,
                  len(list(out_dir.glob("*.geojson"))),
                  len([f for f in out_dir.glob("*.fits") if "psf" in f.name or "kernel" in f.name]))
@@ -237,7 +266,7 @@ def run_mock_leg() -> list[dict]:
 
 
 def main(argv: list[str]) -> None:
-    version, scheme, psf_dir, psf_size = "v2", None, None, None
+    version, scheme, psf_dir, psf_size, r_trial = "v2", None, None, None, None
     args = []
     it = iter(argv)
     for a in it:
@@ -249,9 +278,11 @@ def main(argv: list[str]) -> None:
             psf_dir = next(it)
         elif a == "--psf-size":
             psf_size = float(next(it))
+        elif a == "--r-trial":
+            r_trial = float(next(it))
         else:
             args.append(a)
-    _set_version(version, scheme, psf_dir, psf_size)
+    _set_version(version, scheme, psf_dir, psf_size, r_trial)
     _setup_logging()
     global BANDS
     picked = [a for a in args if a in BANDS]

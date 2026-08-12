@@ -7,9 +7,12 @@ This file records completed implementations, validation runs, and the current wo
   aperture estimator corrected by the recorded box EE
   (`ap_flux_total_<i> = ap_flux_corr_<i>/ee_psf_lo`; est1 panel reads it).
   Against IDL the offset flips from +0.04..+0.06 to -0.03..-0.07 mag
-  (SNR>25, four bands): the division slightly overshoots because IDL's
-  `totcor` is a partial-total convention (IDL `psfcor` ~1.26 never
-  multiplies `flux_F`), so the residual measures conventions, not error.
+  (SNR>25, four bands). Settled from the recorded formalism: IDL `totcor
+  = 1/ap_B` on the unit-normalized model — NOT ee-corrected — so
+  `ap_flux_corr` is the like-for-like column vs `flux_F` (its +0.05
+  offset is a real model-EE difference in the composites' wings) and
+  `ap_flux_total` is the truth-convention total, brighter than IDL by
+  construction. Default scheme stays `psf_wings` (user decision).
   Mock leg reproduces v2 to four decimals (determinism check). Scene
   reporting now post-merge only (one INFO line; pre-merge component count
   demoted to DEBUG) after the 4867-scenes misreading. README + figures +

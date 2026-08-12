@@ -118,6 +118,11 @@ class RunConfig:
     # MJD-matched pattern_hi ePSFs; the halo model is grafted outside
     # their support.
     repair_psf_pattern: str = ""
+    # Reuse a previous run's repair from out_dir/repaired/repair_cache.fits
+    # when its recorded inputs (sci_hi/wht_hi paths + mtimes, patterns,
+    # repair_kwargs) match; the PSF fit is then skipped and the cached pixel
+    # patches and catalog flags are applied instead.
+    repair_reuse: bool = True
     bg_filter_sigma: float = 64.0  # get_bg_and_ivar background filter
     footprint_filter: bool = True  # keep only sources with wht_lo > 0
     r_trial: float = 0.0  # trial-patch radius in arcmin; 0 = full run
@@ -973,6 +978,112 @@ class Pipeline:
             )
         return guess
 
+    def _repair_provenance(self, pattern_halo: str) -> dict[str, str]:
+        """What the repair depended on; a cache is valid only if all match."""
+        cfg = self.run_config
+        prov: dict[str, str] = {
+            "sci_hi": str(cfg.sci_hi),
+            "wht_hi": str(self.resolve_wht_hi()),
+            "pattern": cfg.pattern_hi,
+            "halo": pattern_halo or "",
+            "kwargs": json.dumps(cfg.repair_kwargs or {}, sort_keys=True),
+        }
+        for key in ("sci_hi", "wht_hi"):
+            prov[key + "_mtime"] = str(int(Path(prov[key]).stat().st_mtime))
+        return prov
+
+    def _save_repair_cache(
+        self,
+        path: Path,
+        prov: dict[str, str],
+        sci0: np.ndarray, wht0: np.ndarray, seg0: np.ndarray,
+        rep: dict[str, Any],
+        cat0: Table,
+    ) -> None:
+        """Persist the repair as pixel patches + catalog flag columns.
+
+        The repair only touches saturated cores and flag columns, so the
+        cache stores diffs, not mosaics: a PATCHES bintable of changed
+        pixels (sci/wht/segmap values) and a FLAGS bintable of the
+        catalog's ``FLAG_SATURATED_*`` columns by id.
+        """
+        from astropy.io import fits
+
+        yy, xx = np.nonzero(
+            (rep["sci"] != sci0) | (rep["wht"] != wht0) | (np.asarray(rep["segmap"]) != seg0)
+        )
+        patches = Table({
+            "y": yy.astype(np.int32), "x": xx.astype(np.int32),
+            "sci": np.asarray(rep["sci"])[yy, xx].astype(np.float32),
+            "wht": np.asarray(rep["wht"])[yy, xx].astype(np.float32),
+            "seg": np.asarray(rep["segmap"])[yy, xx].astype(np.int64),
+        })
+        cat = rep["catalog"]
+        flag_cols = [c for c in cat.colnames if c.startswith("FLAG_SATURATED_")]
+        flags = Table({"id": np.asarray(cat["id"], np.int64)})
+        for c in flag_cols:
+            flags[c] = np.asarray(cat[c])
+        hdr = fits.Header()
+        for key, value in prov.items():
+            hdr[f"HIERARCH REPAIR {key.upper()}"] = value
+        hdr["NPATCH"] = len(patches)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fits.HDUList([
+            fits.PrimaryHDU(header=hdr),
+            fits.BinTableHDU(patches, name="PATCHES"),
+            fits.BinTableHDU(flags, name="FLAGS"),
+        ]).writeto(path, overwrite=True)
+        logger.info("repair cache written: %d pixel patches, %d flag rows -> %s",
+                    len(patches), len(flags), path)
+
+    def _load_repair_cache(
+        self,
+        path: Path,
+        prov: dict[str, str],
+        sci: np.ndarray, wht0: np.ndarray, seg: np.ndarray,
+        cat: Table,
+    ) -> tuple[np.ndarray, np.ndarray, Table, np.ndarray] | None:
+        """Apply a matching repair cache; None when absent or stale."""
+        from astropy.io import fits
+
+        if not path.exists():
+            return None
+        with fits.open(path) as hdul:
+            hdr = hdul[0].header
+            for key, value in prov.items():
+                got = hdr.get(f"REPAIR {key.upper()}")
+                if got is None or str(got) != value:
+                    logger.warning(
+                        "repair cache %s is stale (%s changed); re-running repair",
+                        path.name, key,
+                    )
+                    return None
+            patches = Table(hdul["PATCHES"].data)
+            flags = Table(hdul["FLAGS"].data)
+        wht = wht0.copy()
+        yy, xx = np.asarray(patches["y"]), np.asarray(patches["x"])
+        sci[yy, xx] = np.asarray(patches["sci"], sci.dtype)
+        wht[yy, xx] = np.asarray(patches["wht"], wht.dtype)
+        seg[yy, xx] = np.asarray(patches["seg"], seg.dtype)
+        by_id = {int(i): k for k, i in enumerate(cat["id"])}
+        for col in flags.colnames:
+            if col == "id":
+                continue
+            if col not in cat.colnames:
+                cat[col] = np.zeros(len(cat), dtype=np.asarray(flags[col]).dtype)
+            for fid, val in zip(flags["id"], flags[col]):
+                row = by_id.get(int(fid))
+                if row is not None:
+                    cat[col][row] = val
+        n_flagged = int(np.sum(np.any(np.column_stack(
+            [np.asarray(flags[c]) != 0 for c in flags.colnames if c != "id"]
+        ), axis=1))) if len(flags.colnames) > 1 else 0
+        logger.info(
+            "repair reloaded from cache: %d pixel patches, %d flagged rows (%s)",
+            len(patches), n_flagged, path.name,
+        )
+        return sci, wht, cat, seg
+
     def _repair_halo_pattern(self) -> str:
         """Canonical large-FOV halo-grid pattern derived from ``pattern_hi``.
 
@@ -1028,6 +1139,7 @@ class Pipeline:
             sci_hi,
             wht_hi if wht_hi is not None else fits.getdata(path),
             bg_filter_sigma=cfg.bg_filter_sigma,
+            label=f"detection band, {path.name}",
         )
         # The detection background is measured but NOT subtracted: that would
         # change 'default' templates too. It matters for the extended schemes,
@@ -1094,20 +1206,35 @@ class Pipeline:
                         pattern_halo, exc,
                     )
                     stamp_dpsf, pattern_halo = None, ""
-            rep = repair_in_memory(
-                tmpl_hi, fits.getdata(self.resolve_wht_hi()),
-                dpsf=self.dpsf_hi, wcs=wcs_hi, psf_pattern=cfg.pattern_hi,
-                catalog=cat, segmap=segmap,
-                stamp_dpsf=stamp_dpsf,
-                stamp_pattern=pattern_halo or None,
-                out_dir=self.out_dir / "repaired",
-                plots=cfg.scene_plots,
-                **(cfg.repair_kwargs or {}),
-            )
-            tmpl_hi = rep["sci"]
-            wht_hi_repaired = rep["wht"]
-            cat = rep["catalog"]
-            segmap = as_label_array(rep["segmap"])
+            wht0 = fits.getdata(self.resolve_wht_hi())
+            cache_path = self.out_dir / "repaired" / "repair_cache.fits"
+            prov = self._repair_provenance(pattern_halo)
+            cached = None
+            if cfg.repair_reuse:
+                cached = self._load_repair_cache(
+                    cache_path, prov, tmpl_hi, wht0, segmap, cat
+                )
+            if cached is not None:
+                tmpl_hi, wht_hi_repaired, cat = cached[0], cached[1], cached[2]
+                segmap = as_label_array(cached[3])
+            else:
+                sci0 = tmpl_hi.copy()
+                seg0 = segmap.copy()
+                rep = repair_in_memory(
+                    tmpl_hi, wht0,
+                    dpsf=self.dpsf_hi, wcs=wcs_hi, psf_pattern=cfg.pattern_hi,
+                    catalog=cat, segmap=segmap,
+                    stamp_dpsf=stamp_dpsf,
+                    stamp_pattern=pattern_halo or None,
+                    out_dir=self.out_dir / "repaired",
+                    plots=cfg.scene_plots,
+                    **(cfg.repair_kwargs or {}),
+                )
+                self._save_repair_cache(cache_path, prov, sci0, wht0, seg0, rep, cat)
+                tmpl_hi = rep["sci"]
+                wht_hi_repaired = rep["wht"]
+                cat = rep["catalog"]
+                segmap = as_label_array(rep["segmap"])
 
         if cfg.footprint_filter:
             scale_hi = proj_plane_pixel_scales(wcs_hi)[0]
@@ -1134,7 +1261,10 @@ class Pipeline:
             cat = cat[coords.separation(ref) < cfg.r_trial * u.arcmin]
             logger.info("r_trial=%.2f': %d sources", cfg.r_trial, len(cat))
 
-        bg, ivar = get_bg_and_ivar(sci_lo, wht_lo, bg_filter_sigma=cfg.bg_filter_sigma)
+        bg, ivar = get_bg_and_ivar(
+            sci_lo, wht_lo, bg_filter_sigma=cfg.bg_filter_sigma,
+            label=f"{cfg.filter_lo or 'lo band'}, {Path(cfg.wht_lo).name}",
+        )
         sci_fit = sci_lo - bg
         # zero non-finite pixels in image AND weight so they carry no information
         bad = ~np.isfinite(sci_fit)
@@ -2293,8 +2423,10 @@ class Pipeline:
         cat[f"err_{idx}_total"] = self.config.bad_value
         cat[f"err_pred_{idx}_total"] = self.config.bad_value
         cat[f"scene_{idx}"] = -1
-        # scene-level astrometry verdict, inherited by every member source
-        cat[f"flag_astrom_{idx}"] = np.full(len(cat), -1, dtype=np.int8)
+        # Scene-level astrometry verdict, inherited by every member source.
+        # int16, not int8: astropy writes an int8 column as a FITS logical,
+        # and -1 comes back as True.
+        cat[f"flag_astrom_{idx}"] = np.full(len(cat), -1, dtype=np.int16)
 
         if not np.isfinite(throughput) or throughput <= 0.0:
             logger.warning(
@@ -3173,6 +3305,13 @@ class Pipeline:
 
             niter_scene = max(config.fit_astrometry_niter, 1)
             shift_tol = float(getattr(config, "astrom_shift_tol", 0.02))
+            # the tolerance is in fit-grid pixels, which on the upsample path
+            # is the hi-res grid and not the grid of the band being fitted --
+            # report the angle too, so the log is unambiguous
+            ps_fit = self._pixel_scale_arcsec(self.wcs[0] if self.wcs is not None else None)
+            tol_txt = f"{shift_tol:.3g} pix" + (
+                f" = {shift_tol * ps_fit * 1000:.1f} mas" if ps_fit else ""
+            )
             # Scenes are independent -- solve() only reads the scene's own
             # templates, image and weights -- so one that has stopped moving
             # stays stopped, and re-solving it only burns time. Iterate over
@@ -3195,9 +3334,16 @@ class Pipeline:
                         else 0.0
                     )
                     scn.astrom_step, scn.astrom_niter = step, j + 1
-                    scn.astrom_converged = step < shift_tol
+                    # a verdict only means something where shifts were fitted:
+                    # a flux-only run, or a scene with too few bright anchors
+                    # to carry a shift block, never moves, and reporting that
+                    # as "converged" would claim an astrometric solution that
+                    # was never solved for. Those keep astrom_converged None
+                    # and flag -1.
+                    if scn.shifts is not None and len(scn.shifts) > 0:
+                        scn.astrom_converged = step < shift_tol
                     max_step = max(max_step, step)
-                    if not scn.astrom_converged:
+                    if scn.astrom_converged is False:
                         still.append(scn)
                 logger.info(
                     f"[Scenes] iteration {j+1}: max shift increment {max_step:.4f} pix, "
@@ -3206,7 +3352,7 @@ class Pipeline:
                 pending = still
                 if config.fit_astrometry_niter > 0 and not pending:
                     logger.info(
-                        f"[Scenes] shifts converged (< {shift_tol} pix) after {j+1} passes"
+                        f"[Scenes] shifts converged (< {tol_txt}) after {j+1} passes"
                     )
                     break
 
@@ -3216,8 +3362,8 @@ class Pipeline:
                 slow = sorted(pending, key=lambda s: -(s.astrom_step or 0.0))
                 logger.warning(
                     "[Scenes] %d of %d scene(s) did not converge in %d passes "
-                    "(tol %.3g pix); worst: %s",
-                    len(pending), len(scenes), niter_scene, shift_tol,
+                    "(tol %s); worst: %s",
+                    len(pending), len(scenes), niter_scene, tol_txt,
                     ", ".join(f"scene {s.id} ({s.astrom_step:.3f} pix)" for s in slow[:5]),
                 )
 

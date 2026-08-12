@@ -131,6 +131,7 @@ def get_bg_and_ivar(
     bg_filter_sigma: float = 64.0,
     detect_thresh: float = 1.0,
     dilate: int = 3,
+    label: str = "",
 ):
     """
     Fit a smooth background on the coarse grid (mask-aware), subtract it,
@@ -241,10 +242,22 @@ def get_bg_and_ivar(
     # 7) rescale full-res weights
     scale = np.float32(1.0) / (sigma_true * sigma_true + np.float32(1e-30))
     ivar_new = np.where(valid_w, (w * scale).astype(np.float32), 0.0).astype(np.float32)
+    # sigma_true = 1 exactly when the weight map is a calibrated inverse
+    # variance; treat a 20% band as "consistent" (drizzle correlation and
+    # normalisation conventions both land inside it when the map is honest)
+    if 0.8 <= float(sigma_true) <= 1.2:
+        verdict = "consistent with the weight image"
+    else:
+        verdict = (
+            "INCONSISTENT with the weight image (its claimed noise is off "
+            f"by x{float(sigma_true):.4g})"
+        )
     logger.info(
-        "weight calibration: sigma_true=%.4g (ivar x %.4g); measured on %dx%d blocks; "
+        "weight calibration%s: correction factor to wht = %.4g (ivar x %.4g), "
+        "sigma_true=%.4g -> %s; measured on %dx%d blocks; "
         "median wht %.4g -> ivar %.4g; median background %.4g",
-        float(sigma_true), float(scale), step, step,
+        f" [{label}]" if label else "",
+        float(scale), float(scale), float(sigma_true), verdict, step, step,
         float(np.median(w[valid_w])) if np.any(valid_w) else np.nan,
         float(np.median(ivar_new[valid_w])) if np.any(valid_w) else np.nan,
         float(np.median(bg_img_bin[bgmask])) if np.any(bgmask) else np.nan,
@@ -1529,6 +1542,7 @@ def flag_saturated_segments(
     filter_name: str = "TMPL",
     flux_frac: float = 0.3,
     min_snr: float = 5.0,
+    halo_nsigma: float = 5.0,
     sky_noise: float | None = None,
     amplitude_col: str = "amplitude",
     id_col: str = "id",
@@ -1589,6 +1603,17 @@ def flag_saturated_segments(
         Without it, every faint segment inside the stamp support would
         be flagged whenever its noise-dominated observed flux sums to
         about zero.
+    halo_nsigma
+        Second, independent criterion: flag a segment when the model's
+        own mean surface brightness over it exceeds
+        ``halo_nsigma x sky_noise`` per pixel, whatever the flux ratio.
+        The ratio test asks whether the star dominates the segment, and
+        misses the bright diffraction spikes of a saturated star, whose
+        real wings run far above the ePSF's (measured: spike segments at
+        3-29 per cent of their observed flux, where flagged segments sit
+        at 85-130 per cent). Those same segments still carry a model
+        halo tens of sigma above the background, which is what this
+        catches. Set to ``0`` to disable.
     sky_noise
         Per-pixel background rms for the noise floor. Default: robust
         ``mad_std`` of a subsample of *sci*.
@@ -1604,7 +1629,9 @@ def flag_saturated_segments(
         copy when ``zero_segments=False``).
     flag_log : Table
         One row per (star, segment) pair evaluated: ``fit_id, xc, yc,
-        seg_id, obs_flux, model_flux, frac, flagged``.
+        seg_id, npix, obs_flux, model_flux, frac, halo_sig, flagged``,
+        where ``halo_sig`` is the model's mean surface brightness over
+        the segment in units of ``sky_noise``.
     """
     if flux_frac <= 0:
         raise ValueError("flux_frac must be positive")
@@ -1644,6 +1671,7 @@ def flag_saturated_segments(
     # label -> (model_flux, fit_id) of the star claiming it most strongly
     claims: dict[int, tuple[float, int]] = {}
     star_windows: dict[int, tuple[int, int, int, int]] = {}
+    star_centres: dict[int, tuple[float, float]] = {}
     log_rows: list[tuple] = []
     for row in fit_table[ok_mask]:
         amp = float(row[amplitude_col])
@@ -1664,6 +1692,7 @@ def flag_saturated_segments(
         if iy1 <= iy0 or ix1 <= ix0:
             continue
         star_windows[fit_id] = (iy0, iy1, ix0, ix1)
+        star_centres[fit_id] = (yc, xc)
         model = amp * psf_stamp[iy0 - y0:iy1 - y0, ix0 - x0:ix1 - x0]
         seg_cut = segmap[iy0:iy1, ix0:ix1]
         sci_cut = np.asarray(sci[iy0:iy1, ix0:ix1], dtype=np.float64)
@@ -1675,27 +1704,63 @@ def flag_saturated_segments(
         support = model > 0
         for lbl in np.unique(seg_cut[(seg_cut > 0) & support]).tolist():
             m = (seg_cut == lbl) & support
+            npix = int(m.sum())
             obs = float(np.nansum(sci_cut[m]))
             pred = float(np.sum(model[m]))
             frac = pred / obs if obs > 0 else np.inf
-            floor = float(min_snr) * sky_noise * float(np.sqrt(m.sum()))
-            flagged = (pred > floor
-                       and (obs <= 0 or pred > flux_frac * obs))
+            floor = float(min_snr) * sky_noise * float(np.sqrt(npix))
+            # the star dominates the segment ...
+            dominates = pred > floor and (obs <= 0 or pred > flux_frac * obs)
+            # ... or its halo alone is bright here, which is how the
+            # diffraction spikes get caught (see halo_nsigma above)
+            halo_sig = (pred / npix) / sky_noise if npix and sky_noise > 0 else 0.0
+            flagged = dominates or (halo_nsigma > 0 and halo_sig > halo_nsigma)
             if flagged:
                 prev = claims.get(int(lbl))
                 if prev is None or pred > prev[0]:
                     claims[int(lbl)] = (pred, fit_id)
             log_rows.append(
-                (fit_id, xc, yc, int(lbl), obs, pred, frac, flagged)
+                (fit_id, xc, yc, int(lbl), npix, obs, pred, frac, halo_sig, flagged)
             )
 
-    # Group id per star: the lowest flagged label among its claims.
+    # Group id per star: the flagged label that owns the star's core, i.e.
+    # the one reaching closest to the fitted centre. That label's catalog row
+    # sits on the star itself, so it survives the pipeline's footprint and
+    # trial cuts and the filled core it labels is modelled by a template in
+    # the right place. Naming the group by the lowest id instead can pick a
+    # spike fragment tens of arcsec out, whose row may be cut for having no
+    # coverage in the fitted band -- and then nothing models the core.
     star_labels: dict[int, list[int]] = {}
     for lbl, (_, star) in claims.items():
         star_labels.setdefault(star, []).append(lbl)
+
+    def _core_label(star: int, labels: list[int]) -> int:
+        win, centre = star_windows.get(star), star_centres.get(star)
+        if win is None or centre is None:
+            return min(labels)
+        iy0, iy1, ix0, ix1 = win
+        sub = segmap[iy0:iy1, ix0:ix1]
+        yc, xc = centre
+        yy, xx = np.indices(sub.shape)
+        rr = np.hypot(yy + iy0 - yc, xx + ix0 - xc)
+        reach = {}
+        for lbl in labels:
+            m = sub == lbl
+            if m.any():
+                reach[lbl] = float(rr[m].min())
+        if not reach:
+            return min(labels)
+        best_r = min(reach.values())
+        # Fragments that reach the centre equally closely (oversplit cores,
+        # symmetric wedges) are all "the core"; take the lowest id among
+        # them so the group id stays stable rather than turning on
+        # sub-pixel differences.
+        tol = 1.0 + 0.05 * best_r
+        return min(lbl for lbl, r in reach.items() if r <= best_r + tol)
+
     label_group: dict[int, int] = {}
-    for labels in star_labels.values():
-        gid = min(labels)
+    for star, labels in star_labels.items():
+        gid = _core_label(star, labels)
         for lbl in labels:
             label_group[lbl] = gid
 
@@ -1730,7 +1795,7 @@ def flag_saturated_segments(
                 yg = float(row["yc"]) + (float(row["shift_y"]) if has_shift else 0.0)
                 star_geom[fid] = (yg, xg, float(row["r_in"]), float(row["r_out"]))
         for star, labels in star_labels.items():
-            gid = min(labels)
+            gid = label_group[labels[0]]
             win = star_windows.get(star)
             if win is None:
                 continue
@@ -1762,9 +1827,9 @@ def flag_saturated_segments(
 
     flag_log = Table(
         rows=log_rows or None,
-        names=["fit_id", "xc", "yc", "seg_id",
-               "obs_flux", "model_flux", "frac", "flagged"],
-        dtype=[int, float, float, int, float, float, float, bool],
+        names=["fit_id", "xc", "yc", "seg_id", "npix",
+               "obs_flux", "model_flux", "frac", "halo_sig", "flagged"],
+        dtype=[int, float, float, int, int, float, float, float, float, bool],
     )
     flag_log["group_id"] = [
         label_group.get(int(s), 0) if f else 0

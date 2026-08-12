@@ -36,7 +36,7 @@ include_patterns = [
 ]
 
 myst_heading_anchors = 3
-myst_enable_extensions = ["dollarmath", "amsmath"]
+myst_enable_extensions = ["dollarmath", "amsmath", "deflist"]
 
 autosummary_generate = True
 autodoc_default_options = {
@@ -56,6 +56,8 @@ intersphinx_mapping = {
 
 html_theme = "furo"
 html_title = "mophongo"
+html_static_path = ["_static"]
+html_css_files = ["custom.css"]
 html_theme_options = {
     "light_css_variables": {
         "color-brand-primary": "#1f5f8b",

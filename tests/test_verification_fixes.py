@@ -131,3 +131,23 @@ def test_generate_scenes_assigns_id_scene():
             assert t.id_scene == int(s.id)
     ids = {int(s.id) for s in scenes}
     assert len(ids) == len(scenes)
+
+
+def test_convolve_templates_inplace_stores_result():
+    """inplace=True must store the convolved templates back into the internal
+    list; it used to silently keep the unconvolved originals."""
+    from mophongo.utils import matching_kernel
+
+    images, segmap, catalog, psfs, _truth, _rms = make_simple_data()
+    tmpls = Templates.from_image(
+        images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel=None
+    )
+    shapes_before = [t.data.shape for t in tmpls.templates]
+    kernel = matching_kernel(psfs[0] / psfs[0].sum(), psfs[1] / psfs[1].sum())
+
+    out = tmpls.convolve_templates(kernel, inplace=True)
+    assert out is tmpls.templates or out == tmpls._templates
+    grew = [
+        t.data.shape > s for t, s in zip(tmpls.templates, shapes_before)
+    ]
+    assert any(grew), "inplace convolution left every template unconvolved"

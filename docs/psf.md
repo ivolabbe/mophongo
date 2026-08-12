@@ -225,10 +225,9 @@ the ±2% band; below are the source and target PSFs, the kernel, the matched
 PSF, and the residual, with the scan configuration and error terms listed.
 ```
 
-**`PSF.matching_kernel_basis(other, basis, *, method="lstsq", recenter=True)`**
-Alternative kernel from a linear Fourier-basis fit
-  ({func}`mophongo.utils.fit_kernel_fourier`); `basis` is a
-  `(ny, nx, nbasis)` stack of kernel basis images.
+{meth}`~mophongo.psf.PSF.matching_kernel_basis` builds an alternative kernel
+from a linear fit to a stack of kernel basis images
+({func}`mophongo.utils.fit_kernel_fourier`).
 
 ```python
 import numpy as np
@@ -273,36 +272,21 @@ After construction two public attributes expose the exposure geometry:
 `shapely` Polygon, and `DrizzlePSF.driz_footprint`, the mosaic outline
 Polygon. Region maps are built from these footprints ({doc}`psf_maps`).
 
-**`DrizzlePSF.read_wcs_csv(drz_file, csv_file=None, auto_reconstruct=True)`**
-Static helper that parses the WCS CSV into `(flt_keys, wcs_dict,
-  footprints, headers)`. With `auto_reconstruct=True` (default) a missing
-  CSV is regenerated from public archive headers.
+{meth}`~mophongo.psf.DrizzlePSF.read_wcs_csv` is the static helper that
+parses the WCS CSV into `(flt_keys, wcs_dict, footprints, headers)`,
+regenerating a missing CSV from public archive headers by default.
 
 ### Loading ePSF grids
 
-`DrizzlePSF.load_jwst_stdpsf(...)` forwards to
+{meth}`~mophongo.psf.DrizzlePSF.load_jwst_stdpsf` forwards to
 `EffectivePSF.load_jwst_stdpsf`, which fills the `epsf` dictionary keyed by
-the STDPSF filename stem (basename without `.fits`). Parameters of the
-local-directory mode, which is what the pipeline uses:
-
-- `local_dir` (*str or None*) — directory searched recursively for
-  `*.fits` STDPSF files.
-- `filter_pattern` (*str or None*) — regex matched against file basenames;
-  only matching files are loaded.
-- `clip_negative` (*bool*, default `False`) — zero negative ePSF pixels.
-- `edge_taper_pixels` (*float or None*, default `4.0`) — width, in native
-  detector pixels, of a cosine taper applied once at load time to remove
-  finite-grid edge discontinuities; `None` or `0` leaves grids unchanged.
-  The loaded planes are not renormalized afterwards.
-- `use_astropy_cache` (*bool*, default `True`), `verbose` (*bool*, default
-  `False`).
-
-Without both `local_dir` and `filter_pattern` (the local branch needs the two
-together), the loader downloads library STDPSF files from the
-STScI JWST1PASS archive; the filter/detector selection arguments
-(`miri_filters`, `nircam_sw_filters`, `nircam_sw_detectors`,
-`nircam_lw_filters`, `nircam_lw_detectors`, `miri_extended=True`) control
-which files are fetched.
+the STDPSF filename stem (basename without `.fits`). In the local-directory
+mode the pipeline uses, it recursively loads the `*.fits` files under
+`local_dir` whose basenames match the `filter_pattern` regex, applying a
+cosine edge taper (4 native pixels by default) to remove finite-grid edge
+discontinuities without renormalizing the loaded planes. Without both
+arguments it downloads library STDPSF files from the STScI JWST1PASS
+archive instead.
 
 Each grid stores its spatial knot positions (`IPSFX*`/`JPSFY*` header
 keywords) and oversampling factor (`OVERSAMP`, default 4); local-directory
@@ -381,12 +365,10 @@ Return an `astropy.nddata.Cutout2D` of the mosaic (with WCS) around a
   `size_native` in detector pixels; `cutout_data` substitutes an in-memory
   array (or list of arrays) for the mosaic file.
 
-**`DrizzlePSF.register(ra, dec, filter, size=15, max_iterations=3, convergence_threshold=0.05, verbose=False, kernel="square", pixfrac=0.75)`**
-Iteratively shift the model position until the drizzled PSF centroid
-  matches the data centroid, up to `max_iterations` or until the shift
-  drops below `convergence_threshold` pixels. Returns
-  `((ra, dec), data_cutout, psf_model)` — useful for verifying astrometric
-  registration against isolated stars.
+{meth}`~mophongo.psf.DrizzlePSF.register` iteratively shifts the model
+position until the drizzled PSF centroid matches the data centroid,
+returning `((ra, dec), data_cutout, psf_model)` — useful for verifying
+astrometric registration against isolated stars.
 
 **`stamp_encircled_energy(psf, pscale, *, ee_fraction=None, per_stamp=False)`**
 Measure the realized encircled energy of one stamp or a cube. Returns a
@@ -443,14 +425,10 @@ Build every grid needed for a mosaic from its per-exposure `*_wcs.csv`
   per `(detector, date)` pair. Existing files are skipped unless `overwrite`
   is set. `date_mode` may also be an iterable of modes to combine.
 
-**`dates_from_csv(csv_path, mode="modal", *, span=5.0, delta_day=2.0, column="mjd-avg")`**
-Epoch selection from the `mjd-avg` column:
-  - `"modal"` — center of the densest `span`-day window (one date);
-  - `"median"` / `"mean"` — one summary date;
-  - `"cluster"` — the minimum number of dates such that every exposure is
-    within `delta_day` of one of them (greedy 1-D interval cover);
-  - `"all"` — one date per unique integer MJD;
-  - a literal MJD, ISO string, or `Time` — used as-is.
+{func}`~mophongo.psf_factory.dates_from_csv` performs the epoch selection
+behind `from_csv`, turning the CSV's `mjd-avg` column into one or more grid
+dates via the `"modal"`, `"median"`/`"mean"`, `"cluster"`, or `"all"` modes
+(or a literal date, used as-is).
 
 ```python
 from mophongo.psf_factory import PSFFactory
@@ -502,35 +480,20 @@ median ratio, which is what the per-filter blur defaults encode.
 
 ## `jwst_psf` utilities
 
-**`build_jwst_psf(*, instrument, filter, detector=None, date=None, num_psfs=1, oversample=4, fov_arcsec=5.0, use_detsampled_psf=False, parity="odd", opd_choice="closest", verbose=False)`**
-Low-level `stpsf` wrapper returning a `photutils.psf.GriddedPSFModel`.
-  `instrument` is `'NIRCAM'`, `'MIRI'`, `'NIRISS'`, or `'NIRSPEC'`;
-  NIRCam requires an explicit `detector` (e.g. `'NRCA5'`). `date` loads the
-  measured wavefront OPD nearest in time with selection mode `opd_choice`;
-  `parity` sets the stamp pixel parity; the epoch is recorded in the grid
-  metadata as `MJD-AVG`.
+{func}`~mophongo.jwst_psf.build_jwst_psf` is the low-level `stpsf` wrapper
+returning a `photutils.psf.GriddedPSFModel` for one instrument/filter
+(/detector for NIRCam), using the measured wavefront OPD nearest `date` and
+recording the epoch as `MJD-AVG`.
 
-**`blend_psf(core_psf, ext_psf, Rcore_px=0, Rtaper_px=1, Rnorm_px=30, buf_px=4, subtract_bg=True, bg_pct=15.0)`**
-Blend an empirical PSF core into a theoretical halo: the core is inserted
-  with a linear taper of width `Rtaper_px` inward from `Rcore_px`, the halo
-  is rescaled so its enclosed flux inside `Rnorm_px` matches the core, and
-  (with `subtract_bg`) a DC offset estimated from pixels below the
-  `bg_pct` percentile (excluding a `buf_px` edge) is removed from the core
-  first. All radii are in pixels of the (oversampled) stamps.
+{func}`~mophongo.jwst_psf.blend_psf` blends an empirical PSF core into a
+theoretical halo with a linear taper and matched enclosed flux.
 
-**`make_extended_grid(emp, Rmax, *, Rtaper=0.2, Rnorm=0.5, verbose=False, subtract_bg=True, bg_pct=15.0, return_stpsf=True)`**
-Apply {func}`~mophongo.jwst_psf.blend_psf` to every position of an
-  empirical `STDPSFGrid` (path or instance), attaching `stpsf` theoretical
-  wings out to `Rmax` arcsec; `Rtaper` and `Rnorm` are in arcsec. Returns
-  the blended `GriddedPSFModel` (and, with `return_stpsf=True`, the bare
-  theoretical grid as well).
+{func}`~mophongo.jwst_psf.make_extended_grid` applies
+{func}`~mophongo.jwst_psf.blend_psf` to every position of an empirical
+`STDPSFGrid`, attaching `stpsf` theoretical wings out to a given radius.
 
-**`write_stdpsf(filename, psf_grid=None, xgrid=None, ygrid=None, *, detector=None, filt=None, overwrite=False, history=None, verbose=False)`**
-Write a grid in the STDPSF FITS format that
-  `EffectivePSF.load_jwst_stdpsf` reads: the PSF cube in the primary HDU
-  with `NXPSFS`/`NYPSFS` and 1-indexed `IPSFX*`/`JPSFY*` knot keywords.
-  `psf_grid` may be a `GriddedPSFModel`/`STDPSFGrid` (knots and metadata
-  taken from the object) or a raw `(N, Y, X)` array with explicit `xgrid`
-  and `ygrid` detector-pixel knot arrays.
+{func}`~mophongo.jwst_psf.write_stdpsf` writes a grid (a
+`GriddedPSFModel`/`STDPSFGrid` or a raw cube with knot arrays) in the
+STDPSF FITS format that `EffectivePSF.load_jwst_stdpsf` reads.
 
 The full signatures of everything above are in the {doc}`api` reference.

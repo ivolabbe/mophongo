@@ -573,21 +573,12 @@ Parameters:
 
 Both scans return dataclasses carrying the winner and the full search
 history, so the trade-off between fidelity and kernel stability can be
-re-examined without re-running:
-
-{class}`mophongo.psf.MatchingKernelRegFit`
-: `method` and `reg` (the chosen regularization), `score`, `kernel`,
-  `matched_psf`, the 1D scan arrays `reg_grid`, `score_grid`,
-  `growth_error_grid`, `core_error_grid`, `l2_error_grid`,
-  `kernel_regularization_grid`, `kernel_high_frequency_grid`,
-  `kernel_cancellation_grid`, the profile sampling `radii` with
-  `target_growth`, `matched_growth`, `target_profile`, `matched_profile`,
-  and `extra` (a dict of the scan settings).
-
-{class}`mophongo.psf.MatchingKernelWindowFit`
-: The same fields (except `extra`) with `alpha`/`beta` in place of
-  `method`/`reg`, 2D `(beta, alpha)` score and metric grids, and the
-  `alpha_grid`/`beta_grid` axes.
+re-examined without re-running. {class}`mophongo.psf.MatchingKernelRegFit`
+holds the chosen method and regularization together with the kernel,
+matched PSF, 1D scan and metric grids, and the sampled profiles;
+{class}`mophongo.psf.MatchingKernelWindowFit` holds the same for the window
+search, with `alpha`/`beta` in place of `method`/`reg` and 2D
+`(beta, alpha)` grids. Field-level detail is in the {doc}`api` reference.
 
 ### Encircled energy of drizzled stamps
 
@@ -598,6 +589,18 @@ measuring it on the final stamp folds in the drizzle kernel, geometric
 distortion, and the exposure stack at the position. `ee_box` (the full-stamp
 sum) is the quantity that converts a fitted amplitude into a total flux;
 `ee_circ` is the one to compare against tabulated encircled-energy curves.
+
+```{figure} images/stamp_encircled_energy.png
+:width: 100%
+:alt: Cumulative PSF flux versus radius from the stamp centre, with the inscribed-circle radius dotted and the full-stamp sum dashed
+
+Growth curve of a drizzled JWST PSF stamp. The cumulative flux flattens
+towards the stamp edge but never reaches unity: the curve at the
+inscribed-circle radius (dotted) is `ee_circ`, and the full-stamp sum
+(dashed) sits slightly higher because the stamp corners hold flux outside
+that radius. Support beyond the square stamp is lost entirely, which is why
+`ee_box` stays below one.
+```
 
 Parameters:
 

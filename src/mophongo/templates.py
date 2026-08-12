@@ -453,6 +453,10 @@ class Template(Cutout2D):
         # Diagnostic flags (bitwise)
 
         self.flag = 0  # bitwise flag for diagnostics
+        # Saturated-star group id from the catalog FLAG_SATURATED_* column
+        # (the lowest flagged segment id of the star; 0 = not saturated).
+        # Templates sharing a group id are fit together in one scene.
+        self.sat_group: int = 0
         self.flag |= Template.FLAG_VALID
         self.is_star: bool = False  # set by pipeline from catalog flag_star
 
@@ -532,7 +536,7 @@ class Template(Cutout2D):
     #: the reshaping operation itself defines it.
     _META_ATTRS = (
         "id", "id_parent", "id_scene", "name", "flag",
-        "deblend_parent_label", "deblend_nchildren", "is_star",
+        "deblend_parent_label", "deblend_nchildren", "is_star", "sat_group",
         "ee_psf_lo", "ee_tmpl", "template_norm",
         "flux", "err", "err_pred", "wnorm",
         "extension_mode", "extension_skip_reason", "extension_psf_sum",
@@ -1841,7 +1845,11 @@ class Templates:
             new_tmpl = tmpl.convolve_cutout(kern, parent_image=dummy_image)
             new_tmpl.ee_psf_lo = ee_lo
 
-            if not inplace:
+            if inplace:
+                # convolve_cutout returns a new Template; store it back so the
+                # inplace path actually keeps the convolved result
+                tmpls[i] = new_tmpl
+            else:
                 new_templates.append(new_tmpl)
 
         return new_templates if not inplace else self._templates

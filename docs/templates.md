@@ -45,22 +45,12 @@ fit results.
 
 ### Constructor
 
-```python
-Template(data, position, size, label=None, copy=True, wcs=None, **kwargs)
-```
-
-- `data` (`np.ndarray`): full parent image to cut from.
-- `position` (`tuple[float, float]`): source position `(x, y)` in original
-  pixel coordinates.
-- `size` (`tuple[int, int]`): cutout size `(ny, nx)` in pixels.
-- `label` (`int | None`, default `None`): source id, stored as `Template.id`.
-- `copy` (`bool`, default `True`): copy the pixel data rather than keeping a
-  view into the parent image.
-- `wcs` (`astropy.wcs.WCS | None`, default `None`): WCS of the parent image;
-  Cutout2D adjusts it to the cutout frame, and the parent WCS is kept as
-  `wcs_original`.
-
-The constructor always uses `mode="partial"` with `fill_value=0.0`.
+The constructor cuts a `(ny, nx)` stamp out of a full parent image at an
+`(x, y)` position, always in `mode="partial"` with `fill_value=0.0`, storing
+the source id as `Template.id` and keeping any parent WCS as `wcs_original`.
+Templates are normally built for you by
+{meth}`~mophongo.templates.Templates.extract_templates`; see the
+{class}`~mophongo.templates.Template` API page for the full signature.
 
 ### Attributes set at construction
 
@@ -118,112 +108,30 @@ schemes: `FLAG_PSF_EXTENDED` when a scheme blended any PSF model into the
 template, `FLAG_EXTEND_FAILED` when extension was attempted but the PSF was
 unusable.
 
-### Template.from_stamp
+### Geometry helpers
 
-```python
-Template.from_stamp(data, origin, input_position_original, shape_original,
-                    *, wcs=None, label=None, parent_image=None)
-```
+These per-template methods are internal plumbing used by the pipeline; each
+link leads to the full API documentation.
 
-Class method that rebuilds a template from serialized stamp pixels plus
-geometry (the inverse of the stamp output described in {doc}`outputs`).
-
-- `data` (`np.ndarray`): stamp pixels, shape `(ny, nx)`.
-- `origin` (`tuple[int, int]`): original-grid pixel `(x, y)` of `data[0, 0]`;
-  may be negative for edge-padded cutouts.
-- `input_position_original` (`tuple[float, float]`): source position `(x, y)`
-  on the original grid.
-- `shape_original` (`tuple[int, int]`): shape of the full parent image, which
-  sets the clipped `slices_original`/`slices_cutout` pair.
-- `wcs` (`WCS | None`, default `None`): WCS of the full parent image.
-- `label` (`int | None`, default `None`): source id.
-- `parent_image` (`np.ndarray | None`, default `None`): optional zero array of
-  `shape_original` reused across calls to avoid per-source allocations.
-
-### Template.pad
-
-```python
-Template.pad(padding, original_shape, *, image=None, inplace=False)
-```
-
-Returns a new template enlarged by `padding`, keeping original-image
-coordinates consistent.
-
-- `padding` (`tuple[int, int]`): total extra `(ny, nx)` pixels; halved per
-  side, so odd values are rounded down to keep the padding even.
-- `original_shape` (`tuple[int, int]`): accepted for the call signature; the
-  parent shape actually used is the stored `shape_input`.
-- `image` (`np.ndarray | None`, default `None`): parent array to cut from; a
-  zero array of the original shape is created when omitted.
-- `inplace` (`bool`, default `False`): when `True`, the current instance is
-  updated to the padded geometry as well.
-
-### Template.convolve_cutout
-
-```python
-Template.convolve_cutout(kernel, *, parent_image=None, preserve_dtype=True)
-```
-
-Convolves the template with a centered kernel and returns a new
-`Template` whose geometry is already enlarged to hold the full convolution
-result (`mode="full"`), with even padding on both sides. The source position,
-provenance attributes, and `ee_*` metadata are propagated, and
-`FLAG_CONVOLVED` is set.
-
-- `kernel` (`np.ndarray`): 2-D centered convolution kernel.
-- `parent_image` (`np.ndarray | None`, default `None`): reference to the full
-  parent image; a zero dummy of the original shape is created when omitted.
-  It is never copied.
-- `preserve_dtype` (`bool`, default `True`): cast the result back to the input
-  `data` dtype instead of keeping the float64 that FFT convolution returns.
-
-### Template.downsample
-
-```python
-Template.downsample(k, image=None, wcs_lo=None)
-```
-
-Flux-conserving `k`-fold binning aligned to the global high-resolution grid,
-used on the "downsample" multi-resolution path.
-
-- `k` (`int`): integer bin factor; `k=1` returns a deep copy.
-- `image` (`np.ndarray | None`, default `None`): low-resolution parent array;
-  a zero array of the binned original shape is created when omitted.
-- `wcs_lo` (`WCS | None`, default `None`): WCS of the low-resolution grid.
-
-Binning is exact only when the cutout origin and shape are divisible by `k`.
-For a misaligned origin the routine bins the largest `k`-aligned block, logs a
-warning, and leaves the trailing low-resolution row/column zero-filled, losing
-that flux; the warning recommends the `upsample` multi-resolution method for
-exact alignment.
-
-### Template.project_to_block_replicated_grid
-
-```python
-Template.project_to_block_replicated_grid(factor, *, parent_image=None,
-                                          preserve_dtype=True)
-```
-
-Projects the template onto the globally aligned block-replicated grid used by
-the upsampled multi-resolution fitting path (see {doc}`pipeline`). On that
-path each native low-resolution pixel is represented as a constant
-`factor x factor` block; a template fitted against such an image must live in
-the same pixel basis, or the residual depends on where the source sits inside
-the native pixel. The method integrates the template over global native-pixel
-blocks and replicates the block means back onto the high-resolution grid,
-enlarging the cutout to whole native-pixel boundaries.
-
-- `factor` (`int`): block-replication factor; `factor=1` returns a deep copy.
-- `parent_image` (`np.ndarray | None`, default `None`): full parent image
-  reference; a zero dummy is created when omitted.
-- `preserve_dtype` (`bool`, default `True`): cast the result back to the input
-  dtype.
-
-The projected template keeps `input_position_original`, `position_original`,
-the recomputed cutout-frame positions, `flag`, `deblend_parent_label`, and
-`deblend_nchildren`. Other metadata (fit results, `ee_*` values, shift state,
-`id_scene`) are freshly initialized on the returned template, as of this
-writing.
+- {meth}`~mophongo.templates.Template.from_stamp` rebuilds a template from
+  serialized stamp pixels plus geometry, the inverse of the stamp output
+  described in {doc}`outputs`.
+- {meth}`~mophongo.templates.Template.pad` returns a new template enlarged by
+  a given (even) padding, keeping original-image coordinates consistent.
+- {meth}`~mophongo.templates.Template.convolve_cutout` convolves the template
+  with a centered kernel, returning a new template enlarged to hold the full
+  convolution result with provenance and `ee_*` metadata propagated and
+  `FLAG_CONVOLVED` set.
+- {meth}`~mophongo.templates.Template.downsample` performs flux-conserving
+  `k`-fold binning aligned to the global high-resolution grid (the
+  "downsample" multi-resolution path); binning is exact only for `k`-aligned
+  cutouts, and misaligned origins lose the trailing row/column with a warning.
+- {meth}`~mophongo.templates.Template.project_to_block_replicated_grid`
+  projects the template onto the globally aligned block-replicated grid of
+  the upsampled multi-resolution path ({doc}`pipeline`): the template is
+  integrated over native-pixel blocks and the block means replicated back,
+  so it lives in the same pixel basis as the block-replicated image it is
+  fitted against.
 
 ## Templates
 
@@ -245,7 +153,7 @@ Templates.from_image(hires_image, segmap, positions, kernel=None,
 
 Convenience constructor: extracts templates and, when a kernel is given,
 calls {meth}`~mophongo.templates.Templates.convolve_templates` with
-`inplace=True` (see the in-place caveat under that method).
+`inplace=True`, so the stored templates are the convolved ones.
 
 - `hires_image` (`np.ndarray`): high-resolution detection image.
 - `segmap` (`np.ndarray`): segmentation map on the same grid; each pixel
@@ -334,23 +242,10 @@ source flux in the modeled stamp (see the shape-versus-throughput convention in
 
 #### Templates.from_cutout_models
 
-```python
-Templates.from_cutout_models(cutouts, positions, ids, *,
-                             original_shape, wcs=None, normalize=False)
-```
-
-Builds templates from precomputed source-model cutouts, bypassing
-segmentation, for use with externally generated models.
-
-- `cutouts` (iterable of `np.ndarray`): per-source model stamps; each stamp's
-  shape must match the template cutout built at its position.
-- `positions` (iterable of `(x, y)`): source positions.
-- `ids` (iterable of `int`): source labels.
-- `original_shape` (`tuple[int, int]`, keyword-only): shape of the parent
-  grid the cutouts refer to.
-- `wcs` (`WCS | None`, default `None`): parent-grid WCS.
-- `normalize` (`bool`, default `False`): normalize each cutout to unit sum.
-  When `False`, cutouts are interpreted as per-unit-flux models as given.
+{meth}`~mophongo.templates.Templates.from_cutout_models` builds templates
+from precomputed source-model cutouts, bypassing segmentation, for use with
+externally generated models. By default the cutouts are taken as per-unit-flux
+models as given; pass `normalize=True` to renormalize each to unit sum.
 
 ### Template build schemes
 
@@ -379,12 +274,14 @@ as a separate pass after extraction, driven by their own methods.
 
 ```{figure} images/template_psf_halo_anatomy.png
 :width: 100%
-:alt: A classic-scheme template split into segmentation map, full template, on-segment data, off-segment PSF halo, and the PSF used to build it.
+:alt: A classic-scheme template split into segmentation map, full template, on-segment data, halo outside all segments, and the PSF used to build it.
 
 A build-time composite template from a real F770W run, decomposed into its
 parts: inside the source's segmentation footprint the template is the
 detection data, and outside it carries a flux-matched PSF halo, supplying the
-wing flux that a segment-truncated template would miss.
+wing flux that a segment-truncated template would miss. The halo panel nulls
+every segment, its own and its neighbours', so only background pixels and the
+PSF halo remain.
 ```
 
 The build-time schemes are self-contained ports kept out of
@@ -569,12 +466,8 @@ opt-out: they apply to every source.
 
 #### Templates.extend_with_psf
 
-```python
-Templates.extend_with_psf(psf, *, skip_deblended=False,
-                          background_only=True, inplace=False)
-```
-
-Fills zero-valued template pixels with the local high-resolution PSF response.
+{meth}`~mophongo.templates.Templates.extend_with_psf` fills zero-valued
+template pixels with the local high-resolution PSF response.
 Nonzero pixels are trusted measured source pixels; the sparse template is
 convolved with the local PSF, only the zero pixels receive the convolved
 values, and the completed stamp is renormalized to unit sum. The wings
@@ -583,64 +476,24 @@ not a scaled PSF model — contrast
 {func}`~mophongo.template_schemes.composite_classic`, which pastes a
 least-squares-scaled PSF, and
 {func}`~mophongo.template_schemes.composite_wren`, which blends towards a
-core-anchored one.
-
-- `psf` (`np.ndarray | PSFRegionMap`): high-resolution PSF or spatial PSF map.
-- `skip_deblended` (`bool`, default `False`): copy deblended-child templates
-  through unextended.
-- `background_only` (`bool`, default `True`): restrict the fill to background
-  pixels of the segmentation map stored by `extract_templates`. Pixels owned
-  by a different segment keep their zero value, so blended neighbors model
-  their own light there instead of receiving this source's extrapolated
-  wings; pixels outside the image footprint count as background. When no
-  segmap was recorded (prebuilt templates), all zero pixels are filled.
-- `inplace` (`bool`, default `False`): replace the internal template list.
-
-Returns the list of completed templates. Each records diagnostics:
-`extension_mode` (`"psf"`), `extension_psf_sum`,
-`extension_psf_throughput`, `extension_core_sum`, `extension_pre_norm_sum`,
-`extension_filled_sum`, `extension_filled_fraction` (wing flux inserted as a
-fraction of the pre-normalization total), and `extension_blocked_sum` (wing
-flux withheld because it fell on a neighbor's segment).
-
-`template_norm` means something different on this path than at extraction:
-the input template is already unit-sum, so the recorded pre-normalization sum
-is the multiplicative wing boost (IDL's `added_flux`) rather than the
-detection-band flux inside the segment.
+core-anchored one. By default (`background_only=True`) the fill is restricted
+to segmentation-background pixels: pixels owned by a different segment keep
+their zero value, so blended neighbors model their own light there instead of
+receiving this source's extrapolated wings. Per-template `extension_*`
+diagnostics record the inserted, blocked, and throughput sums; on this path
+`template_norm` is the multiplicative wing boost (IDL's `added_flux`) rather
+than a detection-band flux, since the input template is already unit-sum.
 
 #### Templates.extend_with_psf_model
 
-```python
-Templates.extend_with_psf_model(psf, *,
-    gaussian_sigmas=(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0),
-    target_shape=None, mode="wings", skip_deblended=False, inplace=False)
-```
-
-Fits a grid of PSF-convolved circular Gaussian models to the segment pixels
-(scale chosen by least squares on the segment only) and uses the best model to
-complete the template.
-
-- `psf` (`np.ndarray | PSFRegionMap`): high-resolution PSF or spatial PSF map.
-- `gaussian_sigmas` (sequence of `float`, default
-  `(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0)`): Gaussian widths in pixels to try;
-  `0.0` is the bare PSF. Must be non-empty and non-negative.
-- `target_shape` (`tuple[int, int] | None`, default `None`): minimum output
-  stamp shape; the stamp is always at least as large as the template and the
-  PSF, and is padded to even dimensions.
-- `mode` (`str`, default `"wings"`): `"wings"` keeps the extracted segment
-  pixels and fills only the pixels outside the segment with the scaled model;
-  `"model"` replaces the whole template by the best-fitting model. The
-  pipeline's `extend_mode="psf_model"` pass calls this method with
-  `mode="model"`.
-- `skip_deblended` (`bool`, default `False`): as above.
-- `inplace` (`bool`, default `False`): replace the internal template list.
-
-The completed stamp is renormalized to unit sum. Diagnostics recorded per
-template: `extension_mode` (the `mode` value, `"wings"` or `"model"` — not
-`"psf_model"`), `extension_sigma_pix` (best-fit Gaussian sigma),
-`extension_score` (residual sum of squares on segment pixels),
-`extension_segment_fraction` (model flux inside the segment), and
-`extension_psf_throughput`.
+{meth}`~mophongo.templates.Templates.extend_with_psf_model` fits a grid of
+PSF-convolved circular Gaussian models to the segment pixels (scale chosen by
+least squares on the segment only) and uses the best model to complete the
+template: `mode="wings"` keeps the extracted segment pixels and fills only
+the outside, `mode="model"` replaces the whole template by the best-fitting
+model (what the pipeline's `extend_mode="psf_model"` pass uses). The
+completed stamp is renormalized to unit sum, with the best-fit sigma and fit
+score recorded as `extension_*` diagnostics.
 
 ### Scheme parameters
 
@@ -749,11 +602,10 @@ Templates.convolve_templates(kernel, inplace=False, psf_lo=None)
   position. Identity (delta-function) kernels skip the convolution and leave
   the template pixels unchanged. `None` behaves like an identity kernel for
   every template.
-- `inplace` (`bool`, default `False`): with `True`, non-identity kernels
-  still produce new enlarged templates but the internal list keeps the
-  original objects; as of this writing the in-place path returns the internal
-  list without substituting the convolved results, so prefer
-  `inplace=False` and use the returned list.
+- `inplace` (`bool`, default `False`): with `True`, the internal template
+  list is updated with the convolved (enlarged) templates and returned;
+  with `False` the internal list is untouched and a new list of convolved
+  templates is returned.
 - `psf_lo` (`PSFRegionMap | None`, default `None`): PSF map of the target
   band. When given, each output template records `ee_psf_lo`, the encircled
   energy of that band's PSF stamp at the source position, used downstream to
@@ -765,130 +617,38 @@ enlarges each cutout by the kernel size with even padding and sets
 
 ### Other methods
 
-#### Templates.add_component
+These container methods are called by the pipeline; each link leads to the
+full API documentation.
 
-```python
-Templates.add_component(parent, data, component, **kwargs)
-```
-
-Clones `parent` and appends a new component template (used for extra fit
-components such as astrometric gradients).
-
-- `parent` (`Template`): template providing the spatial metadata.
-- `data` (`np.ndarray`): pixel data for the component; must match
-  `parent.data` in shape.
-- `component` (`str`): informational tag stored on the clone.
-- `**kwargs`: additional attributes set on the clone.
-
-Returns the new template, or `None` when the component is nearly parallel to
-the parent (normalized inner product above 0.999) and would make the normal
-equations degenerate.
-
-#### Templates.apply_template_shifts
-
-```python
-Templates.apply_template_shifts(templates)
-```
-
-Static method; applies each template's pending `to_shift = (dx, dy)` offset in
-place with cubic-spline interpolation. The sign convention: `(dx, dy)` is the
-image-to-template correction predicted by astrometry, so the template is
-shifted by `(-dx, -dy)` internally. Shifts below 0.01 pixel are skipped.
-Interpolation always starts from a cached unshifted copy of the data with the
-accumulated total shift, so repeated astrometric passes do not compound the
-interpolation smoothing. Applied templates accumulate into `shifted`, reset
-`to_shift` to zero, and gain `FLAG_SHIFTED`.
-
-- `templates` (sequence of `Template`): templates to shift.
-
-#### Templates.quick_flux
-
-```python
-Templates.quick_flux(templates, image)
-```
-
-Static method; returns per-source scalar least-squares amplitudes
-`sum(image * t) / sum(t**2)` over each template footprint, ignoring source
-blending. Used as an initial estimate before the full sparse fit. Stores the
-value on `tmpl.flux` and returns the array.
-
-- `templates` (`list[Template]`): templates to measure.
-- `image` (`np.ndarray`): image in original coordinates.
-
-#### Templates.predicted_errors
-
-```python
-Templates.predicted_errors(templates, weights)
-```
-
-Static method; returns per-source flux uncertainties
-`1 / sqrt(sum(w * t**2))` that ignore template covariance. Weights are
-inverse variance. The prediction is stored on `tmpl.err_pred` only; the
-solver error `tmpl.err` is never overwritten. Templates with zero total
-weight get `FLAG_SUM_ZERO` and an infinite predicted error.
-
-- `templates` (`list[Template]`): templates to evaluate.
-- `weights` (`np.ndarray`): inverse-variance map in original coordinates.
-
-#### Templates.prune_outside_weight
-
-```python
-Templates.prune_outside_weight(weight, rtol=1e-8)
-```
-
-Removes templates whose weighted norm `sum(d * w * d)` over their footprint
-falls below `rtol` times the median norm — sources lying entirely on
-non-positive weight. Stores the norm on `tmpl.wnorm`, replaces the internal
-list, and returns the survivors.
-
-- `weight` (`np.ndarray`): inverse-variance map aligned with the original
-  image shape.
-- `rtol` (`float`, default `1e-8`): relative tolerance on the median weighted
-  norm.
+- {meth}`~mophongo.templates.Templates.add_component` clones a parent
+  template and appends a new component template (used for extra fit
+  components such as astrometric gradients), returning `None` when the
+  component is nearly parallel to the parent.
+- {meth}`~mophongo.templates.Templates.apply_template_shifts` applies each
+  template's pending `to_shift = (dx, dy)` astrometric offset in place with
+  cubic-spline interpolation, always restarting from a cached unshifted copy
+  so repeated passes do not compound the interpolation smoothing.
+- {meth}`~mophongo.templates.Templates.quick_flux` returns per-source scalar
+  least-squares amplitudes over each template footprint, ignoring source
+  blending; used as an initial estimate before the full sparse fit.
+- {meth}`~mophongo.templates.Templates.predicted_errors` returns per-source
+  flux uncertainties that ignore template covariance, stored on
+  `tmpl.err_pred` only (the solver error `tmpl.err` is never overwritten).
+- {meth}`~mophongo.templates.Templates.prune_outside_weight` removes
+  templates lying entirely on non-positive weight and returns the survivors.
 
 ## AlignedCutout and WCS scaling
 
-{class}`mophongo.templates.AlignedCutout` is a lighter cutout used where
-grid alignment matters more than Cutout2D compatibility: the lower bound and
-shape of the cutout are forced to multiples of `align`, which keeps
-multi-resolution binning exact.
+{class}`mophongo.templates.AlignedCutout` is a lighter cutout used
+internally where grid alignment matters more than Cutout2D compatibility: the
+lower bound and shape of the cutout are forced to multiples of `align`, which
+keeps multi-resolution binning exact. It exposes the same
+`slices_original`/`slices_cutout` bookkeeping as `Template`, plus block
+reduce/replicate array helpers and a flux-conserving `downsample`. As of this
+writing `upsample` depends on a position-remapping helper that
+`mophongo.templates` does not import, so calls with `factor > 1` fail; use
+`as_block_replicated` for the array-only operation.
 
-```python
-AlignedCutout(data, position, size, *, align=1, copy=False,
-              fill_value=0.0, wcs=None)
-```
-
-- `data` (`np.ndarray`): 2-D parent array.
-- `position` (`tuple[float, float]`): `(x, y)` pixel-center position.
-- `size` (`tuple[int, int] | int`): minimum `(ny, nx)` size; the actual cutout
-  may be enlarged to satisfy alignment.
-- `align` (`int`, default `1`): per-axis alignment; the lower bound and the
-  shape become multiples of this value.
-- `copy` (`bool`, default `False`): copy pixels instead of viewing the parent
-  (a copy is forced when the cutout extends outside the parent).
-- `fill_value` (`float`, default `0.0`): value for out-of-image pixels.
-- `wcs` (`WCS | None`, default `None`): parent WCS; adjusted to the cutout,
-  including SIP terms when present.
-
-It exposes the same `slices_original`/`slices_cutout` bookkeeping as
-`Template`, plus array helpers `as_block_reduced(factor, func=np.sum)` and
-`as_block_replicated(factor, conserve_sum=True)`, and geometry-aware
-`downsample(factor)` (flux-conserving; requires origin and shape divisible by
-`factor`) and `upsample(factor, conserve_sum=True)`. As of this writing
-`upsample` depends on a position-remapping helper that `mophongo.templates`
-does not import, so calls with `factor > 1` fail; use `as_block_replicated`
-for the array-only operation.
-
-{func}`mophongo.templates.scale_wcs_pixel` supports these resamplings:
-
-```python
-scale_wcs_pixel(wcs, pixel_scale_factor, new_shape=None)
-```
-
-- `wcs` (`WCS | None`): input WCS; `None` passes through.
-- `pixel_scale_factor` (`float`): factor greater than one enlarges pixels
-  (downsampling), smaller than one shrinks them (upsampling). Sky coordinates
-  are preserved by scaling the CD/CDELT matrix and remapping CRPIX (and SIP
-  reference pixels when present).
-- `new_shape` (`tuple[int, int] | None`, default `None`): pixel shape recorded
-  on the returned WCS.
+{func}`mophongo.templates.scale_wcs_pixel` supports these resamplings: it
+rescales a WCS to a coarser or finer pixel grid while preserving sky
+coordinates, remapping CRPIX and SIP reference pixels as needed.

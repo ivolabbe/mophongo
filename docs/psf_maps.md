@@ -170,6 +170,54 @@ key = prm.lookup_key(10.0075, 0.005)        # inside the A-B overlap
 print(key, prm.get_psf(10.0075, 0.005).shape)  # 1 (25, 25)
 ```
 
+### Convolving a whole image with a map
+
+A map holds a different stamp in every region, so a mosaic cannot be
+convolved in one pass. {meth}`~mophongo.psf_map.PSFRegionMap.convolve_image`
+does it region by region: each region is cut out with a border wide enough
+that its own pixels see nothing of the cut (`buffer`, by default half the
+largest stamp), convolved with that region's stamp, and only the pixels
+*inside* the region polygon are written into the output. Cutouts overlap, the
+kept pixels never do, so nothing is double-counted and the seams carry no
+discontinuity beyond the difference between the two kernels themselves.
+
+This is the operation to reach for when a PSF-matched *image* is wanted rather
+than PSF-matched templates — smoothing a detection image to another band's
+resolution, for instance, with the same kernel map the fit itself used.
+
+Two entry points, one per level. The method works on arrays and needs the
+image's WCS, since the region polygons are in degrees:
+
+```python
+from astropy.io import fits
+from astropy.wcs import WCS
+from mophongo.psf_map import PSFRegionMap
+
+prm = PSFRegionMap.from_geojson("out/uds_f770w/uds_f770w_kernel.geojson")
+sci = fits.getdata("f444w_sci.fits")
+matched = prm.convolve_image(sci, WCS(fits.getheader("f444w_sci.fits")))
+```
+
+{func}`mophongo.psf_map.convolve_fits` is the file-level wrapper: it reads the
+science image and its WCS, convolves, and writes the result under the input
+header plus `CONVMAP` and `CONVNREG` provenance keywords. The map may be an
+object or the GeoJSON a run left behind (its `.fits` stamp sidecar is picked
+up alongside), so a matched image is one call with nothing loaded by hand:
+
+```python
+from mophongo.psf_map import convolve_fits
+
+convolve_fits("f444w_sci.fits", "out/uds_f770w/uds_f770w_kernel.geojson",
+              "f444w_matched_f770w.fits")
+```
+
+Pixels that fall in no region — outside the footprint the map was built from
+— are set to `fill_value` (0 by default), and their count is logged. Regions
+are the drizzle-footprint intersections, so a kernel map covers only the
+overlap of the two bands: convolving a full hi-res mosaic with a kernel map
+leaves everything outside the lo-res band's coverage empty, which is
+generally what you want.
+
 ### Derived maps
 
 {meth}`~mophongo.psf_map.PSFRegionMap.group_by_pa` returns a new map in

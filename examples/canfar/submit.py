@@ -24,8 +24,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
-import re
 import subprocess
 import sys
 import tarfile
@@ -41,23 +39,9 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent                     # mophongo/
 
 
-def canfar_user() -> str:
-    """CADC username, from $CANFAR_USER or scratch/canfar/canfar.conf."""
-    user = os.environ.get("CANFAR_USER")
-    if user:
-        return user
-    conf = REPO / "scratch" / "canfar" / "canfar.conf"
-    if conf.exists():
-        match = re.search(r'^\s*CANFAR_USER\s*=\s*"?([^"\s]+)', conf.read_text(), re.M)
-        if match and match.group(1) != "your_cadc_username":
-            return match.group(1)
-    sys.exit("set CANFAR_USER to your CADC username, or fill in "
-             "scratch/canfar/canfar.conf")
+from runroot import run_root
 
-
-USER = canfar_user()
-RUN = f"/arc/home/{USER}/run"                 # run tree on arc (POSIX form)
-RUN_VOS = f"arc:home/{USER}/run"              # same, VOSpace form
+RUN, RUN_VOS = run_root(REPO)   # /arc/... and its arc: URI
 IMAGE = "images.canfar.net/skaha/jwst-notebook:25.07.25"
 VCP = Path.home() / ".venvs/canfar/bin/vcp"
 DONE = ("Succeeded", "Failed", "Completed", "Terminating")
@@ -142,15 +126,18 @@ def launch(name: str, script: str, cores: int, ram: int, env: dict[str, str]) ->
     return ids[0] if ids else ""
 
 
-def wait(ids: list[str], poll: int = 20) -> dict[str, str]:
+def wait(ids: list[str], poll: int = 20, missing_tolerance: int = 3) -> dict[str, str]:
     """Block until every session reaches a terminal state.
 
-    A session can disappear from the API entirely - reaped, or deleted by a
-    concurrent ``clean`` - in which case ``info`` returns an empty list. Treat
-    that as terminal rather than letting an IndexError kill a long campaign.
+    ``info`` returns an empty list both for a session the service has already
+    reaped *and* for one just created that has not been registered yet, so an
+    empty answer is only treated as terminal after several consecutive polls.
+    Declaring it terminal on the first empty reply made wait() return instantly
+    on a freshly submitted job.
     """
     pending = [i for i in ids if i]
     final: dict[str, str] = {}
+    missing: dict[str, int] = {}
     while pending:
         for sid in list(pending):
             try:
@@ -158,8 +145,16 @@ def wait(ids: list[str], poll: int = 20) -> dict[str, str]:
             except Exception as exc:  # noqa: BLE001 - transient API errors
                 log.warning("  %s: info failed (%s), retrying", sid, type(exc).__name__)
                 continue
-            status = info[0].get("status") if info else "Gone"
-            if status in DONE or status == "Gone":
+            if not info:
+                missing[sid] = missing.get(sid, 0) + 1
+                if missing[sid] >= missing_tolerance:
+                    final[sid] = "Gone"
+                    pending.remove(sid)
+                    log.info("%s Gone", sid)
+                continue
+            missing[sid] = 0
+            status = info[0].get("status")
+            if status in DONE:
                 final[sid] = status
                 pending.remove(sid)
                 log.info("%s %s", sid, status)
@@ -168,10 +163,19 @@ def wait(ids: list[str], poll: int = 20) -> dict[str, str]:
     return final
 
 
+def first_log(ids: list[str]) -> str:
+    """Log text of the first session that has any, or a note that none does."""
+    for text in session().logs(ids).values():
+        return text
+    return "(no log available; the session may have been reaped)"
+
+
 def do_setup(args: argparse.Namespace) -> None:
-    ids = [launch("mophongo-setup", "setup_env.sh", 4, 16, {"RUN": RUN})]
+    # small footprint: this only unpacks and pip installs, and a modest
+    # request schedules when the platform is busy
+    ids = [launch("mophongo-setup", "setup_env.sh", 2, 8, {"RUN": RUN})]
     wait(ids)
-    print(next(iter(session().logs(ids).values()))[-2000:])
+    print(first_log(ids)[-2000:])
 
 
 def stage_job(name: str) -> str:
@@ -188,7 +192,21 @@ def do_sync(args: argparse.Namespace) -> None:
     """
     ids = [launch("mophongo-sync", "update_src.sh", 1, 4, {"RUN": RUN})]
     wait(ids)
-    print(tidy(next(iter(session().logs(ids).values())), 10))
+    print(tidy(first_log(ids), 10))
+
+
+def do_seed(args: argparse.Namespace) -> None:
+    """Copy cached PSF/kernel maps from one run into another.
+
+    Those maps do not depend on the trial patch, so a full-field run can start
+    from what a patch run of the same band already built instead of spending
+    half an hour rebuilding them.
+    """
+    pairs = ",".join(f"{src}:{dst}" for src, dst in
+                     (p.split(":", 1) for p in args.pairs))
+    ids = [launch("mophongo-seed", "seed_cache.sh", 1, 4, {"RUN": RUN, "PAIRS": pairs})]
+    wait(ids)
+    print(tidy(first_log(ids), 25))
 
 
 def do_stage(args: argparse.Namespace) -> None:
@@ -321,9 +339,13 @@ def main() -> None:
     # Every field's grids, not just UDS: a band with no matching grid falls back
     # to building them on the node, which is slow and, run concurrently by
     # several bands of a field, races on the same psf_dir. EGS has none locally
-    # and has to build them regardless.
+    # and has to build them regardless. The third glob is the 30" halo grid the
+    # saturation repair uses to decide which segments a star dominates
+    # (repair_saturated); without it the flag reach shrinks to the GRID25 field
+    # of view and only the star's core gets flagged.
     p.add_argument("--psf-glob", nargs="+",
                    default=["*_NRC*_F444W_MJD*_GRID25_OS4.fits",
+                            "*_NRC*_F444W_MJD*_FOV30_GRID1_OS4.fits",
                             "*_MIRI_*_MJD*_GRID9_OS4.fits"])
     p.set_defaults(func=do_push)
 
@@ -332,6 +354,10 @@ def main() -> None:
 
     p = sub.add_parser("sync", help="replace the source in place, leaving the venv alone")
     p.set_defaults(func=do_sync)
+
+    p = sub.add_parser("seed", help="copy cached PSF/kernel maps between runs")
+    p.add_argument("pairs", nargs="+", metavar="SRC:DST")
+    p.set_defaults(func=do_seed)
 
     p = sub.add_parser("stage", help="decompress a config's inputs on /arc")
     p.add_argument("names", nargs="+")

@@ -11,15 +11,43 @@ they already exist locally. That is an optimisation, not a requirement:
 grids from the exposure lists on arc and caches them there. Uploading just skips
 a slow first run.
 
+## Where runs live
+
+Set the run root before anything else. The default is `/arc/home/<user>/run`,
+which is fine for trial patches but has a quota of a few hundred GB — one
+full-field campaign over a release needs several times that, and staged inputs
+alone are 61 GB.
+
+```bash
+export CANFAR_RUN=/arc/projects/minerva/ifl
+```
+
+Project space is shared with the collaboration and has no comparable limit, so
+that is where campaigns belong; a home run tree is for experiments. Both
+`submit.py` and `arcify.py` read `CANFAR_RUN`, and the arc paths baked into a
+rewritten config come from it — so if you change it, re-run `arcify.py`.
+
 ## Everything at once
 
 ```bash
 P=~/.venvs/canfar/bin/python
-$P campaign.py                      # every config in ../minerva
+$P campaign.py                      # every config in ../minerva, trial patches
 $P campaign.py --fields uds cosmos  # only those fields
 $P campaign.py --from stage         # already pushed and built
 $P campaign.py --dry-run            # print the plan, run nothing
 ```
+
+A full-field campaign over the whole release, reusing the PSF and kernel maps
+the patch runs already built rather than spending half an hour per band
+rebuilding them:
+
+```bash
+$P campaign.py --r-trial 0 --suffix _full --seed-from "" --cores 4 --ram 64
+```
+
+`--suffix` keeps the outputs in their own directories, `--seed-from ""` links
+the caches across from the unsuffixed runs, and `--r-trial 0` disables the
+trial-patch cut so every source in the footprint is fitted.
 
 It runs upload, environment, config rewrite, staging and submission in order,
 and encodes three things worth not rediscovering: runs are submitted without
@@ -53,7 +81,7 @@ $P submit.py push        # mophongo source, job scripts, PSF grids
 $P submit.py setup       # build the venv on /arc from pyproject.toml
 ```
 
-The venv persists on `/arc/home/<user>/run/venv`, so this is paid once. The
+The venv persists at `$CANFAR_RUN/venv`, so this is paid once. The
 stock image's astropy and numpy are too old for mophongo, hence a clean venv
 rather than `--system-site-packages`.
 
@@ -104,19 +132,19 @@ It also repoints `psf_dir` at the uploaded grids and `out_dir` into the run tree
 ## Layout on arc
 
 ```
-/arc/home/<user>/run/
+$CANFAR_RUN/                        e.g. /arc/projects/minerva/ifl
 ├── venv/                  mophongo and its dependencies
 ├── mophongo/              the uploaded source
-├── PSF/                   STPSF MJD-tagged grids
-├── jobs/                  setup_env.sh, stage.sh, run.sh
+├── PSF/                   STPSF MJD-tagged grids, shared by every run
+├── jobs/                  setup_env.sh, stage.sh, run.sh, seed_cache.sh, ...
 ├── data/                  decompressed inputs, shared between bands
 ├── <name>_canfar.json     rewritten configs
 ├── <name>_stage.tsv       per-config copy lists
 └── out/<name>/            run outputs
 ```
 
-It is all under the user's own home rather than the shared project space, which
-is read-mostly for the collaboration.
+`/arc/home/<user>` keeps only `.ssh`, `.ssl` and a README pointing here: its
+quota is far too small for a campaign's outputs.
 
 ## Notes
 
@@ -130,6 +158,12 @@ is read-mostly for the collaboration.
 - Cores are chosen per config: 4 for a full field, 1 for a trial patch, since
   measured CPU use is about 0.2 of a core and the runs wait on `/arc`. Pass
   `--cores` to override. Up to 16 are available.
+- Outputs are large. A 3 arcmin patch of UDS writes 8.4 GB, of which 4.2 GB is
+  `stamps.fits` and 3.5 GB the residual; a full field scales with the source
+  count, which is roughly 8x. Set `save_stamps` or `scene_plots` false in the
+  config when the diagnostics are not wanted.
+- `seed` links rather than copies the PSF and kernel maps. Copying them once
+  duplicated 10 GB and exhausted a home quota.
 - The quota page reports a 32 GB memory default, but that is a default and not a
   cap: 64 GB is an allowed request and is what these scripts use.
 - Importing mophongo from the NFS-backed venv costs about three minutes before

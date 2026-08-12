@@ -505,7 +505,7 @@ Astrometry:
 - `fit_astrometry_niter` (*int*, default `5`) — maximum astrometry
   refinement passes; `0` disables shift fitting (one fitting pass still
   runs).
-- `astrom_shift_tol` (*float*, default `0.05`) — stop iterating once the
+- `astrom_shift_tol` (*float*, default `0.1`) — stop iterating a scene once its
   largest per-template shift increment of a pass drops below this tolerance
   (fit-grid pixels). The increment compared is the damped one that was
   actually applied.

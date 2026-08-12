@@ -1391,6 +1391,10 @@ def plot_repair_diagnostic(
     # visible out to +3×MAD.
     grey_kw = dict(vmin=-2.0 * mad, vmax=5.0 * mad, cmap="bone_r",
                    origin="lower")
+    # Linear stretch, scaled to the residual's own MAD: the residual runs
+    # from a fraction of a percent to a few percent of the star, so on the
+    # data's log stretch it is a flat gray field. Linear resolves the
+    # under/over-subtraction structure the panel exists to show.
     resid_show = np.where(hole_mask, np.nan, resid)
     ax[0, 2].imshow(resid_show, **grey_kw)
     ax[0, 2].contour(ring_mask.astype(float), levels=[0.5],
@@ -1399,7 +1403,7 @@ def plot_repair_diagnostic(
                      colors="red", linewidths=0.5)
     ax[0, 2].set_title(
         f"(data − A·ψ) / A   shifted   "
-        f"Σ|r|/Σ|fit|={diag.resid_frac:.2f}   ±{rng:.1g}"
+        f"Σ|r|/Σ|fit|={diag.resid_frac:.2f}"
     )
 
     fit_label_repair = ("A·ψ + pedestal"
@@ -1525,11 +1529,12 @@ def plot_repair_diagnostic(
         f"⟨SNR²⟩^½={rms_check:.2f}"
     )
 
-    # (0, 4): residual NO-SHIFT (grayscale, same ±3×MAD stretch).
+    # (0, 4): residual NO-SHIFT (same log stretch as the data panels).
     if A_ns > 0:
         resid_ns = (sci - psf_ns_scl) / A
-        resid_ns_show = np.where(hole_mask, np.nan, resid_ns)
-        ax[0, 4].imshow(resid_ns_show, **grey_kw)
+        resid_ns_show = np.where(hole_mask, np.nan,
+                                 np.log10(np.maximum(resid_ns, 0) + offset))
+        ax[0, 4].imshow(resid_ns_show, **log_kw)
         ax[0, 4].contour(ring_mask_noshift.astype(float), levels=[0.5],
                          colors="black", linewidths=0.5)
         ax[0, 4].contour(hole_mask.astype(float), levels=[0.5],

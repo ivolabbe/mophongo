@@ -736,3 +736,427 @@ def test_plot_result_uses_run_scenes(tmp_path):
     )
     with pytest.raises(RuntimeError, match="completed run"):
         bare.plot_result()
+
+
+def test_write_outputs_puts_scene_plots_in_scenes_subdir(tmp_path):
+    """Scene PNGs go to ``out_dir/scenes/``, and only when requested."""
+    import matplotlib
+    matplotlib.use("Agg")
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    from mophongo.fit import FitConfig
+
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=12, nsrc=12, size=101, ndilate=2, peak_snr=2.0
+    )
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+    # the scene catalog converts scene centers to sky, so a WCS is required
+    wcs_hi = WCS(naxis=2)
+    wcs_hi.wcs.crpix = [50.0, 50.0]
+    wcs_hi.wcs.crval = [150.0, 2.0]
+    wcs_hi.wcs.cdelt = [-1e-5, 1e-5]
+    wcs_hi.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+
+    def fresh_pipe(out_dir, scene_plots):
+        pipe = pipeline.Pipeline(
+            [im.copy() for im in images], segmap, catalog=catalog,
+            weights=[w.copy() for w in wht], kernels=[None, kernel], psfs=psfs,
+            wcs=[wcs_hi, wcs_hi], config=FitConfig(fit_astrometry_niter=0),
+        )
+        # write_outputs copies the hi-res header onto the residual
+        sci_hi = out_dir / "hi.fits"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fits.writeto(sci_hi, np.asarray(images[0], np.float32), overwrite=True)
+        pipe.run_config = pipeline.RunConfig(
+            name="t", out_dir=str(out_dir), sci_hi=str(sci_hi), segmap="seg.fits",
+            catalog="cat.fits", sci_lo="lo.fits", wht_lo="wht.fits",
+            csv_hi="hi.csv", csv_lo="lo.csv",
+            scene_plots=scene_plots, save_stamps=False,
+        )
+        pipe.out_dir = out_dir
+        pipe.run()
+        return pipe
+
+    on = tmp_path / "on"
+    pipe = fresh_pipe(on, True)
+    pipe.write_outputs()
+    scene_ids = [s.id for s in pipe.scenes]
+    assert scene_ids
+    assert sorted(p.name for p in (on / "scenes").glob("*.png")) == sorted(
+        f"t_scene_{sid}.png" for sid in scene_ids
+    )
+    # nothing left at the old flat location
+    assert not list(on.glob("*_scene_*.png"))
+    # the scene catalog stays in out_dir
+    assert (on / "t_scene_catalog.csv").exists()
+
+    off = tmp_path / "off"
+    fresh_pipe(off, False).write_outputs()
+    assert not (off / "scenes").exists()
+
+
+def _shift_field_pipeline(tmp_path, order, nsrc=24, size=161, offset=(0.0, 0.0)):
+    """A run with astrometry solved at ``order``, ready for plot_shift_field.
+
+    ``offset`` shifts the fitted band by ``(sx, sy)`` pixels, so the solver has
+    a real offset to recover instead of noise.
+    """
+    from astropy.wcs import WCS
+    from scipy.ndimage import shift as nd_shift
+    from mophongo.fit import FitConfig
+
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=7, nsrc=nsrc, size=size, ndilate=2, peak_snr=50.0
+    )
+    images = [im.copy() for im in images]
+    if any(offset):
+        images[1] = nd_shift(images[1], (offset[1], offset[0]), order=3, mode="nearest")
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+    wcs_hi = WCS(naxis=2)
+    wcs_hi.wcs.crpix = [size / 2, size / 2]
+    wcs_hi.wcs.crval = [150.0, 52.0]  # high dec: exercises the cos(dec) aspect
+    wcs_hi.wcs.cdelt = [-1e-5, 1e-5]
+    wcs_hi.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+
+    cfg = FitConfig(
+        fit_astrometry_niter=2,
+        astrom_model="poly",
+        astrom_kwargs={"poly": {"order": order}, "gp": {"length_scale": 400}},
+        snr_thresh_astrom=0.0,
+        astrom_isolation_thresh=0.0,
+    )
+    pipe = pipeline.Pipeline(
+        images, segmap, catalog=catalog,
+        weights=[w.copy() for w in wht], kernels=[None, kernel], psfs=psfs,
+        wcs=[wcs_hi, wcs_hi], config=cfg,
+    )
+    pipe.run_config = pipeline.RunConfig(
+        name="t", out_dir=str(tmp_path), sci_hi="hi.fits", segmap="seg.fits",
+        catalog="cat.fits", sci_lo="lo.fits", wht_lo="wht.fits",
+        csv_hi="hi.csv", csv_lo="lo.csv",
+    )
+    pipe.out_dir = tmp_path
+    pipe.run()
+    return pipe
+
+
+def test_shift_field_sample_count_follows_poly_order(tmp_path):
+    """order 0 -> 1 arrow at the scene center, order 1 -> 2, order 2 -> 4."""
+    import matplotlib
+    matplotlib.use("Agg")
+
+    for order, expect in ((0, 1), (1, 2), (2, 4)):
+        pipe = _shift_field_pipeline(tmp_path, order)
+        solved = [s for s in pipe.scenes if s.shifts is not None and len(s.shifts) > 1]
+        assert solved, f"order {order}: no scene solved for shifts"
+        for s in solved:
+            xy, dxy = pipe._scene_shift_samples(s)
+            assert xy.shape == (expect, 2), f"order {order}: {xy.shape[0]} samples"
+            assert dxy.shape == (expect, 2)
+            pos = np.array([t.position_original for t in s.templates], float)
+            if expect == 1:
+                # the single arrow sits at the scene center
+                np.testing.assert_allclose(xy[0], pos.mean(axis=0), atol=1e-6)
+            else:
+                # the samples spread over the scene, and stay inside it
+                assert np.ptp(xy, axis=0).max() > 0
+                assert (xy.min(axis=0) >= pos.min(axis=0) - 1).all()
+                assert (xy.max(axis=0) <= pos.max(axis=0) + 1).all()
+
+
+def test_shift_field_arrows_track_applied_template_shifts(tmp_path):
+    """The refit field reproduces the shifts actually applied to templates."""
+    import matplotlib
+    matplotlib.use("Agg")
+
+    pipe = _shift_field_pipeline(tmp_path, 1)
+    checked = 0
+    for s in pipe.scenes:
+        if s.shifts is None or len(s.shifts) < 2:
+            continue
+        applied = np.array([t.shifted[:2] for t in s.templates], float)
+        if not np.any(np.abs(applied) > 1e-3):
+            continue
+        xy, dxy = pipe._scene_shift_samples(s)
+        # the sampled field lies within the range of the shifts it was fit to
+        assert dxy.min() >= applied.min() - 0.05
+        assert dxy.max() <= applied.max() + 0.05
+        checked += 1
+    assert checked, "no scene had non-trivial applied shifts"
+
+
+def test_write_outputs_writes_shift_field(tmp_path):
+    """The shift field is a standard output whenever astrometry was solved."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from astropy.io import fits
+
+    on = tmp_path / "on"
+    on.mkdir()
+    pipe = _shift_field_pipeline(on, 1)
+    fits.writeto(on / "hi.fits", np.asarray(pipe.images[0], np.float32), overwrite=True)
+    pipe.run_config.sci_hi = str(on / "hi.fits")
+    pipe.run_config.save_stamps = False
+    pipe.write_outputs()
+    assert (on / "t_shift_field.png").exists()
+
+    # the figure carries one label per solved scene and one arrow per sample
+    fig, ax = pipe.plot_shift_field()
+    solved = [s for s in pipe.scenes if s.shifts is not None and len(s.shifts) > 1]
+    assert len([t for t in ax.texts]) == len(solved)
+    quiver = [c for c in ax.collections if hasattr(c, "U")][0]
+    assert quiver.U.size == sum(
+        pipe._scene_shift_samples(s)[0].shape[0] for s in solved
+    )
+    assert ax.xaxis_inverted()  # RA increases to the left
+    plt.close(fig)
+
+    # no astrometry solved -> no figure, no file
+    pipe.all_scenes = [[]]
+    assert pipe.plot_shift_field() is None
+
+
+def test_shift_field_arrow_points_from_template_to_measured(tmp_path):
+    """Sign check: offset the fitted band, the arrow follows the offset.
+
+    Shifting the low-resolution image by ``+(sx, sy)`` puts every source that
+    much away from its template, so the arrow drawn from the template toward
+    the measured position must carry the same sign.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    from astropy.wcs import WCS
+    from scipy.ndimage import shift as nd_shift
+    from mophongo.fit import FitConfig
+
+    sx, sy = 0.6, -0.4
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=7, nsrc=40, size=241, ndilate=2, peak_snr=50.0
+    )
+    images = [im.copy() for im in images]
+    images[1] = nd_shift(images[1], (sy, sx), order=3, mode="nearest")
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+    wcs_hi = WCS(naxis=2)
+    wcs_hi.wcs.crpix = [120.0, 120.0]
+    wcs_hi.wcs.crval = [150.0, 2.0]
+    wcs_hi.wcs.cdelt = [-1e-5, 1e-5]
+    wcs_hi.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+
+    pipe = pipeline.Pipeline(
+        images, segmap, catalog=catalog, weights=[w.copy() for w in wht],
+        kernels=[None, kernel], psfs=psfs, wcs=[wcs_hi, wcs_hi],
+        config=FitConfig(
+            fit_astrometry_niter=8, astrom_model="poly",
+            astrom_kwargs={"poly": {"order": 0}, "gp": {"length_scale": 400}},
+            snr_thresh_astrom=0.0, astrom_isolation_thresh=0.0,
+        ),
+    )
+    pipe.run_config = pipeline.RunConfig(
+        name="t", out_dir=str(tmp_path), sci_hi="hi.fits", segmap="seg.fits",
+        catalog="cat.fits", sci_lo="lo.fits", wht_lo="wht.fits",
+        csv_hi="hi.csv", csv_lo="lo.csv",
+    )
+    pipe.out_dir = tmp_path
+    pipe.run()
+
+    arrows = np.vstack(
+        [pipe._scene_shift_samples(s)[1] for s in pipe.scenes
+         if pipe._scene_shift_samples(s) is not None]
+    )
+    assert len(arrows)
+    # sign and rough size of the injected offset, damped solve undershoots
+    assert np.median(arrows[:, 0]) > 0.3 * sx
+    assert np.median(arrows[:, 1]) < 0.3 * sy
+    np.testing.assert_allclose(np.median(arrows, axis=0), [sx, sy], atol=0.25)
+
+
+def test_scene_catalog_carries_total_shift(tmp_path):
+    """The scene catalog's dx, dy is the total shift, not the last increment."""
+    import matplotlib
+    matplotlib.use("Agg")
+    from astropy.io import fits
+    from astropy.table import Table as _Table
+
+    out = tmp_path / "cat"
+    out.mkdir()
+    pipe = _shift_field_pipeline(out, 0, offset=(0.6, -0.4))
+    fits.writeto(out / "hi.fits", np.asarray(pipe.images[0], np.float32), overwrite=True)
+    pipe.run_config.sci_hi = str(out / "hi.fits")
+    pipe.run_config.save_stamps = False
+    pipe.run_config.scene_plots = False
+    pipe.write_outputs()
+
+    cat = _Table.read(out / "t_scene_catalog.csv", format="ascii.csv")
+    assert {"dx", "dy"} <= set(cat.colnames)
+    by_id = {int(r["id"]): (r["dx"], r["dy"]) for r in cat}
+
+    checked = 0
+    for s in pipe.scenes:
+        if s.shifts is None or len(s.shifts) < 2:
+            assert np.isnan(by_id[int(s.id)]).all()
+            continue
+        applied = np.array([t.shifted[:2] for t in s.templates], float)
+        if not np.any(np.abs(applied) > 1e-3):
+            continue
+        # the catalog value is the accumulated shift, not the last increment
+        np.testing.assert_allclose(by_id[int(s.id)], applied.mean(axis=0), atol=0.02)
+        last = np.asarray(s.shifts, float)[:2]  # order 0: the pass's own dx, dy
+        assert not np.allclose(by_id[int(s.id)], last, atol=1e-3)
+        checked += 1
+    assert checked, "no scene had non-trivial applied shifts"
+
+
+def test_astrometry_passes_skip_converged_scenes(monkeypatch):
+    """A scene that has stopped moving drops out of the refinement loop.
+
+    ``Scene.solve`` reads only that scene's own templates, image and weights,
+    so a converged scene cannot start moving again: iterating it further only
+    costs time. Each scene must therefore be solved exactly ``astrom_niter``
+    times, and carry its own convergence verdict rather than the run's.
+    """
+    from mophongo.fit import FitConfig
+    from mophongo.scene import Scene
+
+    calls: dict[int, int] = {}
+    real_solve = Scene.solve
+
+    def counting_solve(self, **kwargs):
+        calls[id(self)] = calls.get(id(self), 0) + 1
+        return real_solve(self, **kwargs)
+
+    monkeypatch.setattr(Scene, "solve", counting_solve)
+
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=7, nsrc=20, size=121, ndilate=2, peak_snr=30.0
+    )
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+    pipe = pipeline.Pipeline(
+        [im.copy() for im in images], segmap, catalog=catalog,
+        weights=[w.copy() for w in wht], kernels=[None, kernel], psfs=psfs,
+    )
+    niter = 3
+    pipe.run(config=FitConfig(fit_astrometry_niter=niter, fit_astrometry_joint=True))
+
+    scenes = [s for band in pipe.all_scenes for s in band]
+    assert scenes
+    assert any(s.astrom_converged is not None for s in scenes)
+    for s in scenes:
+        assert 1 <= s.astrom_niter <= niter
+        # solved once per recorded pass and never again after converging
+        assert calls[id(s)] == s.astrom_niter
+        if s.astrom_niter < niter:
+            assert s.astrom_converged is not False
+
+    # the other end: with an unreachable tolerance nothing converges, every
+    # scene uses the whole budget and is left flagged as unconverged
+    calls.clear()
+    pipe2 = pipeline.Pipeline(
+        [im.copy() for im in images], segmap, catalog=catalog,
+        weights=[w.copy() for w in wht], kernels=[None, kernel], psfs=psfs,
+    )
+    pipe2.run(config=FitConfig(fit_astrometry_niter=niter, fit_astrometry_joint=True,
+                               astrom_shift_tol=0.0))
+    slow = [s for band in pipe2.all_scenes for s in band]
+    assert slow
+    assert any(s.astrom_converged is False for s in slow)
+    for s in slow:
+        if s.shifts is None or len(s.shifts) == 0:
+            continue  # no shift block: no verdict to give
+        assert s.astrom_converged is False
+        assert s.astrom_niter == niter == calls[id(s)]
+
+    # every fitted source inherits its scene's verdict
+    for pipe_, expected in ((pipe, None), (pipe2, None)):
+        table = pipe_.table
+        assert "flag_astrom_1" in table.colnames
+        verdict = {s.id: (-1 if s.astrom_converged is None
+                          else int(not s.astrom_converged))
+                   for band in pipe_.all_scenes for s in band}
+        fitted = np.asarray(table["scene_1"]) >= 0
+        assert fitted.any()
+        got = np.asarray(table["flag_astrom_1"])[fitted]
+        want = np.array([verdict[sid] for sid in np.asarray(table["scene_1"])[fitted]])
+        assert np.array_equal(got, want)
+        # sources with no template carry no verdict
+        assert np.all(np.asarray(table["flag_astrom_1"])[~fitted] == -1)
+        if expected is not None:
+            assert np.all(got == expected)
+
+
+def test_astrometry_verdict_is_none_where_no_shift_was_fitted():
+    """`flag_astrom_<i>` = 0 must mean solved-and-converged, not never-moved.
+
+    A flux-only run never fits a shift, so its templates trivially do not
+    move. Reporting that as convergence would mark every source as
+    astrometrically good on a run that solved no astrometry at all.
+    """
+    from mophongo.fit import FitConfig
+
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=7, nsrc=20, size=121, ndilate=2, peak_snr=30.0
+    )
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+    pipe = pipeline.Pipeline(
+        [im.copy() for im in images], segmap, catalog=catalog,
+        weights=[w.copy() for w in wht], kernels=[None, kernel], psfs=psfs,
+    )
+    table, _ = pipe.run(config=FitConfig(fit_astrometry_niter=0))
+
+    scenes = [s for band in pipe.all_scenes for s in band]
+    assert scenes
+    for s in scenes:
+        assert s.shifts is None or len(s.shifts) == 0
+        assert s.astrom_converged is None
+    assert np.all(np.asarray(table["flag_astrom_1"]) == -1)
+
+
+def test_final_sub_tolerance_shift_is_applied_to_the_templates():
+    """The increment the loop stops on has already been applied.
+
+    ``Scene.solve(apply_shifts=True)`` applies before the caller measures, so
+    the convergence test reads the accumulated ``Template.shifted`` — the last
+    step is on the templates, not discarded for being small.
+    """
+    from mophongo.fit import FitConfig
+    from mophongo.scene import Scene
+
+    seen: list[tuple[int, np.ndarray]] = []
+    real_solve = Scene.solve
+
+    def recording_solve(self, **kwargs):
+        before = np.array([t.shifted[:2] for t in self.templates], float)
+        out = real_solve(self, **kwargs)
+        after = np.array([t.shifted[:2] for t in self.templates], float)
+        seen.append((id(self), np.max(np.abs(after - before)) if before.size else 0.0))
+        return out
+
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=7, nsrc=20, size=121, ndilate=2, peak_snr=30.0
+    )
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+    pipe = pipeline.Pipeline(
+        [im.copy() for im in images], segmap, catalog=catalog,
+        weights=[w.copy() for w in wht], kernels=[None, kernel], psfs=psfs,
+    )
+    tol = 0.1
+    import unittest.mock as _mock
+    with _mock.patch.object(Scene, "solve", recording_solve):
+        pipe.run(config=FitConfig(fit_astrometry_niter=4, astrom_shift_tol=tol))
+
+    checked = 0
+    for s in (s for band in pipe.all_scenes for s in band):
+        if not s.astrom_converged:
+            continue
+        steps = [d for sid, d in seen if sid == id(s)]
+        # the recorded step is measured across solve(), i.e. post-apply, and
+        # it is the value the loop stored and stopped on
+        np.testing.assert_allclose(steps[-1], s.astrom_step, rtol=1e-9)
+        assert s.astrom_step < tol
+        # the accumulated shift includes that final step
+        total = np.max(np.abs([t.shifted[:2] for t in s.templates]))
+        assert total >= 0.0
+        if len(steps) > 1 and s.astrom_step > 1e-2:
+            assert total > 0.0
+        checked += 1
+    assert checked, "no scene converged"

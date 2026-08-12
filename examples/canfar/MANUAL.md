@@ -270,7 +270,8 @@ ls -lh /arc/home/$USER/run/out/uds_f770w
 |---|---|
 | `uds_770_fit_table.fits` | the photometry: `flux_<i>`, `flux_<i>_total`, `err_<i>` |
 | `uds_770_residual.fits` | data minus model, the first thing to check |
-| `uds_770_scene_*.png` | per-scene diagnostics |
+| `scenes/uds_770_scene_*.png` | per-scene diagnostics |
+| `uds_770_shift_field.png` | the fitted astrometric shift field over the whole field |
 | `uds_770_kernel.fits`, `uds_770_psf_*.fits` | PSF and kernel maps |
 | `uds_770.log` | the run log |
 

@@ -1523,7 +1523,7 @@ class Templates:
 
         dropped = len(self._templates) - len(keep)
         if dropped:
-            print(f"Pruned {dropped} templates with low L2 norm on weight map.")
+            logger.info("pruned %d templates with low L2 norm on the weight map", dropped)
         self._templates = keep
         return self._templates
 

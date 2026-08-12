@@ -1,0 +1,204 @@
+{
+  "commit": "23d6cb0",
+  "steps": [
+    "fits",
+    "idl",
+    "mock"
+  ],
+  "idl": [
+    {
+      "band": "f770w",
+      "n_matched": 17565,
+      "figure": "compare_idl_vs_python_f770w.png",
+      "a": {
+        "median": 0.0076,
+        "sd": 0.0401,
+        "n": 451
+      },
+      "a_snr25": {
+        "median": 0.0069,
+        "sd": 0.025,
+        "n": 385
+      },
+      "b": {
+        "median": 0.9497,
+        "sd": 0.0512,
+        "n": 451
+      },
+      "c": {
+        "median": 0.0624,
+        "sd": 0.0538,
+        "n": 451
+      },
+      "c_snr25": {
+        "median": 0.0625,
+        "sd": 0.0453,
+        "n": 385
+      }
+    },
+    {
+      "band": "f1280w",
+      "n_matched": 16911,
+      "figure": "compare_idl_vs_python_f1280w.png",
+      "a": {
+        "median": 0.0173,
+        "sd": 0.1786,
+        "n": 442
+      },
+      "a_snr25": {
+        "median": 0.0076,
+        "sd": 0.0286,
+        "n": 181
+      },
+      "b": {
+        "median": 0.9636,
+        "sd": 0.0383,
+        "n": 442
+      },
+      "c": {
+        "median": 0.0572,
+        "sd": 0.2028,
+        "n": 442
+      },
+      "c_snr25": {
+        "median": 0.0452,
+        "sd": 0.0425,
+        "n": 181
+      }
+    },
+    {
+      "band": "f1500w",
+      "n_matched": 17431,
+      "figure": "compare_idl_vs_python_f1500w.png",
+      "a": {
+        "median": 0.0284,
+        "sd": 0.3685,
+        "n": 591
+      },
+      "a_snr25": {
+        "median": 0.0087,
+        "sd": 0.0848,
+        "n": 197
+      },
+      "b": {
+        "median": 0.9669,
+        "sd": 0.8746,
+        "n": 594
+      },
+      "c": {
+        "median": 0.061,
+        "sd": 0.4544,
+        "n": 591
+      },
+      "c_snr25": {
+        "median": 0.0388,
+        "sd": 0.0698,
+        "n": 197
+      }
+    },
+    {
+      "band": "f1800w",
+      "n_matched": 17265,
+      "figure": "compare_idl_vs_python_f1800w.png",
+      "a": {
+        "median": 0.2664,
+        "sd": 0.6673,
+        "n": 1542
+      },
+      "a_snr25": {
+        "median": 0.0117,
+        "sd": 0.057,
+        "n": 198
+      },
+      "b": {
+        "median": 0.9416,
+        "sd": 0.0533,
+        "n": 1606
+      },
+      "c": {
+        "median": 0.3408,
+        "sd": 0.6826,
+        "n": 1542
+      },
+      "c_snr25": {
+        "median": 0.0597,
+        "sd": 0.0937,
+        "n": 198
+      }
+    }
+  ],
+  "mock": [
+    {
+      "band": "f770w",
+      "blur_fwhm_arcsec": 0.08,
+      "aperture_diam_arcsec": 0.7,
+      "pattern": "UDS_MIRI_F770W_OS4_GRID1",
+      "template_extension": "psf_wings",
+      "n_fit": 696.0,
+      "n_position_mismatched": 5.0,
+      "wiener_lambda": 0.001,
+      "n_source_diagnostics": 10.0,
+      "med_hi": 0.9745167041699154,
+      "med_lo": 0.9754590235493751,
+      "p16_lo": 0.9070675822165578,
+      "p84_lo": 1.009701180753655,
+      "pull_lo_median": -2.680906471203129,
+      "pull_lo_std": 22.82978628230113,
+      "resid_std_over_noise": 0.7989192261961194
+    },
+    {
+      "band": "f1280w",
+      "blur_fwhm_arcsec": 0.12,
+      "aperture_diam_arcsec": 1.2,
+      "pattern": "UDS_MIRI_F1280W_OS4_GRID1",
+      "template_extension": "psf_wings",
+      "n_fit": 696.0,
+      "n_position_mismatched": 4.0,
+      "wiener_lambda": 0.0003,
+      "n_source_diagnostics": 10.0,
+      "med_hi": 0.9772336977628489,
+      "med_lo": 0.9776063407072477,
+      "p16_lo": 0.916216804112593,
+      "p84_lo": 1.015250424235658,
+      "pull_lo_median": -2.472758773657257,
+      "pull_lo_std": 20.886353857235562,
+      "resid_std_over_noise": 0.7988961079965704
+    },
+    {
+      "band": "f1500w",
+      "blur_fwhm_arcsec": 0.18,
+      "aperture_diam_arcsec": 1.2,
+      "pattern": "UDS_MIRI_F1500W_OS4_GRID1",
+      "template_extension": "psf_wings",
+      "n_fit": 696.0,
+      "n_position_mismatched": 5.0,
+      "wiener_lambda": 0.0001,
+      "n_source_diagnostics": 10.0,
+      "med_hi": 0.9782325153847357,
+      "med_lo": 0.9788210650900843,
+      "p16_lo": 0.9202465310138774,
+      "p84_lo": 1.017063293133872,
+      "pull_lo_median": -2.3172010189475514,
+      "pull_lo_std": 20.185636995946815,
+      "resid_std_over_noise": 0.7986210403479233
+    },
+    {
+      "band": "f1800w",
+      "blur_fwhm_arcsec": 0.24,
+      "aperture_diam_arcsec": 1.5,
+      "pattern": "UDS_MIRI_F1800W_OS4_GRID1",
+      "template_extension": "psf_wings",
+      "n_fit": 696.0,
+      "n_position_mismatched": 5.0,
+      "wiener_lambda": 0.0001,
+      "n_source_diagnostics": 10.0,
+      "med_hi": 0.9806905022704614,
+      "med_lo": 0.9810298773173478,
+      "p16_lo": 0.9269518139843654,
+      "p84_lo": 1.016563963389752,
+      "pull_lo_median": -2.157755562626715,
+      "pull_lo_std": 19.24191360596238,
+      "resid_std_over_noise": 0.7987435973919436
+    }
+  ]
+}

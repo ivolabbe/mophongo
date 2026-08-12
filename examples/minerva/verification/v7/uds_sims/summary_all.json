@@ -1,0 +1,98 @@
+[
+  {
+    "band": "f770w",
+    "scheme": "psf_wings",
+    "blur_fwhm_arcsec": 0.08,
+    "aperture_diam_arcsec": 0.7,
+    "pattern": "UDS_MIRI_F770W_OS4_GRID1",
+    "sigma_range_pix": [
+      1.0,
+      10.0
+    ],
+    "sigma_dist": "log",
+    "template_extension": "psf_wings",
+    "n_fit": 696.0,
+    "n_position_mismatched": 22.0,
+    "wiener_lambda": 0.001,
+    "n_source_diagnostics": 10.0,
+    "med_hi": 0.953153983747044,
+    "med_lo": 0.9532938861222575,
+    "p16_lo": 0.8332156767301634,
+    "p84_lo": 0.9998587692646633,
+    "pull_lo_median": -6.014087235453307,
+    "pull_lo_std": 33.36616743552603,
+    "resid_std_over_noise": 0.8004051555905788
+  },
+  {
+    "band": "f1280w",
+    "scheme": "psf_wings",
+    "blur_fwhm_arcsec": 0.12,
+    "aperture_diam_arcsec": 1.2,
+    "pattern": "UDS_MIRI_F1280W_OS4_GRID1",
+    "sigma_range_pix": [
+      1.0,
+      10.0
+    ],
+    "sigma_dist": "log",
+    "template_extension": "psf_wings",
+    "n_fit": 696.0,
+    "n_position_mismatched": 23.0,
+    "wiener_lambda": 0.0003,
+    "n_source_diagnostics": 10.0,
+    "med_hi": 0.955401271613424,
+    "med_lo": 0.9573410197944348,
+    "p16_lo": 0.8507243317021934,
+    "p84_lo": 1.0029857375798266,
+    "pull_lo_median": -5.0341311837675695,
+    "pull_lo_std": 28.62316789124976,
+    "resid_std_over_noise": 0.8000059439018573
+  },
+  {
+    "band": "f1500w",
+    "scheme": "psf_wings",
+    "blur_fwhm_arcsec": 0.18,
+    "aperture_diam_arcsec": 1.2,
+    "pattern": "UDS_MIRI_F1500W_OS4_GRID1",
+    "sigma_range_pix": [
+      1.0,
+      10.0
+    ],
+    "sigma_dist": "log",
+    "template_extension": "psf_wings",
+    "n_fit": 696.0,
+    "n_position_mismatched": 24.0,
+    "wiener_lambda": 0.0003,
+    "n_source_diagnostics": 10.0,
+    "med_hi": 0.9580683013197577,
+    "med_lo": 0.96058234254676,
+    "p16_lo": 0.8712059200800862,
+    "p84_lo": 1.009604148271309,
+    "pull_lo_median": -4.482511416093301,
+    "pull_lo_std": 31.57863404849986,
+    "resid_std_over_noise": 0.799932226490175
+  },
+  {
+    "band": "f1800w",
+    "scheme": "psf_wings",
+    "blur_fwhm_arcsec": 0.24,
+    "aperture_diam_arcsec": 1.5,
+    "pattern": "UDS_MIRI_F1800W_OS4_GRID1",
+    "sigma_range_pix": [
+      1.0,
+      10.0
+    ],
+    "sigma_dist": "log",
+    "template_extension": "psf_wings",
+    "n_fit": 696.0,
+    "n_position_mismatched": 24.0,
+    "wiener_lambda": 0.0003,
+    "n_source_diagnostics": 10.0,
+    "med_hi": 0.9598779779503464,
+    "med_lo": 0.9637331492653847,
+    "p16_lo": 0.8839362221535568,
+    "p84_lo": 1.013443125990365,
+    "pull_lo_median": -3.861586665533917,
+    "pull_lo_std": 30.778423638408295,
+    "resid_std_over_noise": 0.8001274122895458
+  }
+]

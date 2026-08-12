@@ -42,7 +42,7 @@ the patch runs already built rather than spending half an hour per band
 rebuilding them:
 
 ```bash
-$P campaign.py --r-trial 0 --suffix _full --seed-from "" --cores 4 --ram 64
+$P campaign.py --r-trial 0 --suffix _full --seed-from ""
 ```
 
 `--suffix` keeps the outputs in their own directories, `--seed-from ""` links
@@ -90,7 +90,7 @@ rather than `--system-site-packages`.
 ```bash
 $P arcify.py ../minerva/uds_f770w.json        # rewrite paths for arc
 $P submit.py stage uds_f770w                  # decompress its inputs on arc
-$P submit.py run   uds_f770w --ram 64
+$P submit.py run   uds_f770w
 $P submit.py fetch uds_f770w                  # pull the small outputs down
 ```
 
@@ -108,7 +108,7 @@ A cheap smoke run on a small patch, without touching the source config:
 
 ```bash
 $P arcify.py ../minerva/uds_f770w.json --r-trial 0.25 --suffix _test
-$P submit.py run uds_f770w_test --ram 64
+$P submit.py run uds_f770w_test
 ```
 
 `submit.py status` lists sessions, `submit.py logs <id>` prints one job's output
@@ -155,17 +155,20 @@ quota is far too small for a campaign's outputs.
 - Job `args` are whitespace-split into a YAML sequence server side and quotes
   cause a 500, so the command must be a single token. Parameters go through
   environment variables (`RUN`, `CFG`) instead.
-- Cores are chosen per config: 4 for a full field, 1 for a trial patch, since
-  measured CPU use is about 0.2 of a core and the runs wait on `/arc`. Pass
-  `--cores` to override. Up to 16 are available.
+- Runs request 2 cores and 48 GB by default. Measured CPU use is about 0.2 of
+  a core — the runs wait on `/arc` and the fitting path has no thread pool — so
+  a bigger request only idles allocation and takes longer to schedule when the
+  platform is busy. `--cores` and `--ram` override; up to 16 cores and 192 GB
+  are available.
 - Outputs are large. A 3 arcmin patch of UDS writes 8.4 GB, of which 4.2 GB is
   `stamps.fits` and 3.5 GB the residual; a full field scales with the source
   count, which is roughly 8x. Set `save_stamps` or `scene_plots` false in the
   config when the diagnostics are not wanted.
 - `seed` links rather than copies the PSF and kernel maps. Copying them once
   duplicated 10 GB and exhausted a home quota.
-- The quota page reports a 32 GB memory default, but that is a default and not a
-  cap: 64 GB is an allowed request and is what these scripts use.
+- The quota page reports a 32 GB memory default, but that is a default and not
+  a cap. 48 GB gives headroom over the ~34 GB the UDS runs peak at; a 16 GB
+  request is OOM-killed with no traceback.
 - Importing mophongo from the NFS-backed venv costs about three minutes before
   any work starts. That is not a hang.
 - For a single trial patch CANFAR is not faster than a laptop; the gain is that

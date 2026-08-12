@@ -13,15 +13,30 @@ The first fully like-for-like IDL comparison:
 - **Saturated-star repair ON** (30" FOV halo grids autobuilt and cached;
   saturated sources flagged, repaired and isolated into their own
   scenes — the earlier versions ran without it).
-- **IDL-parity columns**: `tot_stamp` (=1/ap_lo, IDL's released totcor
+- **IDL-parity columns**: `stampcor` (was `tot_stamp`; =1/ap_lo, IDL's released totcor
   convention), `psfcor` (=ap_hi/ap_lo), `totcor` (=1/(ap_lo*ee_psf_lo),
   always EE-inclusive), est1 = `ap_flux_corr` (genuine totals).
 - r < 1.5' trial patch (~4-5k matched sources per band), ~11 min per
   band with globally seeded PSF/kernel caches; single-print logging.
 
+## Layout
+
+- `runs/uds_<band>/` — real-data fits, configs in `runs/*.json`.
+- `uds_monu/` — IDL leg: `compare_idl_vs_python_<band>.png`,
+  `idl_summary.json`, `idl_compare.log`.
+- `uds_sims/` — mock leg: per-band `uds_<band>/`, `mock_flux_ratio_<band>
+  .png`, `mock_wiener_<band>.png`, `summary_all.json`, `mock.log`.
+- `verification_summary.json`, `driver.log`.
+
+The mock leg was run separately after the fits and IDL leg (driver
+invocation `... idl --version v6 --psf-dir data/PSF8`), on the same
+commit, and used the same `data/PSF8` grids as the real-data leg. Its
+source population is the v2-v4 one: sigma log-uniform over 1-5 pixels on
+the 40 mas grid (0.04-0.20" sigma), 10% point sources.
+
 ## Results (vs IDL monu)
 
-| band | raw aperture | tot_stamp / IDL totcor | est1 SNR>25 | n |
+| band | raw aperture | stampcor / IDL totcor | est1 SNR>25 | n |
 |---|---|---|---|---|
 | F770W | +0.01 | 0.987 | -0.01±0.06 | 4522 |
 | F1280W | +0.02 | 0.991 | -0.03±0.32 | 4998 |
@@ -30,8 +45,25 @@ The first fully like-for-like IDL comparison:
 
 (*the usual magnitude-cut noise artefact; read the SNR>25 column.)
 
-F770W medians: `tot_stamp` 1.432 vs IDL totcor 1.450 (1.3%), `psfcor`
+F770W medians: `stampcor` (then `tot_stamp`) 1.432 vs IDL totcor 1.450 (1.3%), `psfcor`
 1.240 vs IDL psfcor 1.261 (1.7%), `ee_psf_lo` at 8" = 0.973.
+
+Mock leg (recovered/true total flux, 696 fitted sources per band):
+
+| band | med | p16-p84 | med hi self-fit | pull med | resid/noise | v4 med (4" F444W) |
+|---|---|---|---|---|---|---|
+| F770W | 0.9669 | 0.898-1.009 | 0.9658 | -3.22 | 0.799 | 0.9755 |
+| F1280W | 0.9694 | 0.913-1.016 | 0.9681 | -2.76 | 0.799 | 0.9776 |
+| F1500W | 0.9715 | 0.923-1.019 | 0.9698 | -2.65 | 0.799 | 0.9788 |
+| F1800W | 0.9740 | 0.931-1.021 | 0.9720 | -2.49 | 0.799 | 0.9810 |
+
+Widening the detection PSF from 4" to 8" costs a further 0.7-0.9% of
+recovered flux in every band. The `psf_wings` composite is built on the
+F444W stamp, so a larger stamp puts more wing flux inside the template
+normalization; the fitted amplitude drops correspondingly while the
+injected truth does not move. The band trend (bluest worst) is unchanged.
+The 8" detection stamp also raises the recorded F444W box EE from 0.96317
+to 0.98522, which is the same effect seen from the normalization side.
 
 ## Reading
 

@@ -2,6 +2,14 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] Footprint-limited saturation repair. On a trial-patch run the repair
+  still fits every saturated star in the full mosaic; restrict the
+  candidate list to the run footprint (r_trial + the halo-model reach,
+  ~30", so stars just outside the patch whose halos reach in are still
+  repaired and flagged). Complements the shared `repair_cache_path`
+  (2026-08-12), which already makes bands 2..N of a campaign reload band
+  1's repair; the footprint cut makes band 1 itself cheap on small
+  patches.
 - [ ] `make_minerva_configs.py` must write `wht_hi`: the scheme-based
   template builds require the detection weight map, and the automatic
   `_sci`->`_wht` substitution cannot see through the `_bkgsub` suffix of the

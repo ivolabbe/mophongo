@@ -240,7 +240,11 @@ class SparseFitter:
         sl = tmpl.slices_original
         data = tmpl.data[tmpl.slices_cutout]
         w = self.weights[sl]
-        wnorm = float(np.sum(data * w * data))
+        # float64 accumulator: the operands are float32 stamps and weights, and
+        # np.sum without dtype= accumulates in the input width, so this norm --
+        # which becomes a diagonal of the normal matrix -- would carry only
+        # float32 precision into the solve
+        wnorm = float(np.sum(data * w * data, dtype=np.float64))
         tmpl.wnorm = wnorm
         return wnorm
 
@@ -274,7 +278,7 @@ class SparseFitter:
             data_i = tmpl.data[tmpl.slices_cutout]
             w_i = self.weights[sl_i]
             img_i = self.image[sl_i]
-            atb[i] = np.sum(data_i * w_i * img_i)
+            atb[i] = np.sum(data_i * w_i * img_i, dtype=np.float64)
             ata[i, i] = norms[i]
 
             y0, y1, x0, x1 = tmpl.bbox
@@ -316,7 +320,7 @@ class SparseFitter:
                 )
                 arr_i = self.templates[i].data[sl_i_local]
                 arr_j = self.templates[j].data[sl_j_local]
-                val = np.sum(arr_i * arr_j * w)
+                val = np.sum(arr_i * arr_j * w, dtype=np.float64)
                 ata[i, j] = val
                 ata[j, i] = val
 

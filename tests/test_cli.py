@@ -121,7 +121,12 @@ def test_psf_cli_writes_the_region_stamp_with_the_reference_grid_wcs(run_dir, tm
     assert hdr["MAPKIND"] == "kernel"
     assert hdr["KERNMETH"] == "wiener"
     assert hdr["STAMPSUM"] == pytest.approx(1.0, abs=1e-6)
-    assert 0.0 < hdr["EE_BOX"] <= 1.0
+    # PSF stamps are stored float32 (PSFRegionMap.__post_init__), so a stamp
+    # normalised to unit sum and fully contained in its box -- which is what
+    # this synthetic fixture is -- reports an encircled energy of 1 to within
+    # float32 rounding rather than exactly 1. Real PSFs sit at 0.92-0.96 and
+    # are nowhere near the bound.
+    assert 0.0 < hdr["EE_BOX"] <= 1.0 + 1e-6
 
     w = WCS(hdr)
     ny, nx = data.shape

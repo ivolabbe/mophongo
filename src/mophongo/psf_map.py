@@ -95,6 +95,23 @@ class PSFRegionMap:
     # ───────────── private derived constants ──────────────
     def __post_init__(self) -> None:
         self._area_min = self.area_factor * self.buffer_tol
+        # One width for every map, whichever constructor was used. PSF and
+        # kernel stamps multiply float32 image and template pixels, and scipy
+        # promotes to the wider operand, so a float64 cube doubles the
+        # workspace of every convolution that touches it: 233 MB for a
+        # 100x100x2911 matching-kernel cube, and twice the FFT width across
+        # 138,610 template convolutions.
+        #
+        # float32 is ample. These stamps weight pixels; they are not summed
+        # over long chains. The one derived quantity with a hard bound is the
+        # encircled energy, and on the real UDS maps narrowing moves ee_box by
+        # 2.6e-10 (0.916986720542 -> 0.916986720803) against a physical value
+        # of 0.92-0.96 -- and the delivered psf_hi map has always been stored
+        # BITPIX -32 anyway, so the hi-res band has run at this width all along.
+        # Normalising here rather than in from_geojson keeps a map built in
+        # memory bit-comparable with the same map round-tripped through disk.
+        if self.psfs is not None and np.asarray(self.psfs).dtype != np.float32:
+            self.psfs = np.asarray(self.psfs, dtype=np.float32)
         self._rebuild_spatial_index()
         self._ee_src: int | None = None
         self.refresh_ee()
@@ -291,6 +308,7 @@ class PSFRegionMap:
         psfs = None
         psfs_file = geojson_path.replace('.geojson', '.fits')
         if os.path.exists(psfs_file):
+            # __post_init__ narrows this to float32; see the note there
             psfs = fits.getdata(psfs_file)
         else:
             logging.warning(f"No PSFs found for {geojson_path}, using None.")

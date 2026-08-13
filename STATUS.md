@@ -3,6 +3,63 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [ ] Scene solve cost and the size cap (2026-08-13). Two defects found while
+  chasing the full-field memory peak; both are about the cost of a scene
+  growing with the number of templates in it.
+  * `SceneFitter._flux_errors` chose its branch on size alone. Above
+    `dense_threshold=500` it built `sp.csc_matrix(A)` and factored with
+    `splu`, then back-solved one unit column at a time. That is right for the
+    flux-only path, where the whitened normal matrix really is sparse, and
+    backwards for the joint flux+shift path: it is handed
+    `S_w = A_w - AB_w AB_w^T`, and the outer product is fully populated, so
+    `S_w` arrives dense. A 1718-template scene therefore paid 118 MB and 5.1
+    Gflop where one LAPACK inversion costs 47 MB and 1.7 Gflop. The dispatch
+    is now on whether the matrix *is* sparse. Dense input matches the exact
+    inverse bit-for-bit (it previously differed at ~1e-15, the splu path's
+    error); a genuinely sparse matrix still takes the sparse branch and agrees
+    to 3e-15.
+  * `scene_max_size` never bound. `build_scene_tree_from_normal` splits
+    oversized components, and then `merge_small_scenes` -- which was never
+    given the cap -- merged them straight back chasing `minimum_bright`. A run
+    configured with 800 produced a 1718-template scene. The cap is now
+    threaded through and tested against the scene as it grows within a merge
+    round; it wins over `minimum_bright`, so a scene that cannot merge without
+    breaching it is left short of anchors and logged rather than grown without
+    bound. Four tests in `tests/test_scene_max_size.py`.
+  * Defaults: `scene_max_size` 800 -> 1000. The shift-basis order was already
+    0 in `FitConfig.astrom_kwargs`, but two fallbacks disagreed with it --
+    `__post_init__` assumed 1 when deriving `scene_minimum_bright` and
+    `AstroCorrect` assumed 2 for the polynomial field (its own docstring said
+    "an unmodified FitConfig supplies order 0"). Both now read 0, so a config
+    that omits the `poly` key derives `scene_minimum_bright` 3 rather than 7.
+  Order 0 means nB = 2: one rigid (dx, dy) per scene. That matters for memory
+  because `assemble_scene_system_AB` holds nB float64 planes over the bright
+  anchors' bounding box, doubled when the leverage cap clips -- 0.61 GB for
+  the widest full-field scene at nB=2, and linear in nB above that (order 1
+  would be 1.8 GB, order 2 3.6 GB). Note the size cap does *not* bound this:
+  the widest buffer came from a 25-template scene whose 14 anchors spanned
+  18.8 Mpx. Chunk those columns over row bands before raising the order.
+  Measured on the UDS F770W 3' trial (17,791 templates, config cap 800), against
+  the same trial before these two fixes:
+  * Partition: 70 scenes (sizes 2-1019, median 199) -> 74 scenes (sizes 2-779,
+    median 199). The cap binds -- the largest scene was over it by 27% and is
+    now under -- at the cost of four extra scenes, and *no* scene lost its
+    anchors: both runs report 0 scenes without bright members, so preferring
+    the cap over `minimum_bright` cost nothing here.
+  * Fluxes: 1,592 of 17,796 sources changed at all (9%). Median ratio
+    after/before is 1.000000 with 16-84% both 1.000000. Restricted to the 713
+    sources at SNR > 10 the worst moves 8.2%; the large excursions (up to 40x)
+    are all faint sources that changed scene. Errors move more often (2,682
+    rows) but by less: median 2.5e-3, worst 20%. `stampcor`/`totcor`/`psfcor`
+    move at most 1.9e-3. The residual differs in 0.42% of pixels, max |delta|
+    1.913, rms of the changed pixels 0.0105.
+  * Memory from that pair is NOT comparable: the second run shared the machine
+    with ~30 subagent processes, and macOS phys_footprint counts compressed
+    pages, so it read 30.3 GB against 20.0 GB for reasons that have nothing to
+    do with the code. Re-measure on an idle machine.
+  Still to do: a full-field run on an idle machine for the peak against the
+  recorded 46.5 GB, and the same partition/flux comparison at full-field scale,
+  where scenes are larger and the cap bites harder.
 - [ ] CANFAR v1.0 campaign: submitted, queued on platform capacity
   (2026-08-12 evening). 17 configs (uds/cosmos/egs x all staged MIRI bands),
   `--r-trial 1.5 --suffix _v1.0`, outputs to
@@ -117,6 +174,27 @@ This file records completed implementations, validation runs, and the current wo
     -- a 7 GB intermediate for a 3.5 GB float32 result. Replicating without
     it and dividing in place stays in float32; dividing by an integer square
     is exact, and the output is bit-identical for k=2,3,4.
+  * `as_label_array` validated a float segmap whole-array:
+    `arr[np.isfinite(arr)]` copies every finite pixel, `np.rint` copies it
+    again and `np.nan_to_num` a third time. COSMOS is the field that ships
+    float64 labels (BITPIX -64, 621 Mpx = 4.97 GB stored, 2.48 GB as int32);
+    UDS and EGS ship int32. Validation and cast now run in ~16 Mpx bands:
+    peak RSS for the COSMOS map goes 15.8 -> 8.0 GB for the same result, and
+    non-finite pixels now become background rather than being handed to
+    `astype(int32)` as an overflowing infinity. Integer segmaps are still
+    returned untouched whatever their width or byte order (UDS and EGS
+    arrive as `>i4`): the full-field read hands over a memmap view, and
+    narrowing it to native int32 would convert file-backed pages into
+    anonymous memory.
+  * Every shifted template kept its pre-shift pixels (`_data_unshifted`) so
+    that each astrometric pass resamples the original rather than compounding
+    the cubic smoothing -- correct, but the copy was retained for the whole
+    run, a second full set of stamps (~6 GB) still held while the residual
+    allocated its 3.5 GB. `run()` now releases them once the shifts are
+    settled, and `apply_template_shifts` raises rather than shift a released
+    template, so the smoothing-compound failure cannot return silently. The
+    `.copy()` also went: `tmpl.data` is rebound to the shifted array on the
+    next line, so holding the original reference is all that was needed.
   * `_save_repair_cache` found its changed pixels with
     `(sci != sci0) | (wht != wht0) | (seg != seg0)`, three full-field boolean
     arrays plus the temporaries of the two ORs (4.4 GB) at the one moment
@@ -147,11 +225,19 @@ This file records completed implementations, validation runs, and the current wo
   checked separately against HEAD on two 3000x3000 UDS patches (`bg` and
   `ivar` bit-identical), and the upsample for k=2,3,4.
   `tests/test_memory_footprint.py` pins the equivalences.
-  Full field (UDS F770W, `trial: null`, 138,610 templates, repair reloaded
-  from cache): `Pipeline (start)` 10.4 GB, `(templates)` 28.2, weight-map
-  release -> 24.7, `(convolved)` 27.7, sampled peak 29.1 GB through the
-  convolution -- the stage where both template sets and both upsampled band
-  arrays are live at once.
+  Full field (UDS F770W, `trial: null`, 138,610 templates, 591 scenes, repair
+  reloaded from cache, `load fit`): completed in 87 min at **46.5 GB peak
+  physical footprint** (32.2 GB max RSS). Checkpoints: `(start)` 10.4 GB,
+  `(templates)` 28.2, weight-map release -> 24.7, `(convolved)` 27.7,
+  `(end)` 11.0. `load` alone peaks at 22.2 GB, so the fit contributes the
+  rest. A 15 s RSS sampler over the same run topped out at 29.1 GB, so the
+  peak is a spike shorter than that and does not sit at any checkpoint --
+  under the 48 GB ceiling but without much margin. Being chased; the
+  candidates are the two buffers in the astrometric solve that scale with a
+  scene's *spatial* extent rather than its template count
+  (`assemble_scene_system_AB`'s `Bq`/`Bl`, nB float64 planes over the bright
+  anchors' bounding box, doubled when the leverage cap clips, and
+  `Scene.model_image`'s float64 plane over the full scene bbox).
   Left alone and worth knowing: the saturation repair sets the peak on a
   trial patch, and `run()`'s finiteness guard on `images[i]` is behind
   `if images[i] is None`, so it never runs. Both are in TODO.md.

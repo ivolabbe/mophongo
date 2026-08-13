@@ -216,6 +216,7 @@ def get_bg_and_ivar(
     faint_thresh: float = 4.0,
     dilate: int = 3,
     label: str = "",
+    need_bg: bool = True,
 ):
     """
     Fit a smooth background on the coarse grid (mask-aware), subtract it,
@@ -243,11 +244,16 @@ def get_bg_and_ivar(
     dilate
         Disk radius for smoothing the coarse detection image and for
         dilating the source mask before it is excluded.
+    need_bg
+        Build the full-resolution background image. Pass ``False`` when only
+        the calibrated weights are wanted: on a mosaic-sized input the
+        background alone is another 3.5 GB, and its median is logged here
+        anyway. ``bg_img`` is then ``None``.
 
     Returns
     -------
     bg_img   : float32 ndarray (H, W), background interpolated back to
-               full resolution
+               full resolution, or None when ``need_bg`` is False
     ivar_new : float32 ndarray (H, W), weight map rescaled to a calibrated
                inverse variance
     """
@@ -266,15 +272,15 @@ def get_bg_and_ivar(
     # a single NaN otherwise spreads over its whole block in the mean, into
     # the median and MAD, and makes every statistic and both outputs NaN.
     valid = valid_w & np.isfinite(s)
-    s = np.where(valid, s, 0.0).astype(np.float32)
-    w = np.where(valid, w, 0.0).astype(np.float32)
 
     # 1) coarse block means, taken over the valid pixels of each block, so a
-    #    bad pixel costs its block sample size instead of poisoning it
-    vfrac = _mean_downsample(valid.astype(np.float32), step)
+    #    bad pixel costs its block sample size instead of poisoning it.
+    #    Masked full-resolution copies of sci and wht are never materialised:
+    #    see _valid_block_means.
+    vfrac, s_sum_bin, w_sum_bin = _valid_block_means(s, w, valid, step)
     with np.errstate(invalid="ignore", divide="ignore"):
-        s_bin = np.where(vfrac > 0, _mean_downsample(s, step) / vfrac, 0.0).astype(np.float32)
-        w_bin = np.where(vfrac > 0, _mean_downsample(w, step) / vfrac, 0.0).astype(np.float32)
+        s_bin = np.where(vfrac > 0, s_sum_bin / vfrac, 0.0).astype(np.float32)
+        w_bin = np.where(vfrac > 0, w_sum_bin / vfrac, 0.0).astype(np.float32)
     pos = (vfrac > 0) & (w_bin > 0)
 
     # 2) coarse detection image (S/N)
@@ -359,9 +365,12 @@ def get_bg_and_ivar(
         )
         sigma_true = np.float32(1.0)
 
-    # 7) rescale full-res weights
+    # 7) rescale full-res weights.  ``valid``, not ``valid_w``: the weights used
+    # above were masked by both, and a pixel whose science value is non-finite
+    # carries no information regardless of what its weight claims.
     scale = np.float32(1.0) / (sigma_true * sigma_true + np.float32(1e-30))
-    ivar_new = np.where(valid_w, (w * scale).astype(np.float32), 0.0).astype(np.float32)
+    ivar_new = np.multiply(w, scale, dtype=np.float32)
+    np.copyto(ivar_new, np.float32(0.0), where=~valid)
     # sigma_true = 1 exactly when the weight map is a calibrated inverse
     # variance; treat a 20% band as "consistent" (drizzle correlation and
     # normalisation conventions both land inside it when the map is honest)
@@ -372,16 +381,28 @@ def get_bg_and_ivar(
             "INCONSISTENT with the weight image (its claimed noise is off "
             f"by x{float(sigma_true):.4g})"
         )
+    # Median weight for the log line only. Boolean-indexing the full mask
+    # copies the mosaic, and np.median partitions a second copy of that, so
+    # sample every 8th pixel in each direction instead: 1/64 of the memory for
+    # a median quoted to four figures in a message. The median ivar follows
+    # from it exactly, since ivar is w * scale wherever the pixel is valid.
+    sub = (slice(None, None, 8), slice(None, None, 8))
+    vsub = valid[sub]
+    med_w = float(np.median(w[sub][vsub])) if np.any(vsub) else np.nan
     logger.info(
         "weight calibration%s: correction factor to wht = %.4g (ivar x %.4g), "
         "sigma_true=%.4g -> %s; measured on %dx%d blocks; "
         "median wht %.4g -> ivar %.4g; median background %.4g",
         f" [{label}]" if label else "",
         float(scale), float(scale), float(sigma_true), verdict, step, step,
-        float(np.median(w[valid_w])) if np.any(valid_w) else np.nan,
-        float(np.median(ivar_new[valid_w])) if np.any(valid_w) else np.nan,
+        med_w, med_w * float(scale),
         float(np.median(bg_img_bin[bgmask])) if np.any(bgmask) else np.nan,
     )
+
+    if not need_bg:
+        # the caller only wants the calibrated weights; the full-resolution
+        # background is another array the size of the mosaic
+        return None, ivar_new
 
     # Linearly upsample bgmask to full resolution
     bg_img = expand_to_full(bg_img_bin.astype(np.float32), step, s.shape)
@@ -545,6 +566,52 @@ def _mean_downsample(arr, fact):
     trimmed = arr[: ny2 * fact, : nx2 * fact]  # drop edge pixels
     view = trimmed.reshape(ny2, fact, nx2, fact)
     return view.mean(axis=(1, 3), dtype=arr.dtype)
+
+
+def _valid_block_means(
+    s: np.ndarray,
+    w: np.ndarray,
+    valid: np.ndarray,
+    step: int,
+    band_blocks: int = 64,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Block means of ``valid`` and of ``s`` and ``w`` zeroed outside it.
+
+    Identical to :func:`_mean_downsample` applied to the three masked
+    full-resolution arrays, but computed one band of ``band_blocks`` coarse rows
+    at a time. The whole-array form needs three full-resolution temporaries --
+    masked copies of the science and weight images plus a float32 cast of the
+    mask -- and ``np.where(mask, float32_array, 0.0)`` promotes to float64 on
+    the way, so on a 876 Mpx mosaic it costs about 21 GB to produce three coarse
+    arrays of 200 kB each.
+
+    Args:
+        s: Science image, float32.
+        w: Weight image, float32.
+        valid: Boolean mask, same shape.
+        step: Block size; trailing rows/columns outside a whole block are
+            dropped exactly as :func:`_mean_downsample` drops them.
+        band_blocks: Coarse rows reduced per pass; sets the temporary size.
+
+    Returns:
+        ``(vfrac, s_masked_mean, w_masked_mean)`` on the coarse grid, float32.
+    """
+    ny2, nx2 = s.shape[0] // step, s.shape[1] // step
+    vfrac = np.empty((ny2, nx2), dtype=np.float32)
+    s_bin = np.empty((ny2, nx2), dtype=np.float32)
+    w_bin = np.empty((ny2, nx2), dtype=np.float32)
+    zero = np.float32(0.0)  # a float32 scalar, so np.where stays in float32
+    cols = slice(0, nx2 * step)
+    for b0 in range(0, ny2, band_blocks):
+        b1 = min(b0 + band_blocks, ny2)
+        rows = slice(b0 * step, b1 * step)
+        chunk = valid[rows, cols]
+        vfrac[b0:b1] = _mean_downsample(chunk.astype(np.float32), step)
+        # np.where, not multiplication by the mask: 0 * NaN is NaN, which is
+        # precisely the poisoning the mask exists to prevent
+        s_bin[b0:b1] = _mean_downsample(np.where(chunk, s[rows, cols], zero), step)
+        w_bin[b0:b1] = _mean_downsample(np.where(chunk, w[rows, cols], zero), step)
+    return vfrac, s_bin, w_bin
 
 
 def fit_psf_stamp(

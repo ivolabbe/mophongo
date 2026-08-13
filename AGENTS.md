@@ -166,6 +166,16 @@ into B.
 - Long-form reports (`.tex`/`.md` compiled to PDF): plain academic prose, no
   AI narrative tics; run a humanizer pass before finalizing/compiling.
 
+## Branches And Commits
+
+- Do not create a branch, commit, push, or open a PR unless the user asked for
+  it in this session. Work in the tree the user left you in.
+- Ask before switching branches or moving work onto a new one, even when the
+  current branch looks wrong for the change.
+- The working tree often carries unrelated work in progress. Commit only the
+  files belonging to the task you were given, and say which files you left
+  uncommitted.
+
 ## Pull Request Preparation
 
 Before preparing a PR:

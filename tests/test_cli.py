@@ -268,3 +268,46 @@ def test_stamps_and_diag_cli_from_a_run_directory(run_dir, monkeypatch):
         [cat["ra"][0], cat["dec"][0]], abs=1e-9
     )
     assert (run_dir / "tiny_1_subphot.png").exists()
+
+
+def test_config_run_writes_the_residual_through_its_memmap(run_dir):
+    """End-to-end config run: the residual file IS the accumulator.
+
+    run() maps `f_residual` and accumulates scene models into it, so
+    write_outputs only flushes. What lands on disk must equal image - model,
+    and the band weight map must be gone from the scenes afterwards (nothing
+    plots in this run, so nothing reads it again).
+    """
+    from pathlib import Path
+
+    import numpy as np
+    from mophongo.pipeline import Pipeline
+    from mophongo.scene import _slices_from_bbox
+
+    pipe = Pipeline.from_config(run_dir / "tiny.json")
+    pipe.run()
+
+    res = pipe.residuals[0]
+    assert isinstance(res, np.memmap), "residual should be file-backed"
+    assert Path(res.filename) == pipe.f_residual
+
+    # this config plots scenes, so the weights survive run() -- the figures
+    # still mask on them -- and write_outputs releases them once drawn
+    assert pipe._scene_pixels_needed()
+    scene = pipe.all_scenes[0][0]
+    assert scene.weights is not None
+
+    expected = np.asarray(res).copy()
+    pipe.write_outputs()
+
+    assert all(s.weights is None for s in pipe.all_scenes[0])
+    # a scene still reports its residual without them, unmasked
+    sl = _slices_from_bbox(scene.bbox)
+    assert scene.residual().shape == scene.image[sl].shape
+
+    on_disk = fits.getdata(pipe.f_residual)
+    assert np.array_equal(on_disk, expected)
+    assert on_disk.shape == pipe.images[1].shape
+    # residual = image - model, and the model came from the fitted scenes
+    model = pipe.model_images[0]
+    assert np.allclose(on_disk, pipe.images[1] - model, atol=1e-6)

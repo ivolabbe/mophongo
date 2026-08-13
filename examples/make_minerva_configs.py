@@ -284,6 +284,12 @@ def band_configs(rel: Release) -> list[dict]:
                 # MIRI bands want more, once the NIRCam grids are regenerated
                 # at a larger FOV.
                 "psf_size": 4.0,
+                # Stated explicitly rather than left to the default: these
+                # exposure lists span up to four years across a dozen or more
+                # epochs, the grids are MJD-tagged and looked up by nearest
+                # date, and any mode that collapses the list ("modal" returns
+                # a single date) throws that resolution away invisibly.
+                "psf_date_mode": "all",
                 "psf_blur_fwhm": "default",
                 "footprint_filter": True,
                 # In-memory saturation repair at load time: fill the wht=0

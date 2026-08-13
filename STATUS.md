@@ -3,6 +3,169 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Array-lifetime audit and five memory fixes, `docs/MEMORY_LIFETIMES.md`
+  (2026-08-13). Companion to `docs/SCALING_FIXED_MEMORY.md`, which proposes the
+  decomposition; this one inventories every full-field array a run allocates,
+  records where each is born and last read, and separates what is still needed
+  from what is merely still referenced. Changes made, in the order they run:
+  * The band weight map is released once nothing reads it.
+    `Pipeline._release_scene_weights` clears `Scene.weights` across a band;
+    `run` calls it after `predicted_errors` when the run draws no scene
+    figures, `write_outputs` after the figures. `weights_i` was 3.5 GB of dead
+    weights held by every `Scene` through the stamp write -- the stage where
+    the unexplained full-field failures occur. `Scene.residual`/`Scene.plot`
+    mask on the weights only when they are still attached; `Scene.solve` still
+    refuses to run without them.
+  * `write_outputs` writes the stamps last, after the scene figures rather than
+    before. The products are independent, and a run that dies in the stamp
+    write now keeps its figures.
+  * The residual accumulates straight into its own output file
+    (`_residual_memmap`): header written, file extended sparsely with
+    `truncate`, data section mapped big-endian. `write_outputs` flushes instead
+    of writing. Falls back to anonymous memory for API-driven runs and on any
+    mapping error.
+  * The repair replays its patch table onto a fresh copy-on-write map instead
+    of holding the two full-field mosaics `repair_saturated_holes` returns
+    (`saturate.py:733`). Fresh and cache-reuse paths now share
+    `_apply_repair_patches`; astropy maps a read-only HDU copy-on-write, so the
+    input mosaic on disk is untouched.
+  * `write_stamps` streams: offsets from the shapes recorded in the first pass,
+    datasets created at final size, each stamp written into its slot. Removes a
+    full extra copy of every stamp (12 GB full-field) at the end of the run.
+  * Also: the `isfinite` sweep at the top of `run` is gone (inverted, dead
+    image branch; weight branch re-checked a guard `load_data` had applied).
+  * `poetry run pytest`: 362 passed. New tests cover the residual memmap
+    round-trip end to end, the API fallback, copy-on-write patch replay, and
+    stamp pixel equality after a round trip.
+  * Still open, in `TODO.md`: the byte-order copies in `get_bg_and_ivar` (FITS
+    is big-endian, so `np.asarray(x, dtype=np.float32)` copies rather than
+    views -- ~12 GB transient on the detection band); ivar as
+    `(memmapped wht, scale, mask)`; `weights[1]` after the upsample.
+- [x] `PSFFactory.date_mode` now defaults to `"all"`, and configs can set it
+  (2026-08-13). The default was `"modal"` -- the centre of the densest 5-day
+  window, i.e. exactly *one* date per (detector, filter). Since the grids are
+  MJD-tagged and looked up by nearest date, autobuilding a band whose
+  exposures span years produced a single epoch's wavefront for all of them,
+  silently. Found on OzStar, where nothing had been pre-built: MINERVA
+  exposure lists span up to 1460 days over 4-18 epochs, and every autobuilt
+  band got one grid while the laptop-built UDS F770W/F1800W had 9 (those were
+  made in `cluster` mode). A release built that way would have mixed two PSF
+  conventions across its bands.
+  * `psf_factory.PSFFactory.date_mode` default `"modal"` -> `"all"`, with the
+    docstring saying why the collapsing modes are the wrong default.
+  * New `RunConfig.psf_date_mode` (default `"all"`), threaded into the
+    `PSFFactory` call in `Pipeline._load_epsf`. The mode was previously
+    unreachable from a config at all.
+  * `examples/make_minerva_configs.py` writes `psf_date_mode` explicitly, so
+    every generated MINERVA config states it rather than inheriting it; the
+    53 CANFAR and 35 OzStar configs derived from them carry it too.
+  * Grid counts this implies, from the real exposure lists: 416 across the
+    release in `all` mode against 333 in `cluster` (UDS F770W 17 vs 9,
+    COSMOS F444W 78 vs 44, EGS F444W 42 vs 2).
+  * `poetry run pytest`: 358 passed.
+- [ ] MINERVA v1.0b full-field campaign on OzStar (2026-08-13/14, running).
+  Measured, which is what the OzStar README was missing:
+  * UDS full field F770W: **57.4 GB MaxRSS**, 56m19s, 26 GB of outputs,
+    138,634 sources (8,827 at SNR>5). A 64 GB request would have peaked at
+    90%; 96 GB is the right ask for UDS/COSMOS and EGS gets 128 GB, since its
+    detection grid is ~1.4x UDS's.
+  * 1.5' trial patch: 20 GB, 9m51s, 4,607 sources. Full field is ~3x the patch
+    in memory.
+  * CPU is **6.1% of 16 cores, i.e. about one core**. The fit is serial; cores
+    buy threaded BLAS in a few phases and queue time everywhere else. Memory
+    is the only resource that kills a run. (CANFAR measured 0.2 of a core for
+    the same work, dominated by waiting on NFS `/arc`; Lustre removes that.)
+  * Staging: 66 files, 64 GB, 15-21 min per field on three datamover nodes.
+  * OzStar took a ~30 min unannounced maintenance outage mid-campaign. Queued
+    jobs survived it; `uds_f770w_v1.0b` had already completed.
+  Done autonomously while the user was away, and worth reviewing: the
+  COSMOS/EGS grids are being rebuilt with `date_mode="all"` passed explicitly
+  by `jobs/build_psfs.py`, which calls `PSFFactory` directly rather than going
+  through the pipeline's autobuild. That sidesteps needing the `psf_date_mode`
+  change deployed (the run tree pulls from GitHub `main`, and the change is
+  local and uncommitted) and sidesteps the autobuild's fire-only-when-nothing-
+  matches rule. COSMOS F444W resolves to 39 dates in `all` mode against 22 in
+  `cluster` and 1 in `modal`. UDS grids are deliberately untouched: its bands
+  are in flight and adding dates mid-release would leave `f770w` fitted
+  against 9 grids and later bands against 17.
+- [ ] OzStar campaign toolkit, `examples/ozstar/` (2026-08-13). The CANFAR
+  toolkit's counterpart for Swinburne's Ngarrgu Tindebeek. Two differences
+  drive the design: OzStar has no view of the MINERVA release, so every input a
+  config names is copied from CANFAR arc onto `/fred` before anything runs; and
+  compute is ssh + SLURM rather than a REST API, so a campaign is one
+  dependency graph submitted in a single command instead of a laptop-side
+  process blocking on each stage.
+  * `ozroot.py` (run tree and ssh target from `$OZSTAR_*`), `ozify.py` (local
+    RunConfig -> `<name>_ozstar.json` + `<name>_stage.tsv`), `submit.py`
+    (cert/setup/sync/push/stage/run/status/logs/fetch/cancel/seed),
+    `campaign.py`, `release_v1.0b.sh`, and `jobs/` (setup_env.sh, stage.sh,
+    run.slurm, sync_src.sh, seed_cache.sh).
+  * `ozify.py` imports `roots_for`/`arc_index`/`resolve` from
+    `examples/canfar/arcify.py` rather than copying them - finding a file on
+    arc is the same problem on both platforms. That needed one change there:
+    the module-level `RUN` is now a lazy `arc_run()`, so importing the helpers
+    no longer requires a CANFAR run root. Behaviour is unchanged.
+  * Staging is one datamover job per *field* (bands share the F444W mosaic,
+    weight and segmap), fits wait on it with `--dependency=afterok`, and a
+    field with no PSF grids sends one band ahead of the rest so concurrent
+    bands do not race on one `psf_dir`.
+  * Four platform traps, all found by running into them and all documented in
+    `README.md`/`MANUAL.md`: Lmod is hierarchical, so `python/3.12.3` needs
+    `gcccore/13.3.0` loaded first; the python module puts an EasyBuild shim
+    ahead of the venv on `sys.path`, which on some nodes resolved
+    `cryptography` to a build for another python and killed every `vcp` with a
+    missing `libssl.so.1.1` (job scripts now `unset PYTHONPATH`); a site plugin
+    reassigns the partition of a job that names `datamover` in a `#SBATCH`
+    directive alone, so it has to be on the sbatch command line or the transfer
+    lands on a node with no internet; and datamover nodes have no `/apps`, so
+    the module python is absent there and the CADC tools need their own
+    `venv-vos` built from `/usr/bin/python3`.
+  * Standard request 16 cores / 64 GB per fit, no partition (the scheduler
+    picks between skylake and milan).
+  * State: all three fields staging from arc (17 configs, 8 inputs each);
+    `uds_f770w_trial` (1.5' patch) queued behind UDS staging as the smoke test;
+    the v1.0b full-field release goes in after it passes.
+- [x] Controlled MINERVA SED co-add experiment (2026-08-13). Rebuilt the
+  underlying stack at `Delta z=0.035(1+z)` with 2x rendering interpolation and
+  restricted the continuum-residual panel to observed 0.35--5 micron, where
+  connected filter coverage makes that residual meaningful. Relative to 0.05,
+  the experiment adds 42% more measured redshift rows below z=8 while retaining
+  a median 5,292 galaxies/bin; 0.025 nearly doubles the rows but raises residual
+  noise 16% and adds horizontal striping. OIII coherence improves modestly,
+  H-alpha does not benefit from 0.025, and no coherent Pa-beta/Pa-alpha ridge is
+  detected. The original 0.05 equal-mean product remains primary.
+  Added `scratch/minerva_sed_estimator_experiment.py`: 64 exact complementary
+  split halves over 4,204 field/native-band/redshift cells independently
+  recompute every estimator. Raw IVW is 3.66x less repeatable than the equal
+  mean with median Neff/N=0.0215; Q95 IVW is 1.62x worse with 0.185. The
+  population-scatter weight improves repeatability 16% overall but moves MIRI
+  by a median 0.31 MAD. Winsorizing 0.5% per tail is the conservative companion
+  (1.7% precision gain, 0.008-MAD median shift); 1% is the empirical knee
+  (3.5%, 0.013 MAD). Matched-three-band, `use_phot_miri`, high-quality-z, and
+  spec-only EGS splits yield no stable feature-S/N gain; triple matching keeps
+  only 3,229/126,655 normalized galaxies. Corrected H-alpha and OIII guides to
+  their vacuum wavelengths. Focused SED tests: 30 passed.
+- [x] MINERVA all-field SED-stack MIRI visibility and quality-control pass
+  (2026-08-13). Regenerated every ignored FITS/PNG/PDF product for 357,044
+  normalized COSMOS+EGS+UDS galaxies. Replaced the 1.6-micron continuum-bump
+  guide with vacuum Pa-beta/Pa-alpha, and added a distinct magenta rest-5000-A
+  normalization guide. The new MIRI PNG uses a shared tight signed-asinh
+  stretch plus independently scaled signed profiles, empirical standard
+  errors, N, and effective N; the values are not renormalized per filter.
+  Sampling explains much of the visibility difference: F560W has 5,299
+  normalized measurements and is EGS-only, F770W has 169,862 across all three
+  fields, and F1000W has 94,566 across COSMOS+EGS.
+  Added machine-readable MIRI ECSV/FITS QC with equal means, medians, empirical
+  SEM, 0.5--99.5% field-local winsorized means, population-scatter-regularized
+  weights, effective counts, and raw/Q95 IVW failure columns. An actual
+  4,204-cell all-band audit rejects ordinary IVW: median Neff/N=0.0215 and
+  empirical error 3.2x the equal mean; Q95 capping still gives 0.185 and 1.47x.
+  The equal-galaxy signed mean therefore remains primary and measured S/N is
+  never a weight. Common-galaxy checks find no local 2.5--3-micron F277W
+  excess: F277W is 2--4% below the F250M--F300M interpolation in every field;
+  the visual block is the declining F-lambda continuum plus the real
+  2.226--2.412-micron gap, with the 5000-A anchor crossing it at z=4--5.
+  `tests/test_sed_stack.py`: 27 passed.
 - [ ] Scene solve cost and the size cap (2026-08-13). Two defects found while
   chasing the full-field memory peak; both are about the cost of a scene
   growing with the number of templates in it.
@@ -60,11 +223,38 @@ This file records completed implementations, validation runs, and the current wo
   Still to do: a full-field run on an idle machine for the peak against the
   recorded 46.5 GB, and the same partition/flux comparison at full-field scale,
   where scenes are larger and the cap bites harder.
-- [ ] CANFAR v1.0 campaign: submitted, queued on platform capacity
-  (2026-08-12 evening). 17 configs (uds/cosmos/egs x all staged MIRI bands),
-  `--r-trial 1.5 --suffix _v1.0`, outputs to
-  `/arc/home/ilabbe/run/out/<field>_<band>_v1.0`. Push, setup and all 17
-  stage jobs completed; the run step is queued.
+- [ ] CANFAR v1.0 campaign, **full field** (2026-08-13). v1.0 is now a
+  whole-field run per field-band, not the 1.5' patch the entry below
+  describes: the memory work merged in `9fc52a6` brought UDS full field to
+  46.5 GB, under the 48 GB request. 17 configs (uds/cosmos/egs x all staged
+  MIRI bands) re-arcified with `--r-trial 0 --suffix _v1.0`, so `trial` is
+  null and outputs still go to
+  `/arc/home/ilabbe/run/out/<field>_<band>_v1.0`. Jobs request 4 cores and
+  48 GB. EGS is 1221 Mpx against UDS's 876 and extrapolates over 48 GB, so
+  its bands are the ones expected to OOM; the agreed response is to resubmit
+  those at `--ram 64` rather than raise the request everywhere, since 48 GB
+  and up have queued for hours when the platform is busy.
+  The earlier patch submission was stopped first. That took two rounds: six
+  sessions were listed and destroyed, and ten more appeared minutes later,
+  because skaha does not list a session until the service registers it. They
+  carried the same run names as the new campaign and would have written into
+  the same `out/` directories. `submit.py kill` now sweeps for this.
+  **Result so far: the fits succeed, the stamps write does not.** Every band
+  that has failed wrote a complete fit table first -- egs_f1000w 142,323 rows
+  (142,299 finite `flux_1`), uds_f1800w 137,609, uds_f1280w 140,972, all 22
+  columns -- plus its residual, kernel, PSFs and templates, then died in the
+  stamps write with no `RUN_DONE` and no traceback. Not a memory ceiling:
+  egs_f1000w reached `Pipeline (end) memory: 49.4 GB` against a 48 GB request,
+  but uds_f1800w reached only 41.6 GB and died the same way, and the stamps
+  files it left are truncated at 31-32 MB where a full field should be
+  multi-GB. This is the area `3c29ddd`, `8ca21f5` and `b7bec1e` address on
+  main; the campaign predates them and stays pinned to `9fc52a6a6` through
+  `submit.py run --ref`, so v1.0 is one code version rather than two. Open
+  decision: accept v1.0 as the fit tables from that commit and rebuild stamps
+  separately, or rerun the campaign on current main, which also brings the
+  scene-by-scene astrometric loop (`1ab936e`) and the float32 narrowing into
+  the release. EGS's seven bands are at `--ram 64` since it is the hottest
+  field, though that alone will not produce `RUN_DONE`.
   Four toolkit defects fixed to get this far, all committed:
   * `campaign.py` globbed every JSON in `examples/minerva`, including
     `minerva_sed_fields.json`, which is not a RunConfig and died inside
@@ -82,15 +272,14 @@ This file records completed implementations, validation runs, and the current wo
   520,875 catalogue sources). The platform reports
   `memoryGB.defaultLimit = 32`; 8 GB jobs schedule instantly, 48 GB
   scheduled once while the platform was quiet, and 48/64/128/192 GB have
-  all queued for hours since. **Full field is therefore not runnable on
-  this platform as the pipeline currently allocates**, independent of the
-  campaign tooling.
-  Two ways forward, both needing a decision rather than a default:
-  `multi_resolution_method: downsample` (templates on the lo grid, 4x less
-  template memory -- COSMOS 24.8 -> 6.2 GB -- but it diverges from the
-  upsample path v8 verified), or tiling a field across jobs, which the
-  toolkit does not support. Until then v1.0 is a 1.5' patch per field-band,
-  which is the configuration v8 actually validated.
+  all queued for hours since. Those allocation figures are **pre-`9fc52a6`**
+  and no longer describe the pipeline: cutting the redundant template sets
+  and banding the whole-array passes brought UDS full field to 46.5 GB, so
+  the conclusion recorded here -- that full field was not runnable on this
+  platform, and that the only ways forward were
+  `multi_resolution_method: downsample` or tiling a field across jobs --
+  is superseded. Full field per field-band is what v1.0 now runs; neither
+  fallback was needed. EGS remains the field where 48 GB may not be enough.
   Note the stamp-footprint fix is what makes even this feasible: at the old
   402^2 support, COSMOS's convolved templates alone would need 98 GB.
 - [x] Astrometric loop inverted to scene -> pass (2026-08-13). `run()` ran
@@ -145,6 +334,78 @@ This file records completed implementations, validation runs, and the current wo
   checks all three: no `VerifyWarning` escapes `write_outputs`, the keywords
   are readable back off the fit table, and a bare header assignment still
   warns afterwards.
+- [x] CANFAR toolkit: lessons from starting the full-field campaign
+  (2026-08-13). Nine changes in `examples/canfar/`, each from something that
+  cost time in this run:
+  * **A dropped submission is no longer silent.** Submitting seven EGS bands,
+    the service returned HTTP 500 with
+    `JedisDataException: ERR max number of clients reached` for three of
+    them; skaha swallows that and returns an empty list, so `launch` logged
+    `FAILED` and the batch carried on with three bands that never existed.
+    `launch` now retries three times with a 10 s pause, and `do_run` exits
+    non-zero naming any band that still did not start, rather than returning
+    quietly under `--no-wait`.
+  * **`wait` no longer calls a job dead on an empty `info`.** A two-minute
+    DNS outage on the laptop (09:05-09:07) made three consecutive `info`
+    calls return `[]` -- skaha swallows network errors and answers with an
+    empty list, so an unreachable service is indistinguishable from a reaped
+    session -- and `wait` declared the *running* EGS leader `Gone`. The
+    campaign then moved on and tried to launch the six bands that were
+    waiting on the grids that leader was still building, which is the
+    `psf_dir` race the leader-first ordering exists to prevent. Only the
+    `SRC_VERSION` guard stopped it, and only by accident: the same outage
+    made the version unreadable, so `run` refused. `Gone` now requires
+    `still_listed()` to come back negative from a *non-empty* session
+    listing; an empty or failed listing means "unknown" and waiting
+    continues.
+  * **`sync` goes through the /arc mount, not a container.** Queue latency
+    dominates small work: the 1-core sync job sat `Pending` for 28 minutes,
+    twice, to do seconds of copying, while the sshfs mount turns out to be
+    writable and does the same unpack in 19 s. `run_root_local()` finds the
+    mounted run tree (`$CANFAR_RUN_LOCAL`, else `~/canfar_home`) and
+    `do_sync` unpacks there in the same order as `update_src.sh` - version
+    promoted only after the tar - with `--job` to force a container. Verified
+    byte-identical: the arc copies of `sed_stack.py`, `scene.py` and
+    `catalog.py` sha-match `git show main:<path>`. The hazard is unchanged
+    from the container path, since both rewrite source under running jobs.
+  * **CANFAR runs a commit, not a working tree.** `do_push` tarred `src/`
+    off disk, so the 06:05 push carried another session's uncommitted
+    `sed_stack.py` and `scene.py` and would have shipped them to 17
+    full-field jobs. `push` now ships `git archive` of `main` (`--ref` for
+    another commit, `--worktree` to opt back in, loudly). Provenance runs
+    end to end: `push` uploads `SRC_VERSION.pending`, the unpack step
+    promotes it to `SRC_VERSION` -- deliberately after untarring, so the
+    file means "installed" and not "uploaded" -- `run.sh` prints it at the
+    top of every job log, and `do_run` refuses to submit when it does not
+    match the local ref. That last check is the one with teeth: `push`
+    uploads but does not unpack, so a push without a sync leaves every job
+    importing the previous campaign's code with entirely normal-looking
+    outputs. Verified here: the arc source was four hours older than the
+    memory fix the full-field runs depend on.
+  * `submit.py kill` -- destroying every session took two rounds, because
+    skaha does not list a session until the service registers it and a
+    `--no-wait` campaign registers over several minutes. `kill` sweeps until
+    N consecutive passes come back empty (`--sweeps`, default 3) and spares
+    the `sync` job by default. There was no stop command at all before.
+  * `push --src-only`. Only `setup_env.sh` unpacks `psf.tar`, so a `push`
+    before a `sync` uploads several hundred MB (732 here) that never reach
+    `$RUN/PSF`. Nothing is lost by skipping it: `PSFFactory` skips grid files
+    that already exist unless `overwrite` is set.
+  * `campaign.has_shared_grids` counted only local grids, but the run reads
+    `$RUN/PSF` on arc. COSMOS has its 30" halo pair on arc and none locally,
+    so the check said "missing" and would have serialised one full-field band
+    ahead of the other five for nothing. It now takes the arc listing too
+    (`arc_psf_names`, falling back to local if the listing fails). Verified:
+    cosmos False -> True, egs correctly still False, uds unchanged.
+  * `campaign.py --skip` -- `--from` can only drop a prefix of the chain, so
+    there was no way to re-arcify without also re-staging.
+  * cores default 2 -> 4 (`cores_for`), and the memory guidance in
+    `README.md`/`MANUAL.md` replaced with the measured full-field numbers.
+  Also documented: skaha appends a `-1` replica index to session names, so
+  `mophongo-uds-f770w-v1-0` lists as `mophongo-uds-f770w-v1-0-1`.
+  No tests: `examples/canfar/` is not covered by the suite. Verified by
+  invoking each changed path (`kill --help`, `push --help`, a `--skip`
+  dry-run, and `arc_psf_names` against the live listing).
 - [x] Verification v9: all four UDS MIRI bands at r < 3' (2026-08-13,
   commit `ff1447a`, `examples/minerva/verification/v9/`). Same code and PSF
   grids as v8's F770W re-run, applied to every band, at the trial radius the

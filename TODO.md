@@ -2,6 +2,62 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] Decide whether to rebuild the existing PSF grids in `all` mode
+  (2026-08-13). The default is now `all`, but the grids already on disk (and
+  on arc, and on `/fred`) were built in `cluster` mode -- UDS F770W has 9
+  where `all` wants 17, COSMOS F444W 44 against 78. `_load_epsf` autobuilds
+  only when *nothing* matches the pattern, so those bands will never gain the
+  missing dates on their own: they have to be deleted and rebuilt, about 416
+  grids and an estimated 9 hours of nice'd login-node CPU. Until then a
+  release mixes `cluster`-mode grids (UDS, COSMOS F444W/F770W) with `all`-mode
+  ones (everything autobuilt from now on). Worth measuring first whether the
+  difference is detectable in the photometry: if the wavefront drift between
+  adjacent cluster dates is small, `cluster` is the cheaper convention and the
+  default should arguably be reconsidered rather than the grids rebuilt.
+
+- [ ] `PSFFactory` autobuild is silent about incompleteness. A band with one
+  grid and one with seventeen both "match the pattern", so a partially built
+  grid set looks identical to a complete one at load time. `_load_epsf` could
+  compare the dates it loaded against `dates_from_csv(csv, mode=cfg.psf_date_mode)`
+  and warn when grids are missing; that is how the 2026-08-13 single-epoch
+  problem would have announced itself instead of being found by hand.
+
+- [ ] Measure the OzStar side of the campaign (2026-08-13). `examples/ozstar/`
+  is written and running but has no measured numbers in it yet: staging wall
+  time and volume per field, peak RSS per full-field band from
+  `sacct --format=MaxRSS`, and whether 16 cores buys anything over 4 now that
+  the inputs sit on Lustre rather than an NFS-mounted `/arc` (the CANFAR
+  measurement of 0.2 of a core was dominated by waiting on `/arc`). Those
+  belong in `examples/ozstar/README.md` next to the request defaults.
+
+- [ ] `examples/ozstar/` has no test coverage, for the same reasons and with
+  the same one worth testing as the CANFAR toolkit: `has_shared_grids` is pure
+  given a name list. It is now duplicated in both campaign scripts because the
+  OzStar one must ignore local grids (nothing uploads them there) - if a test
+  is written, that is the moment to decide whether the two should share an
+  implementation.
+
+- [ ] Confirm the EGS full-field memory ceiling and give `campaign.py` a
+  per-field RAM (2026-08-13). This applies to both platforms; the OzStar
+  campaign requests 64 GB by default and its nodes hold 191-256 GB, so a
+  resubmission there is cheap, while CANFAR's 48 GB is the constrained case.
+  EGS is 1221 Mpx against UDS's 876, and UDS
+  full field measures 46.5 GB, so EGS extrapolates over the 48 GB request
+  and its bands are expected to OOM (silently, with no traceback). The
+  agreed response for the v1.0 campaign is to resubmit those at `--ram 64`
+  by hand, because 48 GB and up have queued for hours when the platform is
+  busy and raising the request everywhere costs wall clock. If EGS does need
+  64, `--ram` should become per-field rather than one number for the whole
+  campaign, and the measured peak per field belongs in `README.md` next to
+  the UDS number.
+
+- [ ] `examples/canfar/` has no test coverage. The 2026-08-13 changes
+  (`kill`, `push --src-only`, arc-aware `has_shared_grids`, `--skip`) were
+  verified by invoking them, not by tests. `has_shared_grids` is the one
+  worth a real test: it is pure given a name list, so it needs no network,
+  and getting it wrong either serialises a field for hours or lets several
+  bands race on one `psf_dir`.
+
 - [ ] `AlignedCutout.downsample`/`upsample` pass `self.wcs` (this cutout's
   WCS) as the parent WCS of a new cutout built on a full-shape dummy, the
   same pattern fixed in `Template.convolve_cutout` and
@@ -690,6 +746,21 @@ This file tracks future desired features, checks, and investigations.
       reconstructions, a continuum-residual contrast view, and machine-readable
       stack products are implemented in
       `examples/minerva/plot_uds_sed_stack.py`
+    - [x] Add MIRI-specific visibility/QC for F560W, F770W, and F1000W with a
+      shared local display stretch, empirical SEM/counts, gentle field-local
+      winsorization, population-scatter-regularized weighting, and explicit
+      raw/capped inverse-variance failure diagnostics
+    - [x] Compare 0.05/0.035/0.025 fractional redshift bins and repeated
+      split-half equal/winsor/scatter-weighted/IVW estimators; keep 0.035 as an
+      experimental companion, 0.5% winsorization as the conservative robust
+      view, and formal IVW only as a demonstrated failure control
+    - [ ] Add whole-galaxy field-stratified bootstrap uncertainty (500 final
+      draws), delete-one-field checks, and spatial 4x4 tile jackknives; preserve
+      each galaxy's correlated wavelength cells during every resample
+    - [ ] Add labeled redshift-quality sensitivity stacks (spec-z or narrow
+      EAzY posterior), and use full P(z) multiple imputation only when the exact
+      EAzY posterior files are staged; do not weight the primary stack by
+      photo-z risk or pretend quantiles are Gaussian PDFs
   - [ ] add in residuals in core for improved flux measurements (shift / psf errors)
 - [ ] investigate blending in detection image
 - [ ] Investigate template extension methods (Moffat fit and PSF dilation)
@@ -747,19 +818,52 @@ This file tracks future desired features, checks, and investigations.
     the widest); float32, or accumulate straight into the residual.
   - [ ] Bound scene *extent*, not only `scene_max_size`: the widest buffer came
     from a 25-template scene whose anchors spanned 18.8 Mpx.
-  - [ ] `write_stamps` still builds the complete `vla` list before writing --
-    a full extra copy of every stamp (12 GB full-field) at the end of the run.
-    `8ca21f5` moved the file to HDF5, so the per-source offsets a scene-local
-    read needs already exist and only the incremental *write* is left: append
-    each band's flat buffer as tiles complete rather than concatenating at the
-    end. That turns the stamps file into working storage for the streaming
-    solve, not just an output.
+  - [x] `write_stamps` no longer builds the complete `vla` list before writing
+    (2026-08-13) -- that was a full extra copy of every stamp, 12 GB
+    full-field, at the end of the run. Offsets come from the shapes recorded in
+    the first pass and each stamp is written into its slot. What remains for
+    the streaming solve is appending as *tiles* complete rather than as
+    templates complete, which needs the tiled build to exist first.
   - [ ] Upsampled band on demand instead of materialised: `_upsample_boxed`
     holds 7 GB for the sci/ivar pair and is where COSMOS OOMs. The array is a
     pure function of the lo-res pixels and is only ever read as
     `image[slices_original]`.
-  - [ ] Residual as a `np.memmap` over the output file rather than 3.5 GB of
-    dirty anonymous pages.
+  - [x] Residual as a `np.memmap` over the output file rather than 3.5 GB of
+    dirty anonymous pages (2026-08-13; `Pipeline._residual_memmap`).
+  - [x] Release the band weight map once nothing reads it (2026-08-13).
+    `weights_i` (3.5 GB upsampled ivar) was last read by
+    `Templates.predicted_errors` but held by every `Scene`, so it sat through
+    the stamp write. `Pipeline._release_scene_weights` clears it; `run` calls
+    it after `predicted_errors` when no scene figures are drawn, and
+    `write_outputs` after the figures. See `docs/MEMORY_LIFETIMES.md`.
+  - [x] `write_outputs` writes the stamps last (2026-08-13), after the scene
+    figures rather than before, so the weights can go before the run's other
+    memory peak and a run that dies in the stamp write keeps its figures.
+  - [x] Residual accumulates into its own output file (2026-08-13).
+    `_residual_memmap` writes the header, extends the file sparsely and maps
+    the data section; `write_outputs` flushes instead of writing. Falls back to
+    anonymous memory for API-driven runs and on any mapping error.
+  - [x] Repair replays its patch table onto a fresh copy-on-write map
+    (2026-08-13) instead of holding the two full-field mosaics
+    `repair_saturated_holes` returns (`saturate.py:733`). Fresh and cache-reuse
+    paths now share `_apply_repair_patches`.
+  - [x] `write_stamps` streams (2026-08-13): offsets from the recorded shapes,
+    datasets created at final size, each stamp written into its slot. Removes
+    the 12 GB `vla`-plus-concatenate copy at the end of the run.
+  - [ ] Avoid the byte-order copies in `get_bg_and_ivar`. FITS is big-endian,
+    so a memory-mapped float32 image arrives as `>f4` and
+    `np.asarray(x, dtype=np.float32)` (`catalog.py:267-268`) copies rather than
+    views. The detection-band call transiently allocates ~12 GB on a full field
+    (`s`, `w`, two bool masks, `ivar_new`), undoing every memmap saving
+    upstream. The full-resolution arrays are only used by `_valid_block_means`,
+    a strided median sample and the final `w * scale`, all of which work on
+    `>f4` directly.
+  - [ ] ivar as `(memmapped wht, scale, invalid mask)` rather than a 3.5 GB
+    anonymous array: the calibration is one scalar plus a mask
+    (`catalog.py:369-372`). Composes with the on-demand upsampled band above --
+    with both, neither ivar array exists.
+  - [ ] Drop `weights[1]` after the upsample, which needs `source_products`
+    pointed at the reference-grid array rather than the native one.
   - [ ] Timers inside `Scene.solve`. `56530f2` added the per-section wall-time
     breakdown for `run()`, which covers the outer split (templates, convolve,
     generate scenes, astrometry passes, final flux solve, residual). Still

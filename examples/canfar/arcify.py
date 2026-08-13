@@ -35,10 +35,19 @@ log = logging.getLogger("arcify")
 
 from runroot import run_root
 
-# Run tree on arc; $CANFAR_RUN overrides the default home location.
-RUN, _ = run_root(Path(__file__).resolve().parent.parent.parent)
+REPO = Path(__file__).resolve().parent.parent.parent
 
 ARC = "arc:projects/minerva"
+
+
+def arc_run() -> str:
+    """Run tree on arc; ``$CANFAR_RUN`` overrides the default home location.
+
+    Resolved on demand rather than at import so that ``examples/ozstar``, which
+    reuses the arc indexing helpers below but has no CANFAR run tree, does not
+    have to set ``$CANFAR_USER`` to import this module.
+    """
+    return run_root(REPO)[0]
 
 # Config keys whose values are input file paths.
 PATH_KEYS = ["sci_hi", "wht_hi", "segmap", "catalog", "csv_hi", "sci_lo", "wht_lo", "csv_lo"]
@@ -132,6 +141,7 @@ def arcify(cfg_path: Path, index: dict[str, str], out_dir: Path,
     is kept — only the radius is overridden — so the patch stays where the
     source config put it.
     """
+    run = arc_run()
     raw = re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text())
     cfg = json.loads(raw)
     name = cfg.get("name", cfg_path.stem) + suffix
@@ -162,17 +172,17 @@ def arcify(cfg_path: Path, index: dict[str, str], out_dir: Path,
         if gzipped:
             # decompress once into the run's data dir, under the name the
             # config expects (which also fixes the f770 -> f770w spelling)
-            cfg[key] = f"{RUN}/data/{basename}"
+            cfg[key] = f"{run}/data/{basename}"
             stage.append((arc_path, basename))
         elif Path(arc_path).name != basename:
             # uncompressed but misnamed: copy rather than decompress
-            cfg[key] = f"{RUN}/data/{basename}"
+            cfg[key] = f"{run}/data/{basename}"
             stage.append((arc_path, basename))
         else:
             cfg[key] = arc_path  # read in place, no copy
 
-    cfg["psf_dir"] = f"{RUN}/PSF"
-    cfg["out_dir"] = f"{RUN}/out/{name}"
+    cfg["psf_dir"] = f"{run}/PSF"
+    cfg["out_dir"] = f"{run}/out/{name}"
 
     cfg_out = out_dir / f"{name}_canfar.json"
     cfg_out.write_text(json.dumps(cfg, indent=2) + "\n")

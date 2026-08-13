@@ -357,6 +357,14 @@ def test_write_stamps_variable_size_single_file(tmp_path):
     assert len(recs) == len(conv)
     rec = recs[0]
     assert rec["tmpl_hi"].shape == hi_by_id[int(conv[0].id)].data.shape
+    # pixels land in the right slot: stamps are written straight into the
+    # dataset at offsets derived from the recorded shapes, so a mismatch
+    # between the shape pass and the pixel pass would shear every stamp
+    for rec, t_lo in zip(recs, conv):
+        t_hi = hi_by_id[int(t_lo.id)]
+        # exact at the file's own precision: stamps are stored float32
+        assert np.array_equal(rec["tmpl_lo"], np.float32(t_lo.data))
+        assert np.array_equal(rec["tmpl_hi"], np.float32(t_hi.data))
 
     # file attributes hold only the pointers load_fit needs
     with h5py.File(path, "r") as h5:

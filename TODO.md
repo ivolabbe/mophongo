@@ -725,6 +725,48 @@ This file tracks future desired features, checks, and investigations.
     narrowing the file wholesale. Worth measuring the extraction peak first:
     the win is transient working set, not resident, so it may not move the
     ceiling at all.
+- [ ] Fixed memory budget for arbitrarily large fields, and parallel scene
+  solves. Design note: `docs/SCALING_FIXED_MEMORY.md` (2026-08-13). Only the
+  loop inversion below has been built. Peak today is 46.5 GB on a full UDS field and
+  ~72 GB on COSMOS, both linear in field area; the proposal is tiled template
+  build + global scene partition on `ATA` alone + scene-streaming solve, which
+  bounds the peak by the largest scene rather than by the image (~2-5 GB at
+  eight workers). Threads are measured to be the wrong tool for the scene loop
+  (`build_normal`-shaped work runs 0.47-0.66x with 4-8 threads); processes over
+  memory-mapped inputs are. Prerequisites, each worth doing alone and each
+  blocking part of the above:
+  - [x] Astrometric loop inverted to scene -> pass (2026-08-13): one scene is
+    now refined to convergence before the next starts, so a scene is a
+    self-contained unit of work with no barrier between scenes. Bit-identical
+    against HEAD in three configurations; see STATUS.md.
+  - [ ] Chunk `assemble_scene_system_AB` over row bands. `Bq`/`Bl` (0.61 GB
+    worst case) and the `Bq[k] * wbuf` temporaries are the only per-scene term
+    that scales with spatial extent, so they multiply by the worker count.
+    Blocks parallelism.
+  - [ ] `Scene.model_image` allocates float64 over the scene bbox (150 MB for
+    the widest); float32, or accumulate straight into the residual.
+  - [ ] Bound scene *extent*, not only `scene_max_size`: the widest buffer came
+    from a 25-template scene whose anchors spanned 18.8 Mpx.
+  - [ ] `write_stamps` still builds the complete `vla` list before writing --
+    a full extra copy of every stamp (12 GB full-field) at the end of the run.
+    `8ca21f5` moved the file to HDF5, so the per-source offsets a scene-local
+    read needs already exist and only the incremental *write* is left: append
+    each band's flat buffer as tiles complete rather than concatenating at the
+    end. That turns the stamps file into working storage for the streaming
+    solve, not just an output.
+  - [ ] Upsampled band on demand instead of materialised: `_upsample_boxed`
+    holds 7 GB for the sci/ivar pair and is where COSMOS OOMs. The array is a
+    pure function of the lo-res pixels and is only ever read as
+    `image[slices_original]`.
+  - [ ] Residual as a `np.memmap` over the output file rather than 3.5 GB of
+    dirty anonymous pages.
+  - [ ] Timers inside `Scene.solve`. `56530f2` added the per-section wall-time
+    breakdown for `run()`, which covers the outer split (templates, convolve,
+    generate scenes, astrometry passes, final flux solve, residual). Still
+    missing is the split *within* a scene solve -- `build_normal` against
+    `assemble_scene_system_AB` against the factorisation -- which is what says
+    how much of the scene loop is GIL-bound assembly and therefore what a
+    worker pool would actually buy. Do this before building any of the above.
 - [ ] strong residuals
   - [ ] handle saturated stars in 444 -> catalog pre pass detection
   - [ ] fit as PSF both 444, 770, fit for centroid, mask center

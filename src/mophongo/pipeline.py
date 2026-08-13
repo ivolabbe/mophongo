@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import warnings
 import psutil
 import h5py
 import time
@@ -78,6 +79,43 @@ def human_bytes(n: float, binary: bool = True) -> str:
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= step
     return f"{size:.1f} {units[-1]}"
+
+
+def _ignore_hierarch_warnings() -> None:
+    """Install the filter that silences astropy's per-card HIERARCH warning.
+
+    Keywords longer than eight characters -- ``PHOT_UNIT``, ``WEBBSTARFILT``,
+    ``APER_DIAM``, ``SHRINK_FACTOR`` and the rest of what an input catalog
+    carries in ``Table.meta`` -- round-trip as HIERARCH cards by design.
+    Astropy warns once per card, and twice per card once its own warning
+    logging has a handler, which at run scale is pure noise.
+
+    The caller is responsible for restoring ``warnings.filters``; use
+    :func:`_quiet_hierarch_warnings` unless the filter state is already being
+    saved (:meth:`Pipeline.log_run`).
+    """
+    from astropy.io.fits.verify import VerifyWarning
+
+    warnings.filterwarnings(
+        "ignore",
+        category=VerifyWarning,
+        message=".*a HIERARCH card will be created.*",
+    )
+
+
+@contextmanager
+def _quiet_hierarch_warnings():
+    """Scoped form of :func:`_ignore_hierarch_warnings` for a write path.
+
+    ``log_run`` filters these for everything it wraps, which since 2026-08-13
+    is every CLI invocation. It is not the only way in: a notebook or script
+    driving :class:`Pipeline` directly never enters that block, and the filter
+    belongs with the writes that provoke the warning in any case.
+    """
+    with warnings.catch_warnings():
+        _ignore_hierarch_warnings()
+        yield
+
 
 # shift-field arrows span this fraction of a scene's template extent, so that
 # the outermost samples stay inside the scene rather than sitting on its edge
@@ -2091,20 +2129,22 @@ class Pipeline:
         cfg = self.run_config
         stem = self.out_dir / cfg.name
         # residual is on the hi-res reference grid (upsample path)
-        fits.writeto(
-            self.f_residual,
-            self.residuals[0],
-            fits.getheader(cfg.sci_hi),
-            overwrite=True,
-        )
-        self.table.write(self.f_fit_table, overwrite=True)
+        with _quiet_hierarch_warnings():
+            fits.writeto(
+                self.f_residual,
+                self.residuals[0],
+                fits.getheader(cfg.sci_hi),
+                overwrite=True,
+            )
+            self.table.write(self.f_fit_table, overwrite=True)
 
-        # per-template fit state: everything the solve produced that a rebuild
-        # cannot re-derive (component amplitudes, astrometric shifts, scenes)
-        if getattr(self, "all_templates", None):
-            self._template_fit_table().write(self.f_templates, overwrite=True)
-        if cfg.save_stamps:
-            self.write_stamps()
+            # per-template fit state: everything the solve produced that a
+            # rebuild cannot re-derive (component amplitudes, astrometric
+            # shifts, scenes)
+            if getattr(self, "all_templates", None):
+                self._template_fit_table().write(self.f_templates, overwrite=True)
+            if cfg.save_stamps:
+                self.write_stamps()
 
         scene_dir = self.out_dir / "scenes"
         if cfg.scene_plots and self.scenes:
@@ -2746,14 +2786,11 @@ class Pipeline:
         old_showwarning = warnings.showwarning
         # Long keywords from the input catalog's meta (PHOT_UNIT,
         # WEBBSTARFILT, ...) round-trip as HIERARCH cards by design; the
-        # per-card VerifyWarning about it is pure noise at run scale.
+        # per-card VerifyWarning about it is pure noise at run scale. The write
+        # paths filter these themselves as well, for the step-at-a-time
+        # invocations that never enter this block.
         old_filters = warnings.filters[:]
-        from astropy.io.fits.verify import VerifyWarning
-
-        warnings.filterwarnings(
-            "ignore", category=VerifyWarning,
-            message=".*a HIERARCH card will be created.*",
-        )
+        _ignore_hierarch_warnings()
         # captureWarnings is a latch: if some earlier code in this process left
         # it on, another True call is a no-op and whatever hook is currently
         # installed (e.g. pytest's) stays in place. Reset it first so the
@@ -3889,21 +3926,34 @@ class Pipeline:
             tol_txt = f"{shift_tol:.3g} pix" + (
                 f" = {shift_tol * ps_fit * 1000:.1f} mas" if ps_fit else ""
             )
-            # Scenes are independent -- solve() only reads the scene's own
-            # templates, image and weights -- so one that has stopped moving
-            # stays stopped, and re-solving it only burns time. Iterate over
-            # the scenes still above tolerance and drop each as it converges.
-            pending = list(scenes)
-            for j in range(niter_scene):
-                logger.info(
-                    f"[Scenes] iteration {j+1} of {niter_scene}: "
-                    f"{len(pending)} of {len(scenes)} scene(s) still moving"
-                )
-                max_step, still = 0.0, []
-                for scn in pending:
-                  with self._phase("astrometry passes"):
+            # Scenes are independent across passes, not only within one:
+            # solve() reads the scene's own templates and read-only slices of
+            # the shared image and weights, and writes only to itself and to
+            # those templates. So the whole refinement of one scene -- its
+            # passes, its convergence test, and the flux-only pass that closes
+            # it out -- is a self-contained unit of work, and the loop runs
+            # scene-by-scene rather than synchronising every scene at each
+            # pass. The results are identical either way; what goes is the
+            # barrier, which is what stops a scene from being handed to a
+            # worker process (see docs/SCALING_FIXED_MEMORY.md).
+            logger.info(
+                "[Scenes] solving %d scene(s), up to %d astrometric pass(es) "
+                "each (tol %s)", len(scenes), niter_scene, tol_txt,
+            )
+            # A flux-only run (fit_astrometry_niter = 0) takes one pass through
+            # the loop below -- solve() dispatches to the flux-only path on the
+            # same flag -- and skips the closing re-solve.
+            final_cfg = (
+                replace(config, fit_astrometry_niter=0)
+                if config.fit_astrometry_niter > 0
+                else None
+            )
+            unconverged: list[Scene] = []
+            for scn in scenes:
+                scn.set_band(images[ifilt], weights_i, config=config)
+                with self._phase("astrometry passes"):
+                  for j in range(niter_scene):
                     prev = np.array([t.shifted[:2] for t in scn.templates], dtype=float)
-                    scn.set_band(images[ifilt], weights_i, config=config)
                     scn.solve(config=config, apply_shifts=True)
                     cur = np.array([t.shifted[:2] for t in scn.templates], dtype=float)
                     step = (
@@ -3917,51 +3967,53 @@ class Pipeline:
                     # to carry a shift block, never moves, and reporting that
                     # as "converged" would claim an astrometric solution that
                     # was never solved for. Those keep astrom_converged None
-                    # and flag -1.
+                    # and flag -1 -- and stop here, since nothing will move
+                    # them on a later pass either.
                     if scn.shifts is not None and len(scn.shifts) > 0:
                         scn.astrom_converged = step < shift_tol
-                    max_step = max(max_step, step)
-                    if scn.astrom_converged is False:
-                        still.append(scn)
-                logger.info(
-                    f"[Scenes] iteration {j+1}: max shift increment {max_step:.4f} pix, "
-                    f"{len(pending) - len(still)} scene(s) converged"
+                    if scn.astrom_converged is not False:
+                        break
+                if scn.astrom_converged is False:
+                    unconverged.append(scn)
+                # Each pass solved fluxes on the templates as they stood
+                # *before* that pass's shift was applied, so the stored fluxes,
+                # errors and model belong to a basis that no longer exists --
+                # the last shift applied is never accounted for. Re-solve
+                # fluxes once on the final templates, regardless of the
+                # convergence verdict, so what is written is stationary for the
+                # basis actually used to build the model, residual and stamps.
+                # Shifts are left untouched: this is a flux-only pass.
+                if final_cfg is not None:
+                    with self._phase("final flux solve"):
+                        scn.solve(config=final_cfg)
+                logger.debug(
+                    "[Scenes] scene %s: %d pass(es), last increment %.4f pix, %s",
+                    scn.id, scn.astrom_niter, scn.astrom_step or 0.0,
+                    "converged" if scn.astrom_converged
+                    else ("no shift fitted" if scn.astrom_converged is None
+                          else "still moving"),
                 )
-                pending = still
-                if config.fit_astrometry_niter > 0 and not pending:
-                    logger.info(
-                        f"[Scenes] shifts converged (< {tol_txt}) after {j+1} passes"
-                    )
-                    break
+
+            niters = [s.astrom_niter for s in scenes]
+            logger.info(
+                "[Scenes] %d of %d scene(s) converged (< %s); passes run: "
+                "median %d, max %d%s",
+                sum(s.astrom_converged is True for s in scenes), len(scenes),
+                tol_txt,
+                int(np.median(niters)) if niters else 0, max(niters, default=0),
+                "; fluxes re-solved on the final templates"
+                if final_cfg is not None else "",
+            )
 
             # Scenes still moving when the budget ran out: their shifts are the
             # last iterate, not a converged solution. Worth knowing which.
-            if pending:
-                slow = sorted(pending, key=lambda s: -(s.astrom_step or 0.0))
+            if unconverged:
+                slow = sorted(unconverged, key=lambda s: -(s.astrom_step or 0.0))
                 logger.warning(
                     "[Scenes] %d of %d scene(s) did not converge in %d passes "
                     "(tol %s); worst: %s",
-                    len(pending), len(scenes), niter_scene, tol_txt,
+                    len(unconverged), len(scenes), niter_scene, tol_txt,
                     ", ".join(f"scene {s.id} ({s.astrom_step:.3f} pix)" for s in slow[:5]),
-                )
-
-            # Each pass solves fluxes on the templates as they stood *before*
-            # that pass's shift was applied, so the stored fluxes, errors and
-            # model belong to a basis that no longer exists -- the last shift
-            # applied is never accounted for. Re-solve fluxes once on the final
-            # templates, for every scene and regardless of the convergence
-            # verdict, so what is written is stationary for the basis actually
-            # used to build the model, residual and stamps. Shifts are left
-            # untouched: this is a flux-only pass.
-            if config.fit_astrometry_niter > 0:
-                final_cfg = replace(config, fit_astrometry_niter=0)
-                for scn in scenes:
-                  with self._phase("final flux solve"):
-                    scn.set_band(images[ifilt], weights_i, config=config)
-                    scn.solve(config=final_cfg)
-                logger.info(
-                    "[Scenes] re-solved fluxes on the final templates for %d scene(s)",
-                    len(scenes),
                 )
 
             # Every shifted template holds its pre-shift pixels so that each

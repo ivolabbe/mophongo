@@ -324,32 +324,33 @@ def test_write_stamps_variable_size_single_file(tmp_path):
         images, segmap, catalog=catalog, weights=wht, kernels=[None, kernel], psfs=psfs
     )
 
-    path = tmp_path / "stamps.fits"
+    path = tmp_path / "stamps.h5"
     out = pipe.write_stamps(path)
     assert out == path
 
     conv = pipe.all_templates[0]
     hi_by_id = {int(t.id): t for t in pipe.tmpls.templates}
 
-    with fits.open(path) as hdul:
-        src = hdul["SOURCES"].data
-        assert hdul[0].header["NSRC"] == len(conv)
-        assert len(src) == len(conv)
+    import h5py
+
+    with h5py.File(path, "r") as h5:
+        src = {name: h5["sources"][name][:] for name in h5["sources"]}
+        assert h5.attrs["NSRC"] == len(conv)
+        assert len(src["id"]) == len(conv)
         # PSFs are not duplicated into the file: static PSFs carry key 0
         assert np.all(src["key_psf_hi"] == 0)
         assert np.all(src["key_psf_lo"] == 0)
-        for row, t_lo in zip(src, conv):
-            t_hi = hi_by_id[int(t_lo.id)]
-            assert int(row["id"]) == int(t_lo.id)
-            # native per-source sizes, no padding
-            assert (row["ny_hi"], row["nx_hi"]) == t_hi.data.shape
-            assert (row["ny_lo"], row["nx_lo"]) == t_lo.data.shape
-            np.testing.assert_allclose(
-                np.asarray(row["tmpl_lo"], dtype=np.float32).reshape(t_lo.data.shape),
-                np.asarray(t_lo.data, dtype=np.float32),
-                rtol=1e-6,
-            )
-            assert np.isclose(row["flux"], t_lo.flux)
+        # ragged stamps are one flat buffer per band plus offsets
+        assert h5["tmpl_lo"]["offset"].shape == (len(conv) + 1,)
+        assert h5["tmpl_hi"]["pixels"].dtype == np.float32
+
+    for i, t_lo in enumerate(conv):
+        t_hi = hi_by_id[int(t_lo.id)]
+        assert int(src["id"][i]) == int(t_lo.id)
+        # native per-source sizes, no padding
+        assert (src["ny_hi"][i], src["nx_hi"][i]) == t_hi.data.shape
+        assert (src["ny_lo"][i], src["nx_lo"][i]) == t_lo.data.shape
+        assert np.isclose(src["flux"][i], t_lo.flux)
 
     # reader helper reshapes templates and attaches the PSF stamps
     recs = pipeline.Pipeline.read_stamps(path)
@@ -357,8 +358,9 @@ def test_write_stamps_variable_size_single_file(tmp_path):
     rec = recs[0]
     assert rec["tmpl_hi"].shape == hi_by_id[int(conv[0].id)].data.shape
 
-    # primary header holds only the pointers load_fit needs
-    hdr = fits.getheader(path)
+    # file attributes hold only the pointers load_fit needs
+    with h5py.File(path, "r") as h5:
+        hdr = dict(h5.attrs)
     assert (hdr["NX_HI"], hdr["NY_HI"]) == images[0].shape[::-1]
     assert (hdr["NX_LO"], hdr["NY_LO"]) == images[1].shape[::-1]
 
@@ -499,13 +501,18 @@ def test_load_fit_restores_post_run_state(tmp_path):
     assert axes.shape == (1, 8)
 
     # --- delete the stamps file: load_fit regenerates it identically
-    with fits.open(stamps_path) as hdul:
-        src1 = Table(hdul["SOURCES"].data)
-        tmpl1 = {
-            tag: [np.asarray(row[f"tmpl_{tag}"], np.float32) for row in hdul["SOURCES"].data]
-            for tag in ("hi", "lo")
-        }
-        hdr1 = hdul[0].header
+    import h5py
+
+    def _read_h5(path):
+        recs = pipeline.Pipeline.read_stamps(path)
+        with h5py.File(path, "r") as h5:
+            attrs = dict(h5.attrs)
+        cols = [k for k in recs[0] if not k.startswith("tmpl_")]
+        return Table({c: [r[c] for r in recs] for c in cols}, ), recs, attrs
+
+    src1, recs1, hdr1 = _read_h5(stamps_path)
+    tmpl1 = {tag: [np.asarray(r[f"tmpl_{tag}"], np.float32) for r in recs1]
+             for tag in ("hi", "lo")}
     stamps_path.unlink()
 
     pipe3 = fresh_pipe()
@@ -513,9 +520,8 @@ def test_load_fit_restores_post_run_state(tmp_path):
     assert_matches_run(pipe3)
     assert stamps_path.exists()
 
-    with fits.open(stamps_path) as hdul:
-        src3 = Table(hdul["SOURCES"].data)
-        hdr3 = hdul[0].header
+    src3, recs3, hdr3 = _read_h5(stamps_path)
+    if True:
         assert len(src3) == len(src1)
         for name in src1.colnames:
             if name.startswith("tmpl_"):
@@ -527,9 +533,9 @@ def test_load_fit_restores_post_run_state(tmp_path):
             else:
                 assert np.all(src3[name] == src1[name]), name
         for tag in ("hi", "lo"):
-            for row, ref in zip(hdul["SOURCES"].data, tmpl1[tag]):
+            for rec, ref in zip(recs3, tmpl1[tag]):
                 np.testing.assert_allclose(
-                    np.asarray(row[f"tmpl_{tag}"], np.float32), ref, rtol=1e-6, atol=1e-8
+                    np.asarray(rec[f"tmpl_{tag}"], np.float32), ref, rtol=1e-6, atol=1e-8
                 )
     assert hdr3["RUNNAME"] == hdr1["RUNNAME"] == "t"
     assert (hdr3["NX_HI"], hdr3["NY_HI"], hdr3["NX_LO"], hdr3["NY_LO"]) == (

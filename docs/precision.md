@@ -80,6 +80,16 @@ numbers 5.7e4 to 8.0e6.
 | `SceneFitter._flux_errors` | the inversion itself; its `np.maximum(diag, 1e-12)` floor would silently clamp a float32-corrupted diagonal into a fake tight error bar |
 | `assemble_scene_system_AB` | `BB`, `AB`, `bB`, and the `Bq`/`Bl` shift columns -- the `+=` across overlapping anchors rounds *before* any reduction, so a wider accumulator on the final sum cannot recover it |
 | `astrometry`, WCS | sky coordinates and shift-field fits |
+| `_create_matching_kernel_no_normalize`, `_matching_kernel_tikhonov`, `_matching_kernel_wiener` | the PSF-matching inversion, upcast at entry |
+
+PSF matching deserves its own note, because it is the one place where the
+*inputs* are float32 by policy and the *computation* still has to be float64.
+Deconvolution divides by an OTF that falls to zero at high frequency, so input
+rounding is amplified by exactly the factor the regularisation exists to
+bound -- and `numpy.fft` preserves single precision, so float32 stamps would
+otherwise carry the whole inversion through in `complex64`. The three matching
+functions upcast at entry. The *resulting* kernel is stored float32 like any
+other stamp: it is the solve that needs the digits, not the answer.
 
 The flux-block ridge is `1e-6 x median(diag)`, which is below float32's 1.2e-7
 epsilon -- at float32 the regularisation would be indistinguishable from noise.

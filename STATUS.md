@@ -3,24 +3,44 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
-- [x] Array-lifetime audit, `docs/MEMORY_LIFETIMES.md` (2026-08-13). No code
-  changes; companion to `docs/SCALING_FIXED_MEMORY.md`, which proposes the
-  decomposition. This one inventories every full-field array a run allocates,
+- [x] Array-lifetime audit and five memory fixes, `docs/MEMORY_LIFETIMES.md`
+  (2026-08-13). Companion to `docs/SCALING_FIXED_MEMORY.md`, which proposes the
+  decomposition; this one inventories every full-field array a run allocates,
   records where each is born and last read, and separates what is still needed
-  from what is merely still referenced. Findings feeding `TODO.md`:
-  * `weights_i` (3.5 GB upsampled ivar) is dead after `run:4061` but is pinned
-    by `Scene.weights` through the stamp write, which is where the full-field
-    runs die.
-  * `get_bg_and_ivar` copies its inputs on byte order: FITS is big-endian, so a
-    memmap arrives as `>f4` and `np.asarray(x, dtype=np.float32)` copies. The
-    detection-band call transiently allocates ~12 GB on a full field.
-  * The `isfinite` sweep at `pipeline.py:3838` has an inverted image branch
-    (dead) and a weight branch that touches all 876 Mpx for a guard
-    `load_data` already applied.
-  * `wht_hi`/`ivar_hi`/`weights[0]` are not three arrays: the first is a
-    transient memmap and the last two are the same object. The only true
-    information duplicate in a run is `weights[1]` against `weights_i` -- the
-    same weights on two grids, both alive to the end.
+  from what is merely still referenced. Changes made, in the order they run:
+  * The band weight map is released once nothing reads it.
+    `Pipeline._release_scene_weights` clears `Scene.weights` across a band;
+    `run` calls it after `predicted_errors` when the run draws no scene
+    figures, `write_outputs` after the figures. `weights_i` was 3.5 GB of dead
+    weights held by every `Scene` through the stamp write -- the stage where
+    the unexplained full-field failures occur. `Scene.residual`/`Scene.plot`
+    mask on the weights only when they are still attached; `Scene.solve` still
+    refuses to run without them.
+  * `write_outputs` writes the stamps last, after the scene figures rather than
+    before. The products are independent, and a run that dies in the stamp
+    write now keeps its figures.
+  * The residual accumulates straight into its own output file
+    (`_residual_memmap`): header written, file extended sparsely with
+    `truncate`, data section mapped big-endian. `write_outputs` flushes instead
+    of writing. Falls back to anonymous memory for API-driven runs and on any
+    mapping error.
+  * The repair replays its patch table onto a fresh copy-on-write map instead
+    of holding the two full-field mosaics `repair_saturated_holes` returns
+    (`saturate.py:733`). Fresh and cache-reuse paths now share
+    `_apply_repair_patches`; astropy maps a read-only HDU copy-on-write, so the
+    input mosaic on disk is untouched.
+  * `write_stamps` streams: offsets from the shapes recorded in the first pass,
+    datasets created at final size, each stamp written into its slot. Removes a
+    full extra copy of every stamp (12 GB full-field) at the end of the run.
+  * Also: the `isfinite` sweep at the top of `run` is gone (inverted, dead
+    image branch; weight branch re-checked a guard `load_data` had applied).
+  * `poetry run pytest`: 362 passed. New tests cover the residual memmap
+    round-trip end to end, the API fallback, copy-on-write patch replay, and
+    stamp pixel equality after a round trip.
+  * Still open, in `TODO.md`: the byte-order copies in `get_bg_and_ivar` (FITS
+    is big-endian, so `np.asarray(x, dtype=np.float32)` copies rather than
+    views -- ~12 GB transient on the detection band); ivar as
+    `(memmapped wht, scale, mask)`; `weights[1]` after the upsample.
 - [x] `PSFFactory.date_mode` now defaults to `"all"`, and configs can set it
   (2026-08-13). The default was `"modal"` -- the centre of the densest 5-day
   window, i.e. exactly *one* date per (detector, filter). Since the grids are

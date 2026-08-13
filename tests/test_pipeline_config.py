@@ -227,6 +227,103 @@ def test_load_outputs_resume(tmp_path):
     assert "results: table 2 rows" in fresh.info()
 
 
+def test_residual_memmap_is_the_output_file(tmp_path):
+    """The residual accumulator writes through to ``f_residual``.
+
+    run() accumulates scene models straight into the output file's data
+    section rather than into anonymous memory, so what write_outputs has left
+    to do is flush. The file must be a valid FITS image with the detection
+    band's header, and reading it back must give the accumulated pixels.
+    """
+    import numpy as np
+    from astropy.io import fits
+    from astropy.wcs import WCS
+
+    hi = tmp_path / "hi.fits"
+    w = WCS(naxis=2)
+    w.wcs.crpix = [8.0, 6.0]
+    w.wcs.crval = [150.0, 2.0]
+    w.wcs.cdelt = [-1e-5, 1e-5]
+    w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    hdr = w.to_header()
+    hdr["FILTER"] = "F770W"
+    fits.writeto(hi, np.zeros((11, 13), dtype=np.float32), hdr)
+
+    pipe = Pipeline.from_config(_write_config(tmp_path, {"sci_hi": str(hi)}))
+    res = pipe._residual_memmap((11, 13))
+    assert isinstance(res, np.memmap)
+    assert res.shape == (11, 13)
+
+    res[:] = 0.0
+    res[3, 4] = 2.5
+    res[10, 12] = -1.25
+    res.flush()
+
+    got, got_hdr = fits.getdata(pipe.f_residual, header=True)
+    assert got.shape == (11, 13)
+    assert got[3, 4] == 2.5 and got[10, 12] == -1.25
+    assert got.sum() == 1.25
+    # the detection band's WCS and provenance ride along
+    assert got_hdr["FILTER"] == "F770W"
+    assert WCS(got_hdr).wcs.crval[0] == 150.0
+
+
+def test_residual_allocation_falls_back_without_a_config():
+    """API-driven runs (no out_dir) keep the residual in memory."""
+    import numpy as np
+
+    from mophongo import pipeline as pl
+
+    pipe = pl.Pipeline.__new__(pl.Pipeline)
+    pipe.run_config = None
+    img = np.zeros((5, 6), dtype=np.float32)
+    res = pipe._allocate_residual(img, 1)
+    assert not isinstance(res, np.memmap)
+    assert res.shape == img.shape and res.dtype == img.dtype
+
+
+def test_repair_patches_do_not_write_through_to_the_input(tmp_path):
+    """Replaying a repair patch table leaves the input mosaics untouched.
+
+    load_data applies the patches to fresh maps of sci_hi/segmap rather than
+    holding the repaired mosaics, which is only safe because astropy maps a
+    read-only HDU copy-on-write.
+    """
+    import numpy as np
+    from astropy.io import fits
+    from astropy.table import Table
+
+    from mophongo.pipeline import _apply_repair_patches, _read_image
+
+    sci_path = tmp_path / "sci.fits"
+    seg_path = tmp_path / "seg.fits"
+    sci0 = np.arange(48, dtype=np.float32).reshape(6, 8)
+    seg0 = np.zeros((6, 8), dtype=np.int32)
+    fits.writeto(sci_path, sci0)
+    fits.writeto(seg_path, seg0)
+
+    patches = Table({
+        "y": np.array([1, 4], np.int32), "x": np.array([2, 7], np.int32),
+        "sci": np.array([-9.0, 3.5], np.float32),
+        "wht": np.array([0.0, 0.0], np.float32),
+        "seg": np.array([7, 7], np.int64),
+    })
+    sci = _read_image(sci_path)
+    seg = _read_image(seg_path)
+    _apply_repair_patches(patches, sci, seg)
+
+    assert sci[1, 2] == -9.0 and sci[4, 7] == 3.5
+    assert seg[1, 2] == 7 and seg[4, 7] == 7
+    # everything else is the original
+    untouched = np.ones((6, 8), bool)
+    untouched[[1, 4], [2, 7]] = False
+    assert np.array_equal(np.asarray(sci)[untouched], sci0[untouched])
+
+    del sci, seg
+    assert np.array_equal(fits.getdata(sci_path), sci0)
+    assert np.array_equal(fits.getdata(seg_path), seg0)
+
+
 def test_trial_pixel_box_and_partial_read(tmp_path):
     """Only the trial box is read, into a full-shape array.
 

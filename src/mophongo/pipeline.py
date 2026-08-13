@@ -383,6 +383,21 @@ def _read_image(path: str | Path, box: tuple[int, int, int, int] | None = None):
         return full
 
 
+def _apply_repair_patches(
+    patches: Table, sci: np.ndarray, segmap: np.ndarray
+) -> None:
+    """Write a repair patch table's sci/segmap pixels into ``sci``/``segmap``.
+
+    Shared by the cache-reuse path and the fresh-repair path so both end up
+    with the same representation: the original mosaics, patched in place over
+    the saturated cores only.
+    """
+    yy = np.asarray(patches["y"])
+    xx = np.asarray(patches["x"])
+    sci[yy, xx] = np.asarray(patches["sci"], sci.dtype)
+    segmap[yy, xx] = np.asarray(patches["seg"], segmap.dtype)
+
+
 def _upsample_flux_conserving_image_and_ivar(
     image: np.ndarray,
     weight: np.ndarray | None,
@@ -1312,6 +1327,10 @@ class Pipeline:
         cache stores diffs, not mosaics: a PATCHES bintable of changed
         pixels (sci/wht/segmap values) and a FLAGS bintable of the
         catalog's ``FLAG_SATURATED_*`` columns by id.
+
+        The patch table is also left on the instance as ``_repair_patches``,
+        so :meth:`load_data` can replay it onto a fresh memory map instead of
+        holding the repaired mosaics in anonymous memory.
         """
         from astropy.io import fits
 
@@ -1344,6 +1363,7 @@ class Pipeline:
             "seg": np.asarray(rep["segmap"])[yy, xx].astype(np.int64),
         })
         cat = rep["catalog"]
+        self._repair_patches = patches
         flag_cols = [c for c in cat.colnames if c.startswith("FLAG_SATURATED_")]
         flags = Table({"id": np.asarray(cat["id"], np.int64)})
         for c in flag_cols:
@@ -1386,10 +1406,9 @@ class Pipeline:
             patches = Table(hdul["PATCHES"].data)
             flags = Table(hdul["FLAGS"].data)
         wht = wht0.copy()
+        _apply_repair_patches(patches, sci, seg)
         yy, xx = np.asarray(patches["y"]), np.asarray(patches["x"])
-        sci[yy, xx] = np.asarray(patches["sci"], sci.dtype)
         wht[yy, xx] = np.asarray(patches["wht"], wht.dtype)
-        seg[yy, xx] = np.asarray(patches["seg"], seg.dtype)
         by_id = {int(i): k for k, i in enumerate(cat["id"])}
         for col in flags.colnames:
             if col == "id":
@@ -1600,10 +1619,19 @@ class Pipeline:
                 # the pre-repair snapshots exist only to be written to the
                 # cache, and they are two mosaic-sized arrays
                 del sci0, seg0
-                tmpl_hi = rep["sci"]
                 wht_hi_repaired = rep["wht"]
                 cat = rep["catalog"]
-                segmap = as_label_array(rep["segmap"])
+                # `repair_saturated_holes` returns fresh full-field copies of
+                # sci and segmap (saturate.py:733), so holding them costs two
+                # mosaics of anonymous memory for a result that differs from
+                # the inputs only over the saturated cores. Replay the patch
+                # table onto fresh maps of the originals instead, exactly as
+                # the reuse path above does: astropy maps a read-only HDU
+                # copy-on-write, so only the patched pages go private and the
+                # rest stays evictable page cache.
+                tmpl_hi = _read_image(cfg.sci_hi, box_hi)
+                segmap = as_label_array(_read_image(cfg.segmap, box_hi))
+                _apply_repair_patches(self._repair_patches, tmpl_hi, segmap)
                 del rep
             # the raw hi-res weight map is superseded by the repaired one
             del wht0
@@ -1755,6 +1783,103 @@ class Pipeline:
             self.template_table = None
             logger.warning("no template table %s (older run?)", self.f_templates)
         return self
+
+    def _allocate_residual(self, image: np.ndarray, ifilt: int) -> np.ndarray:
+        """Zero-filled residual accumulator, file-backed where possible.
+
+        The residual is written to :attr:`f_residual` at the end of the run
+        either way, so mapping that file's data section costs no extra disk
+        and turns a full reference-grid array of dirty anonymous pages (3.5 GB
+        on a MINERVA field) into file pages the kernel can flush and evict.
+        The access pattern suits it: scattered writes over scene bounding
+        boxes, then one sequential subtract, then stamp-sized reads.
+
+        Falls back to anonymous memory for API-driven runs (no output path)
+        and for bands past the first, which have nowhere distinct to live.
+        """
+        if getattr(self, "run_config", None) is None or ifilt != 1:
+            return np.zeros(image.shape, dtype=image.dtype)
+        try:
+            return self._residual_memmap(image.shape)
+        except OSError as exc:
+            logger.warning(
+                "could not map %s (%s); accumulating the residual in memory",
+                self.f_residual.name, exc,
+            )
+            return np.zeros(image.shape, dtype=image.dtype)
+
+    def _residual_memmap(self, shape: tuple[int, int]) -> np.memmap:
+        """Create ``f_residual`` at full size and map its data section.
+
+        Writes the FITS header, then extends the file with ``truncate`` --
+        which leaves it sparse, so blocks are allocated only as pages are
+        written, and a trial patch costs the patch. The map is big-endian
+        because that is what FITS stores; numpy handles the mixed byte order
+        in the accumulate and the subtract, and :meth:`write_outputs` then has
+        only the header left to finish.
+        """
+        from astropy.io import fits
+
+        cfg = self.run_config
+        path = self.f_residual
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _quiet_hierarch_warnings():
+            hdr = fits.getheader(cfg.sci_hi).copy()
+            for key in ("SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2",
+                        "EXTEND", "BSCALE", "BZERO"):
+                hdr.remove(key, ignore_missing=True, remove_all=True)
+            hdu = fits.PrimaryHDU(data=np.zeros((1, 1), dtype=np.float32), header=hdr)
+            hdu.header["NAXIS1"] = int(shape[1])
+            hdu.header["NAXIS2"] = int(shape[0])
+            head = hdu.header.tostring(padding=True).encode("ascii")
+        nbytes = int(shape[0]) * int(shape[1]) * 4
+        total = len(head) + nbytes
+        with open(path, "wb") as fh:
+            fh.write(head)
+            fh.truncate(-(-total // 2880) * 2880)  # FITS pads to 2880 blocks
+        res = np.memmap(path, dtype=">f4", mode="r+", offset=len(head), shape=shape)
+        logger.info("residual accumulating into %s (%s, file-backed)",
+                    path.name, human_bytes(nbytes))
+        return res
+
+    def _scene_pixels_needed(self) -> bool:
+        """Whether anything after the solve still reads a scene's band pixels.
+
+        ``Scene.plot`` and ``Scene.residual`` mask on ``scene.weights``, so the
+        weight map survives the end of the solve only until the scene figures
+        are drawn. A run driven directly through the API (no ``run_config``)
+        keeps everything: the caller owns the instance and may plot at any
+        point.
+        """
+        cfg = getattr(self, "run_config", None)
+        return cfg is None or bool(cfg.scene_plots)
+
+    def _release_scene_weights(self, scenes: Sequence["Scene"] | None = None) -> None:
+        """Drop the band weight map from scenes once nothing reads it.
+
+        The weights are last read by ``Templates.predicted_errors`` and by the
+        scene figures; on the upsample path they are a full reference-grid
+        array (3.5 GB on a MINERVA field) that every ``Scene`` holds a
+        reference to, so without this they would stay alive to the end of the
+        process. ``Scene.solve`` refuses to run without them, which is the
+        intended failure: the fit is over.
+
+        Args:
+            scenes: One band's scenes. Defaults to every band recorded on the
+                instance.
+        """
+        bands = [scenes] if scenes is not None else (getattr(self, "all_scenes", []) or [])
+        released = 0
+        for band in bands:
+            for s in band:
+                if getattr(s, "weights", None) is not None:
+                    s.weights = None
+                    released += 1
+        if released:
+            logger.info(
+                "released the band weight map from %d scene(s); memory: %.1f GB",
+                released, memory(),
+            )
 
     def _template_fit_table(self) -> Table:
         """Per-template fit state of the first fitted band as a flat table.
@@ -2137,12 +2262,19 @@ class Pipeline:
         stem = self.out_dir / cfg.name
         # residual is on the hi-res reference grid (upsample path)
         with _quiet_hierarch_warnings():
-            fits.writeto(
-                self.f_residual,
-                self.residuals[0],
-                fits.getheader(cfg.sci_hi),
-                overwrite=True,
-            )
+            if isinstance(self.residuals[0], np.memmap):
+                # already written: run() accumulated straight into the file's
+                # data section (see _residual_memmap), so only the pages still
+                # held by the kernel are outstanding
+                self.residuals[0].flush()
+                logger.info("residual flushed to %s", self.f_residual.name)
+            else:
+                fits.writeto(
+                    self.f_residual,
+                    self.residuals[0],
+                    fits.getheader(cfg.sci_hi),
+                    overwrite=True,
+                )
             self.table.write(self.f_fit_table, overwrite=True)
 
             # per-template fit state: everything the solve produced that a
@@ -2150,8 +2282,6 @@ class Pipeline:
             # shifts, scenes)
             if getattr(self, "all_templates", None):
                 self._template_fit_table().write(self.f_templates, overwrite=True)
-            if cfg.save_stamps:
-                self.write_stamps()
 
         scene_dir = self.out_dir / "scenes"
         if cfg.scene_plots and self.scenes:
@@ -2223,6 +2353,19 @@ class Pipeline:
             import matplotlib.pyplot as plt
 
             plt.close(out[0])
+
+        # Everything that reads a scene's band pixels has now run. The stamps
+        # come last on purpose: writing them is the run's other memory peak
+        # (two full template sets, plus one stamp in flight), and the band
+        # weight map -- a full reference-grid array on the upsample path -- is
+        # dead from the moment the fluxes were solved. Releasing it here keeps
+        # it out of that peak. run() does the same release earlier for runs
+        # that plot nothing at all.
+        self._release_scene_weights()
+        if cfg.save_stamps:
+            with _quiet_hierarch_warnings():
+                self.write_stamps()
+
         logger.info("outputs written to %s", self.out_dir)
         return self
 
@@ -2358,7 +2501,6 @@ class Pipeline:
 
         wcs_hi = self.wcs[0] if self.wcs is not None else None
         rows: dict[str, list] = defaultdict(list)
-        vla = {"hi": [], "lo": []}
         for t_lo in conv:
             t_hi = hi_by_id.get(int(t_lo.id))
             if t_hi is None:
@@ -2372,18 +2514,19 @@ class Pipeline:
                 ra, dec = (float(v) for v in wcs_hi.wcs_pix2world(x, y, 0))
             for tag, t in (("hi", t_hi), ("lo", t_lo)):
                 if t is None:
-                    data = np.zeros((0, 0), dtype=np.float32)
+                    shape = (0, 0)
                     x0 = y0 = -1
                     xs = ys = np.nan
                 else:
-                    data = np.asarray(t.data, dtype=np.float32)
+                    # shape only: the pixels are written in the second pass
+                    # below, straight into their slot in the dataset
+                    shape = t.data.shape
                     # data[0, 0] sits at this original-grid pixel (may be
                     # negative for cutouts padded past the image edge)
                     x0, y0 = (int(v) for v in t._origin_original_true)
                     xs, ys = (float(v) for v in t.input_position_original)
-                vla[tag].append(data.ravel())
-                rows[f"ny_{tag}"].append(data.shape[0])
-                rows[f"nx_{tag}"].append(data.shape[1])
+                rows[f"ny_{tag}"].append(shape[0])
+                rows[f"nx_{tag}"].append(shape[1])
                 rows[f"x0_{tag}"].append(x0)
                 rows[f"y0_{tag}"].append(y0)
                 rows[f"xs_{tag}"].append(xs)
@@ -2412,24 +2555,31 @@ class Pipeline:
         # One flat float32 buffer per band plus per-source offsets, rather
         # than one dataset per source: 138,610 HDF5 datasets would spend more
         # on object headers than on pixels, and the ragged concatenation is
-        # what both readers want anyway. Chunked and gzipped -- template
-        # stamps are mostly zero outside the segment, so this compresses hard.
+        # what both readers want anyway.
+        #
+        # Offsets come from the shapes recorded above, so each dataset is
+        # created at its final size and every stamp is written straight into
+        # its own slot. Collecting the flattened stamps in a list and
+        # concatenating held a full extra copy of every stamp -- 12 GB on a
+        # MINERVA field -- at the very end of the run, on top of the two
+        # template sets that are still alive here.
         hdr = self._stamps_header(ifilt, len(conv))
-        npix = sum(a.size for a in vla["hi"]) + sum(a.size for a in vla["lo"])
+        offs = {}
+        for tag in ("hi", "lo"):
+            sizes = (np.asarray(rows[f"ny_{tag}"], dtype=np.int64)
+                     * np.asarray(rows[f"nx_{tag}"], dtype=np.int64))
+            offs[tag] = np.concatenate([[0], np.cumsum(sizes)]).astype(np.int64)
+        npix = int(offs["hi"][-1]) + int(offs["lo"][-1])
         with h5py.File(path, "w") as h5:
             for key in hdr:
                 if key in ("COMMENT", "HISTORY", ""):
                     continue
                 value = hdr[key]
                 h5.attrs[key] = value if isinstance(value, (int, float, str)) else str(value)
+            pixels = {}
             for tag in ("hi", "lo"):
-                flat = (
-                    np.concatenate(vla[tag]) if vla[tag]
-                    else np.zeros(0, dtype=np.float32)
-                )
-                sizes = np.array([a.size for a in vla[tag]], dtype=np.int64)
-                offs = np.concatenate([[0], np.cumsum(sizes)]).astype(np.int64)
                 grp = h5.create_group(f"tmpl_{tag}")
+                total = int(offs[tag][-1])
                 # chunks bounded independently of stamp size: a 1 Mi-element
                 # chunk is 4 MiB, and a stamp spans at most a few of them
                 # uncompressed: gzip-1 bought 26% on a full field (11.2 ->
@@ -2437,11 +2587,19 @@ class Pipeline:
                 # working products read back by the diagnostics, not archive.
                 # Chunked anyway, so a single-source read still touches only
                 # its own chunks.
-                grp.create_dataset(
-                    "pixels", data=flat, dtype="f4",
-                    chunks=(min(1 << 20, max(flat.size, 1)),),
+                pixels[tag] = grp.create_dataset(
+                    "pixels", shape=(total,), dtype="f4",
+                    chunks=(min(1 << 20, max(total, 1)),),
                 )
-                grp.create_dataset("offset", data=offs, dtype="i8")
+                grp.create_dataset("offset", data=offs[tag], dtype="i8")
+            for i, t_lo in enumerate(conv):
+                t_hi = hi_by_id.get(int(t_lo.id))
+                for tag, t in (("hi", t_hi), ("lo", t_lo)):
+                    o0, o1 = int(offs[tag][i]), int(offs[tag][i + 1])
+                    if o1 > o0:
+                        pixels[tag][o0:o1] = np.asarray(
+                            t.data, dtype=np.float32
+                        ).ravel()
             src = h5.create_group("sources")
             for name, values in rows.items():
                 arr = np.asarray(values)
@@ -3834,12 +3992,13 @@ class Pipeline:
         logger.info("Pipeline (start) memory: %.1f GB", memory())
         logger.info("Pipeline config: %s", config)
 
-        # test for NaN values in images and weights
-        for i in range(len(images)):
-            if images[i] is None:
-                assert np.all(np.isfinite(images[i])), "Image contains NaN values"
-            if weights[i] is not None:
-                assert np.all(np.isfinite(weights[i])), "Weights contain NaN values"
+        # No whole-array finiteness sweep here. The image branch of the old
+        # check was inverted (it fired only when the image was None, and then
+        # np.isfinite(None) raises), and the weight branch touched all 876 Mpx
+        # of the detection ivar to re-check a guard load_data:1649-1664 has
+        # already applied -- it zeroes non-finite pixels in image AND weight
+        # so they carry no information. Templates are still asserted finite
+        # after extraction (_prepare_hi_templates).
 
         with self._phase("catalog"):
             cat = self._fit_catalog(config)
@@ -4043,11 +4202,13 @@ class Pipeline:
                     released, memory(),
                 )
 
-            # build model in res first, then subtract from image. np.zeros,
-            # not np.zeros_like: zeros_like memsets every page, which on a
-            # trial run materialises the whole reference grid.
+            # build model in res first, then subtract from image. File-backed
+            # when the run has an output path (see _allocate_residual);
+            # np.zeros, not np.zeros_like, for the in-memory case: zeros_like
+            # memsets every page, which on a trial run materialises the whole
+            # reference grid.
             with self._phase("residual"):
-              res = np.zeros(images[ifilt].shape, dtype=images[ifilt].dtype)
+              res = self._allocate_residual(images[ifilt], ifilt)
               for s in scenes:
                 sl = _slices_from_bbox(s.bbox)
                 res[sl] += s.model_image()  # adds models in place
@@ -4059,6 +4220,16 @@ class Pipeline:
             fluxes = [t.flux for t in templates]
             errs = [t.err for t in templates]
             err_pred = Templates.predicted_errors(templates, weights_i)
+
+            # Last read of the band's inverse variance in the fit itself.
+            # Nothing after this point -- residual, aperture photometry,
+            # catalog update, write_outputs -- touches it except the scene
+            # figures, so a run that draws none can drop it here already;
+            # write_outputs releases it for the rest, after the figures and
+            # before the stamps.
+            if not self._scene_pixels_needed():
+                weights_i = None
+                self._release_scene_weights(scenes)
             throughput = _filter_psf_throughput(
                 psfs[ifilt] if psfs is not None else None,
                 None if psf_throughputs is None else psf_throughputs[ifilt],

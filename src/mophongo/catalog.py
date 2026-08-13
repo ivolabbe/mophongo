@@ -207,6 +207,47 @@ def coarse_source_mask(
     return src_mask
 
 
+def _row_bands(shape: tuple[int, int], nbytes: int = 1 << 25):
+    """Yield row slices covering ``shape``, each about ``nbytes`` of float32.
+
+    Whole-array passes over a mosaic-sized image cost a full-resolution
+    temporary per operand; banding bounds them at the band instead, at no
+    change in result.
+    """
+    ny, nx = int(shape[0]), int(shape[1])
+    band = max(1, nbytes // max(4 * nx, 1))
+    for y0 in range(0, ny, band):
+        yield slice(y0, min(y0 + band, ny))
+
+
+def _as_float(a: np.ndarray) -> np.ndarray:
+    """Return ``a`` as a floating-point array without a byte-order copy.
+
+    ``np.asarray(a, dtype=np.float32)`` on a big-endian FITS memory map copies
+    the whole array, because ``'>f4'`` and ``'float32'`` are different dtypes.
+    Any float dtype works for everything downstream, so only a genuinely
+    non-float input (an integer weight map) is converted.
+    """
+    arr = np.asarray(a)
+    return arr if arr.dtype.kind == "f" else arr.astype(np.float32)
+
+
+def _valid_mask(s: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """Boolean mask of pixels with finite science and positive finite weight.
+
+    One preallocated array filled band by band. The whole-array expression
+    holds two masks at once plus the temporaries of each ``isfinite`` and the
+    ``> 0`` comparison -- four full-resolution booleans to produce one.
+    """
+    valid = np.empty(s.shape, dtype=bool)
+    for rows in _row_bands(s.shape):
+        wb = w[rows]
+        np.isfinite(wb, out=valid[rows])
+        valid[rows] &= wb > 0
+        valid[rows] &= np.isfinite(s[rows])
+    return valid
+
+
 def get_bg_and_ivar(
     sci: np.ndarray,
     wht: np.ndarray,
@@ -264,14 +305,23 @@ def get_bg_and_ivar(
     # keeps the mask off the noise field
     min_npixels_faint = 3
 
-    s = np.asarray(sci, dtype=np.float32)
-    w = np.asarray(wht, dtype=np.float32)
-    valid_w = np.isfinite(w) & (w > 0)
+    # Byte order is left alone. FITS stores big-endian, so a memory-mapped
+    # float32 mosaic arrives as '>f4', and np.asarray(x, dtype=np.float32)
+    # differs from it in byte order and therefore COPIES -- 3.5 GB per input on
+    # a MINERVA detection grid, which undoes the memory mapping upstream for
+    # the length of this call. Nothing below needs native order: the block
+    # means read one band at a time and cast on the way into their float32
+    # output, and the returned ivar is written with an explicit float32 dtype.
+    s = _as_float(sci)
+    w = _as_float(wht)
     # One common mask: a pixel counts only where BOTH science and weight are
     # finite. Non-finite science is replaced here rather than downstream --
     # a single NaN otherwise spreads over its whole block in the mean, into
     # the median and MAD, and makes every statistic and both outputs NaN.
-    valid = valid_w & np.isfinite(s)
+    # Built one band at a time into a single array: the whole-array form holds
+    # two masks plus the temporaries of `isfinite` and `> 0`, which is four
+    # full-resolution booleans (3.5 GB on the detection grid) to produce one.
+    valid = _valid_mask(s, w)
 
     # 1) coarse block means, taken over the valid pixels of each block, so a
     #    bad pixel costs its block sample size instead of poisoning it.
@@ -365,12 +415,16 @@ def get_bg_and_ivar(
         )
         sigma_true = np.float32(1.0)
 
-    # 7) rescale full-res weights.  ``valid``, not ``valid_w``: the weights used
-    # above were masked by both, and a pixel whose science value is non-finite
-    # carries no information regardless of what its weight claims.
+    # 7) rescale full-res weights, masking on ``valid``: a pixel whose science
+    # value is non-finite carries no information regardless of what its weight
+    # claims. Scale and mask in one banded pass -- `where=~valid` would build a
+    # second full-resolution boolean (0.88 GB on the detection grid) for a
+    # mask that already exists.
     scale = np.float32(1.0) / (sigma_true * sigma_true + np.float32(1e-30))
-    ivar_new = np.multiply(w, scale, dtype=np.float32)
-    np.copyto(ivar_new, np.float32(0.0), where=~valid)
+    ivar_new = np.empty(w.shape, dtype=np.float32)
+    for rows in _row_bands(w.shape):
+        np.multiply(w[rows], scale, out=ivar_new[rows], dtype=np.float32)
+        np.copyto(ivar_new[rows], np.float32(0.0), where=np.logical_not(valid[rows]))
     # sigma_true = 1 exactly when the weight map is a calibrated inverse
     # variance; treat a 20% band as "consistent" (drizzle correlation and
     # normalisation conventions both land inside it when the map is honest)
@@ -406,7 +460,15 @@ def get_bg_and_ivar(
 
     # Linearly upsample bgmask to full resolution
     bg_img = expand_to_full(bg_img_bin.astype(np.float32), step, s.shape)
-    bg_img[~valid_w] = 0.0  # zero out invalid pixels
+    # zero out invalid pixels -- on the WEIGHT alone, unlike ivar above: where
+    # the weight is good the background is defined whatever the science pixel
+    # does, and a lone NaN should not punch a hole in a smooth surface. Banded,
+    # and recomputed rather than kept: this is the only use, it runs only when
+    # a full-resolution background was asked for, and holding the mask from the
+    # top of the function costs a full-resolution boolean throughout.
+    for rows in _row_bands(bg_img.shape):
+        wb = w[rows]
+        bg_img[rows][~(np.isfinite(wb) & (wb > 0))] = 0.0
 
     return bg_img, ivar_new
 

@@ -818,28 +818,38 @@ This file tracks future desired features, checks, and investigations.
     the widest); float32, or accumulate straight into the residual.
   - [ ] Bound scene *extent*, not only `scene_max_size`: the widest buffer came
     from a 25-template scene whose anchors spanned 18.8 Mpx.
-  - [ ] `write_stamps` still builds the complete `vla` list before writing --
-    a full extra copy of every stamp (12 GB full-field) at the end of the run.
-    `8ca21f5` moved the file to HDF5, so the per-source offsets a scene-local
-    read needs already exist and only the incremental *write* is left: append
-    each band's flat buffer as tiles complete rather than concatenating at the
-    end. That turns the stamps file into working storage for the streaming
-    solve, not just an output.
+  - [x] `write_stamps` no longer builds the complete `vla` list before writing
+    (2026-08-13) -- that was a full extra copy of every stamp, 12 GB
+    full-field, at the end of the run. Offsets come from the shapes recorded in
+    the first pass and each stamp is written into its slot. What remains for
+    the streaming solve is appending as *tiles* complete rather than as
+    templates complete, which needs the tiled build to exist first.
   - [ ] Upsampled band on demand instead of materialised: `_upsample_boxed`
     holds 7 GB for the sci/ivar pair and is where COSMOS OOMs. The array is a
     pure function of the lo-res pixels and is only ever read as
     `image[slices_original]`.
-  - [ ] Residual as a `np.memmap` over the output file rather than 3.5 GB of
-    dirty anonymous pages.
-  - [ ] Release the dead weights after `run:4061`. `weights_i` (3.5 GB
-    upsampled ivar) is last read by `Templates.predicted_errors`; nothing in
-    the residual, aperture photometry, catalog update, `write_outputs` or
-    `write_stamps` touches it again. It survives because every `Scene` holds
-    `self.weights` (`scene.py:957`) and `self.all_scenes` holds every scene, so
-    it sits through the stamp write -- the stage where the full-field runs die.
-    Conditional on `scene_plots`/diagnostics being off: `Scene.plot` and
-    `Scene.residual_image` do read it (`scene.py:1302,1553`). See
-    `docs/MEMORY_LIFETIMES.md`.
+  - [x] Residual as a `np.memmap` over the output file rather than 3.5 GB of
+    dirty anonymous pages (2026-08-13; `Pipeline._residual_memmap`).
+  - [x] Release the band weight map once nothing reads it (2026-08-13).
+    `weights_i` (3.5 GB upsampled ivar) was last read by
+    `Templates.predicted_errors` but held by every `Scene`, so it sat through
+    the stamp write. `Pipeline._release_scene_weights` clears it; `run` calls
+    it after `predicted_errors` when no scene figures are drawn, and
+    `write_outputs` after the figures. See `docs/MEMORY_LIFETIMES.md`.
+  - [x] `write_outputs` writes the stamps last (2026-08-13), after the scene
+    figures rather than before, so the weights can go before the run's other
+    memory peak and a run that dies in the stamp write keeps its figures.
+  - [x] Residual accumulates into its own output file (2026-08-13).
+    `_residual_memmap` writes the header, extends the file sparsely and maps
+    the data section; `write_outputs` flushes instead of writing. Falls back to
+    anonymous memory for API-driven runs and on any mapping error.
+  - [x] Repair replays its patch table onto a fresh copy-on-write map
+    (2026-08-13) instead of holding the two full-field mosaics
+    `repair_saturated_holes` returns (`saturate.py:733`). Fresh and cache-reuse
+    paths now share `_apply_repair_patches`.
+  - [x] `write_stamps` streams (2026-08-13): offsets from the recorded shapes,
+    datasets created at final size, each stamp written into its slot. Removes
+    the 12 GB `vla`-plus-concatenate copy at the end of the run.
   - [ ] Avoid the byte-order copies in `get_bg_and_ivar`. FITS is big-endian,
     so a memory-mapped float32 image arrives as `>f4` and
     `np.asarray(x, dtype=np.float32)` (`catalog.py:267-268`) copies rather than
@@ -848,17 +858,12 @@ This file tracks future desired features, checks, and investigations.
     upstream. The full-resolution arrays are only used by `_valid_block_means`,
     a strided median sample and the final `w * scale`, all of which work on
     `>f4` directly.
-  - [ ] Detection ivar as `(memmapped wht, scale, invalid mask)` rather than a
-    3.5 GB anonymous array: the calibration is one scalar plus a mask
+  - [ ] ivar as `(memmapped wht, scale, invalid mask)` rather than a 3.5 GB
+    anonymous array: the calibration is one scalar plus a mask
     (`catalog.py:369-372`). Composes with the on-demand upsampled band above --
     with both, neither ivar array exists.
-  - [ ] Repair path: reopen the cached repaired mosaic as a memory map instead
-    of holding `rep["sci"]` anonymously. The cache file is already written at
-    `load_data:1599`.
-  - [ ] Fix or delete the `isfinite` sweep at `pipeline.py:3838-3842`. The
-    image branch is inverted (fires only when the image is `None`, then calls
-    `np.isfinite(None)`); the weight branch touches all 876 Mpx of `ivar_hi`
-    and duplicates the guard `load_data:1652-1664` already applied.
+  - [ ] Drop `weights[1]` after the upsample, which needs `source_products`
+    pointed at the reference-grid array rather than the native one.
   - [ ] Timers inside `Scene.solve`. `56530f2` added the per-section wall-time
     breakdown for `run()`, which covers the outer split (templates, convolve,
     generate scenes, astrometry passes, final flux solve, residual). Still

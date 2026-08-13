@@ -55,9 +55,16 @@ def run_step(args: list[str], dry: bool) -> None:
         raise SystemExit(f"failed: {printable}")
 
 
+#: A per-band run config is named ``<field>_f<band>w.json``. The directory
+#: also holds inputs that are not RunConfigs (``minerva_sed_fields.json``),
+#: which would fail deep inside arcify with a confusing key error.
+BAND_CONFIG = re.compile(r"^[a-z0-9]+_f\d+w$")
+
+
 def configs_for(fields: list[str] | None) -> list[Path]:
-    """The local MINERVA configs to run, optionally restricted to fields."""
-    found = sorted((HERE.parent / "minerva").glob("*.json"))
+    """The local MINERVA per-band configs to run, optionally by field."""
+    found = [p for p in sorted((HERE.parent / "minerva").glob("*.json"))
+             if BAND_CONFIG.match(p.stem)]
     if fields:
         found = [p for p in found if p.stem.split("_")[0] in fields]
     if not found:

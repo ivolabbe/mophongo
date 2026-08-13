@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import subprocess
 import sys
 import tarfile
@@ -178,8 +179,19 @@ def do_setup(args: argparse.Namespace) -> None:
     print(first_log(ids)[-2000:])
 
 
+def session_name(*parts: str) -> str:
+    """A skaha session name: alphanumerics and ``-`` only.
+
+    Run names carry underscores and dots (``uds_f770w_v1.0``); skaha rejects
+    both with a 400 that names the field but not the value, so normalise here
+    rather than at each call site.
+    """
+    raw = "-".join(str(p) for p in parts if p)
+    return re.sub(r"[^A-Za-z0-9-]+", "-", raw).strip("-")
+
+
 def stage_job(name: str) -> str:
-    return launch(f"mophongo-stage-{name.replace('_', '-')}", "stage.sh", 2, 8,
+    return launch(session_name("mophongo-stage", name), "stage.sh", 2, 8,
                   {"RUN": RUN, "CFG": name})
 
 
@@ -263,7 +275,7 @@ def do_run(args: argparse.Namespace) -> None:
     ids = []
     for name in args.names:
         cores = cores_for(name, args.cores)
-        ids.append(launch(f"mophongo-{name.replace('_', '-')}", "run.sh", cores, args.ram,
+        ids.append(launch(session_name("mophongo", name), "run.sh", cores, args.ram,
                           {"RUN": RUN, "CFG": name}))
     if args.no_wait:
         return

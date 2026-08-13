@@ -306,13 +306,27 @@ class SceneFitter:
         """Return ``sqrt(diag(A^{-1}))`` — 1-σ errors with off-diagonal coupling.
 
         ``A`` is expected SPD (a whitened normal matrix or its Schur
-        complement). For scene-scale problems (``n ≤ dense_threshold``)
-        a single dense inversion is fastest; above that we factor once
-        with sparse LU and back-solve unit columns one at a time.
+        complement). The sparse path -- factor once, back-solve one unit
+        column at a time -- only pays when the matrix really is sparse, so the
+        dispatch is on what ``A`` *is*, not on its size alone.
+
+        That distinction matters because the two callers pass different
+        things. The flux-only solve passes the whitened normal matrix, which is
+        genuinely sparse (each template overlaps a handful of neighbours). The
+        joint flux+shift solve passes the Schur complement
+        ``S_w = A_w - AB_w AB_w^T``, and that outer product is fully populated,
+        so ``S_w`` arrives as a dense ndarray. Routing it through
+        ``csc_matrix`` + ``splu`` factorises a dense matrix as though it were
+        sparse: for a 1718-template scene, 118 MB and n back-solves (5.1
+        Gflop) against 47 MB and one LAPACK inversion (1.7 Gflop).
         """
         n = A.shape[0]
+        if not sp.issparse(A):
+            # dense in, dense out: converting to csc here would only add the
+            # index arrays of an n^2-nonzero matrix on top of the values
+            return np.sqrt(np.maximum(np.diag(np.linalg.inv(np.asarray(A))), 1e-12))
         if n <= dense_threshold:
-            M = A.toarray() if sp.issparse(A) else np.asarray(A)
+            M = A.toarray()
             diag = np.diag(np.linalg.inv(M))
         else:
             Acsc = A.tocsc() if sp.issparse(A) else sp.csc_matrix(A)

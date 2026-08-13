@@ -236,12 +236,23 @@ def merge_small_scenes(
     order: int = 1,
     minimum_bright: int = 10,
     max_merge_radius: float = np.inf,  # pixels
+    max_size: int | None = None,
     max_iter: int = 64,
 ) -> tuple[np.ndarray, int]:
     """
     Merge scenes below the bright threshold into their nearest scene.
     Uses Shapely 2.x STRtree.query_nearest (bulk) and unions all pairs per round.
     Returns (1-based labels, n_scenes).
+
+    ``max_size`` caps the merged scene, in templates. Without it the cap that
+    :func:`build_scene_tree_from_normal` applies is only advisory: it splits
+    oversized components, and then this pass merges them straight back past the
+    limit chasing ``minimum_bright``. A MINERVA UDS run configured with
+    ``scene_max_size=800`` produced a 1718-template scene that way. The cap
+    wins over ``minimum_bright``: a scene that cannot merge without breaching
+    it is left short of anchors rather than grown without bound, because the
+    solve cost is quadratic in the scene size (the joint path's Schur
+    complement is dense).
     """
 
     # Work with compact 0..K-1 labels for bincounts
@@ -309,6 +320,10 @@ def merge_small_scenes(
 
         # -------- union all pairs in one go (prevents A↔B label swaps) -------
         parent = np.arange(K, dtype=int)
+        # running membership per root, so the cap is tested against the scene
+        # as it grows within this round, not against the pre-merge pair
+        size = counts.copy()
+        cap = np.inf if max_size is None else int(max_size)
 
         def find(a: int) -> int:
             # path compression
@@ -317,14 +332,33 @@ def merge_small_scenes(
                 a = parent[a]
             return a
 
+        merged, blocked = 0, 0
         for u, v in zip(src, dst):
             ru, rv = find(u), find(v)
-            if ru != rv:
-                # union by simple heuristic: attach smaller index to larger
-                if ru < rv:
-                    parent[ru] = rv
-                else:
-                    parent[rv] = ru
+            if ru == rv:
+                continue
+            if size[ru] + size[rv] > cap:
+                blocked += 1
+                continue
+            # union by simple heuristic: attach smaller index to larger
+            if ru < rv:
+                parent[ru] = rv
+                size[rv] += size[ru]
+            else:
+                parent[rv] = ru
+                size[ru] += size[rv]
+            merged += 1
+
+        if merged == 0:
+            # nothing moved, so the centroids that produced these pairs will
+            # not move either and no later round can do better
+            if blocked:
+                logger.info(
+                    "[scenes] %d underfilled scene(s) left unmerged: every "
+                    "candidate merge would exceed max_size=%d",
+                    len(under), int(cap),
+                )
+            break
 
         # Relabel all members by representative
         labs = np.fromiter((find(int(li)) for li in labs), dtype=int, count=labs.size)
@@ -762,6 +796,7 @@ def generate_scenes(
         bright_mask[keep],
         minimum_bright=minimum_bright,
         max_merge_radius=max_merge_radius,
+        max_size=max_size,
     )
     labels = np.zeros(len(templates), dtype=labels_k.dtype)
     labels[keep] = labels_k

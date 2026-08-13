@@ -103,13 +103,12 @@ This file tracks future desired features, checks, and investigations.
   (2026-08-12), which already makes bands 2..N of a campaign reload band
   1's repair; the footprint cut makes band 1 itself cheap on small
   patches.
-- [ ] `make_minerva_configs.py` must write `wht_hi`: the scheme-based
-  template builds require the detection weight map, and the automatic
-  `_sci`->`_wht` substitution cannot see through the `_bkgsub` suffix of the
-  MINERVA `sci_hi` names. The v2/v3 verification driver injects the derived
-  `..._drc_wht.fits` path per config as a stopgap
-  (`examples/minerva/run_verification_v2.py::prep_configs`); fold that into
-  the generator and regenerate the 17 configs.
+- [x] `make_minerva_configs.py` writes `wht_hi` (verified 2026-08-13): the
+  scheme-based template builds require the detection weight map, and the
+  automatic `_sci`->`_wht` substitution cannot see through the `_bkgsub`
+  suffix of the MINERVA `sci_hi` names. The generator emits it directly and
+  all 53 CANFAR configs on disk carry it, so the verification driver's
+  per-config stopgap is no longer load-bearing.
 - [ ] F1280W scene 1: convolved templates lose their aperture flux. In the
   v7 run 612 of the 618 sources in scene 1 (a compact block at x 10982-12254,
   y 3712-5157) have `tot_stamp_1` ~ 7.96, i.e. only 12.6% of the convolved

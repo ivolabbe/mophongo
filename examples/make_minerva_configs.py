@@ -311,8 +311,12 @@ def band_configs(rel: Release) -> list[dict]:
                     "scene_minimum_bright": 5,
                     # larger scenes before the local threshold bisection kicks
                     # in, and no long-range gluing of underfilled scenes
-                    # (radius in 40 mas reference pixels; 1000 px = 40")
-                    "scene_max_size": 800,
+                    # (radius in 40 mas reference pixels; 1000 px = 40").
+                    # The cap now also binds through merge_small_scenes, and a
+                    # scene costs quadratically in its size (the joint solve's
+                    # Schur complement is dense), so it is a real ceiling
+                    # rather than advice; matches FitConfig's default.
+                    "scene_max_size": 1000,
                     "scene_max_merge_radius": 1000,
                     "aperture_diam": APERTURE_DIAM_ARCSEC[band],
                 },

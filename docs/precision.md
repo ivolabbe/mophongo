@@ -10,11 +10,19 @@ adding code.
 
 ## The rule
 
-**Narrow anything that only *stores* values derived from float32 pixels and is
-consumed by a reduction or written into a float32 array. Keep float64 wherever
-the array *is* the arithmetic of a solve** -- a normal-equation matrix, its
-whitening or factorisation, a covariance or error propagation, or WCS and sky
-arithmetic.
+**Anything held at scale is single precision. Use float64 only where the extra
+precision is needed.**
+
+"At scale" means either one large array -- an image, a weight map, a scene
+plane -- or a large number of small ones, which in practice means stamps: a
+full field carries 138,610 templates, so a stamp dtype is a field-scale
+decision even though each stamp is 40 kB.
+
+The precision *is* needed wherever the array **is** the arithmetic of a solve:
+a normal-equation matrix, its whitening or factorisation, a covariance or error
+propagation, or WCS and sky arithmetic. Everywhere else -- anything that only
+*stores* values derived from float32 pixels and is consumed by a reduction or
+written into a float32 array -- narrow it.
 
 Two mechanical consequences that any narrowing has to respect.
 

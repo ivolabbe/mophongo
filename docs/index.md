@@ -45,6 +45,7 @@ fitting
 catalog
 preprocessing
 simulation
+precision
 ```
 
 ```{toctree}

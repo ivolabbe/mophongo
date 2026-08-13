@@ -1530,13 +1530,18 @@ class Scene:
         if self.solution is None:
             raise RuntimeError("No solution available")
         bb = self.bbox
-        model_scene = np.zeros((bb[1] - bb[0] + 1, bb[3] - bb[2] + 1), dtype=float)
+        model_scene = np.zeros((bb[1] - bb[0] + 1, bb[3] - bb[2] + 1), dtype=np.float32)
         for t in self.templates:
             sl = t.slices_original
             sl_local_scene = (
                 slice(sl[0].start - bb[0], sl[0].stop - bb[0]),
                 slice(sl[1].start - bb[2], sl[1].stop - bb[2]),
             )
+            # t.flux is an np.float64 out of the solve, so this product forms in
+            # float64 and rounds once on the accumulate. Wrapping it in float()
+            # would make it a weak scalar (NEP 50), computing the product in
+            # float32 and rounding twice, for no saving: the temporary is one
+            # stamp either way, and the buffer above is where the memory is.
             model_scene[sl_local_scene] += t.flux * t.data[t.slices_cutout]
         return model_scene
 

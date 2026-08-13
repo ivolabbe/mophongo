@@ -344,7 +344,11 @@ def representative_psf(psf, ee_fraction: float = 0.95) -> np.ndarray:
         if arr.ndim != 3:
             raise ValueError(f"PSF must be 2-D, a 3-D cube, or a PSFRegionMap; got {arr.ndim}-D")
         stack = arr
-    arrays = [np.asarray(p, dtype=float) for p in stack]
+    # keep the stored width: a 1694 x 100 x 100 detection cube is 68 MB as
+    # float32 and 136 MB upcast, and every consumer below (psf_ee_radius_pix,
+    # wren_fill_radius) casts to float64 internally anyway, so the upcast only
+    # doubled the peak of a function that returns one member of the stack
+    arrays = [np.asarray(p) for p in stack]
     if not arrays:
         raise ValueError("PSF map contains no PSFs")
     return max(arrays, key=lambda p: psf_ee_radius_pix(p, ee_fraction))

@@ -95,6 +95,13 @@ class PSFRegionMap:
     # ───────────── private derived constants ──────────────
     def __post_init__(self) -> None:
         self._area_min = self.area_factor * self.buffer_tol
+        # Stamps keep their stored width here. Narrowing them looks like a
+        # 117 MB saving on a matching-kernel cube, but PSFRegionMap also holds
+        # the band PSF maps, whose finite stamp sums are the throughput
+        # metadata that converts a fitted amplitude to a total flux -- at
+        # float32 a unit-normalised stamp sums to 1 +/- 5e-9, which is enough
+        # to push a reported encircled energy above 1. The convolution width
+        # is matched at the point of use instead (Templates.convolve_templates).
         self._rebuild_spatial_index()
         self._ee_src: int | None = None
         self.refresh_ee()
@@ -291,6 +298,7 @@ class PSFRegionMap:
         psfs = None
         psfs_file = geojson_path.replace('.geojson', '.fits')
         if os.path.exists(psfs_file):
+            # __post_init__ narrows this to float32; see the note there
             psfs = fits.getdata(psfs_file)
         else:
             logging.warning(f"No PSFs found for {geojson_path}, using None.")

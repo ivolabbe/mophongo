@@ -66,17 +66,20 @@ def build_normal(
 
     # diagonals + RHS + bboxes
     boxes = []
-    norms = np.empty(n, dtype=float)
     for i, tmpl in enumerate(templates):
         sl_i = tmpl.slices_original
         cut_i = tmpl.data[tmpl.slices_cutout]
         w_i = weights[sl_i]
         img_i = image[sl_i]
 
-        # diag and rhs
-        wi = float(np.sum(cut_i * w_i * cut_i))
-        bi = float(np.sum(cut_i * w_i * img_i))
-        norms[i] = wi
+        # diag and rhs, accumulated in float64. The operands are float32
+        # stamps and weights, and np.sum without dtype= accumulates in the
+        # input width -- so these entries carried ~7 significant digits into
+        # a float64 matrix, and the whitening, Cholesky and spsolve chain
+        # downstream inherited that. The sum is ~1e4 terms over one stamp
+        # footprint, so the wider accumulator is free.
+        wi = float(np.sum(cut_i * w_i * cut_i, dtype=np.float64))
+        bi = float(np.sum(cut_i * w_i * img_i, dtype=np.float64))
         ata[i, i] = wi
         atb[i] = bi
 
@@ -124,7 +127,7 @@ def build_normal(
             w = weights[inter]
             arr_i = ti.data[sl_i_local]
             arr_j = tj.data[sl_j_local]
-            val = float(np.sum(arr_i * arr_j * w))
+            val = float(np.sum(arr_i * arr_j * w, dtype=np.float64))
             ata[i, j] = val
             ata[j, i] = val
 

@@ -13,17 +13,22 @@ a slow first run.
 
 ## Where runs live
 
-Set the run root before anything else. The default is `/arc/home/<user>/run`,
-which is fine for trial patches but has a quota of a few hundred GB — one
-full-field campaign over a release needs several times that, and staged inputs
-alone are 61 GB.
+The run root defaults to `/arc/projects/minerva/ifl` and nothing needs to be
+exported. A run writes about 12 GB per band — a 3.5 GB residual and 8–11 GB of
+stamps — so a 17-band release lands near 200 GB, and staged inputs alone are
+61 GB. `/arc/home` carries a few hundred GB for everything a user owns, and
+has already been filled this way once.
+
+A tree under `/arc/home` is therefore **refused**, not warned about: the
+failure it causes is silent until a quota stops a campaign halfway through.
+Point the tree elsewhere under `/arc/projects` if you want to:
 
 ```bash
-export CANFAR_RUN=/arc/projects/minerva/ifl
+export CANFAR_RUN=/arc/projects/minerva/ifl_test
 ```
 
 Project space is shared with the collaboration and has no comparable limit, so
-that is where campaigns belong; a home run tree is for experiments. Both
+that is where campaigns belong. Both
 `submit.py` and `arcify.py` read `CANFAR_RUN`, and the arc paths baked into a
 rewritten config come from it — so if you change it, re-run `arcify.py`.
 
@@ -144,7 +149,8 @@ $CANFAR_RUN/                        e.g. /arc/projects/minerva/ifl
 ```
 
 `/arc/home/<user>` keeps only `.ssh`, `.ssl` and a README pointing here: its
-quota is far too small for a campaign's outputs.
+quota is far too small for a campaign's outputs, which is why `runroot.py`
+refuses a run tree there.
 
 ## Notes
 
@@ -178,7 +184,7 @@ quota is far too small for a campaign's outputs.
   file movement should not be a container job at all. A 1-core `sync` has sat
   Pending for half an hour to do seconds of copying; through the mount the same
   unpack takes about twenty seconds. `sync` therefore uses the mount when it
-  finds one — `$CANFAR_RUN_LOCAL`, or the documented `~/canfar_home` — and
+  finds one — `$CANFAR_RUN_LOCAL`, or `~/canfar_projects`/`~/canfar_home` — and
   `--job` forces a container. Reserve jobs for work that needs one. The caveat
   is the same either way: rewriting source under a running job is only safe
   because already-running jobs keep the code they imported.

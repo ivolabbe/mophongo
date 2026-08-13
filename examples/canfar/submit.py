@@ -344,18 +344,38 @@ def run_root_local() -> Path | None:
     Queue latency dominates small work here: a 1-core sync job has sat Pending
     for half an hour to do a few seconds of file copying. The sshfs mount is
     writable, not just readable, so the same unpack takes about twenty seconds
-    from the laptop. ``$CANFAR_RUN_LOCAL`` names the mounted run tree
-    explicitly; otherwise the documented mount of the user's home
-    (``canfar-mount.sh /home/<user> ~/canfar_home``) is tried.
+    from the laptop.
+
+    ``$CANFAR_RUN_LOCAL`` names the mounted run tree explicitly and is the
+    reliable route. Otherwise the conventional mount points are tried, in the
+    order that matches the run tree: ``~/canfar_projects`` for a tree under
+    ``/arc/projects`` (the default since the run tree moved off home), and
+    ``~/canfar_home`` for one under ``/arc/home``. Each mirrors the arc path
+    below its own root -- ``canfar-mount.sh /projects/minerva
+    ~/canfar_projects`` and ``canfar-mount.sh /home/<user> ~/canfar_home``.
+
+    Returns ``None`` when nothing is mounted, which sends the caller back to a
+    container. Slower, never wrong.
     """
     explicit = os.environ.get("CANFAR_RUN_LOCAL")
     if explicit:
         path = Path(explicit).expanduser()
         return path if path.is_dir() else None
-    if not re.match(r"^/arc/home/[^/]+/", RUN):
-        return None
-    path = Path.home() / "canfar_home" / RUN.split("/", 4)[-1]
-    return path if path.is_dir() else None
+    # A mount stands for some prefix of the arc path, and which prefix depends
+    # on what was passed to canfar-mount.sh. Rather than encode that, try each
+    # suffix of the run tree under each mount and take the one that exists:
+    # /arc/projects/minerva/ifl under ~/canfar_projects matches whether the
+    # mount was rooted at /projects or at /projects/minerva.
+    parts = RUN.strip("/").split("/")            # arc, projects, minerva, ifl
+    for mount in ("canfar_projects", "canfar_home"):
+        base = Path.home() / mount
+        if not base.is_dir():
+            continue
+        for start in range(1, len(parts)):
+            candidate = base.joinpath(*parts[start:])
+            if candidate.is_dir():
+                return candidate
+    return None
 
 
 def do_sync(args: argparse.Namespace) -> None:

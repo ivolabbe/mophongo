@@ -158,6 +158,30 @@ run tree /fred/oz030/ilabbe/run on ilabbe@nt.swin.edu.au
 `--prep-time` sets the repair job's walltime (default 4 h) separately from
 `--time` for the fits (default 24 h).
 
+## Where a run tree lives
+
+CANFAR's run root defaults to `/arc/projects/minerva/ifl`, and a tree under
+`/arc/home` is refused outright (`examples/canfar/runroot.py`). The arithmetic
+forces it: a run writes roughly 12 GB per band — a 3.5 GB residual and 8–11 GB
+of stamps — so a 17-band release approaches 200 GB, while `/arc/home` carries a
+few hundred GB for everything a user owns and has already been filled this way
+once. A quota that stops a campaign halfway through is worse than a refusal at
+submission, so this fails loudly rather than warning.
+
+`$CANFAR_RUN` moves the tree elsewhere under `/arc/projects`. The whole tree
+moves together — staged inputs, ePSF grids, the venv, the source and the
+outputs — because splitting them buys nothing and makes the run tree harder to
+reason about than a single root.
+
+OzStar has no equivalent problem: `/fred/oz030/ilabbe` is project storage
+already.
+
+The `/arc` sshfs mount is what makes file movement fast — about twenty seconds
+against a half-hour queue wait for a container to do the same copying — and
+`submit.py` uses it whenever it can find the run tree beneath
+`$CANFAR_RUN_LOCAL`, `~/canfar_projects` or `~/canfar_home`, falling back to a
+container otherwise.
+
 ## Memory
 
 Not a flag you pass. `submit.py`'s `ram_for()` resolves it per field —

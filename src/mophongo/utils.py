@@ -30,25 +30,73 @@ logger = logging.getLogger(__name__)
 
 # remaps (center-of-pixel convention; origin at pixel centers, 0-based)
 
-def as_label_array(segmap: np.ndarray) -> np.ndarray:
-    """Return ``segmap`` as an integer label array.
+def as_label_array(segmap: np.ndarray, band_rows: int | None = None) -> np.ndarray:
+    """Return ``segmap`` as an integer label array, casting floats to ``int32``.
 
     Segmaps are label images, but releases differ on how they store them: the
-    MINERVA UDS and EGS maps are ``int32`` while COSMOS ships the same labels as
-    ``float64``. ``SegmentationImage`` rejects anything non-integer, so cast
+    MINERVA UDS and EGS maps are ``int32`` while COSMOS ships the same labels
+    as ``float64``. ``SegmentationImage`` rejects anything non-integer, so cast
     when the values are whole numbers and refuse when they are not, rather than
-    truncating real fractions silently.
+    truncating real fractions silently. A label image never needs more than
+    ``int32``, so that is the target: a mosaic-sized COSMOS map is 4.97 GB as
+    stored and 2.48 GB as labels.
+
+    An integer input is returned untouched, whatever its width or byte order --
+    MINERVA UDS and EGS arrive as ``>i4``, which is not the native ``int32``
+    dtype but is a perfectly good label type. Narrowing it looks like a saving
+    and is not: the full-field read hands over a memmap view, so the array
+    costs no anonymous memory at all, and rewriting it as native ``int32``
+    would allocate 3.5 GB that only swap can relieve. Measured on the UDS map
+    (876 Mpx), holding the memmap peaks at 3.6 GB of numpy allocation and
+    retains 0.15 GB, against 4.6 GB peak and 3.65 GB retained for the narrowed
+    copy; 40k stamp lookups take 0.35 s either way, so the byte swap on access
+    costs nothing worth having. (The 3.5 GB transient in both is photutils'
+    ``find_objects``, which does need native order.)
+
+    Validation and cast run one band of rows at a time. Whole-array,
+    ``arr[np.isfinite(arr)]`` copies every finite pixel, ``np.rint`` copies the
+    array again and ``np.nan_to_num`` a third time -- roughly 30 GB of
+    temporaries for a 621 Mpx COSMOS map.
+
+    Args:
+        segmap: Label image, integer or whole-valued float.
+        band_rows: Rows validated and cast per pass. Default sizes the band to
+            about 16 Mpx, so the temporaries stay bounded on a wide mosaic.
+
+    Returns:
+        The labels as an integer array; the input itself when already integer.
+
+    Raises:
+        ValueError: The values are not whole numbers, or a label does not fit
+            in ``int32``.
     """
     arr = np.asarray(segmap)
     if np.issubdtype(arr.dtype, np.integer):
         return arr
-    finite = arr[np.isfinite(arr)]
-    if finite.size and not np.all(finite == np.rint(finite)):
-        raise ValueError(
-            "segmap holds non-integer values and cannot be used as labels"
-        )
-    logger.info("segmap stored as %s; casting labels to int32", arr.dtype)
-    return np.nan_to_num(arr).astype(np.int32)
+    if arr.ndim == 0:
+        arr = np.atleast_1d(arr)
+
+    out = np.empty(arr.shape, dtype=np.int32)
+    info = np.iinfo(np.int32)
+    if band_rows is None:
+        ncols = int(np.prod(arr.shape[1:])) or 1
+        band_rows = max(1, 16_000_000 // ncols)
+    for y0 in range(0, arr.shape[0], band_rows):
+        # non-finite pixels become background: NaN has no label, and an inf
+        # would otherwise overflow the cast into an arbitrary one
+        band = np.asarray(arr[y0 : y0 + band_rows])
+        band = np.where(np.isfinite(band), band, 0.0)
+        if not np.array_equal(band, np.rint(band)):
+            raise ValueError(
+                "segmap holds non-integer values and cannot be used as labels"
+            )
+        if band.size and (band.min() < info.min or band.max() > info.max):
+            raise ValueError(
+                f"segmap labels do not fit in int32 (found {band.min()}..{band.max()})"
+            )
+        out[y0 : y0 + band_rows] = band
+    logger.info("segmap stored as %s; cast labels to int32", np.asarray(segmap).dtype)
+    return out
 
 
 def bin_remap(x: float | tuple[float, float], k: int) -> np.ndarray:

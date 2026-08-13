@@ -66,6 +66,25 @@ This file tracks future desired features, checks, and investigations.
   wrong, and does nothing in a scene where the offender is the only bright
   member.
 
+- [ ] Scene shift iteration does not converge on r < 3' patches (found in
+  verification v9, 2026-08-13; see `examples/minerva/verification/v9/README.md`
+  and STATUS.md). Three of four UDS bands leave scenes moving after the 5
+  allowed passes: F1800W scene 27 at 3.12 px, F1280W scene 12 at 1.44 px,
+  F770W scene 66 at 0.61 px. It is a walk, not an oscillation about a
+  stationary point (F1800W scene 27: (-1.27, 0.28) -> (-2.00, 0.88) ->
+  (-1.88, 2.47) -> (0.86, 4.63) -> (2.38, 3.90) px), so it is a different
+  failure from the biased-but-stationary 0.1-0.34 px cases below. At r < 1.5'
+  F770W converged in one pass. Suspect the scene/model scale mismatch: scenes
+  get fewer and larger toward longer wavelength (F1800W 31 scenes, sizes
+  2-1964, median 471, spanning the whole 6' patch) while `astrom_model='gp'`
+  keeps `length_scale` 400 px = 32" at 80 mas. `scene_max_size` (800) is
+  already exceeded at both radii — v8's r < 1.5' F770W run produced a
+  1061-template scene — so the cap is not the trigger. Candidates: make the
+  size cap bind, scale `length_scale` with the scene, or raise
+  `fit_astrometry_niter` / lower `astrom_damping` (currently 5 and 0.8).
+  Check the IRLS item above first: a walk driven by a few high-leverage
+  extended anchors would be cured by the same reweighting.
+
 - [ ] Resolve the 2026-08-12 deep-review release gates in
   `docs/CODE_REVIEW_2026-08-12.md`. P1-01 (exact astrometric block system),
   P1-02 (final flux-only solve), P1-03 (background/IVAR source masking),
@@ -664,6 +683,19 @@ This file tracks future desired features, checks, and investigations.
   demonstrates a pipeline setup from scratch and regenerates standard
   diagnostics
 - [ ] Profiling speed + memory usage
+  - [x] Full-field memory pass (2026-08-13): redundant template snapshots,
+    the stored model image, the detection weight map, and the float64
+    intermediates in `get_bg_and_ivar` / the upsample. See STATUS.md.
+  - [ ] Saturation repair sets the peak on a trial patch and was not
+    touched; profile `repair_in_memory` next.
+  - [ ] `scene_fitter.build_normal` assembles a 138k x 138k `lil_matrix`
+    entry by entry from Python. ~400 MB of Python objects for ~5M stored
+    values, and the insertion loop is the slow part of scene generation;
+    accumulate COO index/value arrays and build the CSR in one call.
+  - [ ] `run()`'s finiteness guard on the images is behind
+    `if images[i] is None`, so it never runs. Decide whether the check is
+    wanted (it costs a full-field boolean pass per image) before fixing the
+    condition -- turning it on may fail runs that pass today.
 - [ ] strong residuals
   - [ ] handle saturated stars in 444 -> catalog pre pass detection
   - [ ] fit as PSF both 444, 770, fit for centroid, mask center

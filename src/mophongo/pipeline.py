@@ -20,6 +20,7 @@ from copy import deepcopy
 import logging
 import numpy as np
 from collections import defaultdict
+from collections.abc import Sequence as _SequenceABC
 
 from astropy.table import Table
 from astropy.wcs import WCS
@@ -315,10 +316,16 @@ def _upsample_flux_conserving_image_and_ivar(
     ``factor**2``. Do not use the flux-conserving default for weights.
     """
     k = int(factor)
-    image_hi = block_replicate(image, k, conserve_sum=True).astype(np.float32)
+    # conserve_sum=True divides by k**2 in float64, so on a full field it
+    # builds a 7 GB intermediate to deliver a 3.5 GB float32 array. Replicate
+    # without it (float32 in, float32 out) and do the same division in place;
+    # dividing by an integer square is exact in binary floating point.
+    image_hi = block_replicate(image, k, conserve_sum=False).astype(np.float32, copy=False)
+    image_hi /= np.float32(k * k)
     weight_hi = None
     if weight is not None:
-        weight_hi = block_replicate(weight, k, conserve_sum=False).astype(np.float32) * k**2
+        weight_hi = block_replicate(weight, k, conserve_sum=False).astype(np.float32, copy=False)
+        weight_hi *= np.float32(k * k)
     return image_hi, weight_hi
 
 
@@ -457,6 +464,37 @@ def _provenance_matches(prm: PSFRegionMap, want: dict[str, Any]) -> str | None:
         elif str(got) != str(value):
             return key
     return None
+
+
+class _ModelImages(_SequenceABC):
+    """Lazy ``image - residual`` per fitted band, in place of a stored list.
+
+    The model image is fully determined by two arrays the run already keeps,
+    so storing it as well costs a third full-field array per band (3.5 GB on a
+    MINERVA mosaic) for a value nothing in the fit reads -- only the
+    diagnostics do. Those index this exactly like the list it replaces; the
+    band asked for last is cached, so a per-source loop subtracts the mosaic
+    once rather than once per source.
+    """
+
+    def __init__(self, pipeline: "Pipeline") -> None:
+        self._pipeline = pipeline
+        self._cache: tuple[int, np.ndarray] | None = None
+
+    def __len__(self) -> int:
+        return len(getattr(self._pipeline, "residuals", []) or [])
+
+    def __getitem__(self, idx: int) -> np.ndarray:
+        n = len(self)
+        i = idx + n if idx < 0 else idx
+        if not 0 <= i < n:
+            raise IndexError(f"no model image for band index {idx}")
+        if self._cache is not None and self._cache[0] == i:
+            return self._cache[1]
+        # residual i belongs to image i + 1: index 0 is the detection band
+        model = self._pipeline.images[i + 1] - self._pipeline.residuals[i]
+        self._cache = (i, model)
+        return model
 
 
 class _Tee:
@@ -703,7 +741,8 @@ class Pipeline:
         self.tmpls: Templates | None = None
         self.templates_extracted: Templates | None = None
         self.templates_extended: Templates | None = None
-        self.model_images: list[np.ndarray] = []
+        # derived from images/residuals on access, never stored (see _ModelImages)
+        self.model_images = _ModelImages(self)
 
         if not hasattr(self, "run_config"):
             self.run_config = None
@@ -1152,10 +1191,13 @@ class Pipeline:
             return get_bg_and_ivar(sci, wht, **kwargs)
         y0, y1, x0, x1 = box
         bg_sub, ivar_sub = get_bg_and_ivar(sci[y0:y1, x0:x1], wht[y0:y1, x0:x1], **kwargs)
-        bg = np.zeros(sci.shape, dtype=bg_sub.dtype)
         ivar = np.zeros(sci.shape, dtype=ivar_sub.dtype)
-        bg[y0:y1, x0:x1] = bg_sub
         ivar[y0:y1, x0:x1] = ivar_sub
+        del ivar_sub
+        if bg_sub is None:  # need_bg=False
+            return None, ivar
+        bg = np.zeros(sci.shape, dtype=bg_sub.dtype)
+        bg[y0:y1, x0:x1] = bg_sub
         return bg, ivar
 
     def _repair_provenance(self, pattern_halo: str) -> dict[str, str]:
@@ -1192,9 +1234,28 @@ class Pipeline:
         """
         from astropy.io import fits
 
-        yy, xx = np.nonzero(
-            (rep["sci"] != sci0) | (rep["wht"] != wht0) | (np.asarray(rep["segmap"]) != seg0)
-        )
+        # Changed pixels, found one band of rows at a time. The whole-array
+        # form builds three full-field boolean arrays plus the temporaries of
+        # the two ORs -- 4.4 GB on a MINERVA detection grid -- at the one
+        # moment the pre-repair and post-repair mosaics are both in memory.
+        sci_new = np.asarray(rep["sci"])
+        wht_new = np.asarray(rep["wht"])
+        seg_new = np.asarray(rep["segmap"])
+        ny, nx = sci0.shape
+        band = max(1, (1 << 22) // max(nx, 1))  # ~4 Mpx of booleans per pass
+        ys: list[np.ndarray] = []
+        xs: list[np.ndarray] = []
+        for y0 in range(0, ny, band):
+            y1 = min(y0 + band, ny)
+            changed = sci_new[y0:y1] != sci0[y0:y1]
+            changed |= wht_new[y0:y1] != wht0[y0:y1]
+            changed |= seg_new[y0:y1] != seg0[y0:y1]
+            by, bx = np.nonzero(changed)
+            if by.size:
+                ys.append(by + y0)
+                xs.append(bx)
+        yy = np.concatenate(ys) if ys else np.zeros(0, dtype=np.int64)
+        xx = np.concatenate(xs) if xs else np.zeros(0, dtype=np.int64)
         patches = Table({
             "y": yy.astype(np.int32), "x": xx.astype(np.int32),
             "sci": np.asarray(rep["sci"])[yy, xx].astype(np.float32),
@@ -1319,22 +1380,20 @@ class Pipeline:
             return None
 
         box_hi = getattr(self, "trial_box_hi", None)
-        bg_hi, ivar_hi = self._bg_and_ivar_boxed(
+        # The detection background is measured but NOT subtracted: that would
+        # change 'default' templates too. It matters for the extended schemes,
+        # which blend raw data over a large halo, so get_bg_and_ivar reports its
+        # median -- which is the only use this path ever had for it, hence
+        # need_bg=False rather than a second mosaic-sized array here.
+        _, ivar_hi = self._bg_and_ivar_boxed(
             sci_hi,
             wht_hi if wht_hi is not None else _read_image(path, box_hi),
             box_hi,
             bg_filter_sigma=cfg.bg_filter_sigma,
             label=f"detection band, {path.name}",
+            need_bg=False,
         )
-        # The detection background is measured but NOT subtracted: that would
-        # change 'default' templates too. It matters for the extended schemes,
-        # which blend raw data over a large halo, so report it (see TODO.md).
-        # over the box: np.median copies its input to partition it, so on a
-        # trial run this one diagnostic would fault in the whole mosaic twice
-        logger.info(
-            "detection ivar from %s (median background %.4g; not subtracted)",
-            path.name, float(np.median(bg_hi[_box_slice(box_hi)])),
-        )
+        logger.info("detection ivar from %s (background not subtracted)", path.name)
         return ivar_hi
 
     # -- step 3: data ------------------------------------------------------
@@ -1457,10 +1516,16 @@ class Pipeline:
                     **(cfg.repair_kwargs or {}),
                 )
                 self._save_repair_cache(cache_path, prov, sci0, wht0, seg0, rep, cat)
+                # the pre-repair snapshots exist only to be written to the
+                # cache, and they are two mosaic-sized arrays
+                del sci0, seg0
                 tmpl_hi = rep["sci"]
                 wht_hi_repaired = rep["wht"]
                 cat = rep["catalog"]
                 segmap = as_label_array(rep["segmap"])
+                del rep
+            # the raw hi-res weight map is superseded by the repaired one
+            del wht0
 
         if cfg.footprint_filter:
             scale_hi = proj_plane_pixel_scales(wcs_hi)[0]
@@ -2398,8 +2463,10 @@ class Pipeline:
         tmpls.wcs = wcs_hi
         tmpls._templates = hi_templates
         self.tmpls = tmpls
-        self.templates_extracted = deepcopy(tmpls)
-        self.templates_extended = deepcopy(tmpls)
+        # stamps carry the post-extension pixels only, so both build stages are
+        # the same object here (see _prepare_hi_templates)
+        self.templates_extracted = tmpls
+        self.templates_extended = tmpls
         self.templates = lo_templates
         self.all_templates = [lo_templates]
         logger.info(
@@ -2504,7 +2571,7 @@ class Pipeline:
                 f"image shape {self.images[ifilt].shape}"
             )
         self.residuals = [residual]
-        self.model_images = [self.images[ifilt] - residual]
+        self.model_images = _ModelImages(self)
         logger.info("post-run state restored from %s", self.out_dir)
         return self
 
@@ -2828,6 +2895,13 @@ class Pipeline:
 
         weights = self.weights if self.weights is not None else []
         det_weight = weights[0] if len(weights) > 0 else None
+        if det_weight is None and getattr(self, "_det_weight_released", False):
+            raise RuntimeError(
+                f"extend_mode={mode!r} needs the detection-band weight map, which "
+                "run() released after building the templates (it is as large as "
+                "the detection mosaic and the fit never reads it again). Build a "
+                "fresh Pipeline to fit these data again."
+            )
         kwargs: dict = {
             "extend_mode": mode,
             "detection_psf": self._psf_for_template_extension(),
@@ -3358,12 +3432,25 @@ class Pipeline:
                     group = sat_by_id.get(int(tmpl.id), 0)
                     tmpl.is_saturated = group != 0
                     tmpl.sat_group = group
-            self.templates_extracted = deepcopy(self.tmpls)
+            # Build-stage snapshots for the diagnostics. A snapshot is a full
+            # second copy of every stamp -- 6 GB on a MINERVA field -- so take
+            # one only where the two stages actually differ. The post-extraction
+            # pass is the only thing that rewrites template pixels here, and it
+            # runs for two of the five modes; for the rest (including the
+            # default 'psf_wings', which builds its composite inside
+            # extract_templates) both names alias `tmpls`, which is what they
+            # held pixel-for-pixel anyway. Aliased snapshots are read-only by
+            # contract: nothing downstream writes into them.
+            self.templates_extracted = (
+                deepcopy(self.tmpls)
+                if extend_mode in ("psf_convolution", "psf_model")
+                else self.tmpls
+            )
             # Template extension is a shape operation. The extension code
             # normalizes finite PSF stamps to unit-sum shapes and keeps
             # native finite-support sums only as throughput metadata.
             self._apply_extension_pass(self.tmpls, extend_mode, config)
-            self.templates_extended = deepcopy(self.tmpls)
+            self.templates_extended = self.tmpls
         else:
             if isinstance(self.input_templates, Templates):
                 self.tmpls = deepcopy(self.input_templates)
@@ -3374,8 +3461,10 @@ class Pipeline:
                 self.tmpls.original_shape = images[0].shape
             if not getattr(self.tmpls, "wcs", None):
                 self.tmpls.wcs = wcs[0] if wcs is not None else None
-            self.templates_extracted = deepcopy(self.tmpls)
-            self.templates_extended = deepcopy(self.tmpls)
+            # no extraction and no extension pass ran, so both stages are the
+            # prebuilt templates themselves (see the snapshot note above)
+            self.templates_extracted = self.tmpls
+            self.templates_extended = self.tmpls
         templates = self.tmpls.templates
         for t in templates:
             assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
@@ -3459,7 +3548,17 @@ class Pipeline:
                     kernel = downsample_psf(kernel, k)
 
         if k == 1 or config.multi_resolution_method == "upsample":
-            tmpls_lo = deepcopy(self.tmpls)
+            # Shallow container, not a deepcopy: `prune_outside_weight` only
+            # drops list entries (and records `wnorm`), and `convolve_templates`
+            # with inplace=False copies each stamp as it goes, so nothing here
+            # writes into the hi-res pixels. A deepcopy would hold a second
+            # full set of stamps -- 6 GB on a MINERVA field -- for the whole
+            # convolution.
+            tmpls_lo = Templates()
+            tmpls_lo.original_shape = self.tmpls.original_shape
+            tmpls_lo.segmap = self.tmpls.segmap
+            tmpls_lo.wcs = getattr(self.tmpls, "wcs", None)
+            tmpls_lo._templates = list(self.tmpls._templates)
 
         if weights_i is not None:
             tmpls_lo.prune_outside_weight(weights_i)
@@ -3467,12 +3566,17 @@ class Pipeline:
         templates = tmpls_lo.convolve_templates(
             kernel, inplace=False, psf_lo=getattr(self, "prm_lo", None)
         )
+        del tmpls_lo
         if k > 1 and config.multi_resolution_method == "upsample":
             dummy_image = np.zeros(images[ifilt].shape, dtype=np.byte)
-            templates = [
-                t.project_to_block_replicated_grid(k, parent_image=dummy_image)
-                for t in templates
-            ]
+            # project in place: a pre-projection stamp is dead the moment its
+            # projection exists, and building a second list would hold both
+            # full sets at once
+            for i, t in enumerate(templates):
+                templates[i] = t.project_to_block_replicated_grid(
+                    k, parent_image=dummy_image
+                )
+                del t
         self.templates = templates
         logger.info("Pipeline (convolved) memory: %.1f GB", memory())
 
@@ -3540,11 +3644,29 @@ class Pipeline:
 
         templates = self._prepare_hi_templates(cat, config)
 
+        # The detection-band inverse variance is read only while templates are
+        # built -- the build schemes grade real data against the PSF by SNR --
+        # and nothing in the fit touches it again. It is as large as the
+        # detection mosaic, so release it here, and record that it went: a
+        # second run() on this instance must fail rather than quietly rebuild
+        # the templates without their weights.
+        if (
+            getattr(self, "run_config", None) is not None
+            and weights is not None
+            and len(weights) > 0
+            and weights[0] is not None
+        ):
+            weights[0] = None
+            self._det_weight_released = True
+            logger.info(
+                "released the detection-band weight map; memory: %.1f GB", memory()
+            )
+
         residuals: list[np.ndarray] = []
         self.all_templates: list[Template] = []
         self.all_scenes: list[Scene] = []
         self.fit_bin_factors: list[int] = []
-        self.model_images = []
+        self.model_images = _ModelImages(self)
         for ifilt in range(1, len(images)):
             scenes = []
             templates, weights_i = self._convolved_templates(ifilt, config)
@@ -3684,6 +3806,22 @@ class Pipeline:
                     len(scenes),
                 )
 
+            # Every shifted template holds its pre-shift pixels so that each
+            # pass resamples the original instead of compounding the cubic
+            # smoothing (Templates.apply_template_shifts). That is a second
+            # full set of stamps -- 6 GB on a MINERVA field -- and the shifts
+            # are settled here, with the residual about to allocate another
+            # full-field array. Release them; apply_template_shifts refuses to
+            # shift a released template rather than resample resampled data.
+            released = sum(
+                t.__dict__.pop("_data_unshifted", None) is not None for t in templates
+            )
+            if released:
+                logger.info(
+                    "released the pre-shift pixels of %d template(s); memory: %.1f GB",
+                    released, memory(),
+                )
+
             # build model in res first, then subtract from image. np.zeros,
             # not np.zeros_like: zeros_like memsets every page, which on a
             # trial run materialises the whole reference grid.
@@ -3691,8 +3829,9 @@ class Pipeline:
             for s in scenes:
                 sl = _slices_from_bbox(s.bbox)
                 res[sl] += s.model_image()  # adds models in place
-            # then subtract from image to get residual
-            res = images[ifilt] - res
+            # then subtract from image to get residual, in place: `images - res`
+            # would hold a third full-field array while the model is still alive
+            np.subtract(images[ifilt], res, out=res)
 
             fluxes = [t.flux for t in templates]
             errs = [t.err for t in templates]
@@ -3755,7 +3894,6 @@ class Pipeline:
             )
 
             self.residuals.append(res)
-            self.model_images.append(images[ifilt] - res)
             #            self.fit.append(fitter)
             self.all_templates.append(templates)
             self.all_scenes.append(scenes)
@@ -4643,11 +4781,14 @@ class Pipeline:
         # was never built and the lookup below raised NameError.
         logger.info("Building scene map for diagnostics")
         scene_map = np.zeros_like(segmap, dtype=int)
+        # One label -> index map for the whole loop. segm.get_index validates
+        # each label with np.setdiff1d against the full label list, i.e. one
+        # sort of every label in the field per template.
+        label_index = {int(lab): i for i, lab in enumerate(segm.labels)}
         for scene in scene_list:
             for tmpl in scene.templates:
-                try:
-                    iseg = segm.get_index(tmpl.id)
-                except (KeyError, ValueError):
+                iseg = label_index.get(int(tmpl.id))
+                if iseg is None:
                     continue  # template with no surviving segment
                 sl = segm.segments[iseg].slices
                 scene_map[sl][segm.data[sl] == tmpl.id] = scene.id

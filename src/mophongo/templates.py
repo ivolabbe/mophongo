@@ -494,6 +494,25 @@ class Template(Cutout2D):
         self.to_shift = np.array([0.0, 0.0], dtype=float)  # impending shift
         self.shifted = np.array([0.0, 0.0], dtype=float)  # accumulated shift
 
+    def __deepcopy__(self, memo: dict) -> "Template":
+        """Deep copy that shares the parent-image WCS instead of duplicating it.
+
+        ``wcs_original`` is the WCS of the mosaic the cutout was taken from:
+        one object for the entire template set, and read-only everywhere it is
+        used (sky lookups, and as the parent WCS handed to a reprojection). The
+        default deepcopy gives every copied template its own, which costs about
+        10 kB per template next to a 40 kB stamp -- 1.3 GB for one copied set
+        on a MINERVA field. The cutout's own ``wcs`` is still copied: that one
+        is per-template and describes geometry a copy may change.
+        """
+        if self.wcs_original is not None:
+            memo.setdefault(id(self.wcs_original), self.wcs_original)
+        new = self.__class__.__new__(self.__class__)
+        memo[id(self)] = new
+        for key, value in self.__dict__.items():
+            setattr(new, key, deepcopy(value, memo))
+        return new
+
     @property
     def is_deblended(self) -> bool:
         """Whether this template comes from a deblended catalog child."""
@@ -1090,8 +1109,20 @@ class Templates:
             # convergence short of the true offset.
             base = getattr(tmpl, "_data_unshifted", None)
             if base is None:
+                if tmpl.flag & Template.FLAG_SHIFTED:
+                    # the pre-shift pixels were released after the solve (see
+                    # Pipeline.run); shifting from tmpl.data would resample
+                    # already-resampled data, the exact failure this cache
+                    # exists to prevent
+                    raise RuntimeError(
+                        f"template {tmpl.id} has already been shifted and its "
+                        "pre-shift pixels were released; rebuild the template "
+                        "before shifting it again"
+                    )
+                # no copy: tmpl.data is rebound to the shifted array below, so
+                # this reference is what keeps the original alive
                 base = tmpl.data
-                tmpl._data_unshifted = base.copy()
+                tmpl._data_unshifted = base
             total_dx = float(tmpl.shifted[0]) + dx
             total_dy = float(tmpl.shifted[1]) + dy
             # sign convention: the template is resampled by +(dx, dy), moving
@@ -1706,6 +1737,14 @@ class Templates:
 
         # Resolve every position to its segment and cutout size up front: the
         # ownership ROI and the extraction loop must size cutouts identically.
+        # `segm.labels` is sorted, so searchsorted is the whole lookup.
+        # `segm.get_index` would also validate the label, and it does that with
+        # np.setdiff1d against the full label list -- a sort of every label in
+        # the field, per source, which is 138k sorts of 346k labels on a MINERVA
+        # run. The label here comes straight out of segm.data and is nonzero, so
+        # it is a label of this image by construction.
+        seg_labels = segm.labels
+        seg_bbox = segm.bbox
         sized: list[tuple[Tuple[float, float], int, int, int]] = []
         for pos in positions:
             # silently skip invalid positions
@@ -1718,8 +1757,7 @@ class Templates:
             if label == 0:
                 continue
 
-            idx = segm.get_index(label)
-            bbox = segm.bbox[idx]
+            bbox = seg_bbox[int(np.searchsorted(seg_labels, label))]
 
             # Make bbox symmetric around the center to ensure proper centering
             # enfore minimum size
@@ -1887,8 +1925,6 @@ class Templates:
             raise ValueError("No templates to convolve. Run extract_templates first.")
 
         tmpls = self._templates
-        original_shape = self.original_shape
-        dummy_image = np.zeros(original_shape, dtype=np.byte)
 
         new_templates: list[Template] = []
         for i, tmpl in enumerate(tqdm(tmpls, desc="Convolving templates")):

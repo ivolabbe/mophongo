@@ -211,6 +211,11 @@ def _build_and_save(job: dict) -> str:
     Returns the path written. The grid itself is not returned: it is a few MB
     of pixels that the caller already has on disk, and sending it back through
     the pool would cost more than building it.
+
+    Threads are pinned to one per worker by the parent before the pool is
+    created (see :meth:`PSFFactory.from_csv`), not here: numpy and its BLAS
+    read their thread counts at import, which in a spawned worker happens
+    before this function is ever called.
     """
     from .jwst_psf import write_stdpsf
 
@@ -315,6 +320,17 @@ class PSFFactory:
     #: ``pattern_hi`` (the F444W grids), so two bands building at once target
     #: identical filenames in one ``psf_dir``. Serialise there -- build one
     #: band of a field first, then fan the rest out.
+    #:
+    #: Measured on UDS F444W (25-PSF grids, 10-core laptop): serial 34.2 s per
+    #: grid; four workers 18.9 s per grid, 1.81x. Not 4x, because pinning each
+    #: worker to one thread roughly halves a single grid's own speed -- an
+    #: unpinned build already uses about 1.6 cores -- so the gain is
+    #: concurrency minus that. Peak RSS was 2.88 GB against 2.84 GB serial:
+    #: workers cost almost nothing in memory.
+    #:
+    #: Above 1, the pool uses a *spawn* context, so a caller's module-level
+    #: code runs again in every worker. A script that drives this needs the
+    #: usual ``if __name__ == "__main__":`` guard.
     workers: int = 1
     #: What the grids being written were derived from, stamped into each file
     #: as ``HIERARCH MPH *`` cards. Set by :meth:`from_csv`; a grid built by
@@ -514,6 +530,7 @@ class PSFFactory:
 
         workers = max(1, int(self.workers or 1))
         if save and workers > 1 and len(jobs) > 1:
+            import multiprocessing as mp
             from concurrent.futures import ProcessPoolExecutor
 
             workers = min(workers, len(jobs))
@@ -526,9 +543,29 @@ class PSFFactory:
                  "build": {**build_kw, "detector": det, "date": mjd}}
                 for det, mjd, path in jobs
             ]
-            with ProcessPoolExecutor(max_workers=workers) as pool:
-                for written in pool.map(_build_and_save, payload):
-                    logger.info("wrote %s", written)
+            # One thread per worker. A single grid build already runs at about
+            # 1.6 cores through threaded FFT and BLAS, so an unpinned pool
+            # multiplies threads by workers and they contend instead of
+            # scaling. Set in the parent and inherited through a *spawn*
+            # context: numpy reads these at import, and a forked child has
+            # already inherited an initialised BLAS that ignores them.
+            pinned = {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1",
+                      "MKL_NUM_THREADS": "1", "NUMEXPR_NUM_THREADS": "1",
+                      "VECLIB_MAXIMUM_THREADS": "1"}
+            saved = {k: os.environ.get(k) for k in pinned}
+            os.environ.update(pinned)
+            try:
+                with ProcessPoolExecutor(
+                    max_workers=workers, mp_context=mp.get_context("spawn")
+                ) as pool:
+                    for written in pool.map(_build_and_save, payload):
+                        logger.info("wrote %s", written)
+            finally:
+                for key, value in saved.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
             # the grids are on disk; returning them would ship every pixel
             # back through the pool for a caller that reads files anyway
             return []

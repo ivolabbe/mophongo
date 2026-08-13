@@ -2,6 +2,25 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] Turn the theoretical-target deconvolution experiment into a calibrated
+  science product only if a use case justifies its noise/ringing cost
+  (2026-08-13). The UDS F444W patch proves the mechanics and the tradeoff:
+  lambda=1e-3 gives 0.139" / 2.22x source-masked field scatter / 1.87x
+  empty-aperture RMS, and lambda=1e-4 gives 0.126" / 4.36x / 2.33x. The
+  closest support-safe scan point is 0.116" at 9.69x / 3.85x, while the
+  nominal 0.109/0.112" endpoints are rejected by absolute edge L1. Both
+  retained solutions have about 0.28 integrated negative response. These
+  noise statistics include correlated sky and residual ringing rather than
+  representing propagated instrumental noise. Before release:
+  estimate a data-informed signal/noise PSD rather than the current flat-prior
+  Wiener (= Tikhonov), propagate or characterize the full correlated-noise
+  covariance rather than inventing a diagonal WHT, run injected-source and
+  reconvolution closure tests, and test soft partition-of-unity blending if a
+  larger mosaic shows PSF-region seams. Also settle the existing F444W wing
+  deficit/grid-support TODOs first: inverse filtering amplifies PSF-model error
+  along with the sky. The reusable API and real-patch driver are complete;
+  these are science-calibration gates, not missing mechanics.
+
 - [ ] Parallelise the PSF build across *patterns*, not only within one
   (2026-08-13). `PSFFactory(workers=N)` now fans out over `(detector, date)`,
   which is safe because each job writes a uniquely named file, and the OPD
@@ -14,8 +33,20 @@ This file tracks future desired features, checks, and investigations.
   would only need to exist for the repair.
   * The per-band `pattern_lo` grids have distinct names and are already safe
     to build concurrently across bands.
-  * `psf_workers` defaults to 1 everywhere. Worth measuring before raising it
-    on an OzStar login node, where the build runs `nice`d on a shared machine.
+  * Measured 2026-08-13 on UDS F444W (25-PSF grids, 10-core laptop): serial
+    34.2 s/grid (137 s for 4 grids, peak RSS 2.84 GB); four workers 18.9 s/grid
+    (75.8 s, peak 2.88 GB), a 1.81x speedup. Not 4x: pinning each worker to one
+    thread roughly halves a single grid's own speed, since an unpinned build
+    already takes about 1.6 cores. Memory is a non-issue. Extrapolating, the
+    ~416-grid release is about 4 hours serial and 2 hours on four workers --
+    both well under the 9 hours estimated before measuring.
+  * `psf_workers` defaults to 1 everywhere. 4 is the number to set: it matches
+    a CANFAR container's `cores_for` of 4, and is modest enough for an OzStar
+    login node, where the build runs `nice`d on a shared machine. 16 is wrong
+    on both -- 4x oversubscription on CANFAR, antisocial on a login node.
+  * Not yet measured: whether pinning is the right trade. An unpinned pool
+    would demand ~1.6 cores per worker, which suits a 10-core laptop and not a
+    4-core container. The shipped default should suit the container.
 
 - [ ] Flip `psf_provenance` from `"warn"` to `"rebuild"` (2026-08-13). Grids
   now carry the exposure-list hash, date mode and FOV they were built from,

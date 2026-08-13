@@ -194,7 +194,10 @@ def do_push(args: argparse.Namespace) -> None:
         vcp(path, f"{RUN_VOS}/{path.name}")
 
     subprocess.run([str(VCP.parent / "vmkdir"), f"{RUN_VOS}/jobs"], capture_output=True)
-    for script in sorted((HERE / "jobs").glob("*.sh")):
+    # .py as well as .sh: a job whose logic does not fit in shell ships its
+    # script alongside the wrapper that runs it.
+    for script in sorted(p for p in (HERE / "jobs").iterdir()
+                         if p.suffix in (".sh", ".py")):
         log.info("uploading jobs/%s", script.name)
         vcp(script, f"{RUN_VOS}/jobs/{script.name}")
 
@@ -537,6 +540,30 @@ def do_run(args: argparse.Namespace) -> None:
                   "less.")
 
 
+def do_plots(args: argparse.Namespace) -> None:
+    """Redraw scene figures for runs that fitted but died rendering them.
+
+    Not a rerun: ``jobs/scene_plots.sh`` restores the finished state with
+    ``load_fit`` and draws the figures from it. The stamps file is rebuilt when
+    it is missing or truncated, since the figures need the templates; nothing
+    else the run wrote is touched.
+    """
+    check_src_current(args.ref, args.force_stale)
+    do_upload_cfg(args.names)
+    ids = [launch(session_name("mophongo-plots", name), "scene_plots.sh",
+                  cores_for(name, args.cores), ram_for(name, args.ram),
+                  {"RUN": RUN, "CFG": name})
+           for name in args.names]
+    dropped = [n for n, sid in zip(args.names, ids) if not sid]
+    if dropped:
+        raise SystemExit("submission failed for: " + ", ".join(dropped))
+    if args.no_wait:
+        return
+    final = wait(ids)
+    for sid, text in session().logs(ids).items():
+        print(f"--- {sid} [{final.get(sid)}]\n{tidy(text)}")
+
+
 def do_status(args: argparse.Namespace) -> None:
     for info in session().fetch(kind="headless"):
         log.info("%-10s %-28s %s", info.get("id"), info.get("name"), info.get("status"))
@@ -687,6 +714,18 @@ def main() -> None:
     p.add_argument("--force-stale", action="store_true",
                    help="submit even though the arc source is not that ref")
     p.set_defaults(func=do_run)
+
+    p = sub.add_parser("plots", help="redraw scene figures from a finished run")
+    p.add_argument("names", nargs="+")
+    p.add_argument("--cores", type=int, default=None)
+    p.add_argument("--ram", type=int, default=None,
+                   help="override the per-field default (64 GB, EGS 82)")
+    p.add_argument("--no-wait", action="store_true")
+    p.add_argument("--ref", default="main",
+                   help="git ref the arc source must match (default: main)")
+    p.add_argument("--force-stale", action="store_true",
+                   help="submit even though the arc source is not that ref")
+    p.set_defaults(func=do_plots)
 
     p = sub.add_parser("status", help="list headless sessions")
     p.set_defaults(func=do_status)

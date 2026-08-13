@@ -3,6 +3,158 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [ ] CANFAR v1.0 campaign: submitted, queued on platform capacity
+  (2026-08-12 evening). 17 configs (uds/cosmos/egs x all staged MIRI bands),
+  `--r-trial 1.5 --suffix _v1.0`, outputs to
+  `/arc/home/ilabbe/run/out/<field>_<band>_v1.0`. Push, setup and all 17
+  stage jobs completed; the run step is queued.
+  Four toolkit defects fixed to get this far, all committed:
+  * `campaign.py` globbed every JSON in `examples/minerva`, including
+    `minerva_sed_fields.json`, which is not a RunConfig and died inside
+    arcify. Restricted to `<field>_f<band>w.json`.
+  * skaha session names accept only alphanumerics and `-`; the `_v1.0`
+    suffix put a dot in them and every job 400'd. `submit.py::session_name`
+    now normalises once instead of replacing underscores per call site.
+  * `arcify --r-trial 0` wrote `radius: 0`; it now writes `trial: null`.
+  * the 48 GB default is a patch-run number (`MANUAL.md`'s own table is
+    patch measurements) and does not cover a full field.
+  Sizing, measured rather than assumed. `Pipeline` logs its own peak: a
+  1.5' patch peaks at 27.3 GB (v8 UDS F770W). Full field needs ~72 GB on
+  COSMOS (151,778 templates; OOM'd at 48 GB right at the upsample) and
+  ~110-130 GB extrapolated on EGS, which is 1.8x COSMOS (1221 Mpx,
+  520,875 catalogue sources). The platform reports
+  `memoryGB.defaultLimit = 32`; 8 GB jobs schedule instantly, 48 GB
+  scheduled once while the platform was quiet, and 48/64/128/192 GB have
+  all queued for hours since. **Full field is therefore not runnable on
+  this platform as the pipeline currently allocates**, independent of the
+  campaign tooling.
+  Two ways forward, both needing a decision rather than a default:
+  `multi_resolution_method: downsample` (templates on the lo grid, 4x less
+  template memory -- COSMOS 24.8 -> 6.2 GB -- but it diverges from the
+  upsample path v8 verified), or tiling a field across jobs, which the
+  toolkit does not support. Until then v1.0 is a 1.5' patch per field-band,
+  which is the configuration v8 actually validated.
+  Note the stamp-footprint fix is what makes even this feasible: at the old
+  402^2 support, COSMOS's convolved templates alone would need 98 GB.
+- [x] Verification v9: all four UDS MIRI bands at r < 3' (2026-08-13,
+  commit `ff1447a`, `examples/minerva/verification/v9/`). Same code and PSF
+  grids as v8's F770W re-run, applied to every band, at the trial radius the
+  band configs already carry (3' against v8's 1.5'), so the band trend is
+  finally read off one code version. ~17.5k matched sources per band against
+  v8's ~4.6k. IDL est1 (no EE) +0.024/+0.022/+0.034/+0.053 mag and psfcor
+  0.976/0.983/0.973/0.957 for F770W/F1280W/F1500W/F1800W; mock
+  recovered/true 0.9607/0.9646/0.9673/0.9688 with resid/noise 0.799
+  throughout. F770W is the only band with the final code at both radii and
+  moves +0.001 mag between them, so doubling the radius is worth ~0.001 mag
+  and the larger shifts in the other three bands (est1 -0.013 to -0.006
+  against v8's first pass) are the late fixes, not the patch. The mock leg
+  does not depend on the trial radius and reproduces v8 to <= 0.001 in
+  `med_lo` in every band, so v8's caveat about superseded mock numbers turns
+  out not to matter. Weight calibration holds at twice the radius: F770W
+  `sigma_true` 3405 here against 3295 on v8's patch.
+- [ ] Scene astrometric shifts do not converge at r < 3' (2026-08-13, found
+  in v9). Three of four bands leave scenes moving after the 5 allowed passes
+  (tol 0.1 px = 4 mas): F1800W scene 27 at 3.12 px, F1280W scene 12 at
+  1.44 px, F770W scene 66 at 0.61 px; F1500W converged in 4. The failure is a
+  walk, not an oscillation -- F1800W scene 27 runs (-1.27, 0.28) ->
+  (-2.00, 0.88) -> (-1.88, 2.47) -> (0.86, 4.63) -> (2.38, 3.90) px. At
+  r < 1.5' F770W converged in one pass. Scenes get fewer and larger toward
+  longer wavelength (F770W 70 scenes, sizes 2-1003, median 226; F1800W 31
+  scenes, sizes 2-1964, median 471) while the GP astrometric model keeps
+  `length_scale` 400 px (32" at 80 mas), so a 6'-wide scene is described by a
+  correlation length a tenth its size. The partition exceeded
+  `scene_max_size` (800) at both radii -- v8's r < 1.5' F770W run already
+  produced a 1061-template scene -- so the cap is not what changed. Needs
+  either a size cap that holds or a change to `fit_astrometry_niter` (5) and
+  `astrom_damping` (0.8).
+- [ ] Memory pressure on full-field runs (2026-08-13). Full-field MINERVA
+  runs were running out of memory; the target is a peak under 48 GB. Nothing
+  here changes what is fitted -- every product is bit-identical -- so the
+  changes are listed by what they stop allocating.
+  Scale of a full-field UDS F770W run, for the numbers below: the detection
+  grid is 34560x25344 (876 Mpx, 3.5 GB per float32 array, the same for the
+  int32 segmap and for the F770W mosaic once it is upsampled onto that grid),
+  and 138,609 of the 345,792 catalog sources fall inside the MIRI footprint.
+  Their stamps have a 100 px floor (the detection PSF stamp) and a mean side
+  of 104 px, so one full set of template pixels is 5.95 GB.
+  * Build-stage template snapshots. `_prepare_hi_templates` kept
+    `templates_extracted` and `templates_extended` as two `deepcopy`s of
+    `tmpls`, and `_convolved_templates` took a third for `tmpls_lo`. Each
+    `deepcopy` of a `Templates` also duplicates its `segmap`, so a snapshot
+    cost the stamps *plus* the whole detection-grid segmentation map: about
+    10.4 GB each at full-field scale, ~31 GB for the three.
+    The two build-stage names now alias `tmpls` except where the two stages
+    genuinely differ -- only `extend_mode` `'psf_convolution'`/`'psf_model'`
+    run a post-extraction pass that rewrites pixels; the default
+    `'psf_wings'` and the other build-time schemes compose inside
+    `extract_templates`, so the snapshots were already pixel-for-pixel
+    identical. `tmpls_lo` is now a shallow container over the same `Template`
+    objects: `prune_outside_weight` only drops list entries, and
+    `convolve_templates(inplace=False)` copies each stamp as it goes.
+  * Projection to the block-replicated grid built a second full list before
+    dropping the first; it now projects in place, one stamp at a time.
+  * `model_images` stored `image - residual` per band, a third full-field
+    array derived from two the run already holds. It is now `_ModelImages`,
+    a sequence that subtracts on access and caches the band asked for last.
+    Nothing in the fit reads it; only the diagnostics do.
+  * The detection-band inverse variance is read only while templates are
+    built (the build schemes grade data against the PSF by SNR). `run()`
+    releases it afterwards and records that it went, so a second `run()` on
+    the same instance raises instead of quietly rebuilding weightless
+    templates.
+  * `get_bg_and_ivar` masked `sci` and `wht` into full-resolution copies, and
+    `np.where(mask, float32, 0.0)` promotes to float64 on the way, so three
+    coarse arrays of 200 kB cost ~21 GB to produce. `_valid_block_means` now
+    reduces one band of coarse rows at a time; the three coarse outputs are
+    bit-identical on real UDS data. The median weight in its log line is
+    taken on an 8x8-strided subsample (boolean-indexing the full mask copies
+    the mosaic, and `np.median` partitions a second copy). `need_bg=False`
+    skips the full-resolution background entirely, which is what the
+    detection-ivar path wanted: it used it for one median that
+    `get_bg_and_ivar` already logs.
+  * `_upsample_flux_conserving_image_and_ivar` used
+    `block_replicate(conserve_sum=True)`, which divides by `k**2` in float64
+    -- a 7 GB intermediate for a 3.5 GB float32 result. Replicating without
+    it and dividing in place stays in float32; dividing by an integer square
+    is exact, and the output is bit-identical for k=2,3,4.
+  * `_save_repair_cache` found its changed pixels with
+    `(sci != sci0) | (wht != wht0) | (seg != seg0)`, three full-field boolean
+    arrays plus the temporaries of the two ORs (4.4 GB) at the one moment
+    both the pre- and post-repair mosaics are in memory. It now scans in
+    bands of ~4 Mpx and concatenates the indices.
+  * The residual is now formed in place (`np.subtract(..., out=res)`), the
+    pre-repair `sci`/`segmap` snapshots and the raw hi-res weight map are
+    freed once the cache is written, and `Template.__deepcopy__` shares the
+    parent-image WCS (one object per template set, read-only) instead of
+    duplicating it per template.
+  Separately, a speed defect that made a full field impractical regardless:
+  `extract_templates` resolved each source's segment with
+  `SegmentationImage.get_index`, which validates the label with
+  `np.setdiff1d` against the full label list -- one sort of all 345,792
+  labels per source, 138,610 times. The label comes straight out of
+  `segm.data` and is nonzero, so it is valid by construction;
+  `np.searchsorted` on the (sorted) label array is the whole lookup. A
+  full-field extraction went from no progress in 100 minutes to 2.5 minutes
+  at ~950 sources/s. `plot_result`'s scene map had the same call in a
+  per-template loop and now builds one label->index dict.
+  Validation: UDS F770W 3' trial, `psfs kernels load fit outputs`, HEAD
+  against the working tree on the same machine. Peak physical footprint
+  37.1 -> 20.0 GB. The fit table is identical in all 17,796 rows and every
+  column, and the residual image is identical pixel for pixel. The trial
+  understates the saving: its template set is 1/8 of a full field, and its
+  mosaic-sized arrays are full-shape but only the patch is ever touched --
+  except in a `deepcopy`, which writes every page. `get_bg_and_ivar` was
+  checked separately against HEAD on two 3000x3000 UDS patches (`bg` and
+  `ivar` bit-identical), and the upsample for k=2,3,4.
+  `tests/test_memory_footprint.py` pins the equivalences.
+  Full field (UDS F770W, `trial: null`, 138,610 templates, repair reloaded
+  from cache): `Pipeline (start)` 10.4 GB, `(templates)` 28.2, weight-map
+  release -> 24.7, `(convolved)` 27.7, sampled peak 29.1 GB through the
+  convolution -- the stage where both template sets and both upsampled band
+  arrays are live at once.
+  Left alone and worth knowing: the saturation repair sets the peak on a
+  trial patch, and `run()`'s finiteness guard on `images[i]` is behind
+  `if images[i] is None`, so it never runs. Both are in TODO.md.
 - [x] Weight calibration on partially covered fields (2026-08-12). The
   robust baseline in `get_bg_and_ivar` (`med0`/`nmad0`) was taken over all
   coarse blocks, including the zero-filled pixels outside the mosaic

@@ -43,6 +43,31 @@ logger = logging.getLogger(__name__)
 
 memory = lambda: psutil.Process(os.getpid()).memory_info().rss / 1e9
 
+
+def human_bytes(n: float, binary: bool = True) -> str:
+    """Format a byte count with a unit that keeps it readable.
+
+    Run logs quote sizes spanning kilobytes (one PSF stamp) to tens of
+    gigabytes (a full-field stamps file), and a fixed unit makes one end or
+    the other unreadable -- "12005.8 MB" is a number nobody parses at a
+    glance. Binary units by default, since these are memory and array sizes.
+
+    Args:
+        n: Size in bytes.
+        binary: Use KiB/MiB/GiB (1024) rather than kB/MB/GB (1000).
+
+    Returns:
+        The size and its unit, e.g. ``"11.7 GiB"``.
+    """
+    step = 1024.0 if binary else 1000.0
+    units = ("B", "KiB", "MiB", "GiB", "TiB") if binary else ("B", "kB", "MB", "GB", "TB")
+    size = float(n)
+    for unit in units[:-1]:
+        if abs(size) < step:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= step
+    return f"{size:.1f} {units[-1]}"
+
 # shift-field arrows span this fraction of a scene's template extent, so that
 # the outermost samples stay inside the scene rather than sitting on its edge
 _SHIFT_SAMPLE_SPREAD = 0.7
@@ -1740,7 +1765,7 @@ class Pipeline:
                 if not path.exists():
                     lines.append(f"  {key:8s} MISSING  {path}")
                     continue
-                desc = f"{path.stat().st_size / 1e6:8.1f} MB"
+                desc = f"{human_bytes(path.stat().st_size):>10s}"
                 try:
                     if path.suffix == ".csv":
                         desc += f"  {sum(1 for _ in open(path)) - 1} frames"
@@ -2344,8 +2369,8 @@ class Pipeline:
         )
         npix = sum(a.size for a in vla["hi"]) + sum(a.size for a in vla["lo"])
         logger.info(
-            "wrote %d sources (%.1f MB of template pixels) to %s",
-            len(conv), npix * 4 / 1e6, path,
+            "wrote %d sources (%s of template pixels) to %s",
+            len(conv), human_bytes(npix * 4), path,
         )
         return path
 

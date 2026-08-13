@@ -42,6 +42,22 @@ This file tracks future desired features, checks, and investigations.
   does for its raw flux) is worth +~1% on ap_flux and +0.8% on stampcor
   coherence (2026-08-12 QA measurement). Decide convention and document.
 
+- [ ] `write_stamps` corrupts the tail of a full-field stamps file. The
+  2026-08-13 UDS F770W full-field round trip wrote 138,610 sources / 11.7 GiB
+  of template pixels and astropy raised
+  `RuntimeWarning: overflow encountered in scalar add` from
+  `io/fits/column.py:2274` (`_offset += descr_output[idx, 0] * _nbytes`),
+  which computes heap offsets for the variable-length `tmpl_hi`/`tmpl_lo`
+  columns. The file reads back and most rows are fine, but 64 of the last 200
+  rows come back all-zero against 1 in 140 sampled across the whole file --
+  a 45x tail enrichment -- and none of those 64 has `FLAG_SUM_ZERO` set, so
+  the pipeline believed their templates were non-zero when it wrote them.
+  Their fitted fluxes are in the fit table, so only the stamps are affected.
+  Treat any full-field stamps file written before this is fixed as suspect in
+  its tail. Likely a 32-bit heap offset in the `P` descriptor: `Q` descriptors
+  (64-bit) exist for exactly this, or the file needs splitting per band/chunk.
+  Reproduce with a full field and `save_stamps: true` (the default).
+
 - [ ] Saturated-star fragment stamps: `write_stamps` rows for spike
   fragments (QA patch, contiguous id blocks) hold smeared star structure
   while the fit table's stampcor for the same ids is sane — stamps-file

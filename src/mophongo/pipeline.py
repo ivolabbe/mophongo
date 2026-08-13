@@ -12,6 +12,7 @@ import json
 import os
 import re
 import psutil
+import h5py
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
@@ -2254,7 +2255,7 @@ class Pipeline:
           by :meth:`load_fit`
 
         Args:
-            path: Output file.  Defaults to ``<out_dir>/<name>_stamps.fits``
+            path: Output file.  Defaults to ``<out_dir>/<name>_stamps.h5``
                 for config-driven runs.
             ifilt: Fitted image index (1-based, as elsewhere).
 
@@ -2270,8 +2271,13 @@ class Pipeline:
         if path is None:
             if getattr(self, "run_config", None) is None:
                 raise ValueError("path is required when not running from a config")
-            path = self.out_dir / f"{self.run_config.name}_stamps.fits"
+            path = self.out_dir / f"{self.run_config.name}_stamps.h5"
         path = Path(path)
+        if path.suffix.lower() in (".fits", ".fit"):
+            # stamps are HDF5 now; a .fits name on an HDF5 file would be a
+            # trap for anything that opens it by extension
+            path = path.with_suffix(".h5")
+            logger.info("stamps are written as HDF5; using %s", path.name)
 
         conv = self.all_templates[ifilt - 1]
         if not conv:
@@ -2346,31 +2352,45 @@ class Pipeline:
             rows["shift_x"].append(float(shift[0]))
             rows["shift_y"].append(float(shift[1]))
 
-        def vla_column(name: str, stamps: list[np.ndarray]) -> fits.Column:
-            arr = np.empty(len(stamps), dtype=object)
-            arr[:] = stamps
-            return fits.Column(name=name, format="PE()", array=arr)
-
-        int_fmt = {"id", "ny", "nx", "x0", "y0", "key", "flag"}
-        columns = [vla_column(f"tmpl_{tag}", vla[tag]) for tag in ("hi", "lo")]
-        columns += [
-            fits.Column(
-                name=name,
-                format="K" if name.split("_")[0] in int_fmt else "D",
-                array=np.asarray(values),
-            )
-            for name, values in rows.items()
-        ]
-        src_hdu = fits.BinTableHDU.from_columns(columns, name="SOURCES")
-
+        # One flat float32 buffer per band plus per-source offsets, rather
+        # than one dataset per source: 138,610 HDF5 datasets would spend more
+        # on object headers than on pixels, and the ragged concatenation is
+        # what both readers want anyway. Chunked and gzipped -- template
+        # stamps are mostly zero outside the segment, so this compresses hard.
         hdr = self._stamps_header(ifilt, len(conv))
-        fits.HDUList([fits.PrimaryHDU(header=hdr), src_hdu]).writeto(
-            path, overwrite=True
-        )
         npix = sum(a.size for a in vla["hi"]) + sum(a.size for a in vla["lo"])
+        with h5py.File(path, "w") as h5:
+            for key in hdr:
+                if key in ("COMMENT", "HISTORY", ""):
+                    continue
+                value = hdr[key]
+                h5.attrs[key] = value if isinstance(value, (int, float, str)) else str(value)
+            for tag in ("hi", "lo"):
+                flat = (
+                    np.concatenate(vla[tag]) if vla[tag]
+                    else np.zeros(0, dtype=np.float32)
+                )
+                sizes = np.array([a.size for a in vla[tag]], dtype=np.int64)
+                offs = np.concatenate([[0], np.cumsum(sizes)]).astype(np.int64)
+                grp = h5.create_group(f"tmpl_{tag}")
+                # chunks bounded independently of stamp size: a 1 Mi-element
+                # chunk is 4 MiB, and a stamp spans at most a few of them
+                grp.create_dataset(
+                    "pixels", data=flat, dtype="f4",
+                    chunks=(min(1 << 20, max(flat.size, 1)),),
+                    compression="gzip", compression_opts=1, shuffle=True,
+                )
+                grp.create_dataset("offset", data=offs, dtype="i8")
+            src = h5.create_group("sources")
+            for name, values in rows.items():
+                arr = np.asarray(values)
+                if arr.dtype.kind not in "iuf":
+                    arr = arr.astype(np.float64)
+                src.create_dataset(name, data=arr, compression="gzip", compression_opts=1)
         logger.info(
-            "wrote %d sources (%s of template pixels) to %s",
-            len(conv), human_bytes(npix * 4), path,
+            "wrote %d sources (%s of template pixels, %s on disk) to %s",
+            len(conv), human_bytes(npix * 4),
+            human_bytes(Path(path).stat().st_size), path,
         )
         return path
 
@@ -2383,6 +2403,34 @@ class Pipeline:
         file; ``key_psf_hi``/``key_psf_lo`` index ``psfs`` of the band's
         cached PSF region map (``<name>_psf_*.geojson``).
         """
+        path = Path(path)
+        if h5py.is_hdf5(path):
+            return Pipeline._read_stamps_h5(path)
+        # a stamps file written before the HDF5 switch
+        logger.info("reading legacy FITS stamps %s", path.name)
+        return Pipeline._read_stamps_fits(path)
+
+    @staticmethod
+    def _read_stamps_h5(path: Path) -> list[dict]:
+        out: list[dict] = []
+        with h5py.File(path, "r") as h5:
+            src = h5["sources"]
+            cols = {name: src[name][:] for name in src}
+            pix = {tag: h5[f"tmpl_{tag}"]["pixels"] for tag in ("hi", "lo")}
+            off = {tag: h5[f"tmpl_{tag}"]["offset"][:] for tag in ("hi", "lo")}
+            n = len(next(iter(cols.values()))) if cols else 0
+            for i in range(n):
+                rec = {name: values[i] for name, values in cols.items()}
+                for tag in ("hi", "lo"):
+                    flat = pix[tag][off[tag][i] : off[tag][i + 1]]
+                    rec[f"tmpl_{tag}"] = np.asarray(flat, dtype=np.float32).reshape(
+                        int(rec[f"ny_{tag}"]), int(rec[f"nx_{tag}"])
+                    )
+                out.append(rec)
+        return out
+
+    @staticmethod
+    def _read_stamps_fits(path: Path) -> list[dict]:
         from astropy.io import fits
 
         out: list[dict] = []
@@ -2427,8 +2475,15 @@ class Pipeline:
         wcs_hi = self.wcs[0] if self.wcs is not None else None
         wcs_lo = self.wcs[ifilt] if self.wcs is not None else None
 
-        with fits.open(path) as hdul:
-            hdr = hdul[0].header
+        # header/attrs and rows through the format-dispatching readers, so an
+        # HDF5 file and a pre-switch FITS one both restore the same state
+        if h5py.is_hdf5(path):
+            with h5py.File(path, "r") as h5:
+                hdr = dict(h5.attrs)
+        else:
+            hdr = dict(fits.getheader(path))
+        src = Pipeline.read_stamps(path)
+        if True:
             if int(hdr.get("IFILT", ifilt)) != int(ifilt):
                 raise ValueError(
                     f"stamps file {path.name} was written for ifilt={hdr['IFILT']}"
@@ -2440,7 +2495,6 @@ class Pipeline:
                     f"stamps file {path.name} grids do not match the loaded "
                     "images; stale file? Delete it to regenerate."
                 )
-            src = hdul["SOURCES"].data
             buf_hi = np.zeros(shape_hi, dtype=np.float32)
             buf_lo = np.zeros(shape_lo, dtype=np.float32)
             hi_templates: list[Template] = []
@@ -2505,7 +2559,7 @@ class Pipeline:
         Counterpart of :meth:`load_data` (pre-run state): reads
         ``<name>_fit_table.fits`` and ``<name>_residual.fits`` written by
         :meth:`write_outputs`, rebuilds the fitted templates from
-        ``<name>_stamps.fits``, and recreates the derived state (grid
+        ``<name>_stamps.h5``, and recreates the derived state (grid
         upsampling, model image) so the instance matches a completed
         :meth:`run`.  When the stamps file is missing it is regenerated
         through the same template path :meth:`run` uses — fluxes then come
@@ -2546,7 +2600,12 @@ class Pipeline:
 
         self.fit_bin_factors = []
         self.all_scenes = []
-        f_stamps = self.out_dir / f"{self.run_config.name}_stamps.fits"
+        # prefer HDF5, fall back to a stamps file written before the switch
+        stem = self.out_dir / f"{self.run_config.name}_stamps"
+        f_stamps = next(
+            (p for p in (stem.with_suffix(".h5"), stem.with_suffix(".fits")) if p.exists()),
+            stem.with_suffix(".h5"),
+        )
         if f_stamps.exists():
             self._templates_from_stamps(f_stamps, ifilt)
         else:

@@ -2466,14 +2466,21 @@ class Pipeline:
             f"{stem}_scene_catalog.csv", format="ascii.csv", overwrite=True
         )
 
-        # full-field map of the partition: every segment colored by the scene
-        # that fitted it, with each scene's bounding box drawn over it
+        # Two full-field views of the partition, answering different
+        # questions. The map paints every segment with the colour of the scene
+        # that fitted it, so it says which source went where; it reads the
+        # mosaic and the segmap to do it. The blobs draw each scene as the
+        # hull of its templates with its id, so it says where the scenes are
+        # and how big they got -- pure vector, no raster, no decimation.
         if cfg.scene_plots and self.scenes:
-            from .verification import save_scene_overview
+            from .verification import save_scene_blobs, save_scene_overview
 
             save_scene_overview(
                 self.images[0], self.segmap, self.scenes,
                 f"{stem}_scene_map.png",
+            )
+            save_scene_blobs(
+                self.scenes, self.images[0].shape, f"{stem}_scene_blobs.png",
             )
 
         # shift field: only exists when astrometry was actually solved

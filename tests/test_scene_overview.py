@@ -87,3 +87,84 @@ def test_save_scene_overview_decimates_a_large_field(tmp_path):
     small = tmp_path / "scene_map_full.png"
     save_scene_overview(image, segmap, scenes, small)
     assert small.exists() and small.stat().st_size > 0
+
+
+def _blob_scene(sid: int, xy: np.ndarray):
+    return SimpleNamespace(
+        id=sid,
+        templates=[SimpleNamespace(position_original=p) for p in np.asarray(xy, float)],
+    )
+
+
+def test_save_scene_blobs_draws_every_scene_and_labels_only_the_large(tmp_path):
+    """One patch per scene, and only the ones big enough to hold a number.
+
+    The blob map is vector: it never touches the mosaic, so its cost is the
+    scene count rather than the field size. Small scenes are still drawn --
+    they are the majority of a real partition -- but numbering them all turns
+    the figure into a smear of grey digits.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from mophongo.verification import save_scene_blobs
+
+    rng = np.random.default_rng(0)
+    scenes = [
+        # one sprawling scene, comfortably over label_min_pix
+        _blob_scene(1, rng.normal(500, 120, size=(40, 2))),
+        # three compact ones, well under it
+        _blob_scene(2, rng.normal(900, 3, size=(5, 2))),
+        _blob_scene(3, np.array([[100.0, 100.0]])),          # single template
+        # collinear and small: a hull would be a zero-area sliver, so this
+        # takes the circle path, and 20 px is under the label gate
+        _blob_scene(4, np.array([[200.0, 200.0], [210.0, 200.0],
+                                 [220.0, 200.0]])),
+    ]
+
+    out = tmp_path / "blobs.png"
+    save_scene_blobs(scenes, (1000, 1000), out)
+    assert out.exists() and out.stat().st_size > 0
+
+    # inspect the axes rather than the file: every scene gets a patch, and
+    # the label count is the gate working
+    fig, ax = plt.subplots()
+    try:
+        save_scene_blobs(scenes, (1000, 1000), tmp_path / "again.png")
+    finally:
+        plt.close(fig)
+
+    captured = {}
+    real_subplots = plt.subplots
+
+    def spy(*a, **k):
+        fig, ax = real_subplots(*a, **k)
+        captured["ax"] = ax
+        return fig, ax
+
+    plt.subplots = spy
+    try:
+        save_scene_blobs(scenes, (1000, 1000), tmp_path / "spy.png")
+    finally:
+        plt.subplots = real_subplots
+
+    ax = captured["ax"]
+    assert len(ax.patches) == len(scenes), "every scene is drawn"
+    labels = [t.get_text() for t in ax.texts]
+    assert labels == ["1"], "only the sprawling scene is labelled"
+    assert ax.texts[0].get_color() == "0.75", "scene numbers are grey"
+
+
+def test_save_scene_blobs_handles_an_empty_partition(tmp_path):
+    """No scenes is a figure with no patches, not a traceback."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    from mophongo.verification import save_scene_blobs
+
+    out = tmp_path / "none.png"
+    save_scene_blobs([], (100, 100), out)
+    assert out.exists()

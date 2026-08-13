@@ -1868,6 +1868,139 @@ def save_scene_overview(
     plt.close(fig)
 
 
+def save_scene_blobs(
+    scenes: Sequence[Any],
+    shape: tuple[int, int],
+    filename: str | Path,
+    *,
+    pad_pix: float = 12.0,
+    min_radius_pix: float = 8.0,
+    label_min_pix: float = 60.0,
+    figsize: tuple[float, float] = (14.0, 14.0),
+) -> None:
+    """Save a full-field map of the scene partition drawn as blobs.
+
+    Complements :func:`save_scene_overview`, which paints the segmentation and
+    is therefore as expensive as the mosaic. This draws each scene as the
+    convex hull of its template positions and nothing else, so it is pure
+    vector: 591 polygons and 591 labels, no full-field raster, no decimation
+    and no dependence on field size. It answers a different question, too --
+    not "which segment went to which scene" but "where are the scenes, how big
+    are they, and which one is number 87".
+
+    Scenes too small or too collinear for a hull are drawn as circles, so a
+    one-template scene still appears.
+
+    Args:
+        scenes: Fitted scenes; each needs ``templates`` with
+            ``position_original``, and ``id``.
+        shape: ``(ny, nx)`` of the field the positions live on, for the axes.
+        filename: Output image path.
+        pad_pix: Blobs are grown by this much so a compact scene is visible at
+            field scale.
+        min_radius_pix: Radius used for scenes drawn as circles.
+        label_min_pix: Scenes whose blob is smaller than this across are left
+            unlabelled; at field scale their numbers would overlap into a
+            smear. The blob is still drawn. Default 60 px, which on a MINERVA
+            detection grid labels the scenes big enough to be worth looking
+            up and leaves the compact majority as plain blobs.
+        figsize: Figure size in inches.
+    """
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Circle, Polygon
+
+    ny, nx = (int(v) for v in shape)
+    rng = np.random.default_rng(12345)
+    hue = np.linspace(0.0, 1.0, max(1, len(scenes)), endpoint=False)
+    rng.shuffle(hue)
+
+    # Geometry first, so the drawing order can be set by size.
+    blobs = []
+    for index, scene in enumerate(scenes):
+        pts = np.asarray(
+            [t.position_original for t in getattr(scene, "templates", [])],
+            dtype=float,
+        )
+        if pts.size == 0:
+            continue
+        centre = pts.mean(axis=0)
+        span = float(np.ptp(pts, axis=0).max()) if len(pts) > 1 else 0.0
+        blobs.append((span, index, scene, pts, centre))
+
+    # Largest first: scenes overlap, and a compact scene inside a sprawling
+    # one has to be drawn last or it is buried by it.
+    blobs.sort(key=lambda b: -b[0])
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_facecolor("0.08")
+    n_labelled = 0
+    for span, index, scene, pts, centre in blobs:
+        colour = mcolors.hsv_to_rgb((float(hue[index % len(hue)]), 0.55, 1.0))
+        # A hull over three or four sources is a sliver or a thin triangle,
+        # which at field scale reads as noise rather than as a scene. Below a
+        # few times the pad, draw the circle that encloses the same sources:
+        # the point here is where a scene is and roughly how big, and a blob
+        # says that better than an exact outline nothing can resolve.
+        radius = max(min_radius_pix, span / 2.0 + pad_pix)
+        patch = None
+        if span > 4.0 * pad_pix and len(pts) >= 3:
+            try:
+                from scipy.spatial import ConvexHull
+
+                hull = ConvexHull(pts)
+                verts = pts[hull.vertices]
+                # grow about the centroid so the outline is not flush with the
+                # outermost source, which reads as a clipped scene
+                grown = verts + pad_pix * _unit_outward(verts, centre)
+                patch = Polygon(grown, closed=True)
+            except Exception:  # noqa: BLE001 - collinear or degenerate
+                patch = None
+        if patch is None:
+            patch = Circle(centre, radius)
+            size_pix = 2.0 * radius
+        else:
+            size_pix = span
+
+        patch.set_facecolor((*colour, 0.30))
+        patch.set_edgecolor((*colour, 0.9))
+        patch.set_linewidth(0.7)
+        ax.add_patch(patch)
+
+        # Label only what is big enough to hold a number. On a full field the
+        # small scenes are the overwhelming majority, and numbering them all
+        # turns the figure into a smear of grey digits.
+        if size_pix >= label_min_pix:
+            ax.text(
+                centre[0], centre[1], str(getattr(scene, "id", index)),
+                color="0.75", fontsize=5.5, ha="center", va="center",
+                zorder=5,
+            )
+            n_labelled += 1
+
+    ax.set_xlim(0, nx)
+    ax.set_ylim(0, ny)
+    ax.set_aspect("equal")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_title(
+        f"Scene partition: {len(scenes)} scenes, {n_labelled} labelled"
+    )
+    fig.savefig(filename, dpi=200, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
+def _unit_outward(verts: np.ndarray, centre: np.ndarray) -> np.ndarray:
+    """Unit vectors pointing from ``centre`` to each vertex.
+
+    Used to grow a hull without shapely. A vertex sitting on the centroid gets
+    a zero vector rather than a division by zero, which simply leaves it put.
+    """
+    delta = verts - centre
+    norm = np.linalg.norm(delta, axis=1, keepdims=True)
+    return np.divide(delta, norm, out=np.zeros_like(delta), where=norm > 0)
+
+
 def _running_median(
     x: np.ndarray,
     y: np.ndarray,

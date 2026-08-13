@@ -3,6 +3,22 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Full-field scene-blob diagnostic (2026-08-13).
+  `verification.save_scene_blobs` draws each scene as the convex hull of its
+  template positions, filled in its own colour and labelled with its scene id
+  in grey, and `write_outputs` writes it as `<name>_scene_blobs.png` next to
+  the existing `_scene_map.png`. The two answer different questions: the map
+  colours segments (which source went where) and reads the mosaic to do it;
+  the blobs show where the scenes are and how big they got, as pure vector --
+  no raster, no decimation, cost set by the scene count rather than the field.
+  * Scenes narrower than `label_min_pix` (60 px) are drawn as circles rather
+    than hulls and left unlabelled: a hull over three sources is a sliver that
+    reads as noise at field scale, and on a real partition most scenes are
+    small, so numbering all of them buries the figure. Rendering 195 synthetic
+    scenes labelled 24.
+  * Drawn largest first, so a compact scene inside a sprawling one is not
+    buried by it.
+  * `poetry run pytest`: 381 passed.
 - [x] PSF grids carry provenance and are rebuilt when it disagrees
   (2026-08-13). A grid filename records detector, filter, MJD, grid size and
   oversampling -- but not the exposure list it came from, nor the `date_mode`

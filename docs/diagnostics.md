@@ -21,9 +21,22 @@ residual, and a color composite. The residual is flat down to the noise
 apart from the cores of the few brightest sources.
 ```
 
-`write_outputs` also writes `<name>_scene_map.png`: the whole field with
-every segment colored by the scene that fitted it, which is the partition
-the figure above shows one cell of (see {doc}`outputs`).
+`write_outputs` also writes two whole-field views of the partition the figure
+above shows one cell of (see {doc}`outputs`):
+
+- `<name>_scene_map.png` colours every *segment* by the scene that fitted it.
+  It answers "which source went where", and it reads the mosaic and the
+  segmentation map to do it, so a full field is decimated for display.
+- `<name>_scene_blobs.png` draws each *scene* as the convex hull of its
+  templates, labelled with its id in grey. It answers "where are the scenes,
+  how big did they get, and which one is number 87". Being pure vector — no
+  raster, no decimation — its cost is the scene count rather than the field
+  size, and scenes are drawn largest first so a compact scene sitting inside a
+  sprawling one is still visible. Scenes too small to hold a number are drawn
+  but left unlabelled; on a real partition most scenes are small, and
+  numbering all of them turns the figure into a smear.
+
+Both are written only when `scene_plots` is on.
 
 ## Inspecting the inputs
 

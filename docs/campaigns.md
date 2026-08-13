@@ -107,11 +107,11 @@ one job:
 ```
 $ python campaign.py --from prep --dry-run
 campaign over 17 config(s): cosmos_f1000w, ..., uds_f770w
-prep: 3 field(s), cosmos_f1000w, egs_f1000w, uds_f1280w
-+ submit.py run cosmos_f1000w egs_f1000w uds_f1280w --step prep --ram 48
-+ submit.py run cosmos_f1000w cosmos_f1280w ... cosmos_f770w --ram 48 --no-wait
-+ submit.py run egs_f1000w egs_f1280w ... egs_f770w --ram 48 --no-wait
-+ submit.py run uds_f1280w uds_f1500w uds_f1800w uds_f770w --ram 48 --no-wait
+prep: 3 field(s), cosmos_f770w, egs_f770w, uds_f770w
++ submit.py run cosmos_f770w egs_f770w uds_f770w --step prep
++ submit.py run cosmos_f1000w cosmos_f1280w ... cosmos_f770w --no-wait
++ submit.py run egs_f1000w egs_f1280w ... egs_f770w --no-wait
++ submit.py run uds_f1280w uds_f1500w uds_f1800w uds_f770w --no-wait
 ```
 
 The first `submit.py run` has no `--no-wait`, so the laptop blocks until all
@@ -151,12 +151,29 @@ laptop is free:
 ```
 $ python campaign.py --fields uds --from prep --dry-run
 run tree /fred/oz030/ilabbe/run on ilabbe@nt.swin.edu.au
-+ repair uds (uds_f1280w) after nothing
++ repair uds (uds_f770w) after nothing
 + run uds_f1280w uds_f1500w uds_f1800w uds_f770w after <uds-repair>
 ```
 
 `--prep-time` sets the repair job's walltime (default 4 h) separately from
 `--time` for the fits (default 24 h).
+
+## Memory
+
+Not a flag you pass. `submit.py`'s `ram_for()` resolves it per field —
+`DEFAULT_RAM = 64` GB, `FIELD_RAM = {"egs": 82}` — because EGS is the largest
+grid (1221 Mpx against UDS's 876) and scales past the others. `--ram` overrides
+it when you have a reason.
+
+Under-sizing it fails in a way worth recognising: the container or the SLURM
+job is killed with no Python traceback, so a run that OOMs looks like a run
+that vanished. If a log ends without `RUN_DONE` and without an exception, that
+is the first thing to check.
+
+Prep is much lighter than a fit — it reads the detection band and fits
+saturated cores, and never builds a kernel map or a template set — but it runs
+under the same request, since asking for a second size buys nothing when the
+job is short.
 
 ## The repair cache
 

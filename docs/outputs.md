@@ -252,6 +252,17 @@ reducing each block by its largest label so single-pixel segments survive
 rather than falling between samples; the title states the ratio. Bounding
 boxes are drawn for up to 250 scenes, past which they overlap into noise.
 
+Alongside it, `<name>_scene_blobs.png` draws the same partition from the other
+direction: each scene as the convex hull of its template positions, filled in
+its own colour and labelled with its scene id in grey. It never touches the
+mosaic or the segmentation map, so it is a vector figure whose cost is the
+number of scenes rather than the size of the field, and it needs no
+decimation. Scenes are drawn largest first, so a compact scene inside a
+sprawling one stays visible. Scenes narrower than 60 pixels are drawn as
+circles rather than hulls -- a hull over three sources is a sliver that reads
+as noise at field scale -- and are left unlabelled, since on a real partition
+most scenes are small and numbering every one of them buries the figure.
+
 In a scene diagnostic, segments listed as saturated elsewhere in the field
 stay visible in the image panel but are excluded from its display scale,
 which their brightness would otherwise flatten; the residual panel nulls

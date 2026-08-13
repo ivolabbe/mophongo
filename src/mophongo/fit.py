@@ -160,10 +160,13 @@ class FitConfig:
     # scene processing
     run_scene_solver: bool = True  # Whether to run the scene solver at all
     scene_coupling_thresh: float = 1e-3  # 1% leakage threshold for scene splitting
-    # Soft cap on templates per scene. Components over the cap are split by
-    # raising the coupling threshold locally (inside that component only);
-    # the accepted local leakage is logged. None = no cap.
-    scene_max_size: int | None = 800
+    # Cap on templates per scene. Components over it are split by raising the
+    # coupling threshold locally (inside that component only), and the merge
+    # pass that follows will not grow a scene back past it; the accepted local
+    # leakage is logged. None = no cap. The cost of a scene is quadratic in its
+    # size -- the joint flux+shift solve forms a dense n x n Schur complement --
+    # so this is what keeps the solve tractable, not just tidy.
+    scene_max_size: int | None = 1000
     # Max distance (px) to merge underfilled scenes. Bounded rather than inf so
     # merging stays local.
     scene_max_merge_radius: float = 1000.0
@@ -173,7 +176,8 @@ class FitConfig:
         # Derive scene_minimum_bright from astrometric polynomial order if not provided
         if self.scene_minimum_bright is None:
             try:
-                poly_order = int(self.astrom_kwargs.get("poly", {}).get("order", 1))
+                # fallback matches the astrom_kwargs default above: order 0
+                poly_order = int(self.astrom_kwargs.get("poly", {}).get("order", 0))
             except Exception:
                 poly_order = 0
             # default to 2x # of Chebyshev terms + 1

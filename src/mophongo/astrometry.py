@@ -299,7 +299,7 @@ class AstroCorrect:
         measured at templates with ``flux/err >= cfg.snr_thresh_astrom``
         (see :func:`measure_template_shifts`) and fit with the configured
         field model. For the polynomial model the basis order comes from
-        ``astrom_kwargs["poly"]["order"]`` (fallback 2); for the Gaussian
+        ``astrom_kwargs["poly"]["order"]`` (fallback 0); for the Gaussian
         process, ``astrom_kwargs["gp"]["length_scale"]`` (fallback 300
         pixels) sets the RBF kernel scale. The cutout ``box_size``
         (fallback 7) is read from the same per-model dict. These fallbacks
@@ -328,7 +328,7 @@ class AstroCorrect:
 
         if self.cfg.astrom_model.lower() == "poly":
             self._predict = fit_polynomial_field(
-                pos, dx, dy, w, order=astrom_kw.pop("order", 2), shape=residual.shape
+                pos, dx, dy, w, order=astrom_kw.pop("order", 0), shape=residual.shape
             )
         elif self.cfg.astrom_model.lower() == "gp":
             self._predict = self._fit_gp(pos, dx, dy, w, **astrom_kw)

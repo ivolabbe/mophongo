@@ -3,6 +3,63 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [ ] Scene solve cost and the size cap (2026-08-13). Two defects found while
+  chasing the full-field memory peak; both are about the cost of a scene
+  growing with the number of templates in it.
+  * `SceneFitter._flux_errors` chose its branch on size alone. Above
+    `dense_threshold=500` it built `sp.csc_matrix(A)` and factored with
+    `splu`, then back-solved one unit column at a time. That is right for the
+    flux-only path, where the whitened normal matrix really is sparse, and
+    backwards for the joint flux+shift path: it is handed
+    `S_w = A_w - AB_w AB_w^T`, and the outer product is fully populated, so
+    `S_w` arrives dense. A 1718-template scene therefore paid 118 MB and 5.1
+    Gflop where one LAPACK inversion costs 47 MB and 1.7 Gflop. The dispatch
+    is now on whether the matrix *is* sparse. Dense input matches the exact
+    inverse bit-for-bit (it previously differed at ~1e-15, the splu path's
+    error); a genuinely sparse matrix still takes the sparse branch and agrees
+    to 3e-15.
+  * `scene_max_size` never bound. `build_scene_tree_from_normal` splits
+    oversized components, and then `merge_small_scenes` -- which was never
+    given the cap -- merged them straight back chasing `minimum_bright`. A run
+    configured with 800 produced a 1718-template scene. The cap is now
+    threaded through and tested against the scene as it grows within a merge
+    round; it wins over `minimum_bright`, so a scene that cannot merge without
+    breaching it is left short of anchors and logged rather than grown without
+    bound. Four tests in `tests/test_scene_max_size.py`.
+  * Defaults: `scene_max_size` 800 -> 1000. The shift-basis order was already
+    0 in `FitConfig.astrom_kwargs`, but two fallbacks disagreed with it --
+    `__post_init__` assumed 1 when deriving `scene_minimum_bright` and
+    `AstroCorrect` assumed 2 for the polynomial field (its own docstring said
+    "an unmodified FitConfig supplies order 0"). Both now read 0, so a config
+    that omits the `poly` key derives `scene_minimum_bright` 3 rather than 7.
+  Order 0 means nB = 2: one rigid (dx, dy) per scene. That matters for memory
+  because `assemble_scene_system_AB` holds nB float64 planes over the bright
+  anchors' bounding box, doubled when the leverage cap clips -- 0.61 GB for
+  the widest full-field scene at nB=2, and linear in nB above that (order 1
+  would be 1.8 GB, order 2 3.6 GB). Note the size cap does *not* bound this:
+  the widest buffer came from a 25-template scene whose 14 anchors spanned
+  18.8 Mpx. Chunk those columns over row bands before raising the order.
+  Measured on the UDS F770W 3' trial (17,791 templates, config cap 800), against
+  the same trial before these two fixes:
+  * Partition: 70 scenes (sizes 2-1019, median 199) -> 74 scenes (sizes 2-779,
+    median 199). The cap binds -- the largest scene was over it by 27% and is
+    now under -- at the cost of four extra scenes, and *no* scene lost its
+    anchors: both runs report 0 scenes without bright members, so preferring
+    the cap over `minimum_bright` cost nothing here.
+  * Fluxes: 1,592 of 17,796 sources changed at all (9%). Median ratio
+    after/before is 1.000000 with 16-84% both 1.000000. Restricted to the 713
+    sources at SNR > 10 the worst moves 8.2%; the large excursions (up to 40x)
+    are all faint sources that changed scene. Errors move more often (2,682
+    rows) but by less: median 2.5e-3, worst 20%. `stampcor`/`totcor`/`psfcor`
+    move at most 1.9e-3. The residual differs in 0.42% of pixels, max |delta|
+    1.913, rms of the changed pixels 0.0105.
+  * Memory from that pair is NOT comparable: the second run shared the machine
+    with ~30 subagent processes, and macOS phys_footprint counts compressed
+    pages, so it read 30.3 GB against 20.0 GB for reasons that have nothing to
+    do with the code. Re-measure on an idle machine.
+  Still to do: a full-field run on an idle machine for the peak against the
+  recorded 46.5 GB, and the same partition/flux comparison at full-field scale,
+  where scenes are larger and the cap bites harder.
 - [ ] CANFAR v1.0 campaign: submitted, queued on platform capacity
   (2026-08-12 evening). 17 configs (uds/cosmos/egs x all staged MIRI bands),
   `--r-trial 1.5 --suffix _v1.0`, outputs to

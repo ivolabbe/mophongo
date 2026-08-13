@@ -290,6 +290,10 @@ def band_configs(rel: Release) -> list[dict]:
                 # date, and any mode that collapses the list ("modal" returns
                 # a single date) throws that resolution away invisibly.
                 "psf_date_mode": "all",
+                # "warn" until the rebuild cost is affordable, then
+                # "rebuild" (TODO.md). Never leave it "off": a grid built
+                # another way is a silent photometric difference.
+                "psf_provenance": "warn",
                 "psf_blur_fwhm": "default",
                 "footprint_filter": True,
                 # In-memory saturation repair at load time: fill the wht=0

@@ -6,3 +6,11 @@
 # `git push origin --delete <tag>` — including the `pre-cleanup` tag.
 # Deleted branches are recoverable from the merge commit; deleted tags are not.
 allow: push --delete
+
+# Stash hygiene: interrupted rebases leave `autostash` entries behind, and once
+# their content is confirmed present in the working tree or on origin/main they
+# are dead weight that hides the stashes that still matter. Confirm containment
+# before dropping (diff the stash's version of each file against the union of
+# the working tree and origin/main, not just by date), because a dropped stash
+# is only recoverable from the reflog and only until it expires.
+allow: stash drop

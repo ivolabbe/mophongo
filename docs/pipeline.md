@@ -608,11 +608,15 @@ Scenes:
   solver is the only fitting path and `False` raises.
 - `scene_coupling_thresh` (*float*, default `1e-3`) — template-coupling
   (leakage) threshold for splitting scenes.
-- `scene_max_size` (*int | None*, default `800`) — soft cap on templates per
+- `scene_max_size` (*int | None*, default `1000`) — soft cap on templates per
   scene; oversized components are split by raising the coupling threshold
   locally. `None` disables the cap.
-- `scene_max_merge_radius` (*float*, default `1000.0`) — maximum distance
-  (pixels) over which underfilled scenes are merged.
+- `scene_max_merge_radius` (*float*, default `1500.0`) — the scene length
+  scale in pixels, read three ways: a scene wider than this is split along its
+  longer axis, an underfilled scene looks no further than this for a merge
+  partner, and a merge that would leave the scene wider than this is refused.
+  `np.inf` disables all three. The size cap above bounds a scene's template
+  count and leaves its shape free; this bounds the shape.
 - `scene_minimum_bright` (*int | None*, default `5`) — minimum number of
   bright sources per scene; when set to `None` it is derived from the
   astrometric polynomial order as `(order + 1) * (order + 2) + 1`.

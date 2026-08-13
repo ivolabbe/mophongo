@@ -540,7 +540,7 @@ page.
 | `run_scene_solver` | `bool` | `True` | Must remain `True`; the scene solver is the only fitting path and `False` raises. |
 | `scene_coupling_thresh` | `float` | `1e-3` | Leakage score above which templates share a scene. |
 | `scene_max_size` | `int \| None` | `800` | Soft cap on templates per scene, enforced by local threshold-raising. `None` disables. |
-| `scene_max_merge_radius` | `float` | `1000.0` | Maximum distance (pixels) over which underfilled scenes merge. |
+| `scene_max_merge_radius` | `float` | `1500.0` | The scene length scale (pixels): scenes wider than this are split, underfilled scenes look no further for a merge partner, and a merge that would exceed it is refused. `np.inf` disables all three. |
 | `generate_scene_catalog` | `bool` | `False` | Write `scene_catalog_<i>.ecsv` and exit without fitting. |
 
 Aperture fields (`aperture_diam`, `aperture_catalog`, `aperture_units`),

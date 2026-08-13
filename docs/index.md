@@ -32,6 +32,7 @@ pipeline
 repair
 outputs
 diagnostics
+campaigns
 ```
 
 ```{toctree}

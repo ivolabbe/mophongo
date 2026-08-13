@@ -37,6 +37,11 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("submit")
 
 HERE = Path(__file__).resolve().parent
+REPO = HERE.parent.parent                     # mophongo/
+# This directory is staging only - launch scripts and configs, all tracked and
+# all small. Anything a command produces goes under scratch/, which is
+# gitignored: outputs must never land in the staging tree.
+WORK = REPO / "scratch" / "ozstar"
 JOB_PREFIX = "moph"
 
 #: Staging needs internet, which only these nodes have. It has to be given on
@@ -44,6 +49,30 @@ JOB_PREFIX = "moph"
 #: names it in a #SBATCH directive alone, and the job then lands on a compute
 #: node that cannot reach CANFAR. Fits leave the partition to the scheduler.
 STAGE_PARTITION = "datamover"
+
+#: Cores per fit. The fitting path is serial - a full-field run measured 6.1%
+#: of 16 cores, i.e. about one - so these buy threaded BLAS in a few phases and
+#: queue position everywhere else. Eight keeps some headroom for the dense
+#: scene solves without paying 16 cores of fair-share for idle allocation.
+DEFAULT_CORES = 8
+
+#: GB per fit, by field. Peak memory is set by the detection grid and segmap,
+#: which are per *field*, not per band: the four UDS bands measured 53.3, 55.6
+#: and 57.4 GB, a spread of 4 GB. 72 GB leaves the worst of those at 80% with
+#: about 15 GB of headroom, and still fits every milan (256 GB) and skylake
+#: (191 GB) node, so it costs no scheduling reach over 64. EGS's detection grid
+#: is about 1.4x UDS's, hence the larger request there. A run that exceeds its
+#: request is killed with no Python traceback, so if a band dies without one,
+#: check `sacct -j <id>.batch --format=MaxRSS` before anything else.
+DEFAULT_MEM_GB = 72
+MEM_GB_BY_FIELD = {"egs": 96}
+
+
+def mem_for(name: str, override: int | None = None) -> int:
+    """GB to request for one config."""
+    if override is not None:
+        return override
+    return MEM_GB_BY_FIELD.get(name.split("_")[0], DEFAULT_MEM_GB)
 
 #: Outputs small enough to be worth having locally. The residual, the stamps
 #: and the scene PNGs stay on /fred; a full field writes tens of GB of them.
@@ -228,9 +257,18 @@ def stage(names: list[str], after: str | None = None,
             for field, bands in by_field(names).items()]
 
 
-def run(names: list[str], after: str | None = None, cores: int = 16,
-        mem: int = 64, walltime: str = "24:00:00", sync: bool = True) -> list[str]:
+def run(names: list[str], after: str | None = None, cores: int = DEFAULT_CORES,
+        mem: int | None = None, walltime: str = "24:00:00", sync: bool = True,
+        step: str = "all") -> list[str]:
     """One SLURM job per config; returns the job ids.
+
+    ``mem`` is GB and overrides the per-field default; leave it None so each
+    field gets :func:`mem_for`, since peak memory follows the field's detection
+    grid rather than the band.
+
+    ``step`` is the pipeline step. ``"repair"`` runs a field's saturation
+    repair into its shared cache and stops, which is what a campaign submits
+    once per field before the bands.
 
     The source is pulled to the latest ``main`` first, unless ``sync`` is off.
     A run must not silently use whatever happened to be cloned weeks ago, and
@@ -240,9 +278,13 @@ def run(names: list[str], after: str | None = None, cores: int = 16,
     """
     if sync:
         sync_src()
-    return [sbatch("run.slurm", f"{JOB_PREFIX}-{name.replace('_', '-')}",
-                   {"CFG": name}, after=after,
-                   extra=[f"--cpus-per-task={cores}", f"--mem={mem}g",
+    # the step goes in the job name so squeue can tell a field's prep job from
+    # the band fits that follow it
+    prefix = JOB_PREFIX if step == "all" else f"{JOB_PREFIX}-{step}"
+    return [sbatch("run.slurm", f"{prefix}-{name.replace('_', '-')}",
+                   {"CFG": name, "STEP": step}, after=after,
+                   extra=[f"--cpus-per-task={cores}",
+                          f"--mem={mem_for(name, mem)}g",
                           f"--time={walltime}"])
             for name in names]
 
@@ -319,7 +361,8 @@ def do_stage(args: argparse.Namespace) -> None:
 
 
 def do_run(args: argparse.Namespace) -> None:
-    run(args.names, args.after, args.cores, args.mem, args.time, sync=not args.no_sync)
+    run(args.names, args.after, args.cores, args.mem, args.time,
+        sync=not args.no_sync, step=getattr(args, "step", "all"))
 
 
 def do_status(args: argparse.Namespace) -> None:
@@ -349,7 +392,7 @@ def do_fetch(args: argparse.Namespace) -> None:
     """Pull the small outputs down; the residual and the stamps stay on /fred."""
     root = ozroot.run_root()
     for name in args.names:
-        dest = HERE / "out" / name
+        dest = WORK / "out" / name
         dest.mkdir(parents=True, exist_ok=True)
         got = 0
         for template in FETCH:
@@ -415,9 +458,15 @@ def main() -> None:
 
     p = sub.add_parser("run", help="one SLURM job per config")
     p.add_argument("names", nargs="+")
+    p.add_argument("--step", default="all",
+                   help="pipeline step (default: all). 'repair' runs the "
+                        "field's saturation repair into its shared cache and "
+                        "stops, so the bands that follow start warm")
     p.add_argument("--after", help="SLURM job id to depend on")
-    p.add_argument("--cores", type=int, default=16)
-    p.add_argument("--mem", type=int, default=64, help="GB")
+    p.add_argument("--cores", type=int, default=DEFAULT_CORES)
+    p.add_argument("--mem", type=int, default=None,
+                   help=f"GB; default is per field ({DEFAULT_MEM_GB}, "
+                        + ", ".join(f"{k} {v}" for k, v in MEM_GB_BY_FIELD.items()) + ")")
     p.add_argument("--time", default="24:00:00")
     p.add_argument("--no-sync", action="store_true",
                    help="do not pull the latest main first (it is pulled by default, "

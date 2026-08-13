@@ -3,6 +3,142 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] PSF grids carry provenance and are rebuilt when it disagrees
+  (2026-08-13). A grid filename records detector, filter, MJD, grid size and
+  oversampling -- but not the exposure list it came from, nor the `date_mode`
+  that chose its MJDs. Those are exactly what changed under the `modal` ->
+  `all` default, so a one-epoch-per-band set is indistinguishable on disk from
+  a per-epoch one, and `_load_epsf` autobuilds only when *nothing* matches the
+  pattern: the wrong set loads and is never corrected.
+  * `psf_factory.grid_provenance()` returns the exposure-list content hash
+    (content, not path or mtime), the date mode and the FOV;
+    `PSFFactory.from_csv` stamps it and `write_stdpsf(provenance=...)` writes
+    it as `HIERARCH MPH` cards. `jwst_psf.read_stdpsf_provenance` reads it.
+  * `Pipeline._stale_psf_grids` compares the cards of every file matching the
+    band's pattern against what the run wants. `RunConfig.psf_provenance`
+    decides what follows: `"warn"` (default) reuses them and says so loudly,
+    `"rebuild"` deletes them and builds the missing MJDs, `"error"` refuses to
+    run, `"off"` skips the check. Grids written before provenance existed
+    carry no cards and count as stale: they cannot be shown to agree.
+  * `"rebuild"` deletes rather than overwrites, and does not force
+    `PSFFactory.overwrite`. Overwriting in place does not converge: a
+    `cluster` grid is named for a cluster midpoint and an `all` grid for a
+    rounded MJD, so the new set never regenerates the old filenames -- they
+    would survive, keep matching the pattern, keep being loaded alongside the
+    fresh ones, and be re-flagged on every later run. With the delete, an
+    existing grid whose encoded MJD is already in the target set is skipped
+    (`psf_factory.py:407`), so only the missing dates are built.
+  * `"warn"` for now because the release holds ~416 `cluster`-mode grids that
+    would otherwise all rebuild on first contact. Flipping the default to
+    `"rebuild"` once that cost is affordable is filed in `TODO.md`; the generated
+    MINERVA configs write `psf_provenance` explicitly so the switch is
+    visible in each of them.
+  * Not covered: an *incomplete* grid set. One grid and seventeen still both
+    match, provided both were built the same way; comparing loaded dates
+    against `dates_from_csv` would close that.
+  * `poetry run pytest`: 375 passed.
+- [x] `scene_max_merge_radius` now bounds a scene's shape, not only its
+  merging (2026-08-13). `scene_max_size` caps a scene's template count and
+  leaves its geometry free, and connected components near the percolation
+  threshold are dendritic. The measured case is the 25-template scene whose 14
+  anchors spanned 18.8 Mpx -- 25 sources strung across ~4300 px. That costs
+  twice: the astrometric shift field is fitted over an extent an order of
+  magnitude larger than the correlation length the model assumes
+  (`astrom_kwargs['gp']['length_scale']`, 400 px), and the derivative columns
+  in `assemble_scene_system_AB` are dense planes over the anchors' bounding
+  box, so a scene's memory follows its bbox area rather than its member count
+  -- the 0.61 GB buffer chased in the full-field memory work.
+  One knob, read three ways, all the same limit from different sides of the
+  partition: a scene wider than `scene_max_merge_radius` is median-bisected
+  along its longer axis (`scene._split_oversized_spatial`), an underfilled
+  scene looks no further than it for a merge partner (unchanged), and a merge
+  that would leave the scene wider than it is refused. The default is
+  1500 px; at MINERVA's 0.08"/px that is 120" = 2', and ~4x the GP length
+  scale (400 px). `np.inf` restores the old behaviour on all three.
+  Bisecting the *longer* axis is what removes elongation specifically: halving
+  the long axis of a thin scene squares it up, and each split strictly reduces
+  membership so the recursion terminates. The merge veto tests the union
+  bounding box rather than the centroid separation, because a distance bound
+  alone does not give an extent bound -- merging a scene already 3000 px wide
+  with a neighbour 900 px away leaves a scene wider still. It has the same
+  precedence over `minimum_bright` that `scene_max_size` has. Positions are why
+  the split lives in `generate_scenes` rather than
+  `build_scene_tree_from_normal`, which sees only `ATA`/`ATb`.
+  Provenance: this is the approach a 2026-08-08 session wrote and then parked
+  in a stash. Its docstring recorded that local threshold-raising had been
+  tried first and rejected as producing ragged shapes -- and threshold-raising
+  is what shipped on 2026-08-13 for the size cap, without that note in view.
+  The 18.8 Mpx scene is that predicted failure, measured.
+  What the default does to that case: the 25-template scene spanning 4300 px
+  becomes 4 scenes, longest side 1412 px, and the bbox area driving the
+  `Bq`/`Bl` buffers falls 18.8 -> 0.36 Mpx, a factor 52. At 1000 px it
+  would be 5 scenes, 883 px, 0.21 Mpx. A crowded
+  but compact scene is untouched (600 templates inside 1200 px stays one
+  scene). End to end on a 120-source field the limit binds and holds at every
+  value tried: 13 scenes / longest side 207 px at `inf`, 14 / 121 px at 150,
+  22 / 77 px at 80.
+  **This changes fluxes on real fields**, and the standard fixture cannot show
+  it -- a 301 px test field never reaches 1500 px, so the fixture reproduces
+  `7784f99` bit for bit and proves only that the plumbing is inert when the
+  limit does not bind. A full-field before/after is still owed: scene count,
+  widest bbox, peak memory, whether the v9 non-converging scenes converge, and
+  the flux comparison `scene_max_size` got. The split cuts couplings the
+  threshold pass chose to keep, so this is not a memory-only change. Every run
+  that already sets `scene_max_merge_radius` (all of them, via the default)
+  now gets the split as well. See TODO.md.
+  Thirteen tests in `tests/test_scene_max_size.py`.
+  They cover the longer-side bound, the elongation fix (45:1 in, within 4:1
+  out), compact scenes left alone, termination on coincident positions, the
+  merge veto, and `np.inf` as a no-op.
+- [x] Two-phase campaigns: a per-field prep step, both toolkits (2026-08-13).
+  A field's bands share its F444W and 30" halo ePSF grids and its saturation
+  repair -- `_repair_provenance` keys on the detection band and the trial box,
+  nothing that varies between bands -- so submitting them together made every
+  band rebuild the same grids, re-run the same repair, and write the same cache
+  file at once. Campaigns now submit prep per field first, then fan out.
+  * `Pipeline.prep()` = `build_psfs()` + `build_repair_cache()`;
+    `build_repair_cache()` = `load_data(kernels=False)`, which runs the repair
+    and writes the cache without building a per-band kernel map. Registered as
+    `STEPS["prep"]` and `STEPS["repair"]`; `repair` is a no-op when
+    `repair_saturated` is off.
+  * The two exist separately because of OzStar: grid building needs MAST and
+    the module stack, which only the login node has, so there the halves run on
+    different machines (`jobs/build_psfs.sh`, then `repair` under SLURM).
+    CANFAR compute has internet, so it uses the combined `prep`.
+  * `jobs/run.sh` and `jobs/run.slurm` take `$STEP` (default `all`);
+    `submit.py run --step` on both sides, with the step in the session/job name
+    so `status`/`squeue` distinguishes prep from the fits. CANFAR waits on
+    prep laptop-side; OzStar expresses it as `--dependency=afterok:<repair>`.
+  * `docs/campaigns.md` (new) explains both, including where the platform
+    differences force the design.
+  * `examples/canfar/` and `examples/ozstar/` are now tracked in full --
+    scripts, docs, generated configs and staging lists, 202 files and under a
+    megabyte of text. They are staging only: `submit.py fetch` and the upload
+    scratch write to `scratch/<toolkit>/` instead, and `out/`/`_upload/` stay
+    ignored inside them so an output cannot creep back in.
+  * `poetry run pytest`: 367 passed.
+- [x] Saturation-repair cache: per-field naming and a readable-file guard
+  (2026-08-13). Found while checking the generated CANFAR configs against the
+  current `RunConfig`. They validate (all 53 load, no unknown keys, all carry
+  `psf_date_mode`), but every one left `repair_cache_path` unset, so the
+  default `'..'` resolved to a single `<run>/out/repair_cache.fits` for the
+  whole tree. `_repair_provenance` keys on the detection image and the trial
+  box, so those 53 fell into 16 mutually-invalidating groups -- three fields
+  and a dozen patch geometries -- each recomputing the repair and overwriting
+  the others' cache.
+  * `arcify.py` now writes `repair_cache_path` next to `out_dir`, named by
+    field and geometry (`uds_full_repair_cache.fits`,
+    `uds_r3_34.38792-5.30102_repair_cache.fits`). Bands of a field with the
+    same geometry share one cache, which is what the default was reaching for;
+    nothing else collides. Fixed in the generator, not the configs: they are
+    gitignored and regenerated by `campaign.py`'s `arcify` step.
+  * `Pipeline._load_repair_cache` treats an unreadable cache as absent
+    (`OSError`/`KeyError`/`ValueError` -> re-run the repair). A campaign
+    submits a field's bands together, so one job can read the file while
+    another is writing it; the cache is recomputable and a lost fit is not.
+  * Follow-up in `TODO.md`: a per-field `prep` step so the repair runs once
+    before the bands are fired off, rather than concurrently in each.
+  * `poetry run pytest`: 365 passed.
 - [x] Array-lifetime audit and five memory fixes, `docs/MEMORY_LIFETIMES.md`
   (2026-08-13). Companion to `docs/SCALING_FIXED_MEMORY.md`, which proposes the
   decomposition; this one inventories every full-field array a run allocates,

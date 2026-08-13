@@ -107,6 +107,46 @@ def _cluster_mjds(mjd: np.ndarray, delta_day: float = 2.0) -> list[float]:
     return centres
 
 
+def csv_fingerprint(csv_path: str | os.PathLike) -> str:
+    """Short content hash of an exposure list.
+
+    Content, not path or mtime: the same listing re-downloaded to a new
+    location is the same input, and a listing rewritten in place with a new
+    exposure is not. Unreadable returns ``""``, which never matches.
+    """
+    import hashlib
+
+    try:
+        return hashlib.sha256(Path(csv_path).read_bytes()).hexdigest()[:16]
+    except OSError:
+        return ""
+
+
+def grid_provenance(
+    csv_path: str | os.PathLike,
+    date_mode: str | float | Time,
+    fov_arcsec: float | None = None,
+) -> dict[str, str]:
+    """Provenance cards for grids built from ``csv_path`` under ``date_mode``.
+
+    These are the two inputs the filename does not record. A grid is named
+    for its detector, filter, MJD, grid size and oversampling, so a set built
+    with ``date_mode="modal"`` — one epoch for a band whose exposures span
+    years — is indistinguishable on disk from a per-epoch set, and the
+    autobuild in ``Pipeline._load_epsf`` fires only when *nothing* matches
+    the pattern, so the wrong set is reused forever. Stamping the exposure
+    list and the date mode is what lets a load check rather than assume.
+    """
+    prov = {
+        "csv": Path(csv_path).name,
+        "csvhash": csv_fingerprint(csv_path),
+        "datemode": str(date_mode),
+    }
+    if fov_arcsec is not None:
+        prov["fov"] = f"{float(fov_arcsec):g}"
+    return prov
+
+
 def dates_from_csv(
     csv_path: str | os.PathLike,
     mode: str | float | Time = "modal",
@@ -163,6 +203,41 @@ def dates_from_csv(
     if mode == "all":
         return sorted({float(int(round(m))) for m in mjds})
     raise ValueError(f"Unknown date mode: {mode!r}")
+
+
+def _build_and_save(job: dict) -> str:
+    """Build one ``(detector, date)`` grid and write it. Module-level so it pickles.
+
+    Returns the path written. The grid itself is not returned: it is a few MB
+    of pixels that the caller already has on disk, and sending it back through
+    the pool would cost more than building it.
+    """
+    from .jwst_psf import write_stdpsf
+
+    backend = BACKENDS[job["telescope"]]
+    grid = backend.build(**job["build"])
+    write_stdpsf(job["outpath"], grid, overwrite=job["overwrite"],
+                 provenance=job["provenance"], verbose=False)
+    return job["outpath"]
+
+
+def prewarm_opds(instrument: str, mjds: Sequence[float]) -> None:
+    """Fetch each date's wavefront OPD once, serially, before any fan-out.
+
+    ``build_jwst_psf`` calls ``inst.load_wss_opd_by_date``, which queries MAST
+    and caches the OPD under ``STPSF_PATH``. Workers building different dates
+    of the same band would otherwise issue those queries concurrently and race
+    to write the same cache files. Doing it here makes the parallel phase
+    purely local CPU. Failures are not fatal: the worker will fetch it itself.
+    """
+    import stpsf
+
+    for mjd in dict.fromkeys(float(m) for m in mjds):
+        try:
+            inst = getattr(stpsf, instrument.title().replace("Nircam", "NIRCam"))()
+            inst.load_wss_opd_by_date(Time(mjd, format="mjd"), choice="closest")
+        except Exception as exc:  # noqa: BLE001 - a warm cache is best effort
+            logger.debug("OPD prewarm for MJD %.1f failed (%s)", mjd, exc)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -229,6 +304,23 @@ class PSFFactory:
     include_fov: bool = False
     overwrite: bool = False
     verbose: bool = False
+    #: Processes used to build grids. One ``(detector, date)`` pair is one
+    #: independent job writing one uniquely named file, so the work is
+    #: embarrassingly parallel and each worker costs the stpsf wavefront
+    #: propagation -- tens to low hundreds of MB, not a share of anything
+    #: field-sized. 1 keeps the historical serial behaviour.
+    #:
+    #: This parallelises WITHIN one pattern. It does not make concurrent
+    #: builds of the SAME pattern safe: every band of a field derives the same
+    #: ``pattern_hi`` (the F444W grids), so two bands building at once target
+    #: identical filenames in one ``psf_dir``. Serialise there -- build one
+    #: band of a field first, then fan the rest out.
+    workers: int = 1
+    #: What the grids being written were derived from, stamped into each file
+    #: as ``HIERARCH MPH *`` cards. Set by :meth:`from_csv`; a grid built by
+    #: the lower-level entry points carries whatever the caller sets here.
+    #: See :func:`mophongo.jwst_psf.read_stdpsf_provenance`.
+    provenance: dict | None = None
 
     # ── filename helper ────────────────────────────────────────────────
     def filename(
@@ -296,6 +388,9 @@ class PSFFactory:
         os_ = oversample if oversample is not None else self.oversample
         fov = fov_arcsec if fov_arcsec is not None else self.fov_arcsec
         det_samp = use_detsampled_psf if use_detsampled_psf is not None else self.use_detsampled_psf
+        # stamp what these grids come from, so a later run can tell whether
+        # the cache on disk was built the way it now wants
+        self.provenance = grid_provenance(csv_path, mode, fov)
 
         grid = backend.build(
             instrument=instrument,
@@ -399,7 +494,11 @@ class PSFFactory:
                 ",".join(f"{m:.1f}" for m in mjds),
             )
 
-        grids = []
+        # One job per (detector, date). Each writes a uniquely named file and
+        # shares nothing, so this is a plain parallel map. Existing files are
+        # skipped here rather than in the worker, so the pool only ever holds
+        # work that has to be done.
+        jobs = []
         for det in det_list:
             for mjd in mjds:
                 outpath = self._outpath(detector=det, filt=filt, num_psfs=n,
@@ -407,22 +506,40 @@ class PSFFactory:
                 if save and outpath is not None and outpath.exists() and not self.overwrite:
                     logger.info("Skipping existing %s", outpath)
                     continue
+                jobs.append((det, float(mjd), outpath))
 
-                grid = backend.build(
-                    instrument=instrument,
-                    filter=filt,
-                    detector=det,
-                    date=float(mjd),
-                    num_psfs=n,
-                    oversample=os_,
-                    fov_arcsec=fov,
-                    use_detsampled_psf=det_samp,
-                    verbose=self.verbose,
-                )
-                grids.append(grid)
-                if save:
-                    self._save(grid, detector=det, filt=filt, num_psfs=n,
-                               use_detsampled_psf=det_samp, mjd=mjd)
+        build_kw = dict(instrument=instrument, filter=filt, num_psfs=n,
+                        oversample=os_, fov_arcsec=fov,
+                        use_detsampled_psf=det_samp, verbose=self.verbose)
+
+        workers = max(1, int(self.workers or 1))
+        if save and workers > 1 and len(jobs) > 1:
+            from concurrent.futures import ProcessPoolExecutor
+
+            workers = min(workers, len(jobs))
+            logger.info("building %d grid(s) on %d worker(s)", len(jobs), workers)
+            # serially, so the pool does not race on the same OPD download
+            prewarm_opds(instrument, [mjd for _, mjd, _ in jobs])
+            payload = [
+                {"telescope": telescope, "outpath": str(path),
+                 "overwrite": self.overwrite, "provenance": self.provenance,
+                 "build": {**build_kw, "detector": det, "date": mjd}}
+                for det, mjd, path in jobs
+            ]
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                for written in pool.map(_build_and_save, payload):
+                    logger.info("wrote %s", written)
+            # the grids are on disk; returning them would ship every pixel
+            # back through the pool for a caller that reads files anyway
+            return []
+
+        grids = []
+        for det, mjd, _outpath in jobs:
+            grid = backend.build(detector=det, date=mjd, **build_kw)
+            grids.append(grid)
+            if save:
+                self._save(grid, detector=det, filt=filt, num_psfs=n,
+                           use_detsampled_psf=det_samp, mjd=mjd)
         return grids
 
     # ── internals ──────────────────────────────────────────────────────
@@ -436,5 +553,6 @@ class PSFFactory:
         if outpath is None:
             return None
         outpath.parent.mkdir(parents=True, exist_ok=True)
-        write_stdpsf(outpath, grid, overwrite=self.overwrite, verbose=self.verbose)
+        write_stdpsf(outpath, grid, overwrite=self.overwrite,
+                     provenance=self.provenance, verbose=self.verbose)
         return outpath

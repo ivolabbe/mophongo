@@ -11,6 +11,9 @@ echo "=== unpack"
 tar -xzf $RUN/mophongo_src.tgz -C $RUN/mophongo
 tar -xf  $RUN/psf.tar          -C $RUN/PSF
 echo "psf grids: $(ls $RUN/PSF | wc -l)"
+# See update_src.sh: SRC_VERSION records what is unpacked, not what was uploaded.
+cp -f $RUN/SRC_VERSION.pending $RUN/SRC_VERSION
+echo "mophongo: $(cat $RUN/SRC_VERSION)"
 
 echo "=== venv"
 rm -rf $RUN/venv

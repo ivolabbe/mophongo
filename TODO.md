@@ -2,25 +2,73 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] Parallelise the PSF build across *patterns*, not only within one
+  (2026-08-13). `PSFFactory(workers=N)` now fans out over `(detector, date)`,
+  which is safe because each job writes a uniquely named file, and the OPD
+  fetches are pre-warmed serially so the pool does not race MAST. What is
+  still serial is bands of a *field*: they all derive the same `pattern_hi`,
+  so `uds_f770w` and `uds_f1000w` build identical F444W filenames into one
+  `psf_dir` and would tear each other's files. Prep sidesteps it by building
+  one band per field first. Doing better means a lock or a claim file per
+  target path, at which point every band could build concurrently and prep
+  would only need to exist for the repair.
+  * The per-band `pattern_lo` grids have distinct names and are already safe
+    to build concurrently across bands.
+  * `psf_workers` defaults to 1 everywhere. Worth measuring before raising it
+    on an OzStar login node, where the build runs `nice`d on a shared machine.
+
+- [ ] Flip `psf_provenance` from `"warn"` to `"rebuild"` (2026-08-13). Grids
+  now carry the exposure-list hash, date mode and FOV they were built from,
+  and `Pipeline._stale_psf_grids` compares them on load. The default is
+  `"warn"`: a mismatch is logged loudly and the grids are used anyway, because
+  the release still holds ~416 `cluster`-mode grids and unstamped legacy files
+  that would otherwise all rebuild the first time a band touched them, which
+  is not what anyone wants to discover mid-campaign.
+  `"rebuild"` is the end state: grids that disagree with the config are
+  deleted and the missing MJDs are built, so the release converges on
+  `all`-mode grids as bands run instead of needing a deliberate purge, and no
+  run ever fits with PSFs its config does not describe. Existing grids whose
+  encoded MJD filename is already in the target set are skipped
+  (`psf_factory.py:407`), so a band that is current except for one new epoch
+  costs one grid, not seventeen. Flip it once the cost is affordable -- about
+  416 grids and an estimated 9 hours of CPU worst case, spread across the
+  campaign rather than paid up front. Flipping means the `RunConfig` default and the
+  `psf_provenance` line `make_minerva_configs.py` writes. (`"error"` halts
+  instead of rebuilding, which is the stricter option if a rebuild mid-run is
+  ever the wrong thing; `"off"` skips the check.)
+
 - [ ] Decide whether to rebuild the existing PSF grids in `all` mode
   (2026-08-13). The default is now `all`, but the grids already on disk (and
   on arc, and on `/fred`) were built in `cluster` mode -- UDS F770W has 9
   where `all` wants 17, COSMOS F444W 44 against 78. `_load_epsf` autobuilds
   only when *nothing* matches the pattern, so those bands will never gain the
-  missing dates on their own: they have to be deleted and rebuilt, about 416
-  grids and an estimated 9 hours of nice'd login-node CPU. Until then a
+  missing dates on their own -- but as of the provenance check they are no
+  longer reused *silently*: a `cluster`-mode grid reports a `datemode`
+  mismatch on every load. With `psf_provenance="warn"` it is still used;
+  running a field with `psf_provenance="rebuild"` is how to upgrade it, about
+  416 grids and an estimated 9 hours of nice'd login-node CPU in total. Until then a
   release mixes `cluster`-mode grids (UDS, COSMOS F444W/F770W) with `all`-mode
   ones (everything autobuilt from now on). Worth measuring first whether the
   difference is detectable in the photometry: if the wavefront drift between
   adjacent cluster dates is small, `cluster` is the cheaper convention and the
   default should arguably be reconsidered rather than the grids rebuilt.
 
-- [ ] `PSFFactory` autobuild is silent about incompleteness. A band with one
-  grid and one with seventeen both "match the pattern", so a partially built
-  grid set looks identical to a complete one at load time. `_load_epsf` could
-  compare the dates it loaded against `dates_from_csv(csv, mode=cfg.psf_date_mode)`
-  and warn when grids are missing; that is how the 2026-08-13 single-epoch
-  problem would have announced itself instead of being found by hand.
+- [x] `PSFFactory` grids carry provenance (2026-08-13). A filename records
+  detector, filter, MJD, grid size and oversampling but not the exposure list
+  or the `date_mode` that chose the MJDs, so a `cluster`-mode set was
+  indistinguishable on disk from an `all`-mode one and `_load_epsf` -- which
+  autobuilds only when *nothing* matches the pattern -- reused it forever.
+  `grid_provenance()` now stamps the exposure-list content hash, the date mode
+  and the FOV into each file as `HIERARCH MPH` cards;
+  `Pipeline._stale_psf_grids` compares them on load, and
+  `RunConfig.psf_provenance` decides what happens: `"warn"` (default for now)
+  reuses them loudly, `"rebuild"` regenerates in place with `overwrite=True`,
+  `"error"` refuses to run, `"off"` skips the check. Unstamped legacy grids
+  count as stale since they cannot be shown to agree.
+  * Follow-up: this catches a *wrong* grid set, not an *incomplete* one. A
+    band with one grid and one with seventeen still both "match", provided
+    both were built the same way. Comparing the loaded dates against
+    `dates_from_csv(csv, mode=cfg.psf_date_mode)` would close that too.
 
 - [ ] Measure the OzStar side of the campaign (2026-08-13). `examples/ozstar/`
   is written and running but has no measured numbers in it yet: staging wall
@@ -37,19 +85,27 @@ This file tracks future desired features, checks, and investigations.
   is written, that is the moment to decide whether the two should share an
   implementation.
 
-- [ ] Confirm the EGS full-field memory ceiling and give `campaign.py` a
-  per-field RAM (2026-08-13). This applies to both platforms; the OzStar
-  campaign requests 64 GB by default and its nodes hold 191-256 GB, so a
-  resubmission there is cheap, while CANFAR's 48 GB is the constrained case.
-  EGS is 1221 Mpx against UDS's 876, and UDS
-  full field measures 46.5 GB, so EGS extrapolates over the 48 GB request
-  and its bands are expected to OOM (silently, with no traceback). The
-  agreed response for the v1.0 campaign is to resubmit those at `--ram 64`
-  by hand, because 48 GB and up have queued for hours when the platform is
-  busy and raising the request everywhere costs wall clock. If EGS does need
-  64, `--ram` should become per-field rather than one number for the whole
-  campaign, and the measured peak per field belongs in `README.md` next to
-  the UDS number.
+- [x] Per-field prep step, both toolkits (2026-08-13). `STEPS["prep"]` and
+  `STEPS["repair"]`, `$STEP` in both job scripts, `submit.py run --step`, and a
+  `prep` phase in both campaigns. CANFAR waits on it laptop-side; OzStar makes
+  each band job depend on its field's repair. See `docs/campaigns.md`.
+- [ ] Decide whether `scene_plots` can stay on for a full field (2026-08-13).
+  It is what killed all ten cosmos/uds bands of the CANFAR v1.0 campaign:
+  each wrote its fit table, residual and stamps, then died rendering Lupton
+  RGB composites for several hundred scenes on top of ~35 GB resident
+  (cosmos_f1280w got 120 of 380 PNGs out). `scene_plots=false` plus the
+  per-field RAM below gives a clean run - egs_f560w completed at 29.7 GB
+  peak. Worth re-testing rather than leaving off permanently: `7784f99`
+  added `_residual_memmap`, which removes the 3.5-4.5 GB anonymous residual
+  the campaign's commit still held, and the plot loop reads only a bbox
+  slice of `self.images[0]` and `self.segmap` while both stay fully
+  resident. If it still does not fit, that loop is the place to read those
+  two memmapped, since it never needs more than the scene's own box.
+  Per-field RAM itself is done: `submit.py::ram_for` gives 64 GB standard
+  and 82 for EGS, `--ram` overrides, and `campaign.py` passes nothing unless
+  asked so each field takes its own size. Still to record: the measured peak
+  per field in `examples/canfar/README.md` next to the UDS number, once
+  enough EGS bands have finished to have one.
 
 - [ ] `examples/canfar/` has no test coverage. The 2026-08-13 changes
   (`kill`, `push --src-only`, arc-aware `has_shared_grids`, `--skip`) were
@@ -156,6 +212,11 @@ This file tracks future desired features, checks, and investigations.
   `fit_astrometry_niter` / lower `astrom_damping` (currently 5 and 0.8).
   Check the IRLS item above first: a walk driven by a few high-leverage
   extended anchors would be cured by the same reweighting.
+  `scene_max_merge_radius` (2026-08-13) is now the direct instrument for the
+  scale-mismatch hypothesis: it bounds the scene's longer side rather than its
+  template count, which is the quantity the GP length scale should be compared
+  against. It is already on at 1500 px (~4x `length_scale`), so re-run v9 and
+  read off whether the walk survives before reaching for the damping.
 
 - [ ] Resolve the 2026-08-12 deep-review release gates in
   `docs/CODE_REVIEW_2026-08-12.md`. P1-01 (exact astrometric block system),
@@ -816,8 +877,22 @@ This file tracks future desired features, checks, and investigations.
     Blocks parallelism.
   - [ ] `Scene.model_image` allocates float64 over the scene bbox (150 MB for
     the widest); float32, or accumulate straight into the residual.
-  - [ ] Bound scene *extent*, not only `scene_max_size`: the widest buffer came
-    from a 25-template scene whose anchors spanned 18.8 Mpx.
+  - [x] Bound scene *extent*, not only `scene_max_size` (2026-08-13):
+    `scene_max_merge_radius` is now one knob read three ways -- split a scene
+    wider than it, search no further than it for a merge partner, refuse a
+    merge that would exceed it. Default unchanged at 1000 px.
+  - [ ] Validate `scene_max_merge_radius=1500` as an extent limit on a full
+    field. It is now on for every run, and it changes fluxes: the split cuts
+    couplings the threshold pass chose to keep, so this needs the same
+    before/after comparison `scene_max_size` got, not just a memory number.
+    Measure scene count, the widest bbox, peak memory, and whether the v9
+    non-converging scenes converge. The motivating case is the 25-template
+    scene spanning 4300 px, which set both the 0.61 GB `Bq`/`Bl` buffer and,
+    most likely, the r < 3' astrometric walk (the GP keeps `length_scale`
+    400 px while the scene spans ten times that); at 1500 px it becomes 4
+    scenes with a worst bbox of 0.36 Mpx. If 1500 px still leaves the walk,
+    1000 px (2.5x the length scale, 5 scenes, 0.21 Mpx) is the next value
+    down.
   - [x] `write_stamps` no longer builds the complete `vla` list before writing
     (2026-08-13) -- that was a full extra copy of every stamp, 12 GB
     full-field, at the end of the run. Offsets come from the shapes recorded in

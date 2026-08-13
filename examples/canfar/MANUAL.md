@@ -87,7 +87,7 @@ collaboration and should stay read-mostly.
    - **type**: `notebook`
    - **image**: `images.canfar.net/skaha/jwst-notebook:25.07.25`
    - **name**: anything, e.g. `mophongo`
-   - **cores**: 2
+   - **cores**: 4
    - **memory**: 48 GB
 4. Launch, wait for it to turn green, and open it.
 5. In JupyterLab, **File → New → Terminal**.
@@ -95,11 +95,11 @@ collaboration and should stay read-mostly.
 That terminal is a normal shell on a machine with `/arc` mounted and outbound
 internet. Everything below is typed there.
 
-On cores: 2 is the standard, for a full field or a trial patch alike. Measured
+On cores: 4 is the standard, for a full field or a trial patch alike. Measured
 CPU use is about 0.2 of a core — the run waits on `/arc` rather than computing,
-and the fitting path has no thread pool — so asking for 8 or 16 only idles
-allocation someone else could use, and a large request waits longer to be
-scheduled when the platform is busy.
+and the fitting path has no thread pool — so the extra cores are headroom rather
+than throughput, and asking for 8 or 16 only idles allocation someone else could
+use and waits longer to be scheduled when the platform is busy.
 
 On memory: ask for 48 GB and do not economise. The pipeline loads the full
 3.3 GB F444W mosaic and the 3.3 GB segmap regardless of how small a trial patch
@@ -319,6 +319,38 @@ $P submit.py stage uds_f770w uds_f1280w uds_f1500w uds_f1800w
 $P submit.py run   uds_f770w uds_f1280w uds_f1500w uds_f1800w
 ```
 
+To ship a code change into a campaign that is already set up, commit it to
+`main` first — `push` ships `git archive` of `main`, not your working tree —
+then skip the PSF half of the push and replace the source without rebuilding
+the venv:
+
+```bash
+$P submit.py push --src-only                   # setup is the only thing that
+$P submit.py sync                              # unpacks psf.tar, so skip it
+```
+
+`sync` does the unpacking through the `/arc` mount when you have one (Part 2),
+which takes seconds; without a mount it launches a container and waits in the
+queue, which has taken half an hour for the same work. `--job` forces the
+container.
+
+Both steps are needed. `push` only uploads the tarball; `sync` is what unpacks
+it. A push with no sync leaves every job importing the previous campaign's
+code, which looks exactly like a run that picked the change up. `run` now
+refuses to submit when the source on arc is not the ref you asked for, and each
+job log opens with the commit it is running.
+
+To stop everything:
+
+```bash
+$P submit.py kill                              # sweeps for late registrations
+```
+
+One pass is not enough on its own. A session is not listed until the service
+registers it, so a campaign submitted with `--no-wait` can show six jobs, be
+destroyed, and produce ten more a few minutes later. `kill` keeps sweeping
+until several consecutive passes come back empty, and spares the `sync` job.
+
 See `README.md` here for the details of what each step does.
 
 ---
@@ -329,7 +361,9 @@ See `README.md` here for the details of what each step does.
 |---|---|
 | Cannot list `arc:projects/minerva` | not in the `minerva` group yet — ask `<adam>` |
 | `No such file or directory: /arc/home/<user>` | home not created yet; see Part 2 |
-| Job or session dies with no Python traceback | out of memory. A full-field run needs 48 GB; a `trial` patch reads only its own pixels and needs far less |
+| Job or session dies with no Python traceback | out of memory. A `trial` patch reads only its own pixels and peaks near 27 GB; UDS full field measures 46.5 GB, so 48 GB has little margin and EGS (1.4x the UDS grid) needs `--ram 64` |
+| Jobs reappear after you destroyed them all | they were submitted but not yet registered when `status` ran. Use `submit.py kill`, which sweeps until the listing stays empty |
+| Session names have an extra `-1` | skaha appends a replica index; `mophongo-uds-f770w-v1-0` lists as `...-v1-0-1` |
 | Nothing happens for three minutes at startup | importing mophongo off `/arc`; normal |
 | `ModuleNotFoundError` after install | you used the image's `python` instead of `./venv/bin/python` |
 | matplotlib font-cache warnings on every command | set `MPLCONFIGDIR` (Part 4.2) |

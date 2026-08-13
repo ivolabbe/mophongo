@@ -228,6 +228,85 @@ from shapely.geometry import Point
 from shapely.strtree import STRtree
 
 
+def _split_oversized_spatial(
+    labels: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    max_extent: float,
+) -> tuple[np.ndarray, int]:
+    """Median-bisect scenes wider than ``max_extent`` along their longer axis.
+
+    :func:`build_scene_tree_from_normal` bounds a scene's *template count*, by
+    raising the coupling threshold locally until the pieces fit. That leaves
+    the scene's *shape* free, and connected components near the percolation
+    threshold are dendritic: a MINERVA UDS run produced a 25-template scene
+    whose anchors spanned 18.8 Mpx -- 25 sources strung across 4300 px. Two
+    things go wrong with a scene that thin. Its astrometric shift field is
+    fitted over an extent much larger than the correlation length the model
+    assumes (``astrom_kwargs['gp']['length_scale']``, 400 px), and the
+    derivative columns in :func:`assemble_scene_system_AB` are dense planes
+    over the anchors' bounding box, so a scene's memory follows its bbox area
+    rather than its member count.
+
+    Bisecting at the median of the longer axis fixes both, and fixes
+    elongation in particular: halving the long axis of a thin scene squares it
+    up, and each pass strictly reduces membership, so the recursion
+    terminates. Splitting on geometry cuts couplings that the threshold pass
+    chose to keep, which is the cost -- the cut is across the scene's thin
+    direction, where the leakage it severs is whatever happened to bridge two
+    distant clumps.
+
+    Parameters
+    ----------
+    labels
+        Scene label per template, any integer labelling.
+    x, y
+        Template positions, aligned to ``labels``.
+    max_extent
+        Longest bounding-box side a scene may have, in pixels.
+
+    Returns
+    -------
+    labels : ndarray
+        0-based compact labels.
+    nscene : int
+        Number of scenes.
+    """
+    labs = np.unique(labels, return_inverse=True)[1]
+    if labs.size == 0:
+        return labs, 0
+    cap = float(max_extent)
+    next_label = int(labs.max()) + 1
+    stack = list(np.unique(labs))
+    n_split = 0
+    while stack:
+        c = stack.pop()
+        memb = np.nonzero(labs == c)[0]
+        # a single template is its own floor: its stamp sets the extent and no
+        # split can shrink it
+        if memb.size < 2:
+            continue
+        xs, ys = x[memb], y[memb]
+        dx, dy = float(xs.max() - xs.min()), float(ys.max() - ys.min())
+        if max(dx, dy) <= cap:
+            continue
+        v = xs if dx >= dy else ys
+        # memb.size // 2 is >= 1 and < memb.size for size >= 2, so every split
+        # strictly shrinks both pieces and the recursion terminates
+        half = memb[np.argsort(v, kind="stable")[: memb.size // 2]]
+        labs[half] = next_label
+        stack.extend((c, next_label))
+        next_label += 1
+        n_split += 1
+    uniq, inv = np.unique(labs, return_inverse=True)
+    if n_split:
+        logger.debug(
+            "[scenes] spatial split: %d bisection(s) at max_extent=%g px, "
+            "%d scenes", n_split, cap, int(uniq.size),
+        )
+    return inv, int(uniq.size)
+
+
 def merge_small_scenes(
     labels: np.ndarray,
     templates: list[Template],
@@ -253,6 +332,15 @@ def merge_small_scenes(
     it is left short of anchors rather than grown without bound, because the
     solve cost is quadratic in the scene size (the joint path's Schur
     complement is dense).
+
+    ``max_merge_radius`` does double duty, and both duties are the same limit:
+    it bounds how far an underfilled scene looks for a partner, and it caps the
+    merged scene's longer bounding-box side. The second is what
+    :func:`_split_oversized_spatial` enforces on the split side, and without it
+    here two compact scenes would merge into one long thin scene and undo that
+    pass, exactly as merging used to undo ``max_size``. A centroid-distance
+    bound alone does not give it: merging a scene already 3000 px wide with a
+    neighbour 900 px away leaves a scene wider still.
     """
 
     # Work with compact 0..K-1 labels for bincounts
@@ -324,6 +412,14 @@ def merge_small_scenes(
         # as it grows within this round, not against the pre-merge pair
         size = counts.copy()
         cap = np.inf if max_size is None else int(max_size)
+        # running bbox per root, for the same reason as `size`: a chain of
+        # merges within one round must be tested against the scene it is
+        # building, not against each pair in isolation
+        cap_ext = float(max_merge_radius)
+        bx0 = np.full(K, np.inf); bx1 = np.full(K, -np.inf)
+        by0 = np.full(K, np.inf); by1 = np.full(K, -np.inf)
+        np.minimum.at(bx0, labs, x); np.maximum.at(bx1, labs, x)
+        np.minimum.at(by0, labs, y); np.maximum.at(by1, labs, y)
 
         def find(a: int) -> int:
             # path compression
@@ -340,13 +436,20 @@ def merge_small_scenes(
             if size[ru] + size[rv] > cap:
                 blocked += 1
                 continue
+            ux0, ux1 = min(bx0[ru], bx0[rv]), max(bx1[ru], bx1[rv])
+            uy0, uy1 = min(by0[ru], by0[rv]), max(by1[ru], by1[rv])
+            if max(ux1 - ux0, uy1 - uy0) > cap_ext:
+                blocked += 1
+                continue
             # union by simple heuristic: attach smaller index to larger
             if ru < rv:
                 parent[ru] = rv
                 size[rv] += size[ru]
+                bx0[rv], bx1[rv], by0[rv], by1[rv] = ux0, ux1, uy0, uy1
             else:
                 parent[rv] = ru
                 size[ru] += size[rv]
+                bx0[ru], bx1[ru], by0[ru], by1[ru] = ux0, ux1, uy0, uy1
             merged += 1
 
         if merged == 0:
@@ -355,8 +458,11 @@ def merge_small_scenes(
             if blocked:
                 logger.info(
                     "[scenes] %d underfilled scene(s) left unmerged: every "
-                    "candidate merge would exceed max_size=%d",
-                    len(under), int(cap),
+                    "candidate merge would exceed max_size=%s or "
+                    "max_merge_radius=%g px in extent",
+                    len(under),
+                    "none" if max_size is None else int(cap),
+                    cap_ext,
                 )
             break
 
@@ -694,6 +800,7 @@ def generate_scenes(
     Steps:
       1) build (ATA, ATb) from templates, image, weight
       2) build_scene_tree_from_normal(ATA, ATb, coupling_thresh)
+      2b) _split_oversized_spatial(labels, x, y, max_extent), if asked
       3) merge_small_scenes(labels, templates, bright_mask, order, max_merge_radius)
       4) create Scene objects with:
            - subset of templates
@@ -727,7 +834,13 @@ def generate_scenes(
         ``FitConfig.scene_minimum_bright``): the ``None`` default is
         forwarded unchanged and fails inside ``merge_small_scenes``.
     max_merge_radius : float
-        Merge radius in pixels, forwarded to :func:`merge_small_scenes`.
+        The scene length scale in pixels (pipeline passes
+        ``FitConfig.scene_max_merge_radius``, 1500 px). One limit, read three
+        ways: a scene wider than this is bisected by
+        :func:`_split_oversized_spatial`, an underfilled scene looks no further
+        than this for a merge partner, and a merge that would leave the scene
+        wider than this is refused. ``np.inf`` disables all three, which is the
+        behaviour before 2026-08-13.
     exclude_stars : bool
         Remove templates with ``is_star`` set from the bright-anchor mask.
     isolate_saturated : bool
@@ -772,6 +885,25 @@ def generate_scenes(
         ATA_k, ATb_k, coupling_thresh=coupling_thresh, max_size=max_size,
         return_0_based=False,
     )
+
+    # 2b) The count cap above leaves a scene's shape free, so bound the extent
+    # too, at the same length scale the merge pass uses. Positions come from
+    # the templates, which is why this cannot live inside
+    # build_scene_tree_from_normal: that function sees only ATA/ATb.
+    if np.isfinite(max_merge_radius):
+        xk = np.array([templates[i].position_original[0] for i in keep], dtype=float)
+        yk = np.array([templates[i].position_original[1] for i in keep], dtype=float)
+        n_before = int(np.unique(labels0_k).size)
+        labels0_k, n_after = _split_oversized_spatial(
+            labels0_k, xk, yk, float(max_merge_radius)
+        )
+        labels0_k = labels0_k + 1  # back to 1-based, as the merge pass expects
+        if n_after != n_before:
+            logger.info(
+                "[scenes] spatial split at max_merge_radius=%g px: "
+                "%d -> %d scene(s)",
+                float(max_merge_radius), n_before, n_after,
+            )
 
     # 3) Merge scenes that are too small in terms of "bright" members
     #    SNR proxy: snr_i ≈ b_i / sqrt(diag(A)_i)

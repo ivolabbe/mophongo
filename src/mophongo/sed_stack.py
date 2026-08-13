@@ -59,6 +59,45 @@ class SEDStack:
     galaxies_per_bin: np.ndarray
 
 
+@dataclass(frozen=True)
+class BinnedMeasurementStatistics:
+    """Quality-control statistics for signed measurements in redshift bins.
+
+    Attributes:
+        mean: Equal-source arithmetic mean for every redshift/bin combination.
+        standard_error: Empirical standard error of ``mean``, including the
+            source-to-source population scatter rather than catalog errors
+            alone.
+        median: Equal-source median, provided as a robust outlier diagnostic.
+        winsorized_mean: Equal-source mean after clipping each cell to its
+            symmetric tail percentiles.  This is a low-bias outlier-sensitivity
+            diagnostic, not the primary estimand.
+        count: Number of valid sources entering each statistic.
+        inverse_variance_mean: Diagnostic error-only inverse-variance mean.
+            Weights are capped independently in each redshift/bin combination.
+        inverse_variance_effective_count: Kish effective sample size of the
+            capped weights, ``sum(w)**2 / sum(w**2)``.
+        maximum_weight_fraction: Largest capped weight divided by ``sum(w)``.
+        regularized_weighted_mean: Error-weighted diagnostic after adding the
+            cell's robust population scatter in quadrature to every catalog
+            error.
+        regularized_effective_count: Effective sample size of those weights.
+        regularized_maximum_weight_fraction: Largest regularized weight share.
+    """
+
+    mean: np.ndarray
+    standard_error: np.ndarray
+    median: np.ndarray
+    winsorized_mean: np.ndarray
+    count: np.ndarray
+    inverse_variance_mean: np.ndarray
+    inverse_variance_effective_count: np.ndarray
+    maximum_weight_fraction: np.ndarray
+    regularized_weighted_mean: np.ndarray
+    regularized_effective_count: np.ndarray
+    regularized_maximum_weight_fraction: np.ndarray
+
+
 def fnu_to_flam_proxy(
     flux_fnu: np.ndarray,
     pivot_wavelength: np.ndarray,
@@ -294,6 +333,195 @@ def redshift_bin_edges(
     n_bin = int(np.ceil(span / delta))
     log_edges = np.log1p(z_min) + delta * np.arange(n_bin + 1)
     return np.expm1(log_edges)
+
+
+def binned_measurement_statistics(
+    values: np.ndarray,
+    errors: np.ndarray,
+    valid: np.ndarray,
+    redshift: np.ndarray,
+    redshift_edges: np.ndarray,
+    *,
+    weight_cap_percentile: float = 95.0,
+    winsor_tail_percent: float = 0.5,
+) -> BinnedMeasurementStatistics:
+    """Summarize signed measurements without flux-dependent selection.
+
+    The primary statistic is the equal-source arithmetic mean.  Its empirical
+    standard error reflects both measurement noise and intrinsic population
+    scatter.  For quality control, the function also returns a capped
+    inverse-variance mean based only on the supplied errors.  It intentionally
+    never weights by measured ``value / error``: doing so would give positive
+    noise excursions more leverage than zero or negative measurements.
+
+    Args:
+        values: Signed measurements, shape ``(n_source, n_measurement)``.
+        errors: Positive one-sigma catalog errors with the same shape.
+        valid: Boolean measurement mask with the same shape.  Finite zero and
+            negative values remain valid.
+        redshift: Source redshifts, shape ``(n_source,)``.
+        redshift_edges: Strictly increasing bin edges.
+        weight_cap_percentile: Percentile at which ``1 / error**2`` weights
+            are capped within each output cell.  Must be in ``(0, 100]``.
+        winsor_tail_percent: Percentage clipped from each tail before forming
+            the winsorized diagnostic mean.  Must be in ``[0, 50)``.
+
+    Returns:
+        Equal-weight, robust, uncertainty, and capped-weight diagnostics.
+
+    Raises:
+        ValueError: Shapes, redshift edges, or the cap percentile are invalid.
+    """
+
+    data = np.asarray(values, dtype=float)
+    uncertainty = np.asarray(errors, dtype=float)
+    mask = np.asarray(valid, dtype=bool).copy()
+    z = np.asarray(redshift, dtype=float)
+    z_edges = np.asarray(redshift_edges, dtype=float)
+    if data.ndim != 2:
+        raise ValueError("values must be a two-dimensional array")
+    if uncertainty.shape != data.shape or mask.shape != data.shape:
+        raise ValueError("values, errors, and valid must have identical shapes")
+    if z.shape != (data.shape[0],):
+        raise ValueError("redshift must have one value per source")
+    if np.any(~np.isfinite(z)) or np.any(z <= -1):
+        raise ValueError("redshift must be finite and greater than -1")
+    if (
+        z_edges.ndim != 1
+        or z_edges.size < 2
+        or np.any(~np.isfinite(z_edges))
+        or np.any(np.diff(z_edges) <= 0)
+    ):
+        raise ValueError("redshift_edges must be finite and strictly increasing")
+    if (
+        not np.isfinite(weight_cap_percentile)
+        or weight_cap_percentile <= 0
+        or weight_cap_percentile > 100
+    ):
+        raise ValueError("weight_cap_percentile must be in (0, 100]")
+    if (
+        not np.isfinite(winsor_tail_percent)
+        or winsor_tail_percent < 0
+        or winsor_tail_percent >= 50
+    ):
+        raise ValueError("winsor_tail_percent must be in [0, 50)")
+
+    mask &= (
+        np.isfinite(data)
+        & np.isfinite(uncertainty)
+        & (uncertainty > 0)
+    )
+    n_redshift = z_edges.size - 1
+    n_measurement = data.shape[1]
+    shape = (n_redshift, n_measurement)
+    mean = np.full(shape, np.nan, dtype=np.float64)
+    standard_error = np.full(shape, np.nan, dtype=np.float64)
+    median = np.full(shape, np.nan, dtype=np.float64)
+    winsorized_mean = np.full(shape, np.nan, dtype=np.float64)
+    count = np.zeros(shape, dtype=np.int32)
+    inverse_variance_mean = np.full(shape, np.nan, dtype=np.float64)
+    effective_count = np.full(shape, np.nan, dtype=np.float64)
+    maximum_weight_fraction = np.full(shape, np.nan, dtype=np.float64)
+    regularized_weighted_mean = np.full(shape, np.nan, dtype=np.float64)
+    regularized_effective_count = np.full(shape, np.nan, dtype=np.float64)
+    regularized_maximum_weight_fraction = np.full(shape, np.nan, dtype=np.float64)
+
+    z_bin = np.searchsorted(z_edges, z, side="right") - 1
+    z_bin[z == z_edges[-1]] = n_redshift - 1
+    order = np.argsort(z_bin, kind="stable")
+    sorted_bin = z_bin[order]
+    starts = np.searchsorted(sorted_bin, np.arange(n_redshift), side="left")
+    stops = np.searchsorted(sorted_bin, np.arange(n_redshift), side="right")
+    for bin_index, (start, stop) in enumerate(zip(starts, stops, strict=True)):
+        if stop <= start:
+            continue
+        rows = order[start:stop]
+        for measurement in range(n_measurement):
+            use = mask[rows, measurement]
+            if not np.any(use):
+                continue
+            sample = data[rows[use], measurement]
+            sample_error = uncertainty[rows[use], measurement]
+            n_valid = sample.size
+            count[bin_index, measurement] = n_valid
+            mean[bin_index, measurement] = np.mean(sample, dtype=np.float64)
+            median[bin_index, measurement] = np.median(sample)
+            if winsor_tail_percent == 0:
+                winsorized_mean[bin_index, measurement] = mean[
+                    bin_index, measurement
+                ]
+            else:
+                lower, upper = np.percentile(
+                    sample,
+                    [winsor_tail_percent, 100.0 - winsor_tail_percent],
+                )
+                winsorized_mean[bin_index, measurement] = np.mean(
+                    np.clip(sample, lower, upper), dtype=np.float64
+                )
+            if n_valid > 1:
+                standard_error[bin_index, measurement] = (
+                    np.std(sample, ddof=1, dtype=np.float64) / np.sqrt(n_valid)
+                )
+
+            weight = np.square(1.0 / sample_error)
+            cap = np.percentile(weight, weight_cap_percentile)
+            weight = np.minimum(weight, cap)
+            sum_weight = np.sum(weight, dtype=np.float64)
+            sum_weight_squared = np.sum(np.square(weight), dtype=np.float64)
+            if sum_weight <= 0 or sum_weight_squared <= 0:
+                continue
+            inverse_variance_mean[bin_index, measurement] = np.sum(
+                weight * sample, dtype=np.float64
+            ) / sum_weight
+            effective_count[bin_index, measurement] = (
+                sum_weight * sum_weight / sum_weight_squared
+            )
+            maximum_weight_fraction[bin_index, measurement] = (
+                np.max(weight) / sum_weight
+            )
+
+            robust_sigma = 1.4826 * np.median(
+                np.abs(sample - median[bin_index, measurement])
+            )
+            if not np.isfinite(robust_sigma) or robust_sigma <= 0:
+                regularized_weight = np.ones(sample.shape, dtype=float)
+            else:
+                regularized_weight = 1.0 / (
+                    np.square(sample_error) + robust_sigma * robust_sigma
+                )
+            regularized_cap = np.percentile(
+                regularized_weight, weight_cap_percentile
+            )
+            regularized_weight = np.minimum(regularized_weight, regularized_cap)
+            regularized_sum = np.sum(regularized_weight, dtype=np.float64)
+            regularized_sum_squared = np.sum(
+                np.square(regularized_weight), dtype=np.float64
+            )
+            if regularized_sum <= 0 or regularized_sum_squared <= 0:
+                continue
+            regularized_weighted_mean[bin_index, measurement] = np.sum(
+                regularized_weight * sample, dtype=np.float64
+            ) / regularized_sum
+            regularized_effective_count[bin_index, measurement] = (
+                regularized_sum * regularized_sum / regularized_sum_squared
+            )
+            regularized_maximum_weight_fraction[bin_index, measurement] = (
+                np.max(regularized_weight) / regularized_sum
+            )
+
+    return BinnedMeasurementStatistics(
+        mean=mean,
+        standard_error=standard_error,
+        median=median,
+        winsorized_mean=winsorized_mean,
+        count=count,
+        inverse_variance_mean=inverse_variance_mean,
+        inverse_variance_effective_count=effective_count,
+        maximum_weight_fraction=maximum_weight_fraction,
+        regularized_weighted_mean=regularized_weighted_mean,
+        regularized_effective_count=regularized_effective_count,
+        regularized_maximum_weight_fraction=regularized_maximum_weight_fraction,
+    )
 
 
 def filter_interval_wavelength_edges(

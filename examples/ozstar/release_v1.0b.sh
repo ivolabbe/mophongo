@@ -15,22 +15,21 @@
 #   ./release_v1.0b.sh --skip-stage # inputs already on /fred
 #   ./release_v1.0b.sh --dry-run    # print the plan
 #
-# Any other argument is passed through to campaign.py, and MEM overrides the
-# request, so a field that needs more memory than the rest is a second call:
+# Any other argument is passed through to campaign.py. Memory is per field
+# (submit.MEM_GB_BY_FIELD): 72 GB for UDS and COSMOS, 96 GB for EGS, whose
+# detection grid is about 1.4x UDS's. Setting MEM overrides all of them.
 #
-#   ./release_v1.0b.sh --skip-stage --fields uds cosmos
-#   MEM=96 ./release_v1.0b.sh --skip-stage --fields egs
-#
-# EGS is the one to watch: its detection grid is 1221 Mpx against UDS's 876, and
-# UDS full field measures a 46.5 GB footprint, so EGS is the band group that can
-# exceed a 64 GB request. A run that does is killed with no Python traceback.
+# Measured on the UDS full-field bands: 53.3, 55.6 and 57.4 GB peak RSS, so 72
+# runs at about 80% with 15 GB spare. A run that exceeds its request is killed
+# with no Python traceback, which reads as a silent failure - if a band dies
+# without one, that is the first thing to check.
 #
 # Watch it with:  python submit.py status
 set -euo pipefail
 
 SUFFIX=${SUFFIX:-_v1.0b}
-CORES=${CORES:-16}
-MEM=${MEM:-64}
+CORES=${CORES:-8}
+MEM=${MEM:-}          # empty = campaign.py's per-field defaults
 WALLTIME=${WALLTIME:-24:00:00}
 # ozify.py needs the vos client, which lives in this venv rather than on PATH.
 PYTHON=${PYTHON:-$HOME/.venvs/canfar/bin/python}
@@ -43,7 +42,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
     exit 1
 }
 
-args=(--r-trial 0 --suffix "$SUFFIX" --cores "$CORES" --mem "$MEM" --time "$WALLTIME")
+args=(--r-trial 0 --suffix "$SUFFIX" --cores "$CORES" --time "$WALLTIME")
+[[ -n $MEM ]] && args+=(--mem "$MEM")
 for opt in "$@"; do
     case "$opt" in
         --skip-stage) args+=(--skip stage) ;;

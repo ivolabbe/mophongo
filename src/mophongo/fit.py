@@ -167,9 +167,26 @@ class FitConfig:
     # size -- the joint flux+shift solve forms a dense n x n Schur complement --
     # so this is what keeps the solve tractable, not just tidy.
     scene_max_size: int | None = 1000
-    # Max distance (px) to merge underfilled scenes. Bounded rather than inf so
-    # merging stays local.
-    scene_max_merge_radius: float = 1000.0
+    # The scene length scale, in pixels: one knob for how far a scene may reach
+    # and how far it may span. Three things read it, all the same limit seen
+    # from a different side of the partition:
+    #   - a scene wider than this is median-bisected along its longer axis
+    #     (scene._split_oversized_spatial)
+    #   - an underfilled scene looks no further than this for a merge partner
+    #   - a merge that would leave the scene wider than this is refused
+    # scene_max_size bounds a scene's template *count* and leaves its shape
+    # free, and components near the percolation threshold are dendritic: a
+    # MINERVA UDS run produced a 25-template scene whose anchors spanned
+    # 4300 px. That costs twice -- the astrometric shift field is then fitted
+    # over an extent far larger than the correlation length the model assumes
+    # (astrom_kwargs['gp']['length_scale'], 400 px), and the derivative columns
+    # in assemble_scene_system_AB are dense planes over the anchors' bounding
+    # box, so a scene's memory follows its bbox area, not its member count.
+    # 1500 px is 120" = 2' at MINERVA's 0.08"/px, and ~4x the GP length scale
+    # -- loose enough that a scene stays large compared with the correlation
+    # length its shift field assumes, tight enough to break up the dendritic
+    # cases. np.inf disables all three, the behaviour before 2026-08-13.
+    scene_max_merge_radius: float = 1500.0
     generate_scene_catalog: bool = False  # If True, generate scene catalog and exit
 
     def __post_init__(self):

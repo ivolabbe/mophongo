@@ -54,7 +54,7 @@ def halo_pattern(pattern_hi: str) -> str:
 
 
 def build_for_pattern(pattern: str, csv: str, psf_dir: str, date_mode: str,
-                      fov_default: float | None) -> int:
+                      fov_default: float | None, workers: int = 1) -> int:
     """Build every grid implied by ``pattern`` and the exposure list."""
     from mophongo.pipeline import _psf_factory_kwargs
     from mophongo.psf_factory import PSFFactory, dates_from_csv
@@ -65,11 +65,11 @@ def build_for_pattern(pattern: str, csv: str, psf_dir: str, date_mode: str,
     before = len(list(Path(psf_dir).glob("*.fits")))
     log.info("  %s: %d date(s) from %s", pattern, want, Path(csv).name)
     PSFFactory(outdir=psf_dir, fov_arcsec=fov, date_mode=date_mode,
-               **kw).from_csv(csv, save=True)
+               workers=workers, **kw).from_csv(csv, save=True)
     return len(list(Path(psf_dir).glob("*.fits"))) - before
 
 
-def build_one(cfg_path: Path, date_mode: str) -> int:
+def build_one(cfg_path: Path, date_mode: str, workers: int = 1) -> int:
     """Build the hi, lo and halo grids for one config; return grids added."""
     from mophongo.pipeline import RunConfig
 
@@ -80,18 +80,24 @@ def build_one(cfg_path: Path, date_mode: str) -> int:
     for pattern, csv in ((cfg.pattern_hi, cfg.csv_hi), (cfg.pattern_lo, cfg.csv_lo)):
         if pattern:
             added += build_for_pattern(pattern, str(csv), psf_dir, date_mode,
-                                       cfg.psf_fov_arcsec)
+                                       cfg.psf_fov_arcsec, workers)
     if getattr(cfg, "repair_saturated", False):
         pat = cfg.repair_psf_pattern or halo_pattern(cfg.pattern_hi)
         if pat and pat != cfg.pattern_hi:
             added += build_for_pattern(pat, str(cfg.csv_hi), psf_dir, date_mode,
-                                       cfg.psf_fov_arcsec)
+                                       cfg.psf_fov_arcsec, workers)
     return added
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("configs", nargs="+", type=Path)
+    ap.add_argument("--workers", type=int, default=1,
+                    help="processes per pattern; one (detector, date) grid is "
+                         "one job of tens to low hundreds of MB, so this "
+                         "scales with cores. Configs are still walked one at "
+                         "a time: bands of a field share pattern_hi and would "
+                         "race on the same F444W filenames")
     ap.add_argument("--date-mode", default="all",
                     help="one grid per unique integer MJD by default; see "
                          "psf_factory.dates_from_csv")
@@ -101,7 +107,7 @@ def main() -> None:
         start = time.time()
         log.info("=== [%d/%d] %s", i, len(args.configs), cfg_path.name)
         try:
-            added = build_one(cfg_path, args.date_mode)
+            added = build_one(cfg_path, args.date_mode, args.workers)
         except Exception as exc:  # noqa: BLE001 - one bad config must not stop the rest
             log.error("FAILED %s: %s: %s", cfg_path.name, type(exc).__name__, exc)
             continue

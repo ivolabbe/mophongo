@@ -136,11 +136,38 @@ the point — the grids are cached there and every later run reads them.
 
 ## Resources
 
-16 cores and 64 GB per fit, the default. The fitting path is largely serial, so
-the cores buy threaded BLAS and FFTs rather than a linear speed-up; the memory
-is what matters. No partition is requested, so the scheduler picks — skylake
-(36 cores / 191 GB) and milan (64 / 256) both hold this comfortably, and
-constraining the choice only lengthens the queue.
+Eight cores per fit, and memory per *field*: 72 GB for UDS and COSMOS, 96 GB
+for EGS (`submit.MEM_GB_BY_FIELD`). `--cores` and `--mem` override.
+
+Measured, on the UDS full-field bands at 16 cores / 96 GB:
+
+| run | wall | peak RSS |
+|---|---|---|
+| 1.5' trial patch | 9m51s | 20.0 GB |
+| F770W full field | 56m19s | 57.4 GB |
+| F1280W full field | 69m25s | 53.3 GB |
+| F1500W full field | 41m15s | 55.6 GB |
+
+Two things follow. Peak memory tracks the *field* — the detection grid and the
+segmap are the same for every band of it, and the four UDS bands span only
+4 GB — so the request belongs per field rather than per run. And CPU sat at
+6.1% of 16 cores throughout, about one core: the fit is serial, so cores buy
+threaded BLAS in the dense scene solves and queue position everywhere else.
+Eight is headroom for the former without paying 16 cores of fair-share for idle
+allocation.
+
+72 GB against the 57.4 GB worst measured peak is 80%, about 15 GB of headroom.
+That is deliberate: a run that exceeds its request is killed with no Python
+traceback, so the failure reads as a mystery rather than an error — if a band
+dies without one, check `sacct -j <id>.batch --format=MaxRSS` before anything
+else. 72 still fits every milan and skylake node, so the headroom costs no
+scheduling reach.
+
+No partition is requested, so the scheduler picks. milan (64 cores / 256 GB,
+147 nodes) and skylake (36 / 191, 118 nodes) both hold this, and constraining
+the choice only lengthens the queue. `largemem` (`dave301-311`, 1 TB) is not
+needed for any MINERVA field and requesting it would queue behind 11 contended
+nodes.
 
 Staging is different: it must be `--partition=datamover`, and that has to be
 given on the `sbatch` command line. A site plugin reassigns the partition of a

@@ -249,3 +249,63 @@ def test_log_run_restores_streams_and_appends(tmp_path):
     assert (sys.stdout, sys.stderr) == (before_out, before_err)
     # appended, not overwritten
     assert (tmp_path / "demo.log").read_text().count("mophongo run demo") == 2
+
+
+def test_psf_factory_parallel_defaults_and_job_uniqueness(tmp_path, monkeypatch):
+    """One job per (detector, date), each writing its own filename.
+
+    That uniqueness is what makes the build parallelisable at all: the jobs
+    share nothing and never target the same file. Parallelism across
+    *patterns* is a different matter -- every band of a field derives the same
+    ``pattern_hi``, so two bands building at once do collide, which is why a
+    campaign builds one band of a field first.
+    """
+    import types
+
+    from mophongo import psf_factory as pf
+
+    assert pf.PSFFactory().workers == 1, "serial by default; callers opt in"
+
+    csv = tmp_path / "uds_f444w_wcs.csv"
+    csv.write_text(
+        "file,mjd-avg\njw01_nrca5.fits,60000.2\njw02_nrca5.fits,60005.7\n"
+    )
+
+    built = []
+
+    def fake_build(**kw):
+        built.append((kw["detector"], kw["date"]))
+        return types.SimpleNamespace(
+            data=np.zeros((1, 4, 4), dtype=np.float32),
+            grid_xypos=np.array([[10, 10]]),
+            meta={"detector": kw["detector"], "filter": kw["filter"]},
+        )
+
+    # JWSTBackend is a frozen dataclass whose build() calls this module
+    # function, so patch there rather than on the instance
+    import mophongo.jwst_psf as jp
+    monkeypatch.setattr(jp, "build_jwst_psf", fake_build)
+
+    out = tmp_path / "PSF"
+    fac = pf.PSFFactory(prefix="UDS", outdir=str(out), num_psfs=1, oversample=4)
+    fac.from_csv(csv, date_mode="all", save=True)
+
+    # F444W is NIRCam LW, so both long-wave detectors are built: the job
+    # count is detectors x unique integer MJDs, each in its own file
+    assert sorted(built) == [("NRCA5", 60000.0), ("NRCA5", 60006.0),
+                             ("NRCB5", 60000.0), ("NRCB5", 60006.0)]
+    assert len(set(built)) == len(built)
+    assert len(sorted(out.glob("*.fits"))) == 4
+
+    # and a second run skips what already exists rather than rebuilding it
+    built.clear()
+    fac.from_csv(csv, date_mode="all", save=True)
+    assert built == []
+
+
+def test_psf_workers_and_provenance_reach_the_factory(tmp_path, monkeypatch):
+    """``RunConfig.psf_workers``/``psf_provenance`` are wired, not decorative."""
+    from mophongo.pipeline import RunConfig
+
+    assert RunConfig.psf_workers == 1
+    assert RunConfig.psf_provenance == "warn"

@@ -47,12 +47,28 @@ log = logging.getLogger("campaign")
 
 HERE = Path(__file__).resolve().parent
 PYTHON = sys.executable
-STEPS = ["ozify", "push", "setup", "seed", "stage", "run"]
+STEPS = ["ozify", "push", "setup", "seed", "stage", "prep", "run"]
 
 #: A per-band run config is named ``<field>_f<band>w.json``. The directory also
 #: holds inputs that are not RunConfigs (``minerva_sed_fields.json``), which
 #: would fail deep inside ozify with a confusing key error.
 BAND_CONFIG = re.compile(r"^[a-z0-9]+_f\d+w$")
+
+
+#: Band a field's prep job runs. It builds the shared F444W and halo grids and
+#: the saturation repair, so every other band of the field starts warm. F770W
+#: by preference: it is the shortest MIRI band, so its own lo-res grids and
+#: fit are the cheapest way to get the shared products built. Falls back to
+#: whichever band sorts first when a field has no F770W.
+PREP_BAND = "f770w"
+
+
+def prep_leader(bands: list[str]) -> str:
+    """The band whose job builds a field's shared products."""
+    for name in bands:
+        if name.split("_")[1:2] == [PREP_BAND] or f"_{PREP_BAND}" in name:
+            return name
+    return bands[0]
 
 
 def run_step(args: list[str], dry: bool) -> None:
@@ -127,9 +143,17 @@ def main() -> None:
     ap.add_argument("--skip", nargs="+", choices=STEPS, default=[],
                     help="drop these steps from the middle of the chain, e.g. "
                          "--skip stage when the inputs are already on /fred")
-    ap.add_argument("--cores", type=int, default=16)
-    ap.add_argument("--mem", type=int, default=64, help="GB per run")
+    ap.add_argument("--cores", type=int, default=submit.DEFAULT_CORES)
+    ap.add_argument("--mem", type=int, default=None,
+                    help="GB per run; default is per field "
+                         f"({submit.DEFAULT_MEM_GB}, "
+                         + ", ".join(f"{k} {v}" for k, v in
+                                     submit.MEM_GB_BY_FIELD.items()) + ")")
     ap.add_argument("--time", default="24:00:00", help="walltime per run")
+    ap.add_argument("--prep-time", default="4:00:00",
+                    help="walltime for the per-field repair job; it reads the "
+                         "detection mosaic and fits the saturated cores, so it "
+                         "is far shorter than a fit but not instant")
     ap.add_argument("--stage-time", default="24:00:00", help="walltime per stage job")
     ap.add_argument("--branch", default="main", help="mophongo branch to clone")
     ap.add_argument("--r-trial", type=float, default=None,
@@ -172,14 +196,42 @@ def main() -> None:
                 log.info("+ stage %s: %s", field, " ".join(bands))
                 continue
             stage_ids[field] = submit.stage(bands, walltime=args.stage_time)[0]
+    # Phase 1: one saturation-repair job per field, all fields at once, each
+    # depending only on its own staging. It writes the field's shared repair
+    # cache, which every band of that field then hits instead of re-running
+    # the identical repair and racing to write the same file.
+    #
+    # The ePSF grids that step needs are NOT built here: compute nodes have no
+    # route to MAST, so grids come from `submit.py psfs` on the login node
+    # (jobs/build_psfs.sh). That is why OzStar runs the `repair` step rather
+    # than CANFAR's combined `prep`.
+    prep_ids: dict[str, str] = {}
+    if "prep" in todo:
+        for field, bands in submit.by_field(names).items():
+            dep = stage_ids.get(field)
+            if args.dry_run:
+                log.info("+ repair %s (%s) after %s", field,
+                         prep_leader(bands), dep or "nothing")
+                # so the plan below shows the dependency it would really carry
+                prep_ids[field] = f"<{field}-repair>"
+                continue
+            prep_ids[field] = submit.run(
+                [prep_leader(bands)], after=dep, cores=args.cores,
+                mem=args.mem, walltime=args.prep_time, step="repair")[0]
+
     if "run" not in todo:
         return
 
     on_fred = [] if args.dry_run else psf_names_on_fred()
     for field, bands in submit.by_field(names).items():
         cfg = next(c for c, n in zip(cfgs, names) if n == bands[0])
-        dep = stage_ids.get(field)
-        leader_needed = not has_shared_grids(cfg, on_fred) and len(bands) > 1
+        # every band waits on its field's repair when there was one, else on
+        # its staging
+        dep = prep_ids.get(field) or stage_ids.get(field)
+        # prep already built the cache and touched the grids; without it, fall
+        # back to the old one-band-first order so concurrent builds do not race
+        leader_needed = ("prep" not in todo
+                         and not has_shared_grids(cfg, on_fred) and len(bands) > 1)
         if args.dry_run:
             log.info("+ run %s%s%s", " ".join(bands),
                      f" after {dep or 'nothing'}",

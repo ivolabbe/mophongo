@@ -390,6 +390,25 @@ def _fits_key(name: str) -> str:
     return key if key and key[0].isalpha() else "METAKEY"
 
 
+def read_stdpsf_provenance(path: str | Path) -> dict[str, str]:
+    """Return the ``HIERARCH MPH *`` cards of a grid file as a plain dict.
+
+    Empty when the file predates provenance stamping, which is not the same
+    as matching: an unstamped grid cannot be shown to agree with anything.
+    """
+    from astropy.io import fits
+
+    try:
+        hdr = fits.getheader(path)
+    except OSError:
+        return {}
+    out = {}
+    for key in hdr:
+        if key.startswith("MPH "):
+            out[key[4:].strip().lower()] = str(hdr[key]).strip()
+    return out
+
+
 def write_stdpsf(
     filename: str | Path,
     psf_grid=None,
@@ -400,6 +419,7 @@ def write_stdpsf(
     filt: str | None = None,
     overwrite: bool = False,
     history: str | None = None,
+    provenance: dict | None = None,
     verbose: bool = False,
 ):
     """Write a JWST STDPSF-format FITS file.
@@ -417,6 +437,15 @@ def write_stdpsf(
     detector, filt
         Override values written to ``DETECTOR`` / ``FILTER`` keywords. If
         omitted they are taken from ``psf_grid.meta``.
+    provenance
+        What this grid was built from, written as ``HIERARCH MPH <KEY>``
+        cards and read back by :func:`read_stdpsf_provenance`. The grid
+        filename records the detector, filter, MJD, grid size and
+        oversampling, but not the exposure list it was derived from nor the
+        date mode that chose the MJDs — so a grid built one epoch per band
+        is indistinguishable on disk from one built per epoch, and a cache
+        of the first kind is silently reused forever. These cards are what
+        makes that detectable.
     """
     if hasattr(psf_grid, "data") and hasattr(psf_grid, "meta"):
         cube = np.asarray(psf_grid.data, dtype="float32")
@@ -469,6 +498,10 @@ def write_stdpsf(
             hdr[kw] = (val, comment)
         except Exception:
             hdr[kw] = (str(val)[:68], comment)
+
+    for key, val in (provenance or {}).items():
+        card = f"HIERARCH MPH {str(key).upper()}"
+        hdr[card] = val if isinstance(val, (int, float)) else str(val)[:60]
 
     now = datetime.now(timezone.utc)
     hdr["DATE"] = now.strftime("%Y-%m-%d")

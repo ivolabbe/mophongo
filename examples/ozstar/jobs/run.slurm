@@ -7,6 +7,13 @@
 #
 # Fit one config. $CFG names the rewritten config, e.g. uds_f770w.
 #
+# $STEP is the pipeline step, default `all` (the whole fit). A campaign runs
+# `repair` first, once per field: that runs the saturation repair into a cache
+# the field's bands then hit, instead of every band re-running it and several
+# writing the same cache file at once. The ePSF grids that step needs are built
+# separately, on the login node, because compute nodes cannot reach MAST
+# (jobs/build_psfs.sh).
+#
 # 16 cores and 64 GB is the standard request. The fitting path itself is
 # largely serial, so the cores buy threaded BLAS and FFTs rather than a linear
 # speed-up; the memory is what actually matters, and a run that exceeds it is
@@ -15,6 +22,7 @@
 # this comfortably, and constraining the choice only lengthens the queue.
 set -euo pipefail
 : "${RUN:?RUN not set}" "${CFG:?CFG not set}"
+STEP=${STEP:-all}
 # Lmod here is hierarchical: python/3.12.3 is only visible once its gcccore
 # parent is loaded. Unquoted on purpose - it is a list, not one name.
 PYMODULES=${PYMODULES:-"gcccore/13.3.0 python/3.12.3"}
@@ -38,9 +46,9 @@ export STPSF_PATH=${STPSF:-$RUN/stpsf-data}
 mkdir -p "$MPLCONFIGDIR" "$RUN/out"
 cd "$RUN/out"
 
-echo "=== $CFG on $(hostname): ${SLURM_CPUS_PER_TASK:-?} cores, ${SLURM_MEM_PER_NODE:-?} MB"
+echo "=== $CFG [$STEP] on $(hostname): ${SLURM_CPUS_PER_TASK:-?} cores, ${SLURM_MEM_PER_NODE:-?} MB"
 echo "=== mophongo $(git -C "$RUN/mophongo" rev-parse --short HEAD)"
-time "$RUN/venv/bin/python" -m mophongo.pipeline "$RUN/${CFG}_ozstar.json" all
+time "$RUN/venv/bin/python" -m mophongo.pipeline "$RUN/${CFG}_ozstar.json" "$STEP"
 
 echo "=== outputs:"; ls -lh "$RUN/out/$CFG" | head -25
 echo "=== peak memory:"; sacct -j "${SLURM_JOB_ID}" --format=JobID,MaxRSS,Elapsed --noheader 2>/dev/null | head -3

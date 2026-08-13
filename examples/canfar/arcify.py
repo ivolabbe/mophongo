@@ -131,6 +131,31 @@ def resolve(basename: str, index: dict[str, str]) -> tuple[str, bool] | None:
     return None
 
 
+def _repair_cache_name(cfg: dict) -> str:
+    """Filename for the shared saturation-repair cache of one config.
+
+    The repair depends on the detection band alone -- science image, weight,
+    PSF pattern, kwargs, and the trial box (``Pipeline._repair_provenance``) --
+    so every band of a field with the same geometry produces the same result
+    and should share one cache. Nothing else should: a different field has a
+    different detection image, and a different patch repairs different pixels,
+    so sharing a path with either means each run finds the other's cache stale,
+    recomputes, and overwrites it.
+
+    ``RunConfig.repair_cache_path`` defaults to ``'..'``, which resolves to one
+    unnamed file for the whole run tree -- fine for one field at a time, wrong
+    for a release campaign that submits several.
+    """
+    field = str(cfg.get("name", "run")).split("_")[0]
+    trial = cfg.get("trial")
+    if not trial:
+        geom = "full"
+    else:
+        ra, dec = (round(float(v), 5) for v in trial["center"])
+        geom = f"r{float(trial['radius']):g}_{ra}{dec:+}"
+    return f"{field}_{geom}_repair_cache.fits"
+
+
 def arcify(cfg_path: Path, index: dict[str, str], out_dir: Path,
            r_trial: float | None = None, suffix: str = "") -> tuple[Path, Path]:
     """Write the arc-path config and its staging list for one local config.
@@ -183,6 +208,7 @@ def arcify(cfg_path: Path, index: dict[str, str], out_dir: Path,
 
     cfg["psf_dir"] = f"{run}/PSF"
     cfg["out_dir"] = f"{run}/out/{name}"
+    cfg["repair_cache_path"] = f"../{_repair_cache_name(cfg)}"
 
     cfg_out = out_dir / f"{name}_canfar.json"
     cfg_out.write_text(json.dumps(cfg, indent=2) + "\n")

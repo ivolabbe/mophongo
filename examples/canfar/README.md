@@ -155,20 +155,83 @@ quota is far too small for a campaign's outputs.
 - Job `args` are whitespace-split into a YAML sequence server side and quotes
   cause a 500, so the command must be a single token. Parameters go through
   environment variables (`RUN`, `CFG`) instead.
-- Runs request 2 cores and 48 GB by default. Measured CPU use is about 0.2 of
+- Runs request 4 cores and 48 GB by default. Measured CPU use is about 0.2 of
   a core — the runs wait on `/arc` and the fitting path has no thread pool — so
-  a bigger request only idles allocation and takes longer to schedule when the
-  platform is busy. `--cores` and `--ram` override; up to 16 cores and 192 GB
-  are available.
+  the extra cores are headroom rather than throughput, and a bigger request
+  takes longer to schedule when the platform is busy. `--cores` and `--ram`
+  override; up to 16 cores and 192 GB are available.
 - Outputs are large. A 3 arcmin patch of UDS writes 8.4 GB, of which 4.2 GB is
   `stamps.fits` and 3.5 GB the residual; a full field scales with the source
   count, which is roughly 8x. Set `save_stamps` or `scene_plots` false in the
   config when the diagnostics are not wanted.
 - `seed` links rather than copies the PSF and kernel maps. Copying them once
   duplicated 10 GB and exhausted a home quota.
+- Session names come back with a `-1` replica index appended, so the job named
+  `mophongo-uds-f770w-v1-0` lists as `mophongo-uds-f770w-v1-0-1`.
+- A submitted session is not listed until the service registers it, which takes
+  minutes. `status` right after a `--no-wait` campaign under-reports, and
+  destroying "everything" once leaves stragglers that surface later carrying
+  the same run names as the next campaign and writing into the same `out/`
+  directories. `submit.py kill` sweeps until several consecutive passes come
+  back empty; it spares the `sync` job by default.
+- Queue latency dominates small work, and the sshfs mount is *writable*, so
+  file movement should not be a container job at all. A 1-core `sync` has sat
+  Pending for half an hour to do seconds of copying; through the mount the same
+  unpack takes about twenty seconds. `sync` therefore uses the mount when it
+  finds one — `$CANFAR_RUN_LOCAL`, or the documented `~/canfar_home` — and
+  `--job` forces a container. Reserve jobs for work that needs one. The caveat
+  is the same either way: rewriting source under a running job is only safe
+  because already-running jobs keep the code they imported.
+- CANFAR always runs a commit. `push` ships `git archive` of `main` by
+  default, never the working tree, so another session's half-finished edit or
+  an editor mid-save cannot reach 17 jobs. `--ref` picks a different commit and
+  `--worktree` ships the uncommitted tree for debugging, saying so loudly.
+- The version is recorded end to end. `push` uploads `SRC_VERSION.pending`;
+  `setup_env.sh`/`update_src.sh` promote it to `SRC_VERSION` *after* unpacking,
+  so the file means "this is what is installed" rather than "this is what was
+  uploaded"; `run.sh` prints it at the top of every job log; and `run` refuses
+  to submit unless it matches the local ref (`--force-stale` overrides). The
+  case this catches is a `push` with no `sync`: nothing else unpacks the
+  tarball, so the jobs quietly import the previous campaign's code and the
+  outputs look entirely normal.
+- Only `setup_env.sh` unpacks `psf.tar`. Pushing it before a `sync`, which
+  replaces the source alone, uploads several hundred MB that never reach
+  `$RUN/PSF` — use `push --src-only` for a code change. Grids on arc are never
+  at risk regardless: `PSFFactory` skips any grid file that already exists
+  unless `overwrite` is set, so they are built once and reused.
+- `campaign.py` serialises one band of a field ahead of the rest when the
+  shared F444W or 30" halo grids are missing, since concurrent bands would race
+  on one `psf_dir`. It counts grids already on arc, not just local ones: a
+  field whose grids an earlier job built needs no leader, and serialising one
+  at full-field scale costs hours.
 - The quota page reports a 32 GB memory default, but that is a default and not
-  a cap. 48 GB gives headroom over the ~34 GB the UDS runs peak at; a 16 GB
-  request is OOM-killed with no traceback.
+  a cap. A 16 GB request is OOM-killed with no traceback, which reads as a
+  mysterious silent failure rather than an error.
+- Full-field memory tracks the *source count*, not the field's pixel count,
+  and 48 GB is below the line for any deep band. Measured on EGS full field
+  (`scene_plots` off), peak at the end of the fit against the stamps written
+  afterwards:
+
+  | band | peak | sources | stamps |
+  |---|---|---|---|
+  | f560w | 29.7 GB | 23,125 | 1.9 GB |
+  | f1800w | 33.3 GB | 48,296 | 4.0 GB |
+  | f2100w | 46.1 GB | 131,416 | 10.8 GB |
+  | f770w | 47.9 GB | 140,412 | 11.6 GB |
+  | f1000w | 47.9 GB | 142,299 | 11.7 GB |
+
+  The heavy bands reach 46-48 GB *before* writing 11 GB of stamps, so a 48 GB
+  request dies in the output stage with no traceback. `ram_for` therefore asks
+  for 64 GB, and 82 for EGS. Larger requests do schedule, but 48 GB and up have
+  queued for hours when the platform is busy, so raising the request everywhere
+  costs wall clock.
+- `scene_plots` is the other half of that budget. Rendering Lupton RGB
+  composites for several hundred scenes, on top of everything the fit still
+  holds, killed all ten cosmos/uds bands of the first full-field campaign
+  after their fit tables and stamps were safely written. Turning it off saves
+  twice: the plots themselves, and the band's inverse-variance map, which
+  `run()` releases early when `_scene_pixels_needed()` is false - worth 1.5 GB
+  on EGS F1000W (49.4 -> 47.9 GB).
 - Importing mophongo from the NFS-backed venv costs about three minutes before
   any work starts. That is not a hang.
 - For a single trial patch CANFAR is not faster than a laptop; the gain is that

@@ -133,3 +133,125 @@ def test_merge_still_merges_when_the_cap_allows_it():
     sizes = sorted(np.bincount(out)[1:].tolist())
     assert max(sizes) <= 20 and sum(sizes) == 40
     assert n < 4, "pairs should still merge under a cap of 20"
+
+
+# --- extent cap: the shape the count cap leaves free --------------------------
+# `max_size` bounds a scene's template count and says nothing about its shape.
+# Components near the percolation threshold are dendritic, and a MINERVA UDS run
+# produced a 25-template scene whose anchors spanned 4300 px. `max_extent` bounds
+# the longer bounding-box side instead, by median bisection along that axis.
+
+
+def _positions(labels_and_xy):
+    x = np.array([p[0] for p in labels_and_xy], dtype=float)
+    y = np.array([p[1] for p in labels_and_xy], dtype=float)
+    return x, y
+
+
+def _extents(labels, x, y):
+    """Longest bbox side of every scene."""
+    out = []
+    for c in np.unique(labels):
+        m = labels == c
+        out.append(max(x[m].max() - x[m].min(), y[m].max() - y[m].min()))
+    return np.asarray(out)
+
+
+def test_spatial_split_bounds_the_longer_side():
+    from mophongo.scene import _split_oversized_spatial
+
+    # one long thin scene: 40 templates strung along x over 3900 px
+    x, y = _positions([(100.0 * k, 0.0) for k in range(40)])
+    labels = np.ones(40, dtype=int)
+
+    out, n = _split_oversized_spatial(labels, x, y, max_extent=500.0)
+    assert n > 1, "a 3900 px scene must split under a 500 px cap"
+    assert _extents(out, x, y).max() <= 500.0
+    assert np.bincount(out).sum() == 40, "templates lost or duplicated"
+
+
+def test_spatial_split_squares_up_an_elongated_scene():
+    """Bisecting the longer axis is what removes elongation, not just size."""
+    from mophongo.scene import _split_oversized_spatial
+
+    # 8 x 64 grid: 3150 px in x, 70 px in y -- 45:1 before, compact after
+    pts = [(50.0 * i, 10.0 * j) for i in range(64) for j in range(8)]
+    x, y = _positions(pts)
+    labels = np.ones(len(pts), dtype=int)
+
+    out, _ = _split_oversized_spatial(labels, x, y, max_extent=200.0)
+    for c in np.unique(out):
+        m = out == c
+        dx = x[m].max() - x[m].min()
+        dy = y[m].max() - y[m].min()
+        assert max(dx, dy) <= 200.0
+        # every piece is now within 4:1, against 45:1 for the input
+        assert max(dx, dy) <= 4.0 * max(min(dx, dy), 10.0)
+
+
+def test_spatial_split_leaves_compact_scenes_alone():
+    from mophongo.scene import _split_oversized_spatial
+
+    pts = [(10.0 * i, 10.0 * j) for i in range(5) for j in range(5)]
+    x, y = _positions(pts)
+    labels = np.repeat([1, 2], len(pts) // 2 + 1)[: len(pts)]
+    out, n = _split_oversized_spatial(labels, x, y, max_extent=500.0)
+    assert n == len(np.unique(labels))
+    np.testing.assert_array_equal(
+        np.unique(out, return_inverse=True)[1],
+        np.unique(labels, return_inverse=True)[1],
+    )
+
+
+def test_spatial_split_terminates_on_coincident_positions():
+    """Templates stacked on one pixel cannot be separated; must not spin."""
+    from mophongo.scene import _split_oversized_spatial
+
+    x = np.zeros(20)
+    y = np.zeros(20)
+    out, n = _split_oversized_spatial(np.ones(20, dtype=int), x, y, max_extent=1.0)
+    assert n == 1, "a zero-extent scene is already under any positive cap"
+
+
+def test_merge_radius_also_caps_the_merged_extent():
+    """One knob: the merge radius must not let merging undo the split.
+
+    A centroid-distance bound alone does not give this -- merging a wide
+    scene with a near neighbour leaves a scene wider still -- so the veto
+    tests the union bbox, not the pair separation.
+    """
+    from mophongo.scene import merge_small_scenes
+
+    # 6 clumps spaced 50 px: unconstrained they collapse into one 250 px scene
+    templates, labels = _line_of_scenes(6, 10, spacing=50.0)
+    bright = np.zeros(len(templates), dtype=bool)
+
+    free, _ = merge_small_scenes(
+        labels, templates, bright, minimum_bright=5, max_merge_radius=np.inf
+    )
+    assert np.bincount(free)[1:].max() == 60
+
+    capped, _ = merge_small_scenes(
+        labels, templates, bright, minimum_bright=5, max_merge_radius=60.0
+    )
+    x = np.array([t.position_original[0] for t in templates])
+    y = np.array([t.position_original[1] for t in templates])
+    assert _extents(capped, x, y).max() <= 60.0
+    assert np.bincount(capped)[1:].sum() == len(templates)
+
+
+def test_infinite_merge_radius_changes_nothing():
+    """np.inf must leave the pre-2026-08-13 partition byte for byte alone."""
+    from mophongo.scene import merge_small_scenes
+
+    templates, labels = _line_of_scenes(4, 10)
+    bright = np.zeros(len(templates), dtype=bool)
+    ref, nref = merge_small_scenes(
+        labels, templates, bright, minimum_bright=5, max_size=20
+    )
+    got, ngot = merge_small_scenes(
+        labels, templates, bright, minimum_bright=5, max_size=20,
+        max_merge_radius=np.inf,
+    )
+    assert ngot == nref
+    np.testing.assert_array_equal(got, ref)

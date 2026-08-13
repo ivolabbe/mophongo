@@ -366,3 +366,258 @@ def test_trial_pixel_box_and_partial_read(tmp_path):
     # a box clipped by the image edge still works
     edge = _trial_pixel_box(w, (ny, nx), (150.0, 2.0), 30.0, 0.0)
     assert edge == (0, ny, 0, nx)
+
+
+def test_repair_cache_degrades_on_an_unreadable_file(tmp_path):
+    """A truncated or half-written cache re-runs the repair, it does not crash.
+
+    Every band of a field shares one cache path by default, and a campaign
+    submits its bands together, so one job can read the file while another is
+    still writing it. The cache is recomputable; a lost fit is not.
+    """
+    import numpy as np
+    from astropy.io import fits
+    from astropy.table import Table
+
+    pipe = Pipeline.from_config(_write_config(tmp_path))
+    sci = np.zeros((4, 4), np.float32)
+    seg = np.zeros((4, 4), np.int32)
+    cat = Table({"id": [1]})
+    prov = {"sci_hi": "x"}
+
+    missing = tmp_path / "absent.fits"
+    assert pipe._load_repair_cache(missing, prov, sci, sci, seg, cat) is None
+
+    # a valid FITS file that is not a repair cache: no PATCHES/FLAGS tables
+    wrong = tmp_path / "wrong.fits"
+    fits.writeto(wrong, np.zeros((2, 2), np.float32))
+    assert pipe._load_repair_cache(wrong, prov, sci, sci, seg, cat) is None
+
+    # a truncated file: not parseable as FITS at all
+    torn = tmp_path / "torn.fits"
+    torn.write_bytes(b"SIMPLE  =                    T" + b"\0" * 200)
+    assert pipe._load_repair_cache(torn, prov, sci, sci, seg, cat) is None
+
+    # an empty file, the most likely shape of a write caught mid-flight
+    empty = tmp_path / "empty.fits"
+    empty.write_bytes(b"")
+    assert pipe._load_repair_cache(empty, prov, sci, sci, seg, cat) is None
+
+
+def test_prep_and_repair_steps_are_registered_and_stop_before_the_fit(tmp_path):
+    """``prep`` is psfs + repair; ``repair`` is the second half alone.
+
+    A campaign runs one of these per field before the bands, so what every
+    band shares -- the detection-band ePSF grids and the saturation repair --
+    is built once instead of concurrently in each. Neither may reach the fit.
+    """
+    from mophongo.pipeline import STEPS
+
+    assert STEPS["prep"] == "prep"
+    assert STEPS["repair"] == "build_repair_cache"
+
+    calls = []
+    pipe = Pipeline.from_config(_write_config(tmp_path, {"repair_saturated": True}))
+    pipe.save_config()
+    for name in ("build_psfs", "load_data", "run", "write_outputs", "build_kernels"):
+        setattr(pipe, name, lambda *a, _n=name, **k: (calls.append((_n, k)), pipe)[1])
+
+    pipe.prep()
+    assert [c[0] for c in calls] == ["build_psfs", "load_data"]
+    # kernels are per-band, not shared: prep must not build them
+    assert calls[1][1] == {"kernels": False}
+
+    calls.clear()
+    pipe.build_repair_cache()
+    assert [c[0] for c in calls] == ["load_data"]
+
+
+def test_repair_step_is_a_noop_without_saturation_repair(tmp_path):
+    """Nothing to cache when the run does not repair; do not read the mosaic."""
+    calls = []
+    pipe = Pipeline.from_config(_write_config(tmp_path, {"repair_saturated": False}))
+    pipe.load_data = lambda *a, **k: calls.append("load_data")
+
+    pipe.build_repair_cache()
+    assert calls == []
+
+
+def _stdpsf(path, provenance=None):
+    """A minimal STDPSF-shaped grid file, optionally stamped."""
+    import numpy as np
+
+    from mophongo.jwst_psf import write_stdpsf
+
+    write_stdpsf(path, np.zeros((4, 5, 5), dtype=np.float32),
+                 xgrid=np.array([10, 30]), ygrid=np.array([10, 30]),
+                 detector="NRCA1", filt="F444W", overwrite=True,
+                 provenance=provenance)
+
+
+def test_psf_grid_provenance_round_trips(tmp_path):
+    """What a grid was built from survives the write and reads back."""
+    from mophongo.jwst_psf import read_stdpsf_provenance
+    from mophongo.psf_factory import csv_fingerprint, grid_provenance
+
+    csv = tmp_path / "uds_wcs.csv"
+    csv.write_text("file,mjd-avg\nexp1.fits,60000.0\n")
+    want = grid_provenance(csv, "all", 30.0)
+    assert want == {"csv": "uds_wcs.csv", "csvhash": csv_fingerprint(csv),
+                    "datemode": "all", "fov": "30"}
+
+    path = tmp_path / "grid.fits"
+    _stdpsf(path, want)
+    assert read_stdpsf_provenance(path) == want
+
+    # content, not path or mtime: a rewritten listing is a different input
+    csv.write_text("file,mjd-avg\nexp1.fits,60000.0\nexp2.fits,61500.0\n")
+    assert grid_provenance(csv, "all", 30.0)["csvhash"] != want["csvhash"]
+
+    # unstamped and unreadable both read as "nothing known"
+    _stdpsf(tmp_path / "bare.fits")
+    assert read_stdpsf_provenance(tmp_path / "bare.fits") == {}
+    assert read_stdpsf_provenance(tmp_path / "absent.fits") == {}
+
+
+def test_stale_psf_grids_flags_a_different_date_mode_or_exposure_list(tmp_path):
+    """Grids that match the pattern but not this run are reported stale.
+
+    The autobuild fires only when *nothing* matches the pattern, so a grid
+    built under the old one-epoch-per-band default matches, loads, and is
+    never corrected. This check is what makes that visible.
+    """
+    from mophongo.psf_factory import grid_provenance
+
+    psf_dir = tmp_path / "PSF"
+    psf_dir.mkdir()
+    csv = tmp_path / "uds_wcs.csv"
+    csv.write_text("file,mjd-avg\nexp1.fits,60000.0\n")
+    pattern = r"UDS_NRC.._F444W_MJD\d+_GRID25_OS4"
+
+    current = grid_provenance(csv, "all", None)
+    _stdpsf(psf_dir / "UDS_NRCA1_F444W_MJD60000_GRID25_OS4.fits", current)
+    _stdpsf(psf_dir / "UDS_NRCA2_F444W_MJD60000_GRID25_OS4.fits",
+            grid_provenance(csv, "modal", None))          # wrong date mode
+    _stdpsf(psf_dir / "UDS_NRCA3_F444W_MJD60000_GRID25_OS4.fits",
+            {"csv": "other.csv", "csvhash": "deadbeef", "datemode": "all"})
+    _stdpsf(psf_dir / "UDS_NRCA4_F444W_MJD60000_GRID25_OS4.fits")  # unstamped
+    _stdpsf(psf_dir / "UDS_NRCB1_F1000W_MJD60000_GRID25_OS4.fits",
+            grid_provenance(csv, "modal", None))          # other pattern
+
+    pipe = Pipeline.from_config(_write_config(tmp_path, {
+        "psf_dir": str(psf_dir), "psf_date_mode": "all"}))
+    stale = pipe._stale_psf_grids(pattern, str(csv), None)
+    names = {p.name: reason for p, reason in stale}
+
+    assert "UDS_NRCA1_F444W_MJD60000_GRID25_OS4.fits" not in names
+    assert "UDS_NRCB1_F1000W_MJD60000_GRID25_OS4.fits" not in names  # not matched
+    assert "datemode" in names["UDS_NRCA2_F444W_MJD60000_GRID25_OS4.fits"]
+    assert "csvhash" in names["UDS_NRCA3_F444W_MJD60000_GRID25_OS4.fits"]
+    assert "before provenance" in names["UDS_NRCA4_F444W_MJD60000_GRID25_OS4.fits"]
+
+    # opt out and everything matching the pattern is reused as before
+    off = Pipeline.from_config(_write_config(tmp_path, {
+        "psf_dir": str(psf_dir), "psf_date_mode": "all",
+        "psf_provenance": "off"}))
+    assert off._stale_psf_grids(pattern, str(csv), None) == []
+
+
+def test_psf_provenance_modes(tmp_path, caplog):
+    """warn reuses and says so; error refuses; the default is warn.
+
+    Stale grids are reused for now because the release still holds ~416
+    cluster-mode ones that would otherwise all rebuild on first contact. The
+    intended end state is rebuild -- see TODO.md.
+    """
+    import logging
+
+    import pytest
+
+    from mophongo.psf_factory import grid_provenance
+
+    psf_dir = tmp_path / "PSF"
+    psf_dir.mkdir()
+    csv = tmp_path / "uds_wcs.csv"
+    csv.write_text("file,mjd-avg\nexp1.fits,60000.0\n")
+    pattern = r"UDS_NRC.._F444W_MJD\d+_GRID25_OS4"
+    _stdpsf(psf_dir / "UDS_NRCA1_F444W_MJD60000_GRID25_OS4.fits",
+            grid_provenance(csv, "modal", None))
+
+    assert RunConfig.psf_provenance == "warn"
+
+    def pipe_for(mode):
+        return Pipeline.from_config(_write_config(tmp_path, {
+            "psf_dir": str(psf_dir), "psf_date_mode": "all",
+            "psf_provenance": mode, "csv_hi": str(csv)}))
+
+    class _Epsf:
+        epsf = {"one": object()}
+
+        def load_jwst_stdpsf(self, **kw):
+            return None
+
+    class _Dpsf:
+        epsf_obj = _Epsf()
+
+    warned = pipe_for("warn")
+    with caplog.at_level(logging.WARNING):
+        warned._load_epsf(_Dpsf(), pattern, str(csv), "hi")
+    text = caplog.text
+    assert "USING THEM ANYWAY" in text and "datemode" in text
+
+    with pytest.raises(FileNotFoundError, match="not built the way this run wants"):
+        pipe_for("error")._load_epsf(_Dpsf(), pattern, str(csv), "hi")
+
+
+def test_rebuild_removes_stale_grids_and_keeps_current_ones(tmp_path, monkeypatch):
+    """Rebuild deletes what disagrees and builds only what is missing.
+
+    Overwriting in place would not converge: a `cluster` grid is named for a
+    cluster midpoint and an `all` grid for a rounded MJD, so the new set never
+    regenerates the old filenames. The stale files would survive, keep
+    matching the pattern, and be re-flagged on every later run.
+    """
+    from mophongo.psf_factory import grid_provenance
+
+    psf_dir = tmp_path / "PSF"
+    psf_dir.mkdir()
+    csv = tmp_path / "uds_wcs.csv"
+    csv.write_text("file,mjd-avg\nexp1.fits,60000.0\n")
+    pattern = r"UDS_NRC.._F444W_MJD\d+_GRID25_OS4"
+
+    current = psf_dir / "UDS_NRCA1_F444W_MJD60000_GRID25_OS4.fits"
+    stale = psf_dir / "UDS_NRCA2_F444W_MJD59999_GRID25_OS4.fits"
+    _stdpsf(current, grid_provenance(csv, "all", None))
+    _stdpsf(stale, grid_provenance(csv, "cluster", None))
+
+    built = {}
+
+    class _Factory:
+        def __init__(self, **kw):
+            built.update(kw)
+
+        def from_csv(self, *a, **k):
+            return []
+
+    class _Epsf:
+        epsf = {"one": object()}
+
+        def load_jwst_stdpsf(self, **kw):
+            return None
+
+    class _Dpsf:
+        epsf_obj = _Epsf()
+
+    # _load_epsf imports PSFFactory from the module at call time
+    import mophongo.psf_factory as pf
+    monkeypatch.setattr(pf, "PSFFactory", _Factory)
+
+    pipe = Pipeline.from_config(_write_config(tmp_path, {
+        "psf_dir": str(psf_dir), "psf_date_mode": "all",
+        "psf_provenance": "rebuild", "csv_hi": str(csv)}))
+    pipe._load_epsf(_Dpsf(), pattern, str(csv), "hi")
+
+    assert not stale.exists(), "the disagreeing grid should be gone"
+    assert current.exists(), "a grid that agrees must be left alone"
+    # and the factory is not told to overwrite, so it skips what survives
+    assert not built.get("overwrite", False)

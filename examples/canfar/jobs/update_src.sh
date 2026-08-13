@@ -9,7 +9,11 @@
 set -euo pipefail
 : "${RUN:?RUN not set}"
 tar -xzf $RUN/mophongo_src.tgz -C $RUN/mophongo
+# Promote only now: SRC_VERSION means "this is what is unpacked", which is what
+# submit.py checks before letting a campaign run.
+cp -f $RUN/SRC_VERSION.pending $RUN/SRC_VERSION
 echo "source updated: $(find $RUN/mophongo -name '*.py' | wc -l) files"
+echo "mophongo: $(cat $RUN/SRC_VERSION)"
 $RUN/venv/bin/python -c "
 from mophongo.pipeline import RunConfig
 from mophongo.utils import as_label_array

@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from mophongo.sed_stack import (
+    binned_measurement_statistics,
     combine_sed_stacks,
     filter_interval_wavelength_edges,
     fnu_to_flam_proxy,
@@ -14,6 +15,78 @@ from mophongo.sed_stack import (
     stack_filter_seds,
     stack_interpolated_seds,
 )
+
+
+def test_binned_statistics_retain_signed_values_and_empirical_scatter():
+    statistics = binned_measurement_statistics(
+        values=np.array([[-1.0], [0.0], [1.0]]),
+        errors=np.ones((3, 1)),
+        valid=np.ones((3, 1), dtype=bool),
+        redshift=np.array([0.1, 0.2, 1.0]),
+        redshift_edges=np.array([0.0, 1.0]),
+    )
+    assert statistics.count[0, 0] == 3
+    assert statistics.mean[0, 0] == 0.0
+    assert statistics.median[0, 0] == 0.0
+    assert statistics.winsorized_mean[0, 0] == 0.0
+    np.testing.assert_allclose(statistics.standard_error[0, 0], 1.0 / np.sqrt(3.0))
+    assert statistics.inverse_variance_mean[0, 0] == 0.0
+    assert statistics.inverse_variance_effective_count[0, 0] == 3.0
+    assert statistics.regularized_weighted_mean[0, 0] == 0.0
+    assert statistics.regularized_effective_count[0, 0] == 3.0
+
+
+def test_binned_inverse_variance_diagnostic_caps_dominant_weight():
+    common = dict(
+        values=np.array([[0.0], [0.0], [10.0]]),
+        errors=np.array([[1.0], [1.0], [0.01]]),
+        valid=np.ones((3, 1), dtype=bool),
+        redshift=np.array([0.1, 0.2, 0.3]),
+        redshift_edges=np.array([0.0, 1.0]),
+    )
+    capped = binned_measurement_statistics(
+        **common, weight_cap_percentile=50.0
+    )
+    uncapped = binned_measurement_statistics(
+        **common, weight_cap_percentile=100.0
+    )
+    np.testing.assert_allclose(capped.inverse_variance_mean[0, 0], 10.0 / 3.0)
+    np.testing.assert_allclose(
+        capped.inverse_variance_effective_count[0, 0], 3.0
+    )
+    np.testing.assert_allclose(capped.maximum_weight_fraction[0, 0], 1.0 / 3.0)
+    assert uncapped.inverse_variance_mean[0, 0] > 9.9
+    assert uncapped.inverse_variance_effective_count[0, 0] < 1.01
+    assert capped.regularized_effective_count[0, 0] > 2.9
+
+
+def test_binned_winsorized_mean_limits_outlier_without_dropping_it():
+    statistics = binned_measurement_statistics(
+        values=np.array([[0.0], [0.0], [0.0], [100.0]]),
+        errors=np.ones((4, 1)),
+        valid=np.ones((4, 1), dtype=bool),
+        redshift=np.array([0.1, 0.2, 0.3, 0.4]),
+        redshift_edges=np.array([0.0, 1.0]),
+        winsor_tail_percent=25.0,
+    )
+    assert statistics.count[0, 0] == 4
+    assert statistics.mean[0, 0] == 25.0
+    np.testing.assert_allclose(statistics.winsorized_mean[0, 0], 6.25)
+
+
+def test_regularized_weights_fall_back_to_equal_for_zero_population_scatter():
+    statistics = binned_measurement_statistics(
+        values=np.ones((3, 1)),
+        errors=np.array([[0.001], [1.0], [100.0]]),
+        valid=np.ones((3, 1), dtype=bool),
+        redshift=np.array([0.1, 0.2, 0.3]),
+        redshift_edges=np.array([0.0, 1.0]),
+    )
+    assert statistics.regularized_weighted_mean[0, 0] == 1.0
+    assert statistics.regularized_effective_count[0, 0] == 3.0
+    np.testing.assert_allclose(
+        statistics.regularized_maximum_weight_fraction[0, 0], 1.0 / 3.0
+    )
 
 
 def test_redshift_edges_are_uniform_in_log_one_plus_z():

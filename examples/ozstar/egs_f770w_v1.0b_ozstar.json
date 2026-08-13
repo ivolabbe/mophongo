@@ -1,0 +1,38 @@
+{
+  "name": "egs_f770w_v1.0b",
+  "out_dir": "/fred/oz030/ilabbe/mophongo/run/out/egs_f770w_v1.0b",
+  "sci_hi": "/fred/oz030/ilabbe/mophongo/run/data/egs-grizli-v8.0-minerva-v2.0-40mas-f444w-clear_drc_sci_bkgsub.fits",
+  "wht_hi": "/fred/oz030/ilabbe/mophongo/run/data/egs-grizli-v8.0-minerva-v2.0-40mas-f444w-clear_drc_wht.fits",
+  "segmap": "/fred/oz030/ilabbe/mophongo/run/data/MINERVA-EGS_n2.0_v1.3_ACS+WEBB_SEGMAP.fits",
+  "catalog": "/fred/oz030/ilabbe/mophongo/run/data/MINERVA-EGS_n2.0_m2.1_v1.3.1_ACS+WEBB_Kf444w_SUPER_CATALOG_wMIRI.fits",
+  "csv_hi": "/fred/oz030/ilabbe/mophongo/run/data/egs-grizli-v8.0-minerva-v2.0-40mas-f444w-clear_wcs.csv",
+  "sci_lo": "/fred/oz030/ilabbe/mophongo/run/data/egs-sbkgsub-v2.1-80mas-f770w_drz_sci_extrabkg.fits",
+  "wht_lo": "/fred/oz030/ilabbe/mophongo/run/data/egs-sbkgsub-v2.1-80mas-f770w_drz_wht.fits",
+  "csv_lo": "/fred/oz030/ilabbe/mophongo/run/data/egs-m2.1_f770w_wcs.csv",
+  "expect_frames": [
+    290,
+    134
+  ],
+  "psf_dir": "/fred/oz030/ilabbe/mophongo/run/PSF",
+  "pattern_hi": "EGS_NRC.._F444W_MJD\\d+_GRID25_OS4",
+  "pattern_lo": "EGS_MIRI_F770W_MJD\\d+_GRID9_OS4",
+  "filter_lo": "f770w",
+  "psf_size": 4.0,
+  "psf_date_mode": "all",
+  "psf_blur_fwhm": "default",
+  "footprint_filter": true,
+  "repair_saturated": true,
+  "repair_kwargs": {
+    "min_buffer_snr": 200
+  },
+  "trial": null,
+  "bg_filter_sigma": 64.0,
+  "fit": {
+    "fit_astrometry_joint": true,
+    "scene_minimum_bright": 5,
+    "scene_max_size": 1000,
+    "scene_max_merge_radius": 1000,
+    "aperture_diam": 0.7
+  },
+  "scene_plots": true
+}

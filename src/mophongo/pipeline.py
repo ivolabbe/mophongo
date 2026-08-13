@@ -159,6 +159,25 @@ class RunConfig:
     # PSF stamp size in arcsec; None = full native ePSF stamp as generated
     psf_size: float | None = 4.0
     psf_autobuild: bool = True  # generate missing PSF grids with PSFFactory
+    # What to do about cached PSF grids that were NOT built from this run's
+    # exposure list and date mode (see Pipeline._stale_psf_grids):
+    #   "warn"    - say so loudly and use them anyway (current default)
+    #   "rebuild" - regenerate them in place
+    #   "error"   - refuse to run
+    #   "off"     - do not look
+    # "warn" while the release still holds ~416 cluster-mode grids that would
+    # otherwise all rebuild on first contact. The intended end state is
+    # "rebuild", so the grids converge on the config's own convention as bands
+    # run: a grid built another way is a silent photometric difference, and it
+    # is what fitted a whole release against one epoch per band. See TODO.md.
+    psf_provenance: str = "warn"
+    # Processes used when building ePSF grids. One (detector, date) grid is an
+    # independent job of tens to low hundreds of MB, so this scales with cores
+    # rather than with memory. It parallelises within one pattern only: bands
+    # of a field share pattern_hi, so two bands building at once still race on
+    # the same F444W filenames -- which is why a campaign builds one band of a
+    # field first and fans out afterwards (see docs/campaigns.md).
+    psf_workers: int = 1
     psf_fov_arcsec: float | None = None  # PSFFactory field of view; None = backend default
     # Which exposure dates get their own grid when autobuilding. "all" (one
     # per unique integer MJD) is the default because the grids are MJD-tagged
@@ -981,6 +1000,54 @@ class Pipeline:
             self._load_epsf(self.dpsf_lo, cfg.pattern_lo, cfg.csv_lo, "lo")
             self._epsf_loaded = True
 
+    def _stale_psf_grids(
+        self, pattern: str, csv: str, fov: float | None
+    ) -> list[tuple[Path, str]]:
+        """Grid files matching ``pattern`` that this run should not reuse.
+
+        A grid filename records the detector, filter, MJD, grid size and
+        oversampling — but not the exposure list it came from, nor the
+        ``date_mode`` that chose its MJDs. Those are stamped into the file as
+        ``HIERARCH MPH`` cards when it is written (:func:`grid_provenance`),
+        and compared here.
+
+        This matters because the autobuild fires only when *nothing* matches
+        the pattern. A band holding one grid built under the old
+        ``date_mode="modal"`` default — a single epoch for exposures spanning
+        years — matches, loads, and is never corrected. Grids written before
+        provenance existed carry no cards; they cannot be shown to agree, so
+        they count as stale rather than being trusted.
+
+        Returns ``(path, reason)`` pairs; empty means every match is current.
+        What happens to them is ``RunConfig.psf_provenance``'s decision, not
+        this function's; ``"off"`` skips the check entirely.
+        """
+        from .psf_factory import grid_provenance
+        from .jwst_psf import read_stdpsf_provenance
+
+        cfg = self.run_config
+        if str(getattr(cfg, "psf_provenance", "warn")).lower() == "off":
+            return []
+        psf_dir = Path(cfg.psf_dir)
+        if not psf_dir.is_dir():
+            return []
+        want = grid_provenance(csv, cfg.psf_date_mode, fov)
+        stale: list[tuple[Path, str]] = []
+        for path in sorted(psf_dir.glob("*.fits")):
+            if not re.search(pattern, path.name):
+                continue
+            got = read_stdpsf_provenance(path)
+            if not got:
+                stale.append((path, "built before provenance was recorded"))
+                continue
+            for key in ("csvhash", "datemode", "fov"):
+                if key in want and got.get(key) != want[key]:
+                    stale.append(
+                        (path, f"{key} {got.get(key)!r} != {want[key]!r}")
+                    )
+                    break
+        return stale
+
     def _load_epsf(self, dpsf, pattern: str, csv: str, band: str) -> None:
         """Load the ePSF grids for one band, generating them if absent.
 
@@ -991,8 +1058,51 @@ class Pipeline:
         exposure list; either way an empty result is an error.
         """
         cfg = self.run_config
+        kw = _psf_factory_kwargs(pattern)
+        fov = kw.get("fov_arcsec", cfg.psf_fov_arcsec)
+        stale = self._stale_psf_grids(pattern, csv, fov)
+        mode = str(getattr(cfg, "psf_provenance", "warn")).lower()
+        if stale:
+            # The autobuild below fires only when NOTHING matches the pattern,
+            # so grids that match but were built from another exposure list or
+            # another date mode are reused for the life of the run tree unless
+            # something says otherwise here. That is how a whole release came
+            # to be fitted against one epoch per band.
+            summary = (
+                f"{band}-res band: {len(stale)} ePSF grid(s) matching "
+                f"{pattern!r} under {cfg.psf_dir} were not built the way this "
+                f"run wants ({'; '.join(sorted({r for _, r in stale}))}). "
+                f"First: {stale[0][0].name}"
+            )
+            if mode == "error":
+                raise FileNotFoundError(
+                    summary + ". Set psf_provenance to 'rebuild' to regenerate "
+                    "them, or 'warn' to use them anyway."
+                )
+            if mode == "rebuild":
+                # Delete the stale files, then build only what is missing.
+                # Overwriting in place does not converge: a `cluster` grid is
+                # named for a cluster midpoint and an `all` grid for a rounded
+                # MJD, so the new set does not regenerate the old filenames.
+                # They would survive, keep matching the pattern, keep being
+                # loaded alongside the fresh ones, and be re-flagged on every
+                # later run. Removing them is what makes the rebuild final --
+                # and it is why this is opt-in rather than the default.
+                logger.warning(
+                    "%s. Removing them and building what is missing.", summary,
+                )
+                for path, reason in stale:
+                    logger.info("  removing %s (%s)", path.name, reason)
+                    path.unlink(missing_ok=True)
+            else:
+                logger.warning(
+                    "%s. USING THEM ANYWAY (psf_provenance=%r): the PSFs this "
+                    "run fits with are not the ones its config describes.",
+                    summary, mode,
+                )
+                stale = []      # reuse: fall through to the ordinary load
         dpsf.epsf_obj.load_jwst_stdpsf(local_dir=str(cfg.psf_dir), filter_pattern=pattern)
-        if dpsf.epsf_obj.epsf:
+        if dpsf.epsf_obj.epsf and not stale:
             logger.info(
                 "%s-res band: loaded %d ePSF grid(s) matching %r",
                 band, len(dpsf.epsf_obj.epsf), pattern,
@@ -1007,7 +1117,6 @@ class Pipeline:
 
         from .psf_factory import PSFFactory
 
-        kw = _psf_factory_kwargs(pattern)
         logger.warning(
             "no PSF grids match %r under %s; generating them from %s with "
             "PSFFactory(%s). This is slow (minutes to tens of minutes) but "
@@ -1019,11 +1128,15 @@ class Pipeline:
         Path(cfg.psf_dir).mkdir(parents=True, exist_ok=True)
         # An _FOV token in the pattern carries its own field of view;
         # otherwise the config's psf_fov_arcsec applies.
-        fov = kw.pop("fov_arcsec", cfg.psf_fov_arcsec)
+        kw.pop("fov_arcsec", None)
+        # No overwrite: the stale files are already gone, and the factory
+        # skips any grid that still exists, so this builds the missing dates
+        # rather than the whole set. A band that is already current except for
+        # one new epoch costs one grid, not seventeen.
         PSFFactory(outdir=str(cfg.psf_dir), fov_arcsec=fov,
-                   date_mode=cfg.psf_date_mode, **kw).from_csv(
-            str(csv), save=True
-        )
+                   date_mode=cfg.psf_date_mode,
+                   workers=int(getattr(cfg, "psf_workers", 1) or 1),
+                   **kw).from_csv(str(csv), save=True)
         dpsf.epsf_obj.load_jwst_stdpsf(local_dir=str(cfg.psf_dir), filter_pattern=pattern)
         if not dpsf.epsf_obj.epsf:
             raise FileNotFoundError(
@@ -1388,23 +1501,39 @@ class Pipeline:
         sci: np.ndarray, wht0: np.ndarray, seg: np.ndarray,
         cat: Table,
     ) -> tuple[np.ndarray, np.ndarray, Table, np.ndarray] | None:
-        """Apply a matching repair cache; None when absent or stale."""
+        """Apply a matching repair cache; None when absent, stale, or unreadable.
+
+        Unreadable counts as absent. The cache is a plain optimisation -- the
+        repair can always be re-run -- and by default every band of a field
+        shares one path (``repair_cache_path`` resolves to ``out_dir/..``), so
+        a campaign that submits its bands together can have one job reading the
+        file while another is still writing it. Letting a truncated read kill
+        the run would trade a recomputable cache for a lost fit.
+        """
         from astropy.io import fits
 
         if not path.exists():
             return None
-        with fits.open(path) as hdul:
-            hdr = hdul[0].header
-            for key, value in prov.items():
-                got = hdr.get(f"REPAIR {key.upper()}")
-                if got is None or str(got) != value:
-                    logger.warning(
-                        "repair cache %s is stale (%s changed); re-running repair",
-                        path.name, key,
-                    )
-                    return None
-            patches = Table(hdul["PATCHES"].data)
-            flags = Table(hdul["FLAGS"].data)
+        try:
+            with fits.open(path) as hdul:
+                hdr = hdul[0].header
+                for key, value in prov.items():
+                    got = hdr.get(f"REPAIR {key.upper()}")
+                    if got is None or str(got) != value:
+                        logger.warning(
+                            "repair cache %s is stale (%s changed); re-running repair",
+                            path.name, key,
+                        )
+                        return None
+                patches = Table(hdul["PATCHES"].data)
+                flags = Table(hdul["FLAGS"].data)
+        except (OSError, KeyError, ValueError) as exc:
+            # truncated or half-written file, or one missing its tables
+            logger.warning(
+                "repair cache %s is unreadable (%s: %s); re-running repair",
+                path.name, type(exc).__name__, exc,
+            )
+            return None
         wht = wht0.copy()
         _apply_repair_patches(patches, sci, seg)
         yy, xx = np.asarray(patches["y"]), np.asarray(patches["x"])
@@ -3049,6 +3178,51 @@ class Pipeline:
 
         _table("time by step", steps, total)
         _table("time within the fit", inner, steps.get("fit", sum(inner.values())))
+
+    def build_repair_cache(self) -> "Pipeline":
+        """Run the saturation repair, write its cache, and stop before the fit.
+
+        A campaign submits a field's bands together, and each would otherwise
+        re-run the same repair: it depends on the detection image, its weight,
+        ``pattern_hi``, the halo pattern, ``repair_kwargs`` and the trial box
+        (:meth:`_repair_provenance`), and on nothing that varies between bands.
+        Running it once per field turns that duplicated work into a cache hit,
+        and removes the concurrent writes to a shared cache file that come with
+        submitting the bands together.
+
+        ``kernels=False`` stops :meth:`load_data` building a matching-kernel
+        map, which is per-band and not shared.
+
+        Needs the detection-band and halo ePSF grids to exist already. On a
+        cluster whose compute nodes have no route to MAST — OzStar — build them
+        on the login node first (``examples/ozstar/jobs/build_psfs.sh``); where
+        compute has internet, :meth:`prep` does both in one job.
+        """
+        cfg = self.run_config
+        if cfg is None:
+            raise RuntimeError("build_repair_cache needs a config-driven run")
+        if not cfg.repair_saturated:
+            logger.info("repair_saturated is off: no cache to build")
+            return self
+        with self.log_run() as log_path:
+            logger.info("logging this repair to %s", log_path)
+            self.load_data(kernels=False)
+        return self
+
+    def prep(self) -> "Pipeline":
+        """Build what every band of this field shares, and stop.
+
+        :meth:`build_psfs` — which builds or reloads the ePSF grids and writes
+        this band's PSF region maps, the ones ``seed_cache.sh`` links into the
+        other bands' run directories — followed by
+        :meth:`build_repair_cache`.
+
+        One job, so this suits a cluster whose compute nodes can reach MAST.
+        Where they cannot, run the two halves on the machines that can: grids
+        on the login node, then the ``repair`` step as an ordinary job.
+        """
+        self.build_psfs()
+        return self.build_repair_cache()
 
     def run_all(self) -> "Pipeline":
         """All steps in order: psfs, kernels, fit, outputs.
@@ -5349,6 +5523,11 @@ def run(
 STEPS = {
     "psfs": "build_psfs",
     "kernels": "build_kernels",
+    # field-level preparation, shared by every band: 'prep' is psfs + repair in
+    # one job; 'repair' is the second half alone, for clusters whose compute
+    # nodes cannot reach MAST and must build the grids elsewhere first
+    "prep": "prep",
+    "repair": "build_repair_cache",
     "load": "load_data",
     "loadfit": "load_fit",
     "info": "info",

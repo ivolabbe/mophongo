@@ -803,6 +803,147 @@ def test_write_outputs_puts_scene_plots_in_scenes_subdir(tmp_path):
     assert not (off / "t_scene_map.png").exists()
 
 
+def test_scene_results_do_not_depend_on_scene_order(monkeypatch):
+    """The astrometric loop runs scene-by-scene, so order must not matter.
+
+    ``run()`` refines one scene to convergence before starting the next rather
+    than synchronising every scene at each pass. That is only legitimate
+    because a scene reads its own templates and read-only slices of the shared
+    image and weights, so processing the scenes in the opposite order has to
+    give the same fluxes, errors, shifts and residual. It is also the property
+    a per-scene worker pool would rely on.
+    """
+    from astropy.wcs import WCS
+    from scipy.ndimage import shift as nd_shift
+    from mophongo.fit import FitConfig
+
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=7, nsrc=40, size=201, ndilate=2, peak_snr=50.0
+    )
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+    # offset the fitted band so the shift loop actually iterates
+    images = [images[0], nd_shift(images[1], (0.95, -0.75), order=3)]
+
+    wcs = WCS(naxis=2)
+    wcs.wcs.crpix = [100.0, 100.0]
+    wcs.wcs.crval = [150.0, 2.0]
+    wcs.wcs.cdelt = [-1e-5, 1e-5]
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    config = FitConfig(
+        fit_astrometry_niter=5, astrom_shift_tol=0.004, snr_thresh_astrom=5.0,
+        astrom_isolation_thresh=0.0, scene_minimum_bright=2,
+    )
+
+    def fit():
+        pipe = pipeline.Pipeline(
+            [im.copy() for im in images], segmap, catalog=catalog,
+            weights=[w.copy() for w in wht], kernels=[None, kernel], psfs=psfs,
+            wcs=[wcs, wcs], config=config,
+        )
+        table, residuals = pipe.run()
+        scenes = sorted(pipe.all_scenes[0], key=lambda s: s.id)
+        return table, residuals[0], scenes
+
+    ref_table, ref_res, ref_scenes = fit()
+    assert len(ref_scenes) > 1, "need several scenes for the order to mean anything"
+
+    # same run, scenes handed to the loop back to front
+    generate = pipeline.generate_scenes
+
+    def reversed_scenes(*args, **kwargs):
+        scenes, labels = generate(*args, **kwargs)
+        return list(reversed(scenes)), labels
+
+    monkeypatch.setattr(pipeline, "generate_scenes", reversed_scenes)
+    got_table, got_res, got_scenes = fit()
+
+    np.testing.assert_array_equal(got_table["id"], ref_table["id"])
+    for col in ("flux_1", "err_1"):
+        np.testing.assert_array_equal(got_table[col], ref_table[col])
+    np.testing.assert_array_equal(got_res, ref_res)
+    for ref, got in zip(ref_scenes, got_scenes):
+        assert got.astrom_niter == ref.astrom_niter
+        assert got.astrom_converged == ref.astrom_converged
+        np.testing.assert_array_equal(got.shifts, ref.shifts)
+
+
+def test_write_outputs_silences_hierarch_card_warnings(tmp_path):
+    """Long catalog-meta keywords write as HIERARCH cards without warning.
+
+    ``PHOT_UNIT``, ``WEBBSTARFILT`` and friends come in on the input catalog's
+    ``meta`` and round-trip by design; astropy warns once per card, twice once
+    its warning logging has a handler. ``log_run`` filtered these, but the
+    steps are also run one at a time (``... config.json load fit outputs``),
+    which never enters that block.
+    """
+    import warnings
+
+    import matplotlib
+    matplotlib.use("Agg")
+    from astropy.io import fits
+    from astropy.io.fits.verify import VerifyWarning
+    from astropy.wcs import WCS
+    from mophongo.fit import FitConfig
+
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=12, nsrc=12, size=101, ndilate=2, peak_snr=2.0
+    )
+    catalog.meta["PHOT_UNIT"] = "uJy"
+    catalog.meta["WEBBSTARFILT"] = "F444W"
+    catalog.meta["SHRINK_FACTOR"] = 2
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+    wcs_hi = WCS(naxis=2)
+    wcs_hi.wcs.crpix = [50.0, 50.0]
+    wcs_hi.wcs.crval = [150.0, 2.0]
+    wcs_hi.wcs.cdelt = [-1e-5, 1e-5]
+    wcs_hi.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sci_hi = out_dir / "hi.fits"
+    fits.writeto(sci_hi, np.asarray(images[0], np.float32), overwrite=True)
+
+    pipe = pipeline.Pipeline(
+        [im.copy() for im in images], segmap, catalog=catalog,
+        weights=[w.copy() for w in wht], kernels=[None, kernel], psfs=psfs,
+        wcs=[wcs_hi, wcs_hi], config=FitConfig(fit_astrometry_niter=0),
+    )
+    pipe.run_config = pipeline.RunConfig(
+        name="t", out_dir=str(out_dir), sci_hi=str(sci_hi), segmap="seg.fits",
+        catalog="cat.fits", sci_lo="lo.fits", wht_lo="wht.fits",
+        csv_hi="hi.csv", csv_lo="lo.csv",
+        scene_plots=False, save_stamps=True,
+    )
+    pipe.out_dir = out_dir
+    pipe.run()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pipe.write_outputs()
+    hierarch = [
+        w for w in caught
+        if issubclass(w.category, VerifyWarning)
+        and "HIERARCH card will be created" in str(w.message)
+    ]
+    assert not hierarch, [str(w.message) for w in hierarch]
+
+    # the keywords still made it into the file, as HIERARCH cards
+    hdr = fits.getheader(pipe.f_fit_table, 1)
+    assert hdr["PHOT_UNIT"] == "uJy"
+    assert hdr["WEBBSTARFILT"] == "F444W"
+    assert hdr["SHRINK_FACTOR"] == 2
+
+    # and the filter is scoped to the write, not left installed globally
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fits.Header()["PHOT_UNIT"] = "uJy"
+    assert any(
+        issubclass(w.category, VerifyWarning)
+        and "HIERARCH card will be created" in str(w.message)
+        for w in caught
+    )
+
+
 def _shift_field_pipeline(tmp_path, order, nsrc=24, size=161, offset=(0.0, 0.0)):
     """A run with astrometry solved at ``order``, ready for plot_shift_field.
 

@@ -10,13 +10,14 @@ set -euo pipefail
 STEP=${STEP:-all}
 export MPLCONFIGDIR=$RUN/.mplconfig
 export MPLBACKEND=Agg
-mkdir -p $RUN/out
-cd $RUN/out
+mkdir -p $RUN
+cd $RUN
 echo "=== $CFG [$STEP] on $(hostname): $(nproc) cores, $(free -g | awk '/Mem/{print $2}')GB"
 # Which mophongo this is. Without it a run that silently used stale source -
 # push writes the tarball, but only setup_env.sh and update_src.sh unpack it -
 # looks exactly like one that picked the change up.
-echo "=== mophongo: $(cat $RUN/SRC_VERSION 2>/dev/null || echo 'SRC_VERSION missing')"
-time $RUN/venv/bin/python -m mophongo.pipeline $RUN/${CFG}_canfar.json $STEP
-echo "=== outputs:"; ls -lh $RUN/out/$CFG | head -25
+echo "=== mophongo: $(cat $RUN/setup/SRC_VERSION 2>/dev/null || echo 'SRC_VERSION missing')"
+time $RUN/setup/venv/bin/python -m mophongo.pipeline $RUN/setup/${CFG}_canfar.json $STEP
+# out_dir is absolute in the config: run<N>/<field>/<band>
+echo "=== outputs:"; ls -lh $RUN/run*/*/$CFG 2>/dev/null | head -25
 echo RUN_DONE

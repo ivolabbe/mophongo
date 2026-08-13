@@ -50,7 +50,7 @@ REPO = HERE.parent.parent                     # mophongo/
 WORK = REPO / "scratch" / "canfar"
 
 
-from runroot import run_root
+from runroot import run_number, run_root
 
 RUN, RUN_VOS = run_root(REPO)   # /arc/... and its arc: URI
 IMAGE = "images.canfar.net/skaha/jwst-notebook:25.07.25"
@@ -189,11 +189,15 @@ def do_push(args: argparse.Namespace) -> None:
         log.info("psf  %d grids, %.1f MB", len(grids), psf_tar.stat().st_size / 1e6)
         uploads.append(psf_tar)
 
+    # the destinations have to exist before anything is copied into them
+    for sub in ("setup", "jobs"):
+        subprocess.run([str(VCP.parent / "vmkdir"), f"{RUN_VOS}/{sub}"],
+                       capture_output=True)
+
     for path in uploads:
         log.info("uploading %s", path.name)
-        vcp(path, f"{RUN_VOS}/{path.name}")
+        vcp(path, f"{RUN_VOS}/setup/{path.name}")
 
-    subprocess.run([str(VCP.parent / "vmkdir"), f"{RUN_VOS}/jobs"], capture_output=True)
     # .py as well as .sh: a job whose logic does not fit in shell ships its
     # script alongside the wrapper that runs it.
     for script in sorted(p for p in (HERE / "jobs").iterdir()
@@ -209,7 +213,7 @@ def do_upload_cfg(names: list[str]) -> None:
             path = HERE / suffix
             if not path.exists():
                 raise SystemExit(f"missing {path}; run arcify.py first")
-            vcp(path, f"{RUN_VOS}/{suffix}")
+            vcp(path, f"{RUN_VOS}/setup/{suffix}")
 
 
 def launch(name: str, script: str, cores: int, ram: int, env: dict[str, str],
@@ -498,7 +502,7 @@ def arc_src_version() -> str:
     dest = tmp / "SRC_VERSION.arc"
     dest.unlink(missing_ok=True)
     try:
-        vcp(f"{RUN_VOS}/SRC_VERSION", str(dest))
+        vcp(f"{RUN_VOS}/setup/SRC_VERSION", str(dest))
     except (FileNotFoundError, SystemExit):
         return ""
     return dest.read_text().strip() if dest.exists() else ""
@@ -661,7 +665,8 @@ def do_fetch(args: argparse.Namespace) -> None:
         dest.mkdir(parents=True, exist_ok=True)
         got = 0
         for template in wanted:
-            remote = f"{RUN_VOS}/out/{name}/{template.format(name=name)}"
+            remote = (f"{RUN_VOS}/run{run_number()}/{name.split('_')[0]}/"
+                      f"{name}/{template.format(name=name)}")
             try:
                 vcp(remote, str(dest))
                 got += 1

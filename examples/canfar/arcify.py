@@ -33,7 +33,7 @@ from vos import Client
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("arcify")
 
-from runroot import run_root
+from runroot import run_number, run_root
 
 REPO = Path(__file__).resolve().parent.parent.parent
 
@@ -41,7 +41,7 @@ ARC = "arc:projects/minerva"
 
 
 def arc_run() -> str:
-    """Run tree on arc; ``$CANFAR_RUN`` overrides the default home location.
+    """Run tree on arc; ``$CANFAR_RUN`` overrides the release default.
 
     Resolved on demand rather than at import so that ``examples/ozstar``, which
     reuses the arc indexing helpers below but has no CANFAR run tree, does not
@@ -137,23 +137,26 @@ def _repair_cache_name(cfg: dict) -> str:
     The repair depends on the detection band alone -- science image, weight,
     PSF pattern, kwargs, and the trial box (``Pipeline._repair_provenance``) --
     so every band of a field with the same geometry produces the same result
-    and should share one cache. Nothing else should: a different field has a
-    different detection image, and a different patch repairs different pixels,
-    so sharing a path with either means each run finds the other's cache stale,
-    recomputes, and overwrites it.
+    and should share one cache. The name carries the field, which is what
+    stops one field's cache being found stale by the next and overwritten:
+    that is exactly what happened to the v1.0 campaign, where all three fields
+    took turns rewriting a single ``out/repair_cache.fits``.
+
+    The cache sits in the field directory of a numbered run, so a run and a
+    geometry are already fixed by where it is. A trial patch still gets its
+    geometry in the name: a patch and a full field repair different pixels,
+    and nothing else distinguishes them if both are run under one run number.
 
     ``RunConfig.repair_cache_path`` defaults to ``'..'``, which resolves to one
-    unnamed file for the whole run tree -- fine for one field at a time, wrong
-    for a release campaign that submits several.
+    unnamed file per directory level -- fine for one field at a time, wrong for
+    a release campaign that submits several.
     """
     field = str(cfg.get("name", "run")).split("_")[0]
     trial = cfg.get("trial")
     if not trial:
-        geom = "full"
-    else:
-        ra, dec = (round(float(v), 5) for v in trial["center"])
-        geom = f"r{float(trial['radius']):g}_{ra}{dec:+}"
-    return f"{field}_{geom}_repair_cache.fits"
+        return f"{field}_repair_cache.fits"
+    ra, dec = (round(float(v), 5) for v in trial["center"])
+    return f"{field}_r{float(trial['radius']):g}_{ra}{dec:+}_repair_cache.fits"
 
 
 def arcify(cfg_path: Path, index: dict[str, str], out_dir: Path,
@@ -206,8 +209,12 @@ def arcify(cfg_path: Path, index: dict[str, str], out_dir: Path,
         else:
             cfg[key] = arc_path  # read in place, no copy
 
+    # Release layout: inputs and grids at the release root, products under a
+    # numbered run and grouped by field. `..` from out_dir is the field
+    # directory, so the repair cache lands beside the bands that share it.
+    field = str(name).split("_")[0]
     cfg["psf_dir"] = f"{run}/PSF"
-    cfg["out_dir"] = f"{run}/out/{name}"
+    cfg["out_dir"] = f"{run}/run{run_number()}/{field}/{name}"
     cfg["repair_cache_path"] = f"../{_repair_cache_name(cfg)}"
 
     cfg_out = out_dir / f"{name}_canfar.json"

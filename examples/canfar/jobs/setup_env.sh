@@ -5,24 +5,24 @@
 set -euo pipefail
 : "${RUN:?RUN not set}"
 export MPLCONFIGDIR=$RUN/.mplconfig
-mkdir -p $MPLCONFIGDIR $RUN/mophongo $RUN/PSF
+mkdir -p $MPLCONFIGDIR $RUN/setup/mophongo $RUN/PSF
 
 echo "=== unpack"
-tar -xzf $RUN/mophongo_src.tgz -C $RUN/mophongo
-tar -xf  $RUN/psf.tar          -C $RUN/PSF
+tar -xzf $RUN/setup/mophongo_src.tgz -C $RUN/setup/mophongo
+tar -xf  $RUN/setup/psf.tar          -C $RUN/PSF
 echo "psf grids: $(ls $RUN/PSF | wc -l)"
 # See update_src.sh: SRC_VERSION records what is unpacked, not what was uploaded.
-cp -f $RUN/SRC_VERSION.pending $RUN/SRC_VERSION
-echo "mophongo: $(cat $RUN/SRC_VERSION)"
+cp -f $RUN/setup/SRC_VERSION.pending $RUN/setup/SRC_VERSION
+echo "mophongo: $(cat $RUN/setup/SRC_VERSION)"
 
 echo "=== venv"
-rm -rf $RUN/venv
-python -m venv $RUN/venv
-$RUN/venv/bin/pip -q install -U pip
-$RUN/venv/bin/pip install -e $RUN/mophongo 2>&1 | tail -3
+rm -rf $RUN/setup/venv
+python -m venv $RUN/setup/venv
+$RUN/setup/venv/bin/pip -q install -U pip
+$RUN/setup/venv/bin/pip install -e $RUN/setup/mophongo 2>&1 | tail -3
 
 echo "=== versions"
-$RUN/venv/bin/python -c "
+$RUN/setup/venv/bin/python -c "
 import astropy, numpy, photutils, psutil, drizzlepac
 print('astropy', astropy.__version__, 'numpy', numpy.__version__,
       'photutils', photutils.__version__, 'psutil', psutil.__version__,

@@ -22,9 +22,31 @@ import os
 import re
 from pathlib import Path
 
-#: Shared project allocation. Big enough for a release, and the grids and
-#: outputs in it are useful to the collaboration rather than to one user.
-DEFAULT_RUN = "/arc/projects/minerva/ifl"
+#: Shared project allocation, at the release currently being produced. Big
+#: enough for a release, and the grids and outputs in it are useful to the
+#: collaboration rather than to one user.
+#:
+#: The tree beneath it separates what a release *is* from what made it::
+#:
+#:     <root>/setup/                source, venv, configs, tarballs
+#:     <root>/data/                 staged mosaics
+#:     <root>/PSF/                  ePSF grids
+#:     <root>/run<N>/<field>/<band>/    one directory per fitted band
+#:     <root>/run<N>/<field>/<field>_repair_cache.fits
+DEFAULT_RUN = "/arc/projects/minerva/ifl/release_v1.0"
+
+
+def run_number() -> int:
+    """Which numbered run of this release to write, from ``$CANFAR_RUNNUM``.
+
+    Outputs go to ``run<N>/`` so a re-run, a test or a changed configuration
+    never overwrites a previous one: bump the number instead of inventing a
+    name suffix, and the release keeps one directory per attempt.
+    """
+    raw = os.environ.get("CANFAR_RUNNUM", "1").strip()
+    if not raw.isdigit() or int(raw) < 1:
+        raise SystemExit(f"CANFAR_RUNNUM must be a positive integer (got {raw!r})")
+    return int(raw)
 
 
 def canfar_user(repo: Path) -> str:

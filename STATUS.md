@@ -3,6 +3,33 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] CANFAR run trees restructured around a release (2026-08-13). The root
+  defaults to `/arc/projects/minerva/ifl/release_v1.0` and a tree under
+  `/arc/home` is refused: the v1.0 campaign had put 200 GB there -- 132 GB of
+  outputs across 15 bands, 67 GB of staged inputs -- against a home quota of a
+  few hundred GB for everything a user owns.
+  * Layout: `setup/` (source, venv, configs, tarballs), `data/`, `PSF/`,
+    `run<N>/<field>/<band>/`, `run<N>/<field>/<field>_repair_cache.fits`.
+    `$CANFAR_RUNNUM` picks the run number, so a re-run bumps a number rather
+    than inventing a name suffix.
+  * `runroot.run_number()`, `arcify.py` (out_dir, repair cache name),
+    `jobs/*.sh` (setup/ paths, run<N> globs, seed_cache finds a band under any
+    run/field), `submit.py` (uploads to `setup/`, `fetch` reads
+    `run<N>/<field>/<band>/`).
+  * The orphaned `out/repair_cache.fits` in home is EGS's -- its
+    `REPAIR SCI_HI` names the EGS detection image -- so all three fields had
+    been overwriting one file in turn. The `<field>_` prefix is what prevents
+    that; a trial patch keeps its geometry in the name as well, since a patch
+    and a full field repair different pixels.
+  * Done through the mount already: `ifl/out -> ifl/release_test`,
+    `ifl/data -> release_v1.0/data`, `ifl/PSF -> release_v1.0/PSF`. Renames
+    inside projects are server-side and instant.
+  * NOT done: moving the 200 GB out of `/arc/home`. sftp refuses cross-tree
+    renames ("Operation not permitted"), so it cannot go through the laptop
+    mount without streaming every byte down and back up. The script is written
+    and staged at `/arc/projects/minerva/ifl/jobs/move_to_release.sh`; it needs
+    a CANFAR container to run it, and `skaha` is not installed on this laptop.
+  * `poetry run pytest`: 387 passed.
 - [x] Spatially varying Wiener deconvolution toward theoretical PSFs, plus a
   real MINERVA UDS F444W patch experiment (2026-08-13).
   * `PSFRegionMap.gaussian_psf_map` defines one noise-free, discrete-unit-sum
@@ -53,6 +80,19 @@ This file records completed implementations, validation runs, and the current wo
     star flux stays within 0.4%, and residual shifts are <=0.061 pixel. The
     output therefore has to be called "regularized toward 0.1\"", not a
     realized clean Gaussian.
+  * The standard `PSF.optimize_matching_kernel_regularization` Wiener scan was
+    also run directly on the three noise-free PSFRegionMap models under the
+    delivered patch (parent keys 564/574/575) and their phase-matched 0.1"
+    targets, plus their median. On the actual 512-pixel kernel grid every scan
+    selects lambda=1e-2: the realized central-line FWHM is 0.156-0.157",
+    white-noise gain is 0.808-0.810, target-peak recovery is 0.566-0.585, and
+    integrated negative response is 0.201-0.205. This is essentially the
+    native PSF, because the stock PSF-matching FOM includes
+    `1e-3 * cancellation**2`; it is a useful stability baseline but not an
+    automatic science-image deconvolution selector. The optimizer is also
+    support/FOM dependent: the same region on an unpadded 100-pixel grid
+    selects lambda=0.0562 and broadens to 0.179". Standard diagnostics and
+    scan CSVs are under `scratch/uds_f444w_deconvolution/optimizer/`.
   * Six focused regressions cover phase matching, padding, unit DC,
     sharpening and diagnostics, numeric provenance round-trip, malformed-map
     validation, and convolution dtype/non-finite handling. Focused PSF/map

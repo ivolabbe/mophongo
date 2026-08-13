@@ -168,10 +168,33 @@ few hundred GB for everything a user owns and has already been filled this way
 once. A quota that stops a campaign halfway through is worse than a refusal at
 submission, so this fails loudly rather than warning.
 
-`$CANFAR_RUN` moves the tree elsewhere under `/arc/projects`. The whole tree
-moves together — staged inputs, ePSF grids, the venv, the source and the
-outputs — because splitting them buys nothing and makes the run tree harder to
-reason about than a single root.
+`$CANFAR_RUN` moves the tree elsewhere under `/arc/projects`.
+
+The tree beneath it separates what a release *is* from the machinery that made
+it:
+
+```
+/arc/projects/minerva/ifl/release_v1.0/
+  setup/                    source, venv, configs, staging lists, tarballs
+  data/                     staged mosaics, segmaps, catalogs
+  PSF/                      ePSF grids
+  run1/uds/uds_f770w/       one directory per fitted band
+  run1/uds/uds_repair_cache.fits
+  run1/cosmos/cosmos_f770w/
+  jobs/                     the scripts a job runs
+```
+
+Products go under `run<N>/`, set by `$CANFAR_RUNNUM` (default 1). A re-run, a
+test or a changed configuration bumps the number rather than inventing a name
+suffix, so the release keeps one directory per attempt and nothing overwrites
+a previous one.
+
+Bands are grouped by field because the things they share are per-field: the
+detection grids, and the saturation repair. The repair cache sits in the field
+directory as `<field>_repair_cache.fits` — the field in the name is what stops
+one field's cache being found stale by the next and overwritten, which is
+exactly what happened to the v1.0 campaign, where all three fields took turns
+rewriting a single `out/repair_cache.fits`.
 
 OzStar has no equivalent problem: `/fred/oz030/ilabbe` is project storage
 already.

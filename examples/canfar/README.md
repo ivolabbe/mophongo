@@ -27,6 +27,12 @@ Point the tree elsewhere under `/arc/projects` if you want to:
 export CANFAR_RUN=/arc/projects/minerva/ifl_test
 ```
 
+The tree beneath the root separates the release from the machinery that made
+it: `setup/` holds the source, the venv and the configs, `data/` and `PSF/`
+the inputs, and `run<N>/<field>/<band>/` the products of each attempt.
+`$CANFAR_RUNNUM` (default 1) picks the run number, so a re-run bumps a number
+instead of inventing a name suffix.
+
 Project space is shared with the collaboration and has no comparable limit, so
 that is where campaigns belong. Both
 `submit.py` and `arcify.py` read `CANFAR_RUN`, and the arc paths baked into a

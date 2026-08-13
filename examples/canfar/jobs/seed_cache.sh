@@ -14,12 +14,16 @@ copied=0
 IFS=',' read -ra items <<< "$PAIRS"
 for pair in "${items[@]}"; do
     src="${pair%%:*}"; dst="${pair##*:}"
-    [[ -d "$RUN/out/$src" ]] || { echo "skip $src: no source dir"; continue; }
-    mkdir -p "$RUN/out/$dst"
+    # run<N>/<field>/<band>: find the source wherever it landed, and put the
+    # destination beside it under the same field
+    srcdir=$(ls -d "$RUN"/run*/*/"$src" 2>/dev/null | head -1)
+    [[ -n "$srcdir" ]] || { echo "skip $src: no source dir"; continue; }
+    dstdir="$(dirname "$srcdir")/$dst"
+    mkdir -p "$dstdir"
     for suffix in psf_hi.fits psf_hi.geojson psf_lo.fits psf_lo.geojson \
                   kernel.fits kernel.geojson; do
-        s="$RUN/out/$src/${src}_${suffix}"
-        d="$RUN/out/$dst/${dst}_${suffix}"
+        s="$srcdir/${src}_${suffix}"
+        d="$dstdir/${dst}_${suffix}"
         [[ -s "$s" ]] || continue
         [[ -e "$d" ]] && continue          # already seeded
         # symlink, not copy: these are read-only inputs and the kernel maps run

@@ -2496,9 +2496,17 @@ def lw_detection_coadd(
         raise ValueError("bands list is empty")
 
     def _load_array(x: _Any) -> np.ndarray:
+        """Band mosaic at float32.
+
+        These are the full-mosaic buffers of the coadd: on a MINERVA grid a
+        float64 pass over seven bands runs to ~42 GB live, which is why
+        callers set COADD_TILE_ONLY. Pixel data is float32 on disk anyway,
+        and every reduction below is a per-pixel weighted sum over a handful
+        of bands, not a long accumulation.
+        """
         if isinstance(x, np.ndarray):
             return x
-        return fits.getdata(str(x)).astype(np.float64)
+        return np.asarray(fits.getdata(str(x)), dtype=np.float32)
 
     target_psf = np.asarray(target_psf, dtype=float)
     target_psf = target_psf / target_psf.sum()
@@ -2516,7 +2524,7 @@ def lw_detection_coadd(
     for i, band in enumerate(bands):
         name = str(band.get("name", f"band{i}"))
         sci = _load_array(band["sci"])
-        wht = _load_array(band["wht"]).astype(np.float64)
+        wht = _load_array(band["wht"])
         psf = np.asarray(band["psf"], dtype=float)
         psf = psf / psf.sum()
 
@@ -2549,7 +2557,9 @@ def lw_detection_coadd(
                 )
             reg = float(result.reg)
             score = float(result.score)
-            sci_match = _scipy_fftconvolve(sci.astype(np.float64), kernel, mode="same")
+            sci_match = _scipy_fftconvolve(
+                sci, kernel.astype(sci.dtype, copy=False), mode="same"
+            )
             wht_match = wht / sum_k2
 
         if sum_wI is None:

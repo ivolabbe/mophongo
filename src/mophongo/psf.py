@@ -2009,7 +2009,13 @@ def stamp_encircled_energy(
         :meth:`DrizzlePSF._ee_fraction_to_arcsec` -- so it sits up to one
         pixel shell outside the continuous radius.
     """
-    arr = np.asarray(psf, dtype=float)
+    # keep the caller's width. Encircled energy is a shape statistic on a
+    # normalised stamp, and photometry is quoted to ~1e-3; a float32 stamp
+    # summed over ~1e4 pixels is good to ~1e-6, so upcasting every PSF map
+    # here bought nothing but a copy of the cube.
+    arr = np.asarray(psf)
+    if arr.dtype.kind != "f":
+        arr = arr.astype(np.float32)
     if arr.ndim < 2:
         raise ValueError(f"psf must be at least 2-D; got shape {arr.shape}")
     if not np.isfinite(pscale) or pscale <= 0.0:

@@ -822,7 +822,11 @@ class Template(Cutout2D):
         shape_input = np.array(self.shape_input) // k
 
         if image is None:
-            image = np.zeros(shape_input)
+            # the stamp's own width: np.zeros defaults to float64, and this
+            # parent buffer sets the dtype of every downsampled stamp built
+            # on it. block_reduce preserves float32, so this was the only
+            # reason the downsample path produced float64 stamps.
+            image = np.zeros(shape_input, dtype=self.data.dtype)
         # Build the low-res Template at the correct fractional center
         low = Template(image, (x_lo, y_lo), (hlo, wlo), wcs=wcs_lo, label=self.id)
 
@@ -865,10 +869,13 @@ class Template(Cutout2D):
         aw = ax1 - ax0
         ah = ay1 - ay0
 
-        padded = np.zeros((ah, aw), dtype=float)
+        # stay at the stamp's width: this pads, block-reduces and repeats,
+        # then casts straight back to self.data.dtype below -- a float64
+        # round trip for each of 138,610 templates on the upsample path
+        padded = np.zeros((ah, aw), dtype=self.data.dtype)
         py = y0 - ay0
         px = x0 - ax0
-        padded[py : py + h, px : px + w] = np.asarray(self.data, dtype=float)
+        padded[py : py + h, px : px + w] = self.data
 
         native = block_reduce(padded, f, func=np.sum)
         projected = np.repeat(np.repeat(native, f, axis=0), f, axis=1) / float(f * f)

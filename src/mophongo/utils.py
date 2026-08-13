@@ -498,6 +498,16 @@ def _create_matching_kernel_no_normalize(
     window: object | None = None,
 ) -> np.ndarray:
     """Create a Fourier-ratio PSF matching kernel without flux normalization."""
+    # float64 for the inversion itself. PSF stamps are stored float32 (they
+    # are large and many), and numpy.fft preserves single precision, so
+    # without this upcast the whole deconvolution runs in complex64 -- and
+    # this is the one genuinely ill-conditioned step in the pipeline: it
+    # divides by an OTF that falls to zero at high frequency, so input
+    # rounding is amplified by exactly the factor the regularisation is
+    # there to bound. The returned kernel is cast back to the stamp width
+    # by the caller; only the solve needs the extra digits.
+    source_psf = np.asarray(source_psf, dtype=np.float64)
+    target_psf = np.asarray(target_psf, dtype=np.float64)
     source_otf = np.fft.fftshift(np.fft.fft2(source_psf))
     target_otf = np.fft.fftshift(np.fft.fft2(target_psf))
     good = np.abs(source_otf) > (np.finfo(float).eps * np.nanmax(np.abs(source_otf)))
@@ -520,6 +530,16 @@ def _matching_kernel_tikhonov(
     ``reg`` is scaled by ``max(|H_hi|^2)`` so the parameter is dimensionless
     and easily comparable across PSF pairs.
     """
+    # float64 for the inversion itself. PSF stamps are stored float32 (they
+    # are large and many), and numpy.fft preserves single precision, so
+    # without this upcast the whole deconvolution runs in complex64 -- and
+    # this is the one genuinely ill-conditioned step in the pipeline: it
+    # divides by an OTF that falls to zero at high frequency, so input
+    # rounding is amplified by exactly the factor the regularisation is
+    # there to bound. The returned kernel is cast back to the stamp width
+    # by the caller; only the solve needs the extra digits.
+    source_psf = np.asarray(source_psf, dtype=np.float64)
+    target_psf = np.asarray(target_psf, dtype=np.float64)
     source_otf = np.fft.fftshift(np.fft.fft2(source_psf))
     target_otf = np.fft.fftshift(np.fft.fft2(target_psf))
     h2 = np.abs(source_otf) ** 2
@@ -543,6 +563,16 @@ def _matching_kernel_wiener(
     Tikhonov; the path is kept so callers can pass an explicit Wiener prior
     (e.g. ``|H_lo|^2`` or a 1/f spectrum).
     """
+    # float64 for the inversion itself. PSF stamps are stored float32 (they
+    # are large and many), and numpy.fft preserves single precision, so
+    # without this upcast the whole deconvolution runs in complex64 -- and
+    # this is the one genuinely ill-conditioned step in the pipeline: it
+    # divides by an OTF that falls to zero at high frequency, so input
+    # rounding is amplified by exactly the factor the regularisation is
+    # there to bound. The returned kernel is cast back to the stamp width
+    # by the caller; only the solve needs the extra digits.
+    source_psf = np.asarray(source_psf, dtype=np.float64)
+    target_psf = np.asarray(target_psf, dtype=np.float64)
     source_otf = np.fft.fftshift(np.fft.fft2(source_psf))
     target_otf = np.fft.fftshift(np.fft.fft2(target_psf))
     if signal_psd is None:

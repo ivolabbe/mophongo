@@ -2635,6 +2635,15 @@ class Pipeline:
 
         path = Path(path) if path is not None else self.out_dir / f"{self.run_config.name}.log"
         path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Reentrant: `main` wraps whatever steps were named, and one of those
+        # steps may be `all`, which opens its own block. Nesting would tee
+        # every line twice and stack two handlers on the root logger, so an
+        # inner call just hands back the path the outer one is already using.
+        if getattr(self, "_log_run_path", None) is not None:
+            yield self._log_run_path
+            return
+        self._log_run_path = path
         handle = open(path, "a", buffering=1)
         started = time.time()
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -2713,6 +2722,7 @@ class Pipeline:
             logging.captureWarnings(False)
             warnings.showwarning = old_showwarning
             warnings.filters[:] = old_filters
+            self._log_run_path = None
             sys.stdout, sys.stderr = old_out, old_err
             handle.close()
 
@@ -5010,8 +5020,15 @@ def main(argv: list[str] | None = None) -> None:
         )
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     pipe = Pipeline.from_config(args.config)
-    for step in steps:
-        getattr(pipe, STEPS[step])()
+    # Every invocation logs to <out_dir>/<name>.log, not just `all`. Naming
+    # steps explicitly used to bypass log_run entirely, so a run whose console
+    # output was not redirected left no record next to its own products --
+    # exactly the runs worth having a record of. log_run is reentrant, so the
+    # `all` step's own block nests harmlessly.
+    with pipe.log_run() as log_path:
+        logger.info("logging this run to %s", log_path)
+        for step in steps:
+            getattr(pipe, STEPS[step])()
 
 
 if __name__ == "__main__":

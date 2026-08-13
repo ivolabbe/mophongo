@@ -1299,7 +1299,8 @@ class Scene:
         model_cut = self.model_image()
         if residual_image is not None:
             res_cut = np.asarray(residual_image)[sl].copy()
-            res_cut[(self.weights[sl] <= 0) | np.isnan(self.weights[sl])] = 0.0
+            if self.weights is not None:
+                res_cut[(self.weights[sl] <= 0) | np.isnan(self.weights[sl])] = 0.0
         else:
             res_cut = self.residual()
         if null_mask is not None and null_mask.any():
@@ -1546,10 +1547,17 @@ class Scene:
         return model_scene
 
     def residual(self) -> np.ndarray:
-        """Return image-model residual over the scene's bounding box."""
+        """Return image-model residual over the scene's bounding box.
+
+        Zero-weight pixels are nulled when the weight map is still attached;
+        ``Pipeline.run`` releases it after the solve on runs that plot nothing
+        (see ``Pipeline._scene_pixels_needed``), and the raw residual is the
+        honest answer then.
+        """
         bb = self.bbox
         sl = _slices_from_bbox(bb)
         res_scene = self.image[sl] - self.model_image()
-        res_scene[(self.weights[sl] <= 0) | np.isnan(self.weights[sl])] = 0.0
+        if self.weights is not None:
+            res_scene[(self.weights[sl] <= 0) | np.isnan(self.weights[sl])] = 0.0
         return res_scene
 

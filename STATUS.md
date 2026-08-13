@@ -117,6 +117,27 @@ This file records completed implementations, validation runs, and the current wo
     -- a 7 GB intermediate for a 3.5 GB float32 result. Replicating without
     it and dividing in place stays in float32; dividing by an integer square
     is exact, and the output is bit-identical for k=2,3,4.
+  * `as_label_array` validated a float segmap whole-array:
+    `arr[np.isfinite(arr)]` copies every finite pixel, `np.rint` copies it
+    again and `np.nan_to_num` a third time. COSMOS is the field that ships
+    float64 labels (BITPIX -64, 621 Mpx = 4.97 GB stored, 2.48 GB as int32);
+    UDS and EGS ship int32. Validation and cast now run in ~16 Mpx bands:
+    peak RSS for the COSMOS map goes 15.8 -> 8.0 GB for the same result, and
+    non-finite pixels now become background rather than being handed to
+    `astype(int32)` as an overflowing infinity. Integer segmaps are still
+    returned untouched whatever their width or byte order (UDS and EGS
+    arrive as `>i4`): the full-field read hands over a memmap view, and
+    narrowing it to native int32 would convert file-backed pages into
+    anonymous memory.
+  * Every shifted template kept its pre-shift pixels (`_data_unshifted`) so
+    that each astrometric pass resamples the original rather than compounding
+    the cubic smoothing -- correct, but the copy was retained for the whole
+    run, a second full set of stamps (~6 GB) still held while the residual
+    allocated its 3.5 GB. `run()` now releases them once the shifts are
+    settled, and `apply_template_shifts` raises rather than shift a released
+    template, so the smoothing-compound failure cannot return silently. The
+    `.copy()` also went: `tmpl.data` is rebound to the shifted array on the
+    next line, so holding the original reference is all that was needed.
   * `_save_repair_cache` found its changed pixels with
     `(sci != sci0) | (wht != wht0) | (seg != seg0)`, three full-field boolean
     arrays plus the temporaries of the two ORs (4.4 GB) at the one moment
@@ -147,11 +168,19 @@ This file records completed implementations, validation runs, and the current wo
   checked separately against HEAD on two 3000x3000 UDS patches (`bg` and
   `ivar` bit-identical), and the upsample for k=2,3,4.
   `tests/test_memory_footprint.py` pins the equivalences.
-  Full field (UDS F770W, `trial: null`, 138,610 templates, repair reloaded
-  from cache): `Pipeline (start)` 10.4 GB, `(templates)` 28.2, weight-map
-  release -> 24.7, `(convolved)` 27.7, sampled peak 29.1 GB through the
-  convolution -- the stage where both template sets and both upsampled band
-  arrays are live at once.
+  Full field (UDS F770W, `trial: null`, 138,610 templates, 591 scenes, repair
+  reloaded from cache, `load fit`): completed in 87 min at **46.5 GB peak
+  physical footprint** (32.2 GB max RSS). Checkpoints: `(start)` 10.4 GB,
+  `(templates)` 28.2, weight-map release -> 24.7, `(convolved)` 27.7,
+  `(end)` 11.0. `load` alone peaks at 22.2 GB, so the fit contributes the
+  rest. A 15 s RSS sampler over the same run topped out at 29.1 GB, so the
+  peak is a spike shorter than that and does not sit at any checkpoint --
+  under the 48 GB ceiling but without much margin. Being chased; the
+  candidates are the two buffers in the astrometric solve that scale with a
+  scene's *spatial* extent rather than its template count
+  (`assemble_scene_system_AB`'s `Bq`/`Bl`, nB float64 planes over the bright
+  anchors' bounding box, doubled when the leverage cap clips, and
+  `Scene.model_image`'s float64 plane over the full scene bbox).
   Left alone and worth knowing: the saturation repair sets the peak on a
   trial patch, and `run()`'s finiteness guard on `images[i]` is behind
   `if images[i] is None`, so it never runs. Both are in TODO.md.

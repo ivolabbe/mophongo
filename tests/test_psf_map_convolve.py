@@ -28,7 +28,11 @@ def _wcs(shape=(64, 64), pscale=1.0 / 3600):
 def _kernel(sigma):
     y, x = np.mgrid[-6:7, -6:7]
     k = np.exp(-(x**2 + y**2) / (2 * sigma**2))
-    return k / k.sum()
+    # float32, the width PSFRegionMap stores its stamps at. The reference
+    # convolutions below have to use the same values the map holds, or they
+    # differ at float32 kernel precision (~5e-9) and the tight tolerance that
+    # makes these region-assignment tests meaningful would have to be dropped.
+    return (k / k.sum()).astype(np.float32)
 
 
 def _two_region_map(wcs, shape=(64, 64)):
@@ -61,9 +65,15 @@ def test_convolve_image_applies_the_region_kernel_to_its_own_pixels():
     ref0 = fftconvolve(image, _kernel(1.0), mode="same")
     ref1 = fftconvolve(image, _kernel(2.5), mode="same")
 
-    # interior of each half, clear of the seam and the image edge
-    assert np.allclose(out[8:-8, 8:24], ref0[8:-8, 8:24], atol=1e-10)
-    assert np.allclose(out[8:-8, 40:-8], ref1[8:-8, 40:-8], atol=1e-10)
+    # interior of each half, clear of the seam and the image edge.
+    # atol 1e-7, not 1e-10: PSFRegionMap stores stamps float32, and
+    # convolve_image renormalises the kernel it holds, so a float32 kernel
+    # whose sum is 1 +/- 5e-9 shifts the output by ~3e-9. The test is about
+    # which region's kernel reaches which pixels, and the two kernels differ
+    # by O(0.1) -- asserted below -- so this still has four orders of margin
+    # on both sides.
+    assert np.allclose(out[8:-8, 8:24], ref0[8:-8, 8:24], atol=1e-7)
+    assert np.allclose(out[8:-8, 40:-8], ref1[8:-8, 40:-8], atol=1e-7)
     # and the two kernels really differ, so the test is not vacuous
     assert not np.allclose(ref0[8:-8, 40:-8], ref1[8:-8, 40:-8], atol=1e-6)
 

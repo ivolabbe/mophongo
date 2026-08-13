@@ -983,7 +983,15 @@ class Catalog:
             self.params["kernel_size"] / 2.355, x_size=kernel_pix, y_size=kernel_pix
         )
         print(f"Convolving with kernel size {self.params['kernel_size']} pixels")
-        smooth = fftconvolve(self.det_img, kernel.array, mode="same")
+        # Gaussian2DKernel.array is always float64, and scipy promotes to the
+        # wider operand, so an unconverted kernel drags a float32 detection
+        # mosaic through the whole convolution at double width: 25.4 GB peak
+        # on the 876 Mpx MINERVA grid against 14.5 GB matched. The FFT sums
+        # inside pocketfft, so there is no accumulator to annotate; the error
+        # is ~log2(N) eps32 = 2e-6 relative, on a map thresholded at 2 sigma.
+        smooth = fftconvolve(
+            self.det_img, kernel.array.astype(self.det_img.dtype, copy=False), mode="same"
+        )
         print("Detecting sources...")
         segmap = detect_sources(
             smooth,

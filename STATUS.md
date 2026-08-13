@@ -3,6 +3,60 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Spatially varying Wiener deconvolution toward theoretical PSFs, plus a
+  real MINERVA UDS F444W patch experiment (2026-08-13).
+  * `PSFRegionMap.gaussian_psf_map` defines one noise-free, discrete-unit-sum
+    Gaussian per source-PSF region. It preserves the region's fitted subpixel
+    core phase (otherwise a fixed array-centre Gaussian encodes up to a
+    half-pixel astrometric jump) and accepts larger padded support for an
+    inverse kernel. `PSF.gaussian` now exposes the existing `x0`/`y0` support
+    of `utils.gaussian`; `psf_core_centroid` and `psf_core_fwhm` measure the
+    phase and the direct central-line width of a non-Gaussian/ringing response.
+  * `PSFRegionMap.matching_kernel_map` passes each normalized source/target
+    pair through the existing `utils.matching_kernel`, requires a strictly
+    positive explicit regularization (the smoothing-kernel auto-FOM is not a sharpening
+    selector), restores unit DC after regularization, and writes per-region
+    white-noise gain, L1 cancellation, edge support, realized FWHM, target
+    peak, negative response flux, normalized L2 residual, and centroid-shift
+    metrics into the
+    returned map, and rejects a target map on a different pixel scale. Unit
+    DC is rechecked after float32 map storage so pathological cancellation
+    fails loudly rather than changing the flux scale. With no `signal_psd`,
+    the existing Wiener path remains the flat-prior/Tikhonov solution.
+  * `PSFRegionMap.convolve_image` now promotes integer input to floating point
+    and maps NaN/+inf/-inf explicitly to zero. Previously integer results were
+    truncated and `np.nan_to_num` turned infinities into enormous finite
+    values, especially destructive under a signed inverse kernel.
+  * `examples/run_uds_f444w_deconvolution.py` reads only a 1024x1024 science
+    patch plus a 258-pixel halo at (34.3413274, -5.2615397), clips the current
+    1694-region production F444W map to the six regions needed by the halo
+    (three cross the delivered patch), builds 512-pixel phase-matched
+    targets/kernels, scans lambda=1e-6..1e-2, and writes selected FITS/map
+    products plus comparison/tradeoff figures and a CSV under
+    `scratch/uds_f444w_deconvolution/`. The adjacent input WHT is explicitly
+    labelled as native-only; no false diagonal weight is made for the signed,
+    correlated output.
+  * The real result is a useful negative result for a literal 0.1" product.
+    The center-region native central-line FWHM is 0.161" and its sampled
+    2.5-pixel target is
+    0.105". Lambda=1e-3 realizes 0.139" at 2.22x source-masked field scatter,
+    1.87x empty-aperture RMS, and 0.277 integrated negative response;
+    lambda=1e-4 realizes 0.126" at 4.36x / 2.33x and 0.285 negative response.
+    The closest support-safe scan point is only 0.116" (lambda=1e-5) and costs
+    9.69x field scatter / 3.85x aperture RMS; the nominal 0.109/0.112" points
+    fail the absolute edge-L1 guardrail and are greyed out. The field metric
+    uses the release segmap (54% of the patch retained) and is stable to
+    12/16/24-pixel dilation; the aperture metric uses 1,908 fixed empty
+    positions. Both include correlated background and residual ringing rather
+    than representing propagated instrumental noise. The retained lambda
+    values are unchanged between 256- and 512-pixel support, large-aperture
+    star flux stays within 0.4%, and residual shifts are <=0.061 pixel. The
+    output therefore has to be called "regularized toward 0.1\"", not a
+    realized clean Gaussian.
+  * Six focused regressions cover phase matching, padding, unit DC,
+    sharpening and diagnostics, numeric provenance round-trip, malformed-map
+    validation, and convolution dtype/non-finite handling. Focused PSF/map
+    validation: 39 passed. Full repository validation: 387 passed.
 - [x] Full-field scene-blob diagnostic (2026-08-13).
   `verification.save_scene_blobs` draws each scene as the convex hull of its
   template positions, filled in its own colour and labelled with its scene id

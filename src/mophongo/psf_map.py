@@ -609,6 +609,374 @@ class PSFRegionMap:
 
         return self.psfs[key]
 
+    def _dense_psf_keys(self) -> np.ndarray:
+        """Validate and return the dense integer key sequence of ``psfs``."""
+        if self.psfs is None:
+            raise ValueError(f"PSFRegionMap {self.name!r} has no psfs")
+        cube = np.asarray(self.psfs)
+        if cube.ndim != 3:
+            raise ValueError(
+                f"PSFRegionMap psfs must have shape (n, ny, nx), got {cube.shape}"
+            )
+        raw_keys = np.asarray(self.regions["psf_key"])
+        numeric_keys = np.asarray(raw_keys, dtype=float)
+        if not np.all(np.isfinite(numeric_keys)) or not np.all(
+            numeric_keys == np.round(numeric_keys)
+        ):
+            raise ValueError(f"PSFRegionMap psf_key values must be finite integers: {raw_keys}")
+        keys = np.unique(numeric_keys.astype(int))
+        expected = np.arange(len(keys), dtype=int)
+        if not np.array_equal(keys, expected) or cube.shape[0] != len(expected):
+            raise ValueError(
+                "PSFRegionMap requires dense psf_key values 0..N-1 aligned "
+                f"with one PSF plane per key; keys={keys.tolist()}, "
+                f"psfs.shape[0]={cube.shape[0]}"
+            )
+        return expected
+
+    def gaussian_psf_map(
+        self,
+        fwhm_pix: float,
+        *,
+        shape: int | tuple[int, int] | None = None,
+        phase_match: bool = True,
+        name: str | None = None,
+    ) -> "PSFRegionMap":
+        """Return a theoretical Gaussian PSF map on this map's geometry.
+
+        One noise-free, unit-sum Gaussian is generated per source-PSF region.
+        With ``phase_match=True`` its core is placed at the measured subpixel
+        centroid of that region's PSF.  This preserves astrometry when the
+        target is narrower than the source; placing every target at the
+        geometric array center would otherwise encode the source PSF's
+        region-dependent pixel phase as a shift in the matching kernel.
+
+        Args:
+            fwhm_pix: Gaussian full width at half maximum in map pixels.
+            shape: Output stamp shape.  A scalar gives a square stamp.  The
+                default is the source PSF shape.  Larger shapes zero-pad the
+                source support during subsequent kernel inversion and reduce
+                Fourier wraparound.
+            phase_match: Match each Gaussian to its source PSF's fitted core
+                centroid.  Disable only when the source PSFs are known to be
+                registered to the geometric center already.
+            name: Optional map name.
+
+        Returns:
+            A new :class:`PSFRegionMap` with the same keys and geometry and a
+            cube of theoretical Gaussian PSFs.
+
+        Raises:
+            ValueError: If the source map is malformed, ``fwhm_pix`` is not
+                positive, or ``shape`` is smaller than the source stamps.
+        """
+        from .psf import PSF, psf_core_centroid
+
+        keys = self._dense_psf_keys()
+        source = np.asarray(self.psfs)
+        if not np.isfinite(fwhm_pix) or float(fwhm_pix) <= 0.0:
+            raise ValueError(f"fwhm_pix must be positive, got {fwhm_pix!r}")
+        if shape is None:
+            target_shape = tuple(map(int, source.shape[-2:]))
+        elif isinstance(shape, (int, np.integer)):
+            target_shape = (int(shape), int(shape))
+        else:
+            target_shape = tuple(map(int, shape))
+            if len(target_shape) != 2:
+                raise ValueError(f"shape must have two axes, got {shape!r}")
+        if any(n <= 0 for n in target_shape):
+            raise ValueError(f"shape axes must be positive, got {target_shape}")
+        if any(t < s for t, s in zip(target_shape, source.shape[-2:])):
+            raise ValueError(
+                f"target shape {target_shape} is smaller than source PSFs "
+                f"{source.shape[-2:]}"
+            )
+
+        pad_y = (target_shape[0] - source.shape[-2]) // 2
+        pad_x = (target_shape[1] - source.shape[-1]) // 2
+        targets: list[np.ndarray] = []
+        for key in keys:
+            if phase_match:
+                xc, yc = psf_core_centroid(source[int(key)])
+                xc += pad_x
+                yc += pad_y
+            else:
+                xc = (target_shape[1] - 1) / 2.0
+                yc = (target_shape[0] - 1) / 2.0
+            target = PSF.gaussian(
+                target_shape, fwhm=float(fwhm_pix), x0=xc, y0=yc
+            ).array
+            target_sum = float(np.sum(target))
+            if not np.isfinite(target_sum) or target_sum <= 0.0:
+                raise ValueError(f"invalid Gaussian target sum at psf_key={key}")
+            targets.append(target / target_sum)
+
+        regions = self.regions.copy()
+        regions["target_model"] = "gaussian"
+        regions["target_fwhm_pix"] = float(fwhm_pix)
+        regions["target_fwhm"] = float(fwhm_pix) * float(self.pscale)
+        regions["target_phase_match"] = bool(phase_match)
+        regions["target_ny"] = int(target_shape[0])
+        regions["target_nx"] = int(target_shape[1])
+        target_map = PSFRegionMap(
+            regions=regions,
+            snap_tol=self.snap_tol,
+            buffer_tol=self.buffer_tol,
+            area_factor=self.area_factor,
+            footprints=self.footprints,
+            name=name or f"{self.name or 'psf'}_gaussian_fwhm{fwhm_pix:g}px",
+            pscale=self.pscale,
+        )
+        # Assign after construction: target/kernel maps do not need their
+        # signed growth curves eagerly, and a large padded cube can make that
+        # irrelevant calculation expensive. The EE cache remains lazy.
+        target_map.psfs = np.asarray(targets, dtype=np.float32)
+        return target_map
+
+    def matching_kernel_map(
+        self,
+        target: "PSFRegionMap | np.ndarray",
+        *,
+        method: str = "wiener",
+        reg: float,
+        signal_psd: np.ndarray | None = None,
+        name: str | None = None,
+    ) -> "PSFRegionMap":
+        """Build per-region kernels matching this PSF map to ``target``.
+
+        The source and target stamps are converted to unit-sum PSF shapes,
+        passed to Mophongo's existing :func:`mophongo.utils.matching_kernel`,
+        and the resulting kernels are normalized to unit DC.  The latter is
+        required because regularization attenuates the zero-frequency term;
+        without it, convolving a science image would change its flux scale.
+
+        This method deliberately requires an explicit regularization value.
+        The standard automatic PSF-matching figure of merit was designed for
+        stable smoothing kernels and can choose a broadened response when the
+        requested target is narrower than the source.  For deconvolution,
+        callers should scan ``reg`` and inspect the diagnostic columns written
+        to the returned region table.
+
+        Args:
+            target: A 2-D target used for every region, a cube with one target
+                per source key, or another aligned :class:`PSFRegionMap` such
+                as :meth:`gaussian_psf_map`. Array targets are assumed to be
+                sampled on this source map's pixel grid; target maps must
+                carry the same ``pscale``.
+            method: Matching-kernel method understood by
+                :func:`mophongo.utils.matching_kernel`.
+            reg: Required, strictly positive dimensionless regularization.
+                ``1e-3`` is a useful conservative starting point for
+                sharpening; it is not a claim that the requested target
+                resolution is achieved.
+            signal_psd: Optional Wiener signal power spectrum.  With ``None``
+                the current Wiener implementation uses a flat prior and is
+                mathematically the Tikhonov solution.
+            name: Optional output map name.
+
+        Returns:
+            A kernel :class:`PSFRegionMap`.  Its region table includes the
+            white-noise RMS gain, kernel cancellation, edge support, realized
+            core width, target peak recovery, negative response flux, and
+            residual astrometric shift for every key.
+
+        Raises:
+            ValueError: If either map is malformed, target keys are not
+                aligned, a stamp cannot be normalized, or a kernel has zero
+                DC response.
+        """
+        from .psf import psf_core_centroid, psf_core_fwhm
+        from .utils import fftconvolve, matching_kernel, pad_to_shape
+
+        keys = self._dense_psf_keys()
+        source_cube = np.asarray(self.psfs, dtype=float)
+        if not np.isfinite(reg) or float(reg) <= 0.0:
+            raise ValueError(f"reg must be a finite positive scalar, got {reg!r}")
+
+        target_name = "array"
+        target_regions = None
+        if isinstance(target, PSFRegionMap):
+            target_keys = target._dense_psf_keys()
+            if not np.array_equal(keys, target_keys):
+                raise ValueError("source and target PSFRegionMap keys are not aligned")
+            if not np.isclose(
+                float(self.pscale), float(target.pscale), rtol=1e-10, atol=0.0
+            ):
+                raise ValueError(
+                    "source and target PSFRegionMap pixel scales differ: "
+                    f"{self.pscale!r} vs {target.pscale!r}"
+                )
+            target_cube = np.asarray(target.psfs, dtype=float)
+            target_name = target.name or "PSFRegionMap"
+            target_regions = target.regions
+        else:
+            target_cube = np.asarray(target, dtype=float)
+            if target_cube.ndim == 2:
+                target_cube = np.broadcast_to(
+                    target_cube, (len(keys),) + target_cube.shape
+                )
+            elif target_cube.ndim != 3 or target_cube.shape[0] != len(keys):
+                raise ValueError(
+                    "target must be 2-D or have one 2-D plane per psf_key; "
+                    f"got shape {target_cube.shape}"
+                )
+
+        metric_names = (
+            "kernel_sum_raw",
+            "kernel_noise_gain",
+            "kernel_l1",
+            "kernel_negative_flux",
+            "kernel_edge_l1",
+            "kernel_edge_l1_fraction",
+            "response_fwhm_x_pix",
+            "response_fwhm_y_pix",
+            "response_target_peak",
+            "response_negative_flux",
+            "response_l2_fraction",
+            "response_shift_x_pix",
+            "response_shift_y_pix",
+        )
+        metrics = {field: np.full(len(keys), np.nan, dtype=float) for field in metric_names}
+        kernels: list[np.ndarray] = []
+
+        for key in keys:
+            source = np.where(np.isfinite(source_cube[int(key)]), source_cube[int(key)], 0.0)
+            target_psf = np.where(
+                np.isfinite(target_cube[int(key)]), target_cube[int(key)], 0.0
+            )
+            source_sum = float(np.sum(source))
+            target_sum = float(np.sum(target_psf))
+            if source_sum <= 0.0 or not np.isfinite(source_sum):
+                raise ValueError(f"source PSF at psf_key={key} has invalid sum {source_sum}")
+            if target_sum <= 0.0 or not np.isfinite(target_sum):
+                raise ValueError(f"target PSF at psf_key={key} has invalid sum {target_sum}")
+            source /= source_sum
+            target_psf /= target_sum
+
+            kernel = matching_kernel(
+                source,
+                target_psf,
+                method=method,
+                reg=float(reg),
+                recenter=False,
+                signal_psd=signal_psd,
+            )
+            raw_sum = float(np.sum(kernel))
+            if not np.isfinite(raw_sum) or abs(raw_sum) <= np.finfo(float).eps:
+                raise ValueError(
+                    f"kernel at psf_key={key} has invalid DC sum {raw_sum}"
+                )
+            kernel = np.asarray(kernel, dtype=float) / raw_sum
+
+            # PSFRegionMap stores stamp cubes as float32.  Signed inverse
+            # kernels can contain enough cancellation that this cast moves
+            # their DC sum measurably away from one, so normalize and validate
+            # the representation that will actually be convolved.  A tiny
+            # residual is placed at the kernel origin; if float32 cannot
+            # represent that correction, the requested inversion is too
+            # unstable for this map format and must use stronger regularization.
+            kernel_stored = np.asarray(kernel, dtype=np.float32)
+            stored_sum = float(np.sum(kernel_stored, dtype=np.float64))
+            if not np.isfinite(stored_sum) or abs(stored_sum) <= np.finfo(float).eps:
+                raise ValueError(
+                    f"float32 kernel at psf_key={key} has invalid DC sum "
+                    f"{stored_sum}; increase reg"
+                )
+            kernel_stored /= np.float32(stored_sum)
+            origin = tuple(int(n // 2) for n in kernel_stored.shape)
+            stored_sum = float(np.sum(kernel_stored, dtype=np.float64))
+            kernel_stored[origin] += np.float32(1.0 - stored_sum)
+            stored_sum = float(np.sum(kernel_stored, dtype=np.float64))
+            if not np.isclose(stored_sum, 1.0, rtol=0.0, atol=2e-6):
+                raise ValueError(
+                    f"float32 kernel at psf_key={key} cannot preserve unit DC "
+                    f"(sum={stored_sum}); increase reg"
+                )
+            kernels.append(kernel_stored)
+            kernel = np.asarray(kernel_stored, dtype=float)
+
+            shape = tuple(map(int, kernel.shape))
+            source_padded = pad_to_shape(source, shape)
+            target_padded = pad_to_shape(target_psf, shape)
+            response = fftconvolve(source_padded, kernel, mode="same")
+            response_fwhm = psf_core_fwhm(response)
+            target_centroid = psf_core_centroid(target_padded)
+            response_centroid = psf_core_centroid(response)
+            border = max(1, min(shape) // 32)
+            edge = np.zeros(shape, dtype=bool)
+            edge[:border, :] = True
+            edge[-border:, :] = True
+            edge[:, :border] = True
+            edge[:, -border:] = True
+            l1 = float(np.sum(np.abs(kernel)))
+            edge_l1 = float(np.sum(np.abs(kernel[edge])))
+            target_peak = float(np.max(target_padded))
+
+            metrics["kernel_sum_raw"][int(key)] = raw_sum
+            metrics["kernel_noise_gain"][int(key)] = float(np.sqrt(np.sum(kernel**2)))
+            metrics["kernel_l1"][int(key)] = l1
+            metrics["kernel_negative_flux"][int(key)] = float(
+                -np.sum(np.minimum(kernel, 0.0))
+            )
+            metrics["kernel_edge_l1"][int(key)] = edge_l1
+            metrics["kernel_edge_l1_fraction"][int(key)] = (
+                edge_l1 / l1 if l1 > 0.0 else np.nan
+            )
+            metrics["response_fwhm_x_pix"][int(key)] = response_fwhm[0]
+            metrics["response_fwhm_y_pix"][int(key)] = response_fwhm[1]
+            metrics["response_target_peak"][int(key)] = (
+                float(np.max(response)) / target_peak if target_peak > 0.0 else np.nan
+            )
+            metrics["response_negative_flux"][int(key)] = float(
+                -np.sum(np.minimum(response, 0.0))
+            )
+            target_l2 = float(np.linalg.norm(target_padded))
+            metrics["response_l2_fraction"][int(key)] = (
+                float(np.linalg.norm(response - target_padded)) / target_l2
+                if target_l2 > 0.0 else np.nan
+            )
+            metrics["response_shift_x_pix"][int(key)] = (
+                response_centroid[0] - target_centroid[0]
+            )
+            metrics["response_shift_y_pix"][int(key)] = (
+                response_centroid[1] - target_centroid[1]
+            )
+
+        regions = self.regions.copy()
+        key_rows = np.asarray(regions["psf_key"], dtype=int)
+        regions["kernel_method"] = str(method)
+        regions["kernel_reg"] = float(reg)
+        regions["kernel_source"] = self.name or "PSFRegionMap"
+        regions["kernel_target"] = target_name
+        regions["kernel_signal_psd"] = "flat" if signal_psd is None else "provided"
+        for field, values in metrics.items():
+            regions[field] = values[key_rows]
+
+        if target_regions is not None:
+            target_key_rows = np.asarray(target_regions["psf_key"], dtype=int)
+            for field in target_regions.columns:
+                if not str(field).startswith("target_"):
+                    continue
+                values_by_key = []
+                for key in keys:
+                    rows = np.flatnonzero(target_key_rows == int(key))
+                    if rows.size == 0:
+                        raise ValueError(f"target metadata missing psf_key={key}")
+                    values_by_key.append(target_regions.iloc[int(rows[0])][field])
+                regions[field] = np.asarray(values_by_key)[key_rows]
+
+        kernel_map = PSFRegionMap(
+            regions=regions,
+            snap_tol=self.snap_tol,
+            buffer_tol=self.buffer_tol,
+            area_factor=self.area_factor,
+            footprints=self.footprints,
+            name=name or f"{self.name or 'psf'}_{method}_kernel_{target_name}",
+            pscale=self.pscale,
+        )
+        kernel_map.psfs = np.asarray(kernels, dtype=np.float32)
+        return kernel_map
+
     # -------------------------------------------------------------------
     # encircled energy of the stored stamps
     # -------------------------------------------------------------------
@@ -717,7 +1085,8 @@ class PSFRegionMap:
                 exposure footprint the map was built from.
 
         Returns:
-            Convolved image, same shape and dtype as ``image``.
+            Convolved image with the same shape as ``image``. Floating input
+            retains its dtype; integer input is promoted to floating point.
 
         Raises:
             ValueError: If the map has no ``psfs`` to convolve with.
@@ -739,7 +1108,15 @@ class PSFRegionMap:
             buffer = int(max(stamps.shape[-2:]) // 2 + 1)
         buffer = int(buffer)
 
-        out = np.full(image.shape, fill_value, dtype=image.dtype)
+        # Convolution is intrinsically floating point. Keeping an integer
+        # input dtype truncated every result, and np.nan_to_num's default
+        # treatment of +/-inf injected enormous finite values that a signed
+        # deconvolution kernel then spread across a region. Promote integers
+        # and replace every non-finite input explicitly with zero.
+        out_dtype = np.result_type(image.dtype, stamps.dtype, np.float32)
+        if not np.issubdtype(out_dtype, np.floating):
+            out_dtype = np.dtype(np.float32)
+        out = np.full(image.shape, fill_value, dtype=out_dtype)
         covered = np.zeros(image.shape, dtype=bool)
         ny, nx = image.shape
 
@@ -763,8 +1140,9 @@ class PSFRegionMap:
             if x1 <= x0 or y1 <= y0:
                 continue
 
-            cut = image[y0:y1, x0:x1]
-            conv = fftconvolve(np.nan_to_num(cut, copy=True), stamps[int(key)], mode="same")
+            cut = np.asarray(image[y0:y1, x0:x1], dtype=out_dtype)
+            clean = np.where(np.isfinite(cut), cut, 0.0)
+            conv = fftconvolve(clean, stamps[int(key)], mode="same")
 
             # keep only the pixels of this region, tested against the polygon
             # itself rather than its bounding box

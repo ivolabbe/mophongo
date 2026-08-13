@@ -48,6 +48,145 @@ from astropy.coordinates import SkyCoord
 logger = logging.getLogger(__name__)
 
 
+def psf_core_centroid(
+    image: np.ndarray,
+    *,
+    fit_boxsize: int = 7,
+    search_boxsize: int = 9,
+) -> tuple[float, float]:
+    """Measure the local quadratic centroid of a PSF core.
+
+    The fit is performed on a small crop around the brightest pixel.  Keeping
+    the coordinates local avoids the numerical-conditioning failure of
+    ``photutils.centroid_quadratic`` on large absolute pixel indices and makes
+    this helper safe for stamps cut from large mosaics.
+
+    Args:
+        image: Two-dimensional PSF or point-response stamp.
+        fit_boxsize: Odd side length of the quadratic fitting box.
+        search_boxsize: Odd side length searched around the brightest pixel.
+
+    Returns:
+        The ``(x, y)`` centroid in zero-indexed array coordinates.  A
+        positive-flux center of mass, then the geometric center, is used if
+        the quadratic fit is not finite.
+
+    Raises:
+        ValueError: If ``image`` is not two-dimensional or has no positive
+            finite pixels.
+    """
+    from photutils.centroids import centroid_com
+
+    data = np.asarray(image, dtype=float)
+    if data.ndim != 2:
+        raise ValueError(f"image must be 2-D, got shape {data.shape}")
+    data = np.where(np.isfinite(data), data, 0.0)
+    if not np.any(data > 0.0):
+        raise ValueError("image has no positive finite pixels")
+
+    ypeak, xpeak = np.unravel_index(int(np.argmax(data)), data.shape)
+    half = max(int(fit_boxsize), int(search_boxsize)) + 2
+    x0 = max(0, int(xpeak) - half)
+    x1 = min(data.shape[1], int(xpeak) + half + 1)
+    y0 = max(0, int(ypeak) - half)
+    y1 = min(data.shape[0], int(ypeak) + half + 1)
+    local = data[y0:y1, x0:x1]
+    xc, yc = centroid_quadratic(
+        local,
+        xpeak=float(xpeak - x0),
+        ypeak=float(ypeak - y0),
+        fit_boxsize=fit_boxsize,
+        search_boxsize=search_boxsize,
+    )
+    if np.isfinite(xc) and np.isfinite(yc):
+        return float(xc + x0), float(yc + y0)
+
+    positive = np.clip(data, 0.0, None)
+    xc, yc = centroid_com(positive)
+    if np.isfinite(xc) and np.isfinite(yc):
+        return float(xc), float(yc)
+    return (data.shape[1] - 1) / 2.0, (data.shape[0] - 1) / 2.0
+
+
+def psf_core_fwhm(
+    image: np.ndarray,
+    *,
+    center: tuple[float, float] | None = None,
+) -> tuple[float, float]:
+    """Measure the central-line FWHM of a sampled PSF core.
+
+    The horizontal and vertical profiles are bilinearly sampled through the
+    fitted core centroid, and the nearest half-maximum crossings around the
+    central peak are linearly interpolated.  This is intentionally a direct
+    width of the realized response rather than a Gaussian fit: a regularized
+    deconvolution response can have broad wings and negative rings that a
+    Gaussian-core fit hides.
+
+    Args:
+        image: Two-dimensional PSF or point-response stamp.
+        center: Optional ``(x, y)`` core center.  When omitted,
+            :func:`psf_core_centroid` is used.
+
+    Returns:
+        ``(fwhm_x, fwhm_y)`` in pixels.  An axis is ``nan`` if its profile
+        does not cross half maximum on both sides of the core.
+
+    Raises:
+        ValueError: If ``image`` is not two-dimensional.
+    """
+    from scipy.ndimage import map_coordinates
+
+    data = np.asarray(image, dtype=float)
+    if data.ndim != 2:
+        raise ValueError(f"image must be 2-D, got shape {data.shape}")
+    data = np.where(np.isfinite(data), data, 0.0)
+    if center is None:
+        center = psf_core_centroid(data)
+    xc, yc = map(float, center)
+
+    x = np.arange(data.shape[1], dtype=float)
+    y = np.arange(data.shape[0], dtype=float)
+    profile_x = map_coordinates(
+        data, [np.full_like(x, yc), x], order=1, mode="constant", cval=0.0
+    )
+    profile_y = map_coordinates(
+        data, [y, np.full_like(y, xc)], order=1, mode="constant", cval=0.0
+    )
+
+    def _width(coords: np.ndarray, values: np.ndarray, center_coord: float) -> float:
+        core = np.abs(coords - center_coord) <= 2.0
+        if not np.any(core):
+            return float("nan")
+        indices = np.flatnonzero(core)
+        peak_index = int(indices[np.argmax(values[core])])
+        peak = float(values[peak_index])
+        if not np.isfinite(peak) or peak <= 0.0:
+            return float("nan")
+        half_peak = 0.5 * peak
+
+        left_candidates = np.flatnonzero(values[: peak_index + 1] <= half_peak)
+        right_rel = np.flatnonzero(values[peak_index:] <= half_peak)
+        if left_candidates.size == 0 or right_rel.size == 0:
+            return float("nan")
+        il = int(left_candidates[-1])
+        ir = int(peak_index + right_rel[0])
+        if il >= peak_index or ir <= peak_index:
+            return float("nan")
+
+        def _cross(i0: int, i1: int) -> float:
+            v0, v1 = float(values[i0]), float(values[i1])
+            if v1 == v0:
+                return 0.5 * float(coords[i0] + coords[i1])
+            frac = (half_peak - v0) / (v1 - v0)
+            return float(coords[i0] + frac * (coords[i1] - coords[i0]))
+
+        left = _cross(il, il + 1)
+        right = _cross(ir - 1, ir)
+        return right - left
+
+    return _width(x, profile_x, xc), _width(y, profile_y, yc)
+
+
 @contextmanager
 def _quiet_drizzle():
     """Silence routine drizzlepac/stwcs chatter during per-stamp PSF drizzles.
@@ -833,6 +972,9 @@ class PSF:
         fwhm: float | tuple[float, float] | None = None,
         fwhm_y: float | None = None,
         theta: float = 0.0,
+        *,
+        x0: float | None = None,
+        y0: float | None = None,
     ) -> "PSF":
         """Create a normalized Gaussian PSF.
 
@@ -846,6 +988,9 @@ class PSF:
             FWHM along y; defaults to ``fwhm``.
         theta : float, optional
             Rotation angle in radians.
+        x0, y0 : float, optional
+            Subpixel center in zero-indexed array coordinates. Defaults to
+            the geometric center of the stamp.
 
         Returns
         -------
@@ -862,7 +1007,9 @@ class PSF:
             fwhm_x = fwhm
             fwhm_y = fwhm if fwhm_y is None else fwhm_y
 
-        return cls(gaussian(size, fwhm_x, fwhm_y, theta=theta))
+        return cls(
+            gaussian(size, fwhm_x, fwhm_y, theta=theta, x0=x0, y0=y0)
+        )
 
     @classmethod
     def delta(cls, size: int = 3) -> "PSF":

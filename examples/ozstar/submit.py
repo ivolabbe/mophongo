@@ -174,7 +174,9 @@ def push(names: list[str], psf_globs: list[str] | None = None) -> None:
     happen on the login node, one field at a time. Grids that already exist on
     a laptop are much cheaper to copy than to rebuild.
     """
-    scripts = sorted((HERE / "jobs").glob("*"))
+    # files only: importing a job module leaves a __pycache__ directory here,
+    # and scp refuses a directory without -r
+    scripts = sorted(p for p in (HERE / "jobs").glob("*") if p.is_file())
     upload(scripts, "jobs")
     ssh(f"chmod +x {shlex.quote(ozroot.run_root())}/jobs/*")
     files: list[Path] = []

@@ -222,6 +222,80 @@ overlap of the two bands: convolving a full hi-res mosaic with a kernel map
 leaves everything outside the lo-res band's coverage empty, which is
 generally what you want.
 
+`convolve_image` always returns floating-point data. Integer inputs are
+promoted rather than truncating the convolution, and non-finite input pixels
+are explicitly replaced by zero instead of allowing `+/-inf` to become huge
+finite values. For a signed deconvolution kernel, bad pixels should normally
+be inpainted or masked with a halo before this call: zero-filled holes ring.
+
+### Matching to a theoretical Gaussian target
+
+The same map machinery can sharpen an image toward a theoretical target PSF.
+{meth}`~mophongo.psf_map.PSFRegionMap.gaussian_psf_map` constructs one
+noise-free, unit-sum Gaussian per region. The target's core is phase-matched
+to the measured subpixel centroid of the corresponding source PSF by default;
+otherwise a fixed array-center target would turn the region-dependent drizzle
+phase into an astrometric shift. A larger `shape` zero-pads the finite source
+support during inversion and suppresses circular FFT wraparound.
+
+{meth}`~mophongo.psf_map.PSFRegionMap.matching_kernel_map` then delegates each
+source/target pair to the existing {func}`mophongo.utils.matching_kernel`,
+normalizes both PSF shapes and the final kernel to unit sum, and returns a new
+kernel map ready for `convolve_image`:
+
+```python
+from astropy.io import fits
+from astropy.wcs import WCS
+from mophongo.psf_map import PSFRegionMap
+
+source = PSFRegionMap.from_geojson("f444w_psf.geojson", pscale=0.04)
+target = source.gaussian_psf_map(
+    0.10 / source.pscale,  # 0.1 arcsec = 2.5 pixels
+    shape=512,             # padded support for an aggressive inverse kernel
+    phase_match=True,
+)
+kernels = source.matching_kernel_map(
+    target, method="wiener", reg=1e-3,
+)
+image = fits.getdata("f444w_sci.fits")
+sharpened = kernels.convolve_image(image, WCS(fits.getheader("f444w_sci.fits")))
+```
+
+The strictly positive regularization is a required argument on purpose. The standard automatic
+PSF-matching score was tuned for stable *smoothing* kernels and can choose a
+broader response when the target is narrower than the source. With no
+`signal_psd`, Mophongo's Wiener method uses a flat signal spectrum and is
+mathematically the Tikhonov solution. Scan `reg` against the science image;
+do not infer the output resolution from the requested Gaussian alone.
+
+Every returned region records diagnostics including `kernel_noise_gain`
+(`sqrt(sum(kernel**2))`, the white-noise RMS factor), `kernel_l1`, negative
+kernel flux, absolute and fractional edge L1, realized
+`response_fwhm_[xy]_pix`, recovered
+target peak, negative response flux, normalized L2 PSF residual, and residual centroid
+shift. Real drizzle noise is correlated, so its blank-sky RMS and power
+spectrum still need to be measured on the convolved image. A sharpened result
+should be described as **regularized toward** the target unless the realized
+response and noise diagnostics establish otherwise.
+
+For an inverse kernel, a small fractional edge L1 can hide a material tail
+when the total kernel L1 is large. Check both the fractional and absolute
+outer-edge L1 and repeat selected kernels at doubled support. The UDS driver
+marks a scan point support-limited when the fraction exceeds `1e-3` or the
+absolute edge L1 exceeds `1e-2`; limited points remain in its CSV but are not
+connected into the resolution/noise curve.
+
+The site-local real-data driver `examples/run_uds_f444w_deconvolution.py`
+applies this path to a 1024-pixel MINERVA UDS F444W patch, scans the
+resolution/noise tradeoff, and writes the selected FITS images, target/kernel
+maps, CSV metrics, and diagnostic figures. The mosaics and production PSF map
+are too large for the repository: provide a local MINERVA JSON config with
+aligned `sci_hi`/`wht_hi`/`segmap` paths and pass its matching map with
+`--psf-map`. The
+driver reports both release-segmentation-masked field scatter and fixed
+empty-aperture RMS. These include correlated background and residual ringing;
+neither is a propagated WHT. The input WHT product is labelled native-only.
+
 ### Derived maps
 
 {meth}`~mophongo.psf_map.PSFRegionMap.group_by_pa` returns a new map in

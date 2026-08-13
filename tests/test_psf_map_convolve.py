@@ -101,6 +101,27 @@ def test_convolve_image_needs_psfs():
         prm.convolve_image(np.zeros((64, 64)), wcs)
 
 
+def test_convolve_image_promotes_integer_input_and_zeroes_nonfinite_values():
+    shape = (64, 64)
+    wcs = _wcs(shape)
+    prm = _two_region_map(wcs, shape)
+
+    integer_image = np.zeros(shape, dtype=np.int16)
+    integer_image[20, 10] = 1
+    integer_out = prm.convolve_image(integer_image, wcs)
+    assert integer_out.dtype.kind == "f"
+    assert 0.0 < integer_out[20, 10] < 1.0
+    assert integer_out.sum() == pytest.approx(1.0, rel=1e-6)
+
+    bad_image = np.zeros(shape, dtype=np.float32)
+    bad_image[20, 10] = np.inf
+    bad_image[40, 50] = -np.inf
+    bad_image[32, 32] = np.nan
+    bad_out = prm.convolve_image(bad_image, wcs)
+    assert np.all(np.isfinite(bad_out))
+    assert np.all(bad_out == 0.0)
+
+
 def test_convolve_fits_round_trip(tmp_path):
     """File in, file out: same result as the array call, header carried over."""
     shape = (64, 64)

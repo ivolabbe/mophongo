@@ -696,6 +696,20 @@ This file tracks future desired features, checks, and investigations.
     `if images[i] is None`, so it never runs. Decide whether the check is
     wanted (it costs a full-field boolean pass per image) before fixing the
     condition -- turning it on may fail runs that pass today.
+  - [ ] Finish the float32 sweep in `template_schemes.py`. The composite
+    builders still upcast per source in about 15 places -- `stamp`,
+    `ivar_stamp`, `psf_cut`, `D`, `P`, the `W` weight image -- so every one
+    of the 138,610 extractions runs its wing fit at float64 and casts the
+    composite back on the way out (`cut.data[sl_c] = comp.astype(...)`).
+    Left out of the 2026-08-13 pass because these are transient per source
+    rather than held, and each one feeds a small least-squares solve, which
+    is the side of the rule where precision is wanted: the policy is float32
+    for what is *stored*, float64 for what is *solved* (see
+    `docs/precision.md`, and the PSF-matching case for the same split done
+    deliberately). Decide per site which of the two a buffer is, rather than
+    narrowing the file wholesale. Worth measuring the extraction peak first:
+    the win is transient working set, not resident, so it may not move the
+    ceiling at all.
 - [ ] strong residuals
   - [ ] handle saturated stars in 444 -> catalog pre pass detection
   - [ ] fit as PSF both 444, 770, fit for centroid, mask center

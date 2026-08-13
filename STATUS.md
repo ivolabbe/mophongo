@@ -3,6 +3,32 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Weight calibration on partially covered fields (2026-08-12). The
+  robust baseline in `get_bg_and_ivar` (`med0`/`nmad0`) was taken over all
+  coarse blocks, including the zero-filled pixels outside the mosaic
+  footprint -- the normal case for MIRI, where a square box around any patch
+  is roughly half uncovered. Those zeros dragged `sigma0` from 449 to 12,
+  which collapsed the detection threshold, which flagged the whole field as
+  source, after which the background fit interpolated the data and the
+  residual scatter went to zero: `sigma_true` 1.4e-4 and the inverse
+  variance inflated by 5e7.
+  Symptoms were entirely downstream and the pipeline's own diagnostics read
+  clean: every source came out at SNR ~1e7, so every scene reported bright
+  anchors and `0 scene(s) without bright members` was true and meaningless;
+  the partition fragmented 15 -> 207 scenes and each fitted an order-0 shift
+  from noise (spatially uncorrelated: |dshift| 0.207 px between neighbours
+  at 0-20" against 0.204 px for random pairs). Fitted fluxes moved 13%.
+  The baseline is now taken over valid blocks only, and `MIN_BG_FRACTION`
+  (0.02) makes the estimator warn and leave the weight map unscaled rather
+  than calibrate on a field the source mask has eaten. Two different patches
+  of the same mosaic now return `sigma_true` 3295 and 3291 (0.1%), where
+  they previously differed by 2.3e7. The full-field runs were affected too,
+  so v6's 3518 and the 3518 -> 3921 shift previously attributed to the P1-03
+  retune were partly this bias.
+  Also corrected: the 207-scene fragmentation was this bug, not the
+  convolution crop as first reported. With the calibration fixed the
+  partition is 15 scenes (median 250) against v6's 13 (median 346), and 120
+  sources exceed SNR 15.
 - [x] Added a science-safe interpolated companion to the all-field MINERVA SED
   stack (2026-08-12). Interpolate each galaxy only between adjacent valid
   field bands in linear normalized F-lambda versus log wavelength, retain
@@ -14,6 +40,8 @@ This file records completed implementations, validation runs, and the current wo
   arithmetic-averages effectively coincident pivots. Its observed evaluation
   grid is <=0.0025 dex and includes every filter edge/pivot; rest stays at the
   requested 100 A. Added raw interpolated mean/count FITS extensions and a
+  full set of per-field interpolated mean/count cubes with explicit frame,
+  support-model, coincident-pivot, and wavelength-table provenance, plus a
   separate contrast panel that continuum-subtracts only for rendering, with
   masked 4x redshift interpolation that never crosses a finite-support gap.
   The full COSMOS+EGS+UDS render completed for 357,044 normalized galaxies;

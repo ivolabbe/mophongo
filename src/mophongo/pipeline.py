@@ -13,6 +13,7 @@ import os
 import re
 import psutil
 import h5py
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
@@ -43,6 +44,15 @@ import logging
 logger = logging.getLogger(__name__)
 
 memory = lambda: psutil.Process(os.getpid()).memory_info().rss / 1e9
+
+
+def _fmt_hms(seconds: float) -> str:
+    """``1h02m03s`` / ``2m03s`` / ``3.4s`` -- whichever fits the magnitude."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, sec = divmod(int(round(seconds)), 60)
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m{sec:02d}s" if h else f"{m}m{sec:02d}s"
 
 
 def human_bytes(n: float, binary: bool = True) -> str:
@@ -2615,7 +2625,8 @@ class Pipeline:
             )
             cat = self._fit_catalog(config)
             self._prepare_hi_templates(cat, config)
-            templates, weights_i = self._convolved_templates(ifilt, config)
+            with self._phase("convolve templates"):
+                templates, weights_i = self._convolved_templates(ifilt, config)
             # fitted amplitudes/errors/shifts: the saved per-template table is
             # exact (per component, pre-aggregation); the fit table is the
             # fallback for runs that predate it
@@ -2784,6 +2795,54 @@ class Pipeline:
             self._log_run_path = None
             sys.stdout, sys.stderr = old_out, old_err
             handle.close()
+
+    @contextmanager
+    def _phase(self, name: str):
+        """Accumulate wall time under ``name`` for the end-of-run breakdown.
+
+        Re-entering a name adds to it, so a phase inside a per-band loop
+        reports its total across bands rather than the last one.
+        """
+        if not hasattr(self, "_timings"):
+            self._timings: dict[str, float] = {}
+        if name.startswith("step: "):
+            # a caller is partitioning the whole invocation and will report
+            # once at the end; run() must not report its own half-finished view
+            self._cli_stepping = True
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            dt = time.perf_counter() - started
+            self._timings[name] = self._timings.get(name, 0.0) + dt
+
+    def report_timings(self, total: float | None = None) -> None:
+        """Log the per-section wall-clock breakdown, longest first."""
+        timings = getattr(self, "_timings", None)
+        if not timings:
+            return
+        # Two levels, reported separately: CLI steps partition the run, while
+        # the fit's own phases sit inside one of them. Listing both in one
+        # table would double-count and the percentages would exceed 100.
+        steps = {k[len("step: "):]: v for k, v in timings.items() if k.startswith("step: ")}
+        inner = {k: v for k, v in timings.items() if not k.startswith("step: ")}
+        total = total if total is not None else sum(steps.values()) or sum(inner.values())
+        width = max(len(k) for k in list(steps) + list(inner))
+
+        def _table(title: str, items: dict[str, float], denom: float) -> None:
+            if not items:
+                return
+            logger.info("%s (%s):", title, _fmt_hms(denom))
+            for name, dt in sorted(items.items(), key=lambda kv: -kv[1]):
+                logger.info("  %-*s  %9s  %5.1f%%", width, name,
+                            _fmt_hms(dt), 100.0 * dt / max(denom, 1e-9))
+            rest = denom - sum(items.values())
+            if rest > 0.02 * denom:
+                logger.info("  %-*s  %9s  %5.1f%%", width, "(other)",
+                            _fmt_hms(rest), 100.0 * rest / max(denom, 1e-9))
+
+        _table("time by step", steps, total)
+        _table("time within the fit", inner, steps.get("fit", sum(inner.values())))
 
     def run_all(self) -> "Pipeline":
         """All steps in order: psfs, kernels, fit, outputs.
@@ -3734,9 +3793,11 @@ class Pipeline:
             if weights[i] is not None:
                 assert np.all(np.isfinite(weights[i])), "Weights contain NaN values"
 
-        cat = self._fit_catalog(config)
+        with self._phase("catalog"):
+            cat = self._fit_catalog(config)
 
-        templates = self._prepare_hi_templates(cat, config)
+        with self._phase("extract templates"):
+            templates = self._prepare_hi_templates(cat, config)
 
         # The detection-band inverse variance is read only while templates are
         # built -- the build schemes grade real data against the PSF by SNR --
@@ -3771,7 +3832,8 @@ class Pipeline:
                     "is the only fitting path"
                 )
             templates_scene = templates
-            scenes, labels = generate_scenes(
+            with self._phase("generate scenes"):
+              scenes, labels = generate_scenes(
                 templates_scene,
                 images[ifilt],
                 weights_i,
@@ -3839,6 +3901,7 @@ class Pipeline:
                 )
                 max_step, still = 0.0, []
                 for scn in pending:
+                  with self._phase("astrometry passes"):
                     prev = np.array([t.shifted[:2] for t in scn.templates], dtype=float)
                     scn.set_band(images[ifilt], weights_i, config=config)
                     scn.solve(config=config, apply_shifts=True)
@@ -3893,6 +3956,7 @@ class Pipeline:
             if config.fit_astrometry_niter > 0:
                 final_cfg = replace(config, fit_astrometry_niter=0)
                 for scn in scenes:
+                  with self._phase("final flux solve"):
                     scn.set_band(images[ifilt], weights_i, config=config)
                     scn.solve(config=final_cfg)
                 logger.info(
@@ -3919,13 +3983,15 @@ class Pipeline:
             # build model in res first, then subtract from image. np.zeros,
             # not np.zeros_like: zeros_like memsets every page, which on a
             # trial run materialises the whole reference grid.
-            res = np.zeros(images[ifilt].shape, dtype=images[ifilt].dtype)
-            for s in scenes:
+            with self._phase("residual"):
+              res = np.zeros(images[ifilt].shape, dtype=images[ifilt].dtype)
+              for s in scenes:
                 sl = _slices_from_bbox(s.bbox)
                 res[sl] += s.model_image()  # adds models in place
-            # then subtract from image to get residual, in place: `images - res`
-            # would hold a third full-field array while the model is still alive
-            np.subtract(images[ifilt], res, out=res)
+              # then subtract from image to get residual, in place:
+              # `images - res` would hold a third full-field array while the
+              # model is still alive
+              np.subtract(images[ifilt], res, out=res)
 
             fluxes = [t.flux for t in templates]
             errs = [t.err for t in templates]
@@ -3977,7 +4043,8 @@ class Pipeline:
                 scene_ids=template_scene_ids,
                 scene_flags=scene_astrom_flags,
             )
-            self._add_aperture_photometry(
+            with self._phase("aperture photometry"):
+              self._add_aperture_photometry(
                 cat,
                 templates,
                 fluxes,
@@ -3995,6 +4062,10 @@ class Pipeline:
 
         logger.info("Pipeline (end) memory: %.1f GB",
                     psutil.Process(os.getpid()).memory_info().rss / 1e9)
+        # the CLI reports once for the whole invocation; only report here when
+        # run() was called directly, or the breakdown would print twice
+        if not getattr(self, "_cli_stepping", False):
+            self.report_timings()
         self.table = cat
 
         return self.table, self.residuals  # , self.all_templates, self.all_scenes
@@ -5086,8 +5157,11 @@ def main(argv: list[str] | None = None) -> None:
     # `all` step's own block nests harmlessly.
     with pipe.log_run() as log_path:
         logger.info("logging this run to %s", log_path)
+        started = time.perf_counter()
         for step in steps:
-            getattr(pipe, STEPS[step])()
+            with pipe._phase(f"step: {step}"):
+                getattr(pipe, STEPS[step])()
+        pipe.report_timings(time.perf_counter() - started)
 
 
 if __name__ == "__main__":

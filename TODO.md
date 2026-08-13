@@ -664,6 +664,19 @@ This file tracks future desired features, checks, and investigations.
   demonstrates a pipeline setup from scratch and regenerates standard
   diagnostics
 - [ ] Profiling speed + memory usage
+  - [x] Full-field memory pass (2026-08-13): redundant template snapshots,
+    the stored model image, the detection weight map, and the float64
+    intermediates in `get_bg_and_ivar` / the upsample. See STATUS.md.
+  - [ ] Saturation repair sets the peak on a trial patch and was not
+    touched; profile `repair_in_memory` next.
+  - [ ] `scene_fitter.build_normal` assembles a 138k x 138k `lil_matrix`
+    entry by entry from Python. ~400 MB of Python objects for ~5M stored
+    values, and the insertion loop is the slow part of scene generation;
+    accumulate COO index/value arrays and build the CSR in one call.
+  - [ ] `run()`'s finiteness guard on the images is behind
+    `if images[i] is None`, so it never runs. Decide whether the check is
+    wanted (it costs a full-field boolean pass per image) before fixing the
+    condition -- turning it on may fail runs that pass today.
 - [ ] strong residuals
   - [ ] handle saturated stars in 444 -> catalog pre pass detection
   - [ ] fit as PSF both 444, 770, fit for centroid, mask center

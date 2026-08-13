@@ -2425,10 +2425,14 @@ class Pipeline:
                 grp = h5.create_group(f"tmpl_{tag}")
                 # chunks bounded independently of stamp size: a 1 Mi-element
                 # chunk is 4 MiB, and a stamp spans at most a few of them
+                # uncompressed: gzip-1 bought 26% on a full field (11.2 ->
+                # 8.3 GiB) for 206 s of the 1112 s run, and these files are
+                # working products read back by the diagnostics, not archive.
+                # Chunked anyway, so a single-source read still touches only
+                # its own chunks.
                 grp.create_dataset(
                     "pixels", data=flat, dtype="f4",
                     chunks=(min(1 << 20, max(flat.size, 1)),),
-                    compression="gzip", compression_opts=1, shuffle=True,
                 )
                 grp.create_dataset("offset", data=offs, dtype="i8")
             src = h5.create_group("sources")
@@ -2436,7 +2440,7 @@ class Pipeline:
                 arr = np.asarray(values)
                 if arr.dtype.kind not in "iuf":
                     arr = arr.astype(np.float64)
-                src.create_dataset(name, data=arr, compression="gzip", compression_opts=1)
+                src.create_dataset(name, data=arr)
         logger.info(
             "wrote %d sources (%s of template pixels, %s on disk) to %s",
             len(conv), human_bytes(npix * 4),

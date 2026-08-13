@@ -160,6 +160,12 @@ class RunConfig:
     psf_size: float | None = 4.0
     psf_autobuild: bool = True  # generate missing PSF grids with PSFFactory
     psf_fov_arcsec: float | None = None  # PSFFactory field of view; None = backend default
+    # Which exposure dates get their own grid when autobuilding. "all" (one
+    # per unique integer MJD) is the default because the grids are MJD-tagged
+    # and looked up by nearest date: collapsing an exposure list that spans
+    # years onto one date ("modal") or a few ("cluster") silently discards
+    # that. See psf_factory.dates_from_csv for the full set of modes.
+    psf_date_mode: str | float = "all"
     # extra Gaussian broadening of the lo-res model PSF (FWHM arcsec);
     # "default" = mock_mosaic.DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC[filter_lo],
     # a number = that value, None = no broadening
@@ -999,7 +1005,8 @@ class Pipeline:
         # An _FOV token in the pattern carries its own field of view;
         # otherwise the config's psf_fov_arcsec applies.
         fov = kw.pop("fov_arcsec", cfg.psf_fov_arcsec)
-        PSFFactory(outdir=str(cfg.psf_dir), fov_arcsec=fov, **kw).from_csv(
+        PSFFactory(outdir=str(cfg.psf_dir), fov_arcsec=fov,
+                   date_mode=cfg.psf_date_mode, **kw).from_csv(
             str(csv), save=True
         )
         dpsf.epsf_obj.load_jwst_stdpsf(local_dir=str(cfg.psf_dir), filter_pattern=pattern)

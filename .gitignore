@@ -24,6 +24,18 @@ examples/canfar/*
 !examples/canfar/jobs/
 examples/canfar/jobs/*
 !examples/canfar/jobs/*.sh
+# OzStar toolkit: the same rule - scripts and docs, not the generated configs
+# (they carry a hardcoded run root), the staging lists, or the fetched outputs
+!examples/ozstar/
+examples/ozstar/*
+!examples/ozstar/*.py
+!examples/ozstar/*.md
+!examples/ozstar/*.sh
+!examples/ozstar/jobs/
+examples/ozstar/jobs/*
+!examples/ozstar/jobs/*.sh
+!examples/ozstar/jobs/*.slurm
+!examples/ozstar/jobs/*.py
 legacy/autopilot/*png
 legacy/autopilot/*pdf
 !data/*test*

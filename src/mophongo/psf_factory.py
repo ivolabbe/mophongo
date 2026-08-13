@@ -195,7 +195,12 @@ class PSFFactory:
         Write detector-sampled rather than oversampled PSFs. Default False.
     date_mode
         Default epoch-selection mode for :meth:`from_csv`; see
-        :func:`dates_from_csv`. Default ``'modal'``.
+        :func:`dates_from_csv`. Default ``'all'`` -- one grid per unique
+        integer MJD in the exposure list. The alternatives collapse an
+        exposure list that spans years onto one or a few dates, which
+        silently defeats the MJD-tagged lookup the grids exist for:
+        ``'modal'`` in particular returns a single date, so a band observed
+        over four years would be fitted with one epoch's wavefront.
     span
         Window width in days for ``'modal'``. Default 5.0.
     delta_day
@@ -214,7 +219,7 @@ class PSFFactory:
     oversample: int = 4
     fov_arcsec: float | None = None
     use_detsampled_psf: bool = False
-    date_mode: str | float | Time = "modal"
+    date_mode: str | float | Time = "all"
     span: float = 5.0
     delta_day: float = 2.0
     include_mjd: bool = True
@@ -340,7 +345,7 @@ class PSFFactory:
         date_mode
             See :func:`dates_from_csv`. May also be an iterable of modes /
             literals to combine (e.g. ``("modal", "median")``). Default =
-            factory's ``date_mode`` (``'modal'``).
+            factory's ``date_mode`` (``'all'``).
         span
             Window width (days) for ``'modal'``. Default = factory's ``span``.
         delta_day

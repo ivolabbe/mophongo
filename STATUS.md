@@ -93,6 +93,58 @@ This file records completed implementations, validation runs, and the current wo
   which is the configuration v8 actually validated.
   Note the stamp-footprint fix is what makes even this feasible: at the old
   402^2 support, COSMOS's convolved templates alone would need 98 GB.
+- [x] Astrometric loop inverted to scene -> pass (2026-08-13). `run()` ran
+  `for pass in 1..niter: for scene in pending:`, synchronising every scene at
+  each pass and carrying a `pending` list so a converged scene dropped out. It
+  now refines one scene to convergence -- its passes, its convergence test, and
+  the flux-only pass that closes it out -- before starting the next. Scenes are
+  independent *across* passes and not only within one: `solve()` reads the
+  scene's own templates and read-only slices of the shared image and weights,
+  and writes only to itself and to those templates, so nothing couples one
+  scene's iterate to another's. What goes is the barrier, which is what stops a
+  scene from being handed to a worker process (`docs/SCALING_FIXED_MEMORY.md`).
+  Results are unchanged, checked rather than argued: the same fixture run
+  through HEAD and through the working tree gives bit-identical fluxes, errors,
+  per-scene shift coefficients, per-template accumulated shifts, pass counts,
+  convergence flags and residual, in three configurations -- 3 scenes
+  converging uniformly, 10 scenes at a tolerance that makes the pass count vary
+  between scenes (median 4, max 5, which is where the two orderings genuinely
+  interleave differently), and the flux-only path (`fit_astrometry_niter=0`,
+  one solve per scene, no closing re-solve).
+  Behaviour preserved in the corners: a scene whose shift block was never built
+  (flux-only run, or fewer than two bright anchors) keeps `astrom_converged`
+  None and stops after one pass, exactly as dropping out of `pending` did.
+  Logging changes shape, since the per-pass lines no longer mean anything: the
+  loop now logs its budget up front, each scene at DEBUG, and one summary line
+  (scenes converged, median and maximum passes run). The warning naming the
+  worst non-converged scenes is unchanged.
+  `tests/test_pipeline.py::test_scene_results_do_not_depend_on_scene_order`
+  pins the invariant by handing the loop its scenes back to front and requiring
+  identical fluxes, errors, shifts, pass counts and residual.
+- [x] HIERARCH card warnings silenced outside `log_run` (2026-08-13). Long
+  keywords carried on the input catalog's `Table.meta` -- `PHOT_UNIT`,
+  `WEBBSTARFILT`, `HSTSTARFILT`, `APER_DIAM`, `SHRINK_FACTOR` -- round-trip
+  into the fit table's header as HIERARCH cards by design, and astropy warns
+  once per card, twice per card once its own warning logging has a handler.
+  `log_run` already filtered them, but at the time it only wrapped `run_all`,
+  and the steps are normally run one at a time (`python -m mophongo.pipeline
+  config.json psfs kernels load fit outputs`, which is what the campaign and
+  every validation run use), so that path never entered the block. `01dd473`
+  has since put every CLI invocation inside `log_run`, which closes the same
+  hole from the other end; a notebook or script driving `Pipeline` directly
+  still does not go through it, and the filter belongs with the writes that
+  provoke the warning in any case. It is now a module
+  helper applied at the write path itself -- `write_outputs`, around the
+  residual, fit table and template table -- with `log_run` calling the same
+  helper instead of repeating the filter inline. `write_stamps` needs no filter
+  since `8ca21f5` moved it to HDF5.
+  It is scoped to the write: a caller's own filters are
+  untouched afterwards. Nothing about what is written changes; the keywords
+  still land as HIERARCH cards.
+  `tests/test_pipeline.py::test_write_outputs_silences_hierarch_card_warnings`
+  checks all three: no `VerifyWarning` escapes `write_outputs`, the keywords
+  are readable back off the fit table, and a bare header assignment still
+  warns afterwards.
 - [x] Verification v9: all four UDS MIRI bands at r < 3' (2026-08-13,
   commit `ff1447a`, `examples/minerva/verification/v9/`). Same code and PSF
   grids as v8's F770W re-run, applied to every band, at the trial radius the

@@ -32,8 +32,8 @@ Dry run by default: it prints what it would rename and stamp and changes
 nothing. On CANFAR, run it with the run tree's interpreter so mophongo is
 importable::
 
-    $RUN/setup/venv/bin/python $RUN/jobs/restamp_psfs.py --apply \\
-        $RUN/PSF $RUN/setup/uds_f770w_canfar.json
+    $RUN/run$RUNNUM/config/venv/bin/python $RUN/jobs/restamp_psfs.py --apply \\
+        $RUN/PSF $RUN/run$RUNNUM/config/uds_f770w_canfar.json
 """
 from __future__ import annotations
 

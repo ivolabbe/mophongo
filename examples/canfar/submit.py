@@ -3,11 +3,13 @@
 
 CANFAR compute is a REST API (`skaha`), not ssh: the transfer endpoint on port
 64022 is SFTP only and cannot execute anything. Jobs are containers with `/arc`
-mounted, so the MINERVA data are already there and nothing is uploaded except
-the mophongo source and the PSF grids.
+mounted, so the MINERVA data are already there and the only things uploaded are
+the job scripts and the rewritten configs. The mophongo source is not among
+them: `setup` clones it on arc from GitHub, so a run records the commit it
+built rather than the contents of somebody's laptop.
 
-    python submit.py push                    # upload src (from main) + PSF grids
-    python submit.py setup                   # build the venv on /arc
+    python submit.py push                    # upload the job scripts
+    python submit.py setup                   # clone the source, build the venv
     python submit.py stage  uds_f770w        # decompress that config's inputs
     python submit.py run    uds_f770w ...    # one job per config, concurrent
     python submit.py status                  # all sessions
@@ -50,9 +52,20 @@ REPO = HERE.parent.parent                     # mophongo/
 WORK = REPO / "scratch" / "canfar"
 
 
-from runroot import run_number, run_root
+from runroot import config_dir, run_number, run_root
 
 RUN, RUN_VOS = run_root(REPO)   # /arc/... and its arc: URI
+
+
+def cfg_vos() -> str:
+    """arc: URI of this run's config directory.
+
+    A run pins one mophongo version, so its source, venv and configs live in
+    ``run<N>/config`` rather than at the tree root -- the same path
+    ``jobs/*.sh`` resolve from ``$RUN`` and ``$RUNNUM``. Uploading anywhere
+    else produces jobs that cannot find their config.
+    """
+    return config_dir(RUN_VOS, run_number())
 IMAGE = "images.canfar.net/skaha/jwst-notebook:25.07.25"
 VCP = Path.home() / ".venvs/canfar/bin/vcp"
 DONE = ("Succeeded", "Failed", "Completed", "Terminating")
@@ -60,9 +73,6 @@ DONE = ("Succeeded", "Failed", "Completed", "Terminating")
 
 def session() -> Session:
     return Session(version="v1")
-
-
-SRC_ITEMS = ["src", "pyproject.toml", "README.md"]
 
 
 def git(*args: str) -> str:
@@ -98,37 +108,6 @@ def resolve_ref(ref: str) -> str:
     return remote
 
 
-def build_src_tarball(dest: Path, ref: str, worktree: bool) -> str:
-    """Write the source tarball; return a one-line description of what it holds.
-
-    The source ships from ``git archive`` of a committed ref, not from the
-    working tree. A campaign is 17 jobs running for hours, and tarring whatever
-    happens to be on disk sends half-finished edits - another session's, or an
-    editor mid-save - to every one of them, with nothing afterwards recording
-    which code actually ran. ``--worktree`` is the escape hatch for trying an
-    uncommitted change, and says so loudly.
-
-    A ref behind its remote is a warning rather than an error: the remote may
-    simply not have been fetched.
-    """
-    if worktree:
-        dirty = git("status", "--porcelain", "--", *SRC_ITEMS).splitlines()
-        with tarfile.open(dest, "w:gz") as tar:
-            for item in SRC_ITEMS:
-                tar.add(REPO / item, arcname=item,
-                        filter=lambda t: None if "__pycache__" in t.name else t)
-        log.warning("shipping the WORKING TREE, not a commit%s",
-                    f"; {len(dirty)} uncommitted file(s) included" if dirty else "")
-        for line in dirty:
-            log.warning("    %s", line)
-        return f"worktree on top of {git('rev-parse', '--short', 'HEAD')}"
-
-    sha = resolve_ref(ref)
-    subprocess.run(["git", "-C", str(REPO), "archive", "--format=tar.gz",
-                    "-o", str(dest), sha, "--", *SRC_ITEMS], check=True)
-    return f"{ref} {sha[:9]} {git('log', '-1', '--format=%cs %s', sha)}"
-
-
 def vcp(src: Path | str, dst: str, tries: int = 3) -> None:
     """Copy one file with ``vcp``. VOSpace flakes, so transient errors retry.
 
@@ -149,54 +128,17 @@ def vcp(src: Path | str, dst: str, tries: int = 3) -> None:
 
 
 def do_push(args: argparse.Namespace) -> None:
-    """Upload the mophongo source and the PSF grids the configs reference.
+    """Upload the job scripts.
 
-    Only these two: every science input is already on arc. Tarred first because
-    many small files over VOSpace are slow (about 3 MB/s).
-
-    ``psf.tar`` is unpacked by ``setup_env.sh`` and by nothing else, so pushing
-    it before a ``sync`` (which only replaces the source) uploads several
-    hundred MB that never reach ``$RUN/PSF``. Use ``--src-only`` to ship a code
-    change on its own. The grids already on arc are not lost either way:
-    ``PSFFactory`` skips any grid file that exists unless ``overwrite`` is set.
+    That is all a run needs from here. The science inputs and the ePSF grids
+    are already on arc, and the source is cloned there by ``setup_env.sh``
+    rather than shipped: the commit a run built from is then recorded by git
+    in the run's own checkout, which cannot disagree with what was uploaded
+    the way a tarball and a version file could.
     """
-    tmp = WORK / "_upload"
-    tmp.mkdir(exist_ok=True)
-
-    src_tar = tmp / "mophongo_src.tgz"
-    version = build_src_tarball(src_tar, args.ref, args.worktree)
-    log.info("src  %.1f MB  [%s]", src_tar.stat().st_size / 1e6, version)
-
-    # Uploaded as ``.pending`` and promoted to ``SRC_VERSION`` by whichever job
-    # unpacks the tarball. Stamping it here instead would record the version on
-    # upload, and push-without-sync - the case worth catching - would then look
-    # current while the jobs still imported the old source.
-    version_file = tmp / "SRC_VERSION.pending"
-    version_file.write_text(version + "\n")
-
-    uploads = [src_tar, version_file]
-    if args.src_only:
-        log.info("psf  skipped (--src-only)")
-    else:
-        psf_tar = tmp / "psf.tar"
-        grids = sorted(set(sum((list((REPO / "data" / "PSF").glob(pat))
-                                for pat in args.psf_glob), [])))
-        if not grids:
-            raise SystemExit(f"no PSF grids matched {args.psf_glob}")
-        with tarfile.open(psf_tar, "w") as tar:
-            for grid in grids:
-                tar.add(grid, arcname=grid.name)
-        log.info("psf  %d grids, %.1f MB", len(grids), psf_tar.stat().st_size / 1e6)
-        uploads.append(psf_tar)
-
-    # the destinations have to exist before anything is copied into them
-    for sub in ("setup", "jobs"):
-        subprocess.run([str(VCP.parent / "vmkdir"), f"{RUN_VOS}/{sub}"],
-                       capture_output=True)
-
-    for path in uploads:
-        log.info("uploading %s", path.name)
-        vcp(path, f"{RUN_VOS}/setup/{path.name}")
+    # the destination has to exist before anything is copied into it
+    subprocess.run([str(VCP.parent / "vmkdir"), f"{RUN_VOS}/jobs"],
+                   capture_output=True)
 
     # .py as well as .sh: a job whose logic does not fit in shell ships its
     # script alongside the wrapper that runs it.
@@ -213,12 +155,20 @@ def do_upload_cfg(names: list[str]) -> None:
             path = HERE / suffix
             if not path.exists():
                 raise SystemExit(f"missing {path}; run arcify.py first")
-            vcp(path, f"{RUN_VOS}/setup/{suffix}")
+            # setup makes this directory, but stage may reach it first
+            subprocess.run([str(VCP.parent / "vmkdir"), "-p", cfg_vos()],
+                           capture_output=True)
+            vcp(path, f"{cfg_vos()}/{suffix}")
 
 
 def launch(name: str, script: str, cores: int, ram: int, env: dict[str, str],
            tries: int = 3) -> str:
     """Start one headless job and return its session id, or ``""``.
+
+    ``RUNNUM`` is set here rather than at each call site: every job script
+    resolves ``run$RUNNUM/config`` from it and defaults to 1, so a job launched
+    without it would read and write another run's tree while the laptop
+    believed it was driving this one.
 
     Retried, because the service drops submissions under load: a batch of seven
     once lost three to HTTP 500s carrying
@@ -226,6 +176,7 @@ def launch(name: str, script: str, cores: int, ram: int, env: dict[str, str],
     those and returns an empty list, so an unretried failure is a job that
     silently never existed.
     """
+    env = {"RUNNUM": str(run_number()), **env}
     for attempt in range(1, tries + 1):
         try:
             ids = session().create(
@@ -342,73 +293,23 @@ def stage_job(name: str) -> str:
                   {"RUN": RUN, "CFG": name})
 
 
-def run_root_local() -> Path | None:
-    """The run tree as a local path, when a writable /arc mount exposes it.
-
-    Queue latency dominates small work here: a 1-core sync job has sat Pending
-    for half an hour to do a few seconds of file copying. The sshfs mount is
-    writable, not just readable, so the same unpack takes about twenty seconds
-    from the laptop.
-
-    ``$CANFAR_RUN_LOCAL`` names the mounted run tree explicitly and is the
-    reliable route. Otherwise the conventional mount points are tried, in the
-    order that matches the run tree: ``~/canfar_projects`` for a tree under
-    ``/arc/projects`` (the default since the run tree moved off home), and
-    ``~/canfar_home`` for one under ``/arc/home``. Each mirrors the arc path
-    below its own root -- ``canfar-mount.sh /projects/minerva
-    ~/canfar_projects`` and ``canfar-mount.sh /home/<user> ~/canfar_home``.
-
-    Returns ``None`` when nothing is mounted, which sends the caller back to a
-    container. Slower, never wrong.
-    """
-    explicit = os.environ.get("CANFAR_RUN_LOCAL")
-    if explicit:
-        path = Path(explicit).expanduser()
-        return path if path.is_dir() else None
-    # A mount stands for some prefix of the arc path, and which prefix depends
-    # on what was passed to canfar-mount.sh. Rather than encode that, try each
-    # suffix of the run tree under each mount and take the one that exists:
-    # /arc/projects/minerva/ifl under ~/canfar_projects matches whether the
-    # mount was rooted at /projects or at /projects/minerva.
-    parts = RUN.strip("/").split("/")            # arc, projects, minerva, ifl
-    for mount in ("canfar_projects", "canfar_home"):
-        base = Path.home() / mount
-        if not base.is_dir():
-            continue
-        for start in range(1, len(parts)):
-            candidate = base.joinpath(*parts[start:])
-            if candidate.is_dir():
-                return candidate
-    return None
-
-
 def do_sync(args: argparse.Namespace) -> None:
     """Ship a code change without rebuilding the venv.
 
     ``setup`` deletes and recreates the venv, which breaks every run currently
-    using it. mophongo is installed editable, so replacing the source is enough
-    and is safe while other jobs are in flight.
+    using it. mophongo is installed editable, so fast-forwarding the run's
+    checkout is enough, and is safe while other jobs are in flight: as
+    ``update_src.sh`` says, already-running jobs keep the code they imported
+    and only later ones pick this up.
 
-    Done through the /arc mount when there is one, since this is file movement
-    rather than compute and a container would spend far longer queueing than
-    working. ``--job`` forces the container. Either way the source is rewritten
-    under any job that is running: as ``update_src.sh`` says, already-running
-    jobs keep the code they imported, and only later ones pick this up.
+    A container rather than the /arc mount, because the source is a git clone
+    on arc: updating it means a fetch and a reset in place, which the job does
+    in one step against the run's own checkout.
     """
-    local = None if args.job else run_root_local()
-    if local is None:
-        ids = [launch("mophongo-sync", "update_src.sh", 1, 4, {"RUN": RUN})]
-        wait(ids)
-        print(tidy(first_log(ids), 10))
-        return
-
-    # The same two steps as jobs/update_src.sh, in the same order: the version
-    # is promoted only once the source it describes is actually unpacked.
-    subprocess.run(["tar", "-xzf", str(local / "mophongo_src.tgz"),
-                    "-C", str(local / "mophongo")], check=True)
-    (local / "SRC_VERSION").write_text((local / "SRC_VERSION.pending").read_text())
-    log.info("source updated through %s", local)
-    log.info("mophongo: %s", (local / "SRC_VERSION").read_text().strip())
+    ids = [launch("mophongo-sync", "update_src.sh", 1, 4,
+                  {"RUN": RUN, "RUNNUM": str(run_number()), "BRANCH": args.ref})]
+    wait(ids)
+    print(tidy(first_log(ids), 10))
 
 
 def do_seed(args: argparse.Namespace) -> None:
@@ -496,13 +397,18 @@ def ram_for(name: str, override: int | None) -> int:
 
 
 def arc_src_version() -> str:
-    """The ``SRC_VERSION`` recorded in the run tree, or ``""`` if unreadable."""
+    """The ``SRC_VERSION`` this run's checkout recorded, or ``""`` if unreadable.
+
+    Written by ``setup_env.sh`` / ``update_src.sh`` as ``git rev-parse --short
+    HEAD`` of the checkout they just updated, so it describes what is installed
+    rather than what was uploaded.
+    """
     tmp = WORK / "_upload"
     tmp.mkdir(exist_ok=True)
     dest = tmp / "SRC_VERSION.arc"
     dest.unlink(missing_ok=True)
     try:
-        vcp(f"{RUN_VOS}/setup/SRC_VERSION", str(dest))
+        vcp(f"{cfg_vos()}/SRC_VERSION", str(dest))
     except (FileNotFoundError, SystemExit):
         return ""
     return dest.read_text().strip() if dest.exists() else ""
@@ -511,25 +417,30 @@ def arc_src_version() -> str:
 def check_src_current(ref: str, force: bool) -> None:
     """Refuse to run against source that is not the current ``ref``.
 
-    ``push`` only uploads the tarball; ``setup`` and ``sync`` are what unpack
-    it. Doing the first without the second leaves every job importing the
-    previous campaign's code, and the outputs look entirely normal afterwards,
-    so this is checked rather than trusted. It has already happened once: a
-    campaign was submitted against source four hours older than the memory fix
-    it depended on.
+    ``setup`` and ``sync`` are what move the checkout; a campaign submitted
+    without either runs the previous one's code, and the outputs look entirely
+    normal afterwards, so this is checked rather than trusted. It has already
+    happened once: a campaign was submitted against source four hours older
+    than the memory fix it depended on.
+
+    Compared as a prefix in both directions, because the two sides abbreviate
+    differently -- ``git rev-parse --short`` picks its own length on arc, while
+    this end takes nine characters.
     """
     want = resolve_ref(ref)[:9]
     have = arc_src_version()
-    if have and want in have:
+    sha = have.split()[0] if have else ""
+    if sha and (sha.startswith(want) or want.startswith(sha)):
         log.info("source on arc: %s", have)
         return
-    problem = (f"no SRC_VERSION in {RUN_VOS}" if not have
+    problem = (f"no SRC_VERSION in {cfg_vos()}" if not have
                else f"arc has [{have}], local {ref} is {want}")
     if force:
         log.warning("%s (continuing anyway: --force-stale)", problem)
     else:
         raise SystemExit(f"refusing to run: {problem}. "
-                         f"Run 'submit.py push --src-only' then 'submit.py sync'.")
+                         f"Run 'submit.py setup' (first run) or "
+                         f"'submit.py sync' (code change).")
 
 
 def do_run(args: argparse.Namespace) -> None:
@@ -680,35 +591,15 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("push", help="upload mophongo source and PSF grids")
-    # Every field's grids, not just UDS: a band with no matching grid falls back
-    # to building them on the node, which is slow and, run concurrently by
-    # several bands of a field, races on the same psf_dir. EGS has none locally
-    # and has to build them regardless. The third glob is the 30" halo grid the
-    # saturation repair uses to decide which segments a star dominates
-    # (repair_saturated); without it the flag reach shrinks to the GRID25 field
-    # of view and only the star's core gets flagged.
-    p.add_argument("--psf-glob", nargs="+",
-                   default=["*_NRC*_F444W_MJD*_GRID25_OS4.fits",
-                            "*_NRC*_F444W_MJD*_FOV30_GRID1_OS4.fits",
-                            "*_MIRI_*_MJD*_GRID9_OS4.fits"])
-    p.add_argument("--src-only", action="store_true",
-                   help="skip the PSF grids; only setup unpacks them, so a push "
-                        "before sync ships several hundred MB for nothing")
-    p.add_argument("--ref", default="main",
-                   help="git ref whose source is shipped (default: main)")
-    p.add_argument("--worktree", action="store_true",
-                   help="ship the working tree instead of a commit, uncommitted "
-                        "changes and all; for trying a fix, not for a campaign")
+    p = sub.add_parser("push", help="upload the job scripts")
     p.set_defaults(func=do_push)
 
-    p = sub.add_parser("setup", help="build the venv on /arc")
+    p = sub.add_parser("setup", help="clone the source and build the venv on /arc")
     p.set_defaults(func=do_setup)
 
-    p = sub.add_parser("sync", help="replace the source in place, leaving the venv alone")
-    p.add_argument("--job", action="store_true",
-                   help="use a container even when the /arc mount is available; "
-                        "the mount does the same work without the queue wait")
+    p = sub.add_parser("sync", help="fast-forward the run's checkout, leaving the venv alone")
+    p.add_argument("--ref", default="main",
+                   help="branch to fast-forward the checkout to (default: main)")
     p.set_defaults(func=do_sync)
 
     p = sub.add_parser("seed", help="copy cached PSF/kernel maps between runs")

@@ -11,10 +11,9 @@ each stage by hand::
     python campaign.py --from arcify --skip stage   # inputs already decompressed
     python campaign.py --dry-run             # print the plan, do nothing
 
-To ship a code change into a campaign without rebuilding the venv, do the two
-source steps by hand first and start the campaign after them::
+To ship a code change into a campaign without rebuilding the venv, fast-forward
+the run's checkout first and start the campaign after it::
 
-    python submit.py push --src-only
     python submit.py sync
     python campaign.py --from arcify --skip stage
 
@@ -117,8 +116,8 @@ def arc_psf_names() -> list[str]:
     find its grids, and the run reads ``$RUN/PSF`` on arc rather than the
     laptop. A field whose grids an earlier job built is complete there while
     the local directory has never held them, and serialising a leader for it
-    costs a whole run - a full field, so hours. Note that ``push`` does not
-    close this gap: only ``setup_env.sh`` unpacks ``psf.tar``.
+    costs a whole run - a full field, so hours. Nothing uploads grids any
+    more, so arc is the only answer that counts.
 
     An unreadable listing returns empty, which falls back to the local check.
     """
@@ -148,9 +147,6 @@ def has_shared_grids(cfg_path: Path, extra_names: list[str] | None = None) -> bo
     filenames into one ``psf_dir``. The per-band MIRI grids of ``pattern_lo``
     have distinct names and can be built concurrently without racing.
 
-    ``push`` uploads whatever is in ``data/PSF``, so local presence stands in
-    for what the run will find on arc.
-
     With ``repair_saturated`` the 30" halo grids are shared the same way -
     every band of the field derives the same ``_FOV30_GRID1_OS4`` names from
     ``pattern_hi`` - so they count here too.
@@ -164,6 +160,12 @@ def has_shared_grids(cfg_path: Path, extra_names: list[str] | None = None) -> bo
         # same derivation as Pipeline._repair_halo_pattern
         patterns.append(cfg.get("repair_psf_pattern")
                         or re.sub(r"_MJD.*$", r"_MJD\\d+_FOV30_GRID1_OS4", pattern))
+    # Grid filenames carry an _FOV token that the configs' patterns do not, so
+    # match the way the loader does (mophongo.jwst_psf.fov_agnostic_pattern is
+    # the source of truth; inlined to keep this script free of the package).
+    patterns = [p if ("_FOV" in p or "_GRID" not in p)
+                else p.replace("_GRID", r"(?:_FOV\d+)?_GRID", 1)
+                for p in patterns]
     names = [p.name for p in PSF_DIR.glob("*.fits")] + list(extra_names or [])
     return all(any(re.search(pat, n) for n in names) for pat in patterns)
 

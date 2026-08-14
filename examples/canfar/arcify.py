@@ -33,6 +33,26 @@ from vos import Client
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("arcify")
 
+#: A version belongs in the run directory, not in the run name. `run2/uds/
+#: uds_f770w` beats `run2/uds/uds_f770w_v2`: the latter repeats the version in
+#: every path and every output filename, and makes two attempts at one release
+#: impossible to compare without renaming files. `--suffix` remains for genuine
+#: variants of a run (a `_trial` patch beside the full field), so a suffix that
+#: merely looks like a version is refused rather than silently accepted.
+VERSION_SUFFIX = re.compile(r"^_?v?[\d.]+[a-z]?$", re.I)
+
+
+def check_suffix(suffix: str) -> str:
+    """Reject a suffix that is really a version; the run directory carries that."""
+    if suffix and VERSION_SUFFIX.match(suffix):
+        raise SystemExit(
+            f"refusing --suffix {suffix!r}: the version is the run directory. "
+            f"Use CANFAR_RUNNUM=run<N> instead, so outputs stay "
+            "<run>/<field>/<field>_<band> and nothing repeats the version."
+        )
+    return suffix
+
+
 from runroot import run_number, run_root
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -236,6 +256,7 @@ def main() -> None:
     ap.add_argument("--suffix", default="",
                     help="append to the run name, e.g. _test, to keep outputs separate")
     args = ap.parse_args()
+    check_suffix(args.suffix)
 
     cert = Path.home() / ".ssl/cadcproxy.pem"
     if not cert.exists():

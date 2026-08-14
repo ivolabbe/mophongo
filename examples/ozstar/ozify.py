@@ -7,8 +7,10 @@ a config names has to be copied to ``/fred`` first. So this writes two things
 per config:
 
 * ``<name>_ozstar.json`` - the config with every input path pointed at
-  ``$RUN/data``, ``psf_dir`` at ``$RUN/PSF`` and ``out_dir`` at
-  ``$RUN/out/<name>``;
+  ``<base>/data``, ``psf_dir`` at ``<base>/PSF`` and ``out_dir`` at
+  ``<base>/<run>/<field>/<name>``. Data and grids sit above the run
+  directory because they are stable across catalog versions; see
+  :mod:`ozroot` for the tree;
 * ``<name>_stage.tsv`` - ``<vospace uri>\\t<destination basename>`` for every
   one of those inputs, which ``jobs/stage.sh`` copies from CANFAR and, where
   the arc copy is gzipped, decompresses.
@@ -45,12 +47,34 @@ HERE = Path(__file__).resolve().parent
 # `ozroot` so the two cannot shadow each other.
 sys.path.append(str(HERE.parent / "canfar"))
 
-from arcify import PATH_KEYS, arc_index, resolve, roots_for  # noqa: E402
+from arcify import (  # noqa: E402
+    PATH_KEYS, _repair_cache_name, arc_index, resolve, roots_for,
+)
 
-from ozroot import run_root  # noqa: E402
+import ozroot  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("ozify")
+
+#: A version belongs in the run directory, not in the run name. `run2/uds/
+#: uds_f770w` beats `run2/uds/uds_f770w_v2`: the latter repeats the version in
+#: every path and every output filename, and makes two attempts at one release
+#: impossible to compare without renaming files. `--suffix` remains for genuine
+#: variants of a run (a `_trial` patch beside the full field), so a suffix that
+#: merely looks like a version is refused rather than silently accepted.
+VERSION_SUFFIX = re.compile(r"^_?v?[\d.]+[a-z]?$", re.I)
+
+
+def check_suffix(suffix: str) -> str:
+    """Reject a suffix that is really a version; the run directory carries that."""
+    if suffix and VERSION_SUFFIX.match(suffix):
+        raise SystemExit(
+            f"refusing --suffix {suffix!r}: the version is the run directory. "
+            f"Use OZSTAR_RUN=run<N> instead, so outputs stay "
+            "<run>/<field>/<field>_<band> and nothing repeats the version."
+        )
+    return suffix
+
 
 
 def vos_uri(arc_path: str) -> str:
@@ -62,7 +86,7 @@ def vos_uri(arc_path: str) -> str:
     return "arc:" + arc_path[len("/arc/"):]
 
 
-def ozify(cfg_path: Path, index: dict[str, str], out_dir: Path, run: str,
+def ozify(cfg_path: Path, index: dict[str, str], out_dir: Path,
           r_trial: float | None = None, suffix: str = "") -> tuple[Path, Path]:
     """Write the OzStar config and its staging list for one local config.
 
@@ -101,11 +125,23 @@ def ozify(cfg_path: Path, index: dict[str, str], out_dir: Path, run: str,
         # Everything is copied, compressed or not: /fred has no view of arc.
         # The destination carries the name the config expects, which also fixes
         # the f770 -> f770w frame-table spelling.
-        cfg[key] = f"{run}/data/{basename}"
+        cfg[key] = f"{ozroot.data_dir()}/{basename}"
         stage.append((vos_uri(arc_path), basename))
 
-    cfg["psf_dir"] = f"{run}/PSF"
-    cfg["out_dir"] = f"{run}/out/{name}"
+    # data/ and PSF/ live above the run directory: they are stable across
+    # catalog versions, so a new run re-fits the same mosaics and reuses the
+    # same grids rather than re-staging 64 GB and rebuilding 400 grids.
+    cfg["psf_dir"] = ozroot.psf_dir()
+    cfg["out_dir"] = ozroot.out_dir(name)
+    # Per-field saturation-repair cache, one level above out_dir. The repair
+    # depends only on detection-side inputs, so a field's bands share it: band
+    # one fits the saturated cores, the rest reload. Naming it after the field
+    # keeps fields apart even when they run concurrently -- the v1.0b campaign
+    # had a single shared cache and COSMOS paid for the repair twice because
+    # EGS overwrote it in between. Never a correctness problem (the cache
+    # records sci_hi and its mtime, and a foreign one is rejected as stale),
+    # but wasted work and a read-while-writing race.
+    cfg["repair_cache_path"] = f"../{_repair_cache_name(cfg)}"
 
     cfg_out = out_dir / f"{name}_ozstar.json"
     cfg_out.write_text(json.dumps(cfg, indent=2) + "\n")
@@ -126,12 +162,12 @@ def main() -> None:
     ap.add_argument("--suffix", default="",
                     help="append to the run name, e.g. _trial, to keep outputs separate")
     args = ap.parse_args()
+    check_suffix(args.suffix)
 
     cert = Path.home() / ".ssl/cadcproxy.pem"
     if not cert.exists():
         raise SystemExit(f"no CADC certificate at {cert}; run canfar-cert.sh first")
 
-    run = run_root()
 
     # Collect the subtrees every config needs, then index each one once: the
     # bands of a field overlap almost completely.
@@ -146,7 +182,7 @@ def main() -> None:
     index = arc_index(Client(vospace_certfile=str(cert)), roots)
 
     for cfg_path in args.configs:
-        ozify(cfg_path, index, args.out_dir, run, args.r_trial, args.suffix)
+        ozify(cfg_path, index, args.out_dir, args.r_trial, args.suffix)
 
 
 if __name__ == "__main__":

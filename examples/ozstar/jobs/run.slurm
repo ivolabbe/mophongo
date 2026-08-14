@@ -21,7 +21,7 @@
 # scheduler picks: both skylake (36 cores / 191 GB) and milan (64 / 256) hold
 # this comfortably, and constraining the choice only lengthens the queue.
 set -euo pipefail
-: "${RUN:?RUN not set}" "${CFG:?CFG not set}"
+: "${BASE:?BASE not set}" "${RUN:?RUN not set}" "${CFGDIR:?CFGDIR not set}" "${CFG:?CFG not set}"
 STEP=${STEP:-all}
 # Lmod here is hierarchical: python/3.12.3 is only visible once its gcccore
 # parent is loaded. Unquoted on purpose - it is a list, not one name.
@@ -37,19 +37,21 @@ unset PYTHONPATH
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 export OPENBLAS_NUM_THREADS=$OMP_NUM_THREADS
 export MKL_NUM_THREADS=$OMP_NUM_THREADS
-export MPLCONFIGDIR=$RUN/.mplconfig
+export MPLCONFIGDIR=$BASE/.mplconfig
 export MPLBACKEND=Agg
 # Compute nodes have no internet: stpsf cannot fetch its reference data here,
 # so it has to be on /fred already (setup_env.sh checks).
-export STPSF_PATH=${STPSF:-$RUN/stpsf-data}
+export STPSF_PATH=${STPSF:-$BASE/stpsf-data}
 
-mkdir -p "$MPLCONFIGDIR" "$RUN/out"
-cd "$RUN/out"
+# out_dir is <run>/<field>/<name>, created by the pipeline; cd to the run
+# so any stray relative path lands there rather than in $HOME
+mkdir -p "$MPLCONFIGDIR" "$RUN"
+cd "$RUN"
 
 echo "=== $CFG [$STEP] on $(hostname): ${SLURM_CPUS_PER_TASK:-?} cores, ${SLURM_MEM_PER_NODE:-?} MB"
-echo "=== mophongo $(git -C "$RUN/mophongo" rev-parse --short HEAD)"
-time "$RUN/venv/bin/python" -m mophongo.pipeline "$RUN/${CFG}_ozstar.json" "$STEP"
+echo "=== mophongo $(git -C "$CFGDIR/mophongo" rev-parse --short HEAD)"
+time "$CFGDIR/venv/bin/python" -m mophongo.pipeline "$CFGDIR/${CFG}_ozstar.json" "$STEP"
 
-echo "=== outputs:"; ls -lh "$RUN/out/$CFG" | head -25
+echo "=== outputs:"; ls -lh "$RUN/${CFG%%_*}/$CFG" | head -25
 echo "=== peak memory:"; sacct -j "${SLURM_JOB_ID}" --format=JobID,MaxRSS,Elapsed --noheader 2>/dev/null | head -3
 echo RUN_DONE

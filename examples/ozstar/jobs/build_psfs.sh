@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build a config's ePSF grids into $RUN/PSF, on the login node, detached.
+# Build a config's ePSF grids into $PSFDIR, on the login node, detached.
 #
 # This cannot be a SLURM job. PSFFactory generates MJD-tagged grids, and stpsf
 # resolves each exposure's date to a wavefront OPD by querying MAST
@@ -18,7 +18,7 @@
 #
 # $CFGS is a space-separated list of config names.
 set -euo pipefail
-: "${RUN:?RUN not set}" "${CFGS:?CFGS not set}"
+: "${BASE:?BASE not set}" "${RUN:?RUN not set}" "${CFGDIR:?CFGDIR not set}" "${CFGS:?CFGS not set}"
 # Lmod here is hierarchical: python/3.12.3 is only visible once its gcccore
 # parent is loaded. Unquoted on purpose - it is a list, not one name.
 PYMODULES=${PYMODULES:-"gcccore/13.3.0 python/3.12.3"}
@@ -28,20 +28,20 @@ module purge
 module load $PYMODULES
 unset PYTHONPATH   # keep the EasyBuild shim off sys.path; see setup_env.sh
 
-export MPLCONFIGDIR=$RUN/.mplconfig
+export MPLCONFIGDIR=$BASE/.mplconfig
 export MPLBACKEND=Agg
-export STPSF_PATH=${STPSF:-$RUN/stpsf-data}
-mkdir -p "$MPLCONFIGDIR" "$RUN/PSF" "$RUN/out" "$RUN/logs"
-cd "$RUN/out"
+export STPSF_PATH=${STPSF:-$BASE/stpsf-data}
+mkdir -p "$MPLCONFIGDIR" "$PSFDIR" "$RUN/logs"
+cd "$RUN"
 
 configs=()
 for cfg in $CFGS; do
-    configs+=("$RUN/${cfg}_ozstar.json")
+    configs+=("$CFGDIR/${cfg}_ozstar.json")
 done
 
 # Bands of a field share the hi-res grids, so the driver walks them one at a
 # time: concurrent builds would write the same filenames into one psf_dir.
-setsid nohup nice -n 10 "$RUN/venv/bin/python" "$RUN/jobs/build_psfs.py" \
+setsid nohup nice -n 10 "$CFGDIR/venv/bin/python" "$BIN/build_psfs.py" \
     --date-mode "${DATE_MODE:-all}" "${configs[@]}" > "$LOG" 2>&1 < /dev/null &
 
 echo "PSF build detached, pid $!"

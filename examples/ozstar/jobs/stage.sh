@@ -8,7 +8,7 @@
 # is refused outright as an impossible node configuration.
 #SBATCH --time=24:00:00
 #
-# Copy one field's inputs from CANFAR arc into $RUN/data, decompressing the
+# Copy one field's inputs from CANFAR arc into $DATA, decompressing the
 # gzipped ones on the way.
 #
 # This runs on the *datamover* partition. Ordinary compute nodes have no
@@ -28,10 +28,10 @@
 # each file transfers once. Already-present files are skipped, so a job that
 # ran out of time can simply be resubmitted.
 set -euo pipefail
-: "${RUN:?RUN not set}" "${CFGS:?CFGS not set}"
+: "${BASE:?BASE not set}" "${RUN:?RUN not set}" "${CFGDIR:?CFGDIR not set}" "${CFGS:?CFGS not set}"
 JOBS=${JOBS:-6}
 
-export PATH="$RUN/venv-vos/bin:$PATH"
+export PATH="$CFGDIR/venv-vos/bin:$PATH"
 unset PYTHONPATH
 command -v vcp > /dev/null || { echo "no vcp; run 'submit.py setup' first" >&2; exit 1; }
 
@@ -41,7 +41,7 @@ command -v vcp > /dev/null || { echo "no vcp; run 'submit.py setup' first" >&2; 
     exit 1
 }
 
-D=$RUN/data
+D=$DATA
 mkdir -p "$D"
 
 # A cancelled or timed-out job leaves its ".<name>.<pid>" temporaries behind,
@@ -51,7 +51,7 @@ find "$D" -maxdepth 1 -name '.*.[0-9]*' -mmin +360 -delete 2>/dev/null || true
 
 manifests=()
 for cfg in $CFGS; do
-    m=$RUN/${cfg}_stage.tsv
+    m=$CFGDIR/${cfg}_stage.tsv
     [[ -s $m ]] || { echo "no manifest: $m" >&2; exit 1; }
     manifests+=("$m")
 done

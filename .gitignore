@@ -25,14 +25,29 @@ examples/minerva/
 #
 # `examples/*` above stops git descending into a directory at all, so the two
 # have to be un-ignored before any rule inside them can apply.
+# Campaign toolkits: track the scripts and docs, never the generated configs.
+# arcify.py/ozify.py rewrite a MINERVA config into <name>_canfar.json or
+# <name>_ozstar.json with absolute paths for one cluster and one account -
+# /fred/<project>/<user>/... and /arc/... - so they are per-machine working
+# data, not source. Regenerate them; do not commit them.
 !examples/canfar/
 !examples/ozstar/
-examples/canfar/__pycache__/
-examples/canfar/out/
-examples/canfar/_upload/
-examples/ozstar/__pycache__/
-examples/ozstar/out/
-examples/ozstar/_upload/
+examples/canfar/*
+examples/ozstar/*
+!examples/canfar/*.py
+!examples/canfar/*.md
+!examples/canfar/*.sh
+!examples/ozstar/*.py
+!examples/ozstar/*.md
+!examples/ozstar/*.sh
+!examples/canfar/jobs/
+examples/canfar/jobs/*
+!examples/canfar/jobs/*.sh
+!examples/ozstar/jobs/
+examples/ozstar/jobs/*
+!examples/ozstar/jobs/*.sh
+!examples/ozstar/jobs/*.slurm
+!examples/ozstar/jobs/*.py
 legacy/autopilot/*png
 legacy/autopilot/*pdf
 # IDL reference-run output: 2.4 MB of FITS per run, regenerable from the

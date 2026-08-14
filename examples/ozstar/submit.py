@@ -98,12 +98,18 @@ def ssh_stream(command: str) -> int:
 
 def job_env(extra: dict[str, str] | None = None) -> str:
     """``VAR=value ...`` prefix for a job script run directly on the login node."""
-    env = {"RUN": ozroot.run_root(), "STPSF": ozroot.stpsf_dir(), **(extra or {})}
+    env = {"BASE": ozroot.base_root(), "RUN": ozroot.run_root(),
+           "CFGDIR": ozroot.config_dir(), "DATA": ozroot.data_dir(),
+           "PSFDIR": ozroot.psf_dir(), "BIN": ozroot.bin_dir(),
+           "STPSF": ozroot.stpsf_dir(), **(extra or {})}
     return " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
 
 
-def upload(paths: list[Path], subdir: str = "") -> None:
-    """Copy files into the run tree with scp.
+def upload(paths: list[Path], dest: str) -> None:
+    """Copy files to an absolute destination on the cluster with scp.
+
+    Absolute rather than relative to the run tree: job scripts go to the shared
+    ``bin/`` and configs to ``<run>/config/``, which are no longer siblings.
 
     scp rather than rsync: macOS ships openrsync, which does not have all of
     rsync's flags, and everything uploaded here is small - the mophongo source
@@ -111,7 +117,6 @@ def upload(paths: list[Path], subdir: str = "") -> None:
     """
     if not paths:
         return
-    dest = f"{ozroot.run_root()}/{subdir}".rstrip("/")
     ssh(f"mkdir -p {shlex.quote(dest)}")
     proc = subprocess.run(["scp", "-q", *[str(p) for p in paths],
                            f"{ozroot.ssh_target()}:{dest}/"])
@@ -120,24 +125,36 @@ def upload(paths: list[Path], subdir: str = "") -> None:
 
 
 def sbatch(script: str, job_name: str, env: dict[str, str],
-           after: str | None = None, extra: list[str] | None = None) -> str:
+           after: str | None = None, extra: list[str] | None = None,
+           log_dir: str | None = None) -> str:
     """Submit one job and return its id.
 
     Parameters go through ``--export`` rather than being baked into the script,
     so one script serves every config.
+
+    ``log_dir`` is where the job's stdout lands, and for a fit it defaults to
+    that band's ``out_dir``: the SLURM log belongs with the products it
+    produced, alongside the pipeline's own ``<name>.log``, so a result and the
+    record of how it was computed travel together. Jobs with no single output
+    directory - staging a whole field, building grids - fall back to
+    ``<run>/logs``. SLURM will not create the directory, so it is made here.
     """
     run = ozroot.run_root()
     exports = ",".join(f"{k}={v}" for k, v in
-                       {"RUN": run, "STPSF": ozroot.stpsf_dir(), **env}.items())
+                       {"BASE": ozroot.base_root(), "RUN": run,
+                        "CFGDIR": ozroot.config_dir(), "DATA": ozroot.data_dir(),
+                        "PSFDIR": ozroot.psf_dir(), "BIN": ozroot.bin_dir(),
+                        "STPSF": ozroot.stpsf_dir(), **env}.items())
+    dest = log_dir or f"{run}/logs"
     flags = ["--parsable", f"--job-name={job_name}",
-             f"--output={run}/logs/{job_name}-%j.out",
+             f"--output={dest}/{job_name}-%j.out",
              f"--export=ALL,{exports}"]
     if after:
         flags.append(f"--dependency=afterok:{after}")
     flags += extra or []
-    command = (f"mkdir -p {shlex.quote(run)}/logs && cd {shlex.quote(run)} && sbatch "
+    command = (f"mkdir -p {shlex.quote(dest)} && cd {shlex.quote(run)} && sbatch "
                + " ".join(shlex.quote(f) for f in flags)
-               + f" {shlex.quote(run)}/jobs/{script}")
+               + f" {shlex.quote(ozroot.bin_dir())}/{script}")
     jobid = ssh(command).strip().split(";")[0]
     log.info("%-30s %s%s", job_name, jobid, f"  (after {after})" if after else "")
     return jobid
@@ -169,7 +186,7 @@ def push(names: list[str], psf_globs: list[str] | None = None) -> None:
     login node, which reaches it far faster than a laptop uplink does.
 
     ``psf_globs`` additionally ships local ePSF grids. That is an optimisation,
-    not a requirement - ``jobs/build_psfs.sh`` builds whatever is missing - but
+    not a requirement - ``bin/build_psfs.sh`` builds whatever is missing - but
     building a grid needs a MAST query for the wavefront OPD and so can only
     happen on the login node, one field at a time. Grids that already exist on
     a laptop are much cheaper to copy than to rebuild.
@@ -177,8 +194,8 @@ def push(names: list[str], psf_globs: list[str] | None = None) -> None:
     # files only: importing a job module leaves a __pycache__ directory here,
     # and scp refuses a directory without -r
     scripts = sorted(p for p in (HERE / "jobs").glob("*") if p.is_file())
-    upload(scripts, "jobs")
-    ssh(f"chmod +x {shlex.quote(ozroot.run_root())}/jobs/*")
+    upload(scripts, ozroot.bin_dir())
+    ssh(f"chmod +x {shlex.quote(ozroot.bin_dir())}/*")
     files: list[Path] = []
     for name in names:
         for suffix in (f"{name}_ozstar.json", f"{name}_stage.tsv"):
@@ -186,7 +203,7 @@ def push(names: list[str], psf_globs: list[str] | None = None) -> None:
             if not path.exists():
                 raise SystemExit(f"missing {path}; run ozify.py first")
             files.append(path)
-    upload(files)
+    upload(files, ozroot.config_dir())
     log.info("pushed %d job script(s), %d config file(s)", len(scripts), len(files))
     if psf_globs:
         push_psf_grids(psf_globs)
@@ -206,7 +223,7 @@ def push_psf_grids(psf_globs: list[str]) -> None:
     if not grids:
         raise SystemExit(f"no PSF grids matched {psf_globs} under {psf_dir}")
     total = sum(g.stat().st_size for g in grids)
-    dest = f"{ozroot.run_root()}/PSF"
+    dest = ozroot.psf_dir()
     ssh(f"mkdir -p {shlex.quote(dest)}")
     log.info("shipping %d PSF grid(s), %.0f MB", len(grids), total / 1e6)
     tar = subprocess.Popen(
@@ -234,7 +251,7 @@ def build_psfs(names: list[str]) -> str:
     attempt died partway through when the driving ssh dropped and the remote
     bash took the SIGHUP with it. Poll the returned log with ``psf-log``.
     """
-    script = f"{ozroot.run_root()}/jobs/build_psfs.sh"
+    script = f"{ozroot.bin_dir()}/build_psfs.sh"
     out = ssh(f"{job_env({'CFGS': ' '.join(names)})} bash {shlex.quote(script)}")
     log.info("%s", out.strip())
     for line in out.splitlines():
@@ -287,13 +304,14 @@ def run(names: list[str], after: str | None = None, cores: int = DEFAULT_CORES,
                    {"CFG": name, "STEP": step}, after=after,
                    extra=[f"--cpus-per-task={cores}",
                           f"--mem={mem_for(name, mem)}g",
-                          f"--time={walltime}"])
+                          f"--time={walltime}"],
+                   log_dir=ozroot.out_dir(name))
             for name in names]
 
 
 def sync_src(branch: str = "main") -> None:
     """Pull the run tree's mophongo clone to the head of ``branch``."""
-    script = f"{ozroot.run_root()}/jobs/sync_src.sh"
+    script = f"{ozroot.bin_dir()}/sync_src.sh"
     code = ssh_stream(f"{job_env({'BRANCH': branch})} bash {shlex.quote(script)}")
     if code != 0:
         raise SystemExit(f"sync failed ({code})")
@@ -339,7 +357,7 @@ def do_setup(args: argparse.Namespace) -> None:
     extra = {"BRANCH": args.branch}
     if args.rebuild:
         extra["REBUILD"] = "1"
-    script = f"{ozroot.run_root()}/jobs/setup_env.sh"
+    script = f"{ozroot.bin_dir()}/setup_env.sh"
     code = ssh_stream(f"{job_env(extra)} bash {shlex.quote(script)}")
     if code != 0:
         raise SystemExit(f"setup failed ({code})")
@@ -354,7 +372,7 @@ def do_seed(args: argparse.Namespace) -> None:
     """Link cached PSF/kernel maps from one run into another."""
     pairs = ",".join(f"{src}:{dst}" for src, dst in
                      (p.split(":", 1) for p in args.pairs))
-    script = f"{ozroot.run_root()}/jobs/seed_cache.sh"
+    script = f"{ozroot.bin_dir()}/seed_cache.sh"
     ssh_stream(f"{job_env({'PAIRS': pairs})} bash {shlex.quote(script)}")
 
 
@@ -381,11 +399,15 @@ def do_logs(args: argparse.Namespace) -> None:
     Run names carry underscores (``uds_f770w``) and job names dashes
     (``moph-uds-f770w``), so both spellings are tried.
     """
-    run_dir = f"{ozroot.run_root()}/logs"
-    globs = " ".join(f"{run_dir}/*{p}*"
+    # A fit's log sits in its out_dir; jobs with no single output directory
+    # (staging, grid builds) still land in <run>/logs, so search both.
+    run = ozroot.run_root()
+    roots = [f"{run}/*/*", f"{run}/logs"]
+    globs = " ".join(f"{r}/*{p}*"
+                     for r in roots
                      for p in dict.fromkeys([args.name, args.name.replace("_", "-")]))
     cmd = (f"f=$(ls -t {globs} 2>/dev/null | head -1); "
-           f'[ -n "$f" ] || {{ echo "no log matching {args.name} in {run_dir}"; exit 1; }}; '
+           f'[ -n "$f" ] || {{ echo "no log matching {args.name} under {run}"; exit 1; }}; '
            f'echo "--- $f"; tail -n {args.lines} "$f"')
     ssh_stream(cmd)
 
@@ -398,7 +420,7 @@ def do_fetch(args: argparse.Namespace) -> None:
         dest.mkdir(parents=True, exist_ok=True)
         got = 0
         for template in FETCH:
-            remote = f"{root}/out/{name}/{template.format(name=name)}"
+            remote = f"{ozroot.out_dir(name)}/{template.format(name=name)}"
             proc = subprocess.run(["scp", "-q", f"{ozroot.ssh_target()}:{remote}",
                                    str(dest)], capture_output=True, text=True)
             if proc.returncode == 0:

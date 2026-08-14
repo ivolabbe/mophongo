@@ -139,7 +139,38 @@ This file records completed implementations, validation runs, and the current wo
     2.22x / 1.87x scatter and 0.277 negative response. The Moffat therefore
     rings less in the effective PSF but has a larger kernel L1 (22.1 versus
     18.5) and is more sensitive to PSF mismatch; it is not a physical JWST
-    target or a clean 0.1" reconstruction.
+    target or a clean 0.1" reconstruction. The requested stock Wiener
+    optimizer was run on this Moffat pair as well: all three regions select
+    lambda=0.0316 and broaden to about 0.182", so it remains a conservative
+    PSF-only stability reference rather than the selector for this experiment.
+    If compact storage is the priority, the 128-pixel Moffat/lambda=3e-4 run
+    closes numerically against 160 pixels and realizes 0.142" at 1.80x / 1.47x
+    field/aperture scatter and 0.070 negative response. Its maximum edge L1 is
+    0.0091, just inside the 0.01 guardrail, so 160 remains the margin-safe run.
+  * Ringing-mitigation follow-up used the same three noise-free region-map
+    PSFs and the real patch at matched realized width.  A post-Wiener spatial
+    taper `exp(-(r/6 pix)**2)` on the 0.10" Gaussian/lambda=1e-3 kernels is
+    the best compact fixed-kernel compromise tested: it realizes 0.145",
+    lowers integrated negative response from 0.277 to 0.116, kernel L1 from
+    18.52 to 6.07, source-masked field scatter from 2.22x to 1.41x, and empty-
+    aperture scatter from 1.87x to 1.36x.  The broad ring train disappears,
+    but a compact -4.6% trough remains, so it is an apodized effective target,
+    not a clean Gaussian.  A generalized-Gaussian Fourier taper can reduce
+    the trough to -0.7% and negative response to 0.055 at the same 0.145"
+    width, but raises white-noise gain to 1.65, kernel L1 to 27.7, and needs
+    256-pixel support; on the patch its field/aperture scatter is 2.18x/1.66x
+    and a low-contrast concentric train remains visible.  SplitCosineBell and
+    ForWaRD did not improve the matched-width Pareto front.  Signal PSDs
+    estimated from 1,807 empty
+    patches, Matérn priors, and target-OTF priors likewise did not beat flat
+    Wiener at matched resolution; their apparent gain at fixed lambda was
+    resolution loss.  A 0.12"/0.48" two-Gaussian core+halo target nearly
+    removes the model-response negative bowl (0.015 at 0.143"), but moves 40%
+    of the flux into the halo and still produces visible real-star ripples.
+    Exact ring-free matching to a narrower Gaussian is impossible for one
+    linear kernel because the Gaussian OTF remains nonzero where F444W's OTF
+    vanishes; smooth tapering can only trade the missing modes for a broader,
+    non-Gaussian response.
   * An actual UDS F356W-to-F444W PSF test is forward smoothing, not the same
     inverse problem. On native 100-pixel stamps the stock Wiener optimizer
     selects lambda=1e-3 and realizes 0.167x0.162" against the
@@ -151,10 +182,12 @@ This file records completed implementations, validation runs, and the current wo
     deconvolution. A production F356W region map was not built because the
     checkout has only single-epoch F356W grids while the mosaic spans 23 date
     groups.
-  * Six focused regressions cover phase matching, padding, unit DC,
+  * Focused regressions cover phase matching, padding, unit DC,
     sharpening and diagnostics, numeric provenance round-trip, malformed-map
     validation, and convolution dtype/non-finite handling. Focused PSF/map
-    validation: 39 passed. Full repository validation: 387 passed.
+    validation: 42 passed. Full repository validation: 389 passed (388 in the
+    workspace sandbox plus the legacy astrometry diagnostic-write test rerun
+    with permission for its `../tmp` output).
 - [x] Full-field scene-blob diagnostic (2026-08-13).
   `verification.save_scene_blobs` draws each scene as the convex hull of its
   template positions, filled in its own colour and labelled with its scene id

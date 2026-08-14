@@ -20,6 +20,15 @@ This file tracks future desired features, checks, and investigations.
   deficit/grid-support TODOs first: inverse filtering amplifies PSF-model error
   along with the sky. The reusable API and real-patch driver are complete;
   these are science-calibration gates, not missing mechanics.
+  The ringing scan adds one candidate if a product is pursued: expose an
+  explicit smooth post-Wiener transfer taper (generalized Gaussian with a
+  documented half-power frequency), and select it jointly on realized width,
+  response negativity, correlated-noise gain, L1, and edge support.  Do not
+  present this as an exact Gaussian target: even the best compact spatial
+  taper retains a roughly -4.6% trough, while the nearly ring-free Fourier
+  setting costs 1.65x white-noise gain and 256-pixel support.  A nonlinear
+  positivity-constrained reconstruction would be a separate, prior-dependent
+  image solver and must be reconvolved and closed against the native image.
 
 - [ ] Parallelise the PSF build across *patterns*, not only within one
   (2026-08-13). `PSFFactory(workers=N)` now fans out over `(detector, date)`,
@@ -534,6 +543,15 @@ This file tracks future desired features, checks, and investigations.
   need a bias-variance compromise, so tune with
   `PSF.optimize_matching_kernel_regularization(..., diagnostic_path=...)` and
   add `A/S_lo` on an injected point source to its criteria.
+  **F356W-to-F444W cross-check (2026-08-14):** colocated real UDS model stamps
+  confirm that this adjacent-band direction is smoothing. Wiener at
+  `reg=1e-3` matches the 0.166x0.160" F444W target to 0.167x0.162", has
+  `sqrt(sum(K**2))=0.313`, normalized maximum Fourier gain 1.000, and point
+  projection 1.005. The stock SplitCosineBell broadens to about
+  0.215x0.213" and biases the projection by 11%; an optimized window
+  (`alpha` about 0.16, `beta` about 0.525) is faithful. Do not build a
+  production F356W region map from the current two MJD 59967 GRID1 files:
+  the science WCS table spans 23 date groups and needs date-aware grids first.
 - [ ] Scene partitioning is not reproducible run to run (from wren's
   `CHECKLIST.md`; the mechanism is live here and recorded nowhere else).
 - [ ] The flux-block ridge biases faint sources low: -33% at

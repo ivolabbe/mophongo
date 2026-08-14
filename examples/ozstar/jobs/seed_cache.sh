@@ -8,18 +8,18 @@
 #
 # PAIRS is a comma-separated list of src:dst run names.
 set -euo pipefail
-: "${RUN:?RUN not set}" "${PAIRS:?PAIRS not set}"
+: "${BASE:?BASE not set}" "${RUN:?RUN not set}" "${CFGDIR:?CFGDIR not set}" "${PAIRS:?PAIRS not set}"
 
 linked=0
 IFS=',' read -ra items <<< "$PAIRS"
 for pair in "${items[@]}"; do
     src="${pair%%:*}"; dst="${pair##*:}"
-    [[ -d "$RUN/out/$src" ]] || { echo "skip $src: no source dir"; continue; }
-    mkdir -p "$RUN/out/$dst"
+    [[ -d "$RUN/${src%%_*}/$src" ]] || { echo "skip $src: no source dir"; continue; }
+    mkdir -p "$RUN/${dst%%_*}/$dst"
     for suffix in psf_hi.fits psf_hi.geojson psf_lo.fits psf_lo.geojson \
                   kernel.fits kernel.geojson; do
-        s="$RUN/out/$src/${src}_${suffix}"
-        d="$RUN/out/$dst/${dst}_${suffix}"
+        s="$RUN/${src%%_*}/$src/${src}_${suffix}"
+        d="$RUN/${dst%%_*}/$dst/${dst}_${suffix}"
         [[ -s "$s" ]] || continue
         [[ -e "$d" ]] && continue          # already seeded
         # symlink, not copy: these are read-only inputs and the kernel maps run

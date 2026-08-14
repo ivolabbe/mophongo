@@ -95,18 +95,28 @@ def _find(root: Path, pattern: str, what: str) -> Path | None:
     return _one(sorted(root.rglob(pattern)), what)
 
 
-def _find_release(root: Path, prefer: str, pattern: str, what: str) -> Path | None:
+def _find_release(root: Path, prefer: str, pattern: str, what: str,
+                  exclude: str | None = None) -> Path | None:
     """Glob ``pattern`` under the field root, preferring the ``prefer`` release.
 
     The same product can sit in more than one release directory (and the
     directory name varies: ``n3.0_v1.2`` from CANFAR, ``n3.0_v1.2_SEC`` from
     the Drive delivery), so match on the release prefix rather than an exact
     directory name and fall back to any release that has the file.
+
+    ``exclude`` drops paths containing that substring. The glob is recursive,
+    so a pattern can reach products that merely share a stem: the EAzY photo-z
+    output is ``..._SUPER_CATALOG_wMIRI.eazypy.zout.fits``, which matches
+    ``*SUPER_CATALOG*.fits`` and, sitting in ``EAzY/``, sorts *before* the
+    catalog it derives from. mophongo wants the SUPER catalog's id/x/y/ra/dec,
+    not photometric redshifts.
     """
     if not root.exists():
         log.warning("  no directory %s", root)
         return None
     hits = sorted(root.rglob(pattern))
+    if exclude:
+        hits = [h for h in hits if exclude not in str(h)]
     return _one([h for h in hits if prefer in str(h)] or hits, what)
 
 
@@ -230,7 +240,8 @@ def band_configs(rel: Release) -> list[dict]:
     # both detection flavours ship a segmap; the SUPER catalog is keyed to the
     # ACS+WEBB chi-mean one, so take that
     segmap = _find_release(root, rel.seg_dir, "*ACS+WEBB*SEGMAP.fits", "segmap")
-    catalog = _find_release(root, rel.cat_dir, "*SUPER_CATALOG*.fits", "SUPER catalog")
+    catalog = _find_release(root, rel.cat_dir, "*SUPER_CATALOG*.fits",
+                            "SUPER catalog", exclude=".eazypy.")
     if not all([sci_hi, wht_hi, csv_hi, segmap, catalog]):
         log.warning("  %s incomplete, skipped", rel.local)
         return []

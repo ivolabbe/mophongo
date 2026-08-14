@@ -18,7 +18,7 @@
 #
 # $CFGS is a space-separated list of config names.
 set -euo pipefail
-: "${BASE:?BASE not set}" "${RUN:?RUN not set}" "${CFGDIR:?CFGDIR not set}" "${CFGS:?CFGS not set}"
+: "${BASE:?BASE not set}" "${RUN:?RUN not set}" "${CFGDIR:?CFGDIR not set}" "${VENV:?VENV not set}" "${SRC:?SRC not set}" "${CFGS:?CFGS not set}"
 # Lmod here is hierarchical: python/3.12.3 is only visible once its gcccore
 # parent is loaded. Unquoted on purpose - it is a list, not one name.
 PYMODULES=${PYMODULES:-"gcccore/13.3.0 python/3.12.3"}
@@ -41,7 +41,7 @@ done
 
 # Bands of a field share the hi-res grids, so the driver walks them one at a
 # time: concurrent builds would write the same filenames into one psf_dir.
-setsid nohup nice -n 10 "$CFGDIR/venv/bin/python" "$BIN/build_psfs.py" \
+setsid nohup nice -n 10 "$VENV/bin/python" "$BIN/build_psfs.py" \
     --date-mode "${DATE_MODE:-all}" "${configs[@]}" > "$LOG" 2>&1 < /dev/null &
 
 echo "PSF build detached, pid $!"

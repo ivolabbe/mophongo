@@ -17,7 +17,7 @@
 #             nodes have no /apps module tree at all, so the module python is
 #             simply not there. The OS python is on every node.
 set -euo pipefail
-: "${BASE:?BASE not set}" "${RUN:?RUN not set}" "${CFGDIR:?CFGDIR not set}"
+: "${BASE:?BASE not set}" "${RUN:?RUN not set}" "${CFGDIR:?CFGDIR not set}" "${VENV:?VENV not set}" "${SRC:?SRC not set}"
 # Lmod here is hierarchical: python/3.12.3 is only visible once its gcccore
 # parent is loaded. Unquoted on purpose - it is a list, not one name.
 PYMODULES=${PYMODULES:-"gcccore/13.3.0 python/3.12.3"}
@@ -36,37 +36,37 @@ unset PYTHONPATH
 mkdir -p "$BASE"/{PSF,data,bin} "$RUN"/logs "$CFGDIR"
 
 echo "=== source"
-if [[ -d $CFGDIR/mophongo/.git ]]; then
-    git -C "$CFGDIR/mophongo" fetch --quiet origin "$BRANCH"
-    git -C "$CFGDIR/mophongo" checkout --quiet "$BRANCH"
-    git -C "$CFGDIR/mophongo" reset --hard "origin/$BRANCH"
+if [[ -d $SRC/.git ]]; then
+    git -C "$SRC" fetch --quiet origin "$BRANCH"
+    git -C "$SRC" checkout --quiet "$BRANCH"
+    git -C "$SRC" reset --hard "origin/$BRANCH"
 else
-    git clone --quiet --branch "$BRANCH" "$REPO_URL" "$CFGDIR/mophongo"
+    git clone --quiet --branch "$BRANCH" "$REPO_URL" "$SRC"
 fi
-echo "mophongo $(git -C "$CFGDIR/mophongo" rev-parse --short HEAD) on $BRANCH"
+echo "mophongo $(git -C "$SRC" rev-parse --short HEAD) on $BRANCH"
 
 echo "=== venv (mophongo, module python, compute nodes)"
 if [[ ${REBUILD:-0} == 1 ]]; then
-    rm -rf "$CFGDIR/venv" "$CFGDIR/venv-vos"
+    rm -rf "$VENV" "$VOS"
 fi
-if [[ ! -x $CFGDIR/venv/bin/python ]]; then
-    python -m venv "$CFGDIR/venv"
-    "$CFGDIR/venv/bin/pip" -q install -U pip
+if [[ ! -x $VENV/bin/python ]]; then
+    python -m venv "$VENV"
+    "$VENV/bin/pip" -q install -U pip
 fi
 # Editable, so `sync_src.sh` (a git pull) is enough to ship a code change.
-"$CFGDIR/venv/bin/pip" install -q -e "$CFGDIR/mophongo"
+"$VENV/bin/pip" install -q -e "$SRC"
 
 echo "=== venv-vos (CADC tools, OS python, datamover nodes)"
-if [[ ! -x $CFGDIR/venv-vos/bin/python ]]; then
-    /usr/bin/python3 -m venv "$CFGDIR/venv-vos"
-    "$CFGDIR/venv-vos/bin/pip" -q install -U pip
+if [[ ! -x $VOS/bin/python ]]; then
+    /usr/bin/python3 -m venv "$VOS"
+    "$VOS/bin/pip" -q install -U pip
 fi
-"$CFGDIR/venv-vos/bin/pip" install -q vos cadcutils
-"$CFGDIR/venv-vos/bin/vcp" --help > /dev/null && \
-    echo "$("$CFGDIR/venv-vos/bin/python" -c 'import vos; print(vos.version.version)') ok"
+"$VOS/bin/pip" install -q vos cadcutils
+"$VOS/bin/vcp" --help > /dev/null && \
+    echo "$("$VOS/bin/python" -c 'import vos; print(vos.version.version)') ok"
 
 echo "=== versions"
-"$CFGDIR/venv/bin/python" -c "
+"$VENV/bin/python" -c "
 import astropy, numpy, photutils, psutil, drizzlepac
 print('astropy', astropy.__version__, 'numpy', numpy.__version__,
       'photutils', photutils.__version__, 'psutil', psutil.__version__,

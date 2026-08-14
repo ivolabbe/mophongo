@@ -21,7 +21,7 @@
 # scheduler picks: both skylake (36 cores / 191 GB) and milan (64 / 256) hold
 # this comfortably, and constraining the choice only lengthens the queue.
 set -euo pipefail
-: "${BASE:?BASE not set}" "${RUN:?RUN not set}" "${CFGDIR:?CFGDIR not set}" "${CFG:?CFG not set}"
+: "${BASE:?BASE not set}" "${RUN:?RUN not set}" "${CFGDIR:?CFGDIR not set}" "${VENV:?VENV not set}" "${SRC:?SRC not set}" "${CFG:?CFG not set}"
 STEP=${STEP:-all}
 # Lmod here is hierarchical: python/3.12.3 is only visible once its gcccore
 # parent is loaded. Unquoted on purpose - it is a list, not one name.
@@ -49,8 +49,8 @@ mkdir -p "$MPLCONFIGDIR" "$RUN"
 cd "$RUN"
 
 echo "=== $CFG [$STEP] on $(hostname): ${SLURM_CPUS_PER_TASK:-?} cores, ${SLURM_MEM_PER_NODE:-?} MB"
-echo "=== mophongo $(git -C "$CFGDIR/mophongo" rev-parse --short HEAD)"
-time "$CFGDIR/venv/bin/python" -m mophongo.pipeline "$CFGDIR/${CFG}_ozstar.json" "$STEP"
+echo "=== mophongo $(git -C "$SRC" rev-parse --short HEAD)"
+time "$VENV/bin/python" -m mophongo.pipeline "$CFGDIR/${CFG}_ozstar.json" "$STEP"
 
 echo "=== outputs:"; ls -lh "$RUN/${CFG%%_*}/$CFG" | head -25
 echo "=== peak memory:"; sacct -j "${SLURM_JOB_ID}" --format=JobID,MaxRSS,Elapsed --noheader 2>/dev/null | head -3

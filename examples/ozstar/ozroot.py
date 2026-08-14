@@ -5,20 +5,25 @@ The tree separates what is stable from what is per-run, mirroring the CANFAR
 layout::
 
     /fred/<project>/<user>/mophongo/     $OZSTAR_BASE
-    ├── bin/                  job scripts, shared by every run
+    ├── bin/                  job scripts and environments, shared by every run
+    │   ├── venv/             mophongo and its dependencies (module python)
+    │   └── venv-vos/         CADC transfer tools (OS python, datamover nodes)
+    ├── mophongo/             the GitHub clone
     ├── PSF/                  ePSF grids, expensive and reusable
     ├── data/                 inputs staged from CANFAR arc
     └── run2/                 one catalog version   $OZSTAR_RUN
-        ├── config/           rewritten configs, the venv, the mophongo clone
-        ├── logs/             SLURM job output
+        ├── config/           the rewritten configs
+        ├── logs/             SLURM logs of jobs with no single output dir
         └── <field>/          uds, cosmos, egs
             ├── <field>_repair_cache.fits
-            └── <field>_<band>/   the fit's out_dir
+            └── <field>_<band>/   the fit's out_dir, and its own SLURM log
 
-Data and PSF grids sit *above* the run directory because they are stable: a
-release is re-fitted many times against the same 64 GB of mosaics and the same
-grids, and only the configs and the outputs change. Putting them inside a run
-would mean re-staging and rebuilding for every version, or symlink sprawl.
+Everything stable sits *above* the run directory: the mosaics, the grids, the
+clone, both venvs and the job scripts. A release is re-fitted many times
+against the same 64 GB of inputs and the same 492 grids, and only the configs
+and the outputs change. Putting any of it inside a run would mean re-staging
+and rebuilding for every version - and it makes deleting a run destructive
+beyond that run, which is exactly how a campaign's tooling was lost once.
 
 The per-field level matters too. ``RunConfig.repair_cache_path`` defaults to
 ``".."`` relative to ``out_dir``, so with ``<field>/<field>_<band>/`` a field's
@@ -91,8 +96,28 @@ def run_root() -> str:
 
 
 def config_dir() -> str:
-    """Rewritten configs, staging lists, the venv and the mophongo clone."""
+    """Rewritten configs and staging lists for this run."""
     return f"{run_root()}/config"
+
+
+def src_dir() -> str:
+    """The mophongo clone, shared by every run."""
+    return f"{base_root()}/mophongo"
+
+
+def venv_dir() -> str:
+    """The mophongo venv (module python), shared by every run.
+
+    Under ``bin/`` with the CADC tools: both are executables rather than data,
+    and keeping them together leaves the top level to the things worth looking
+    at - the clone, the inputs, the grids and the runs.
+    """
+    return f"{bin_dir()}/venv"
+
+
+def vos_dir() -> str:
+    """The CADC transfer tools (OS python), shared and usable on datamover."""
+    return f"{bin_dir()}/venv-vos"
 
 
 def data_dir() -> str:

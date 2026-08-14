@@ -28,10 +28,10 @@
 # each file transfers once. Already-present files are skipped, so a job that
 # ran out of time can simply be resubmitted.
 set -euo pipefail
-: "${BASE:?BASE not set}" "${RUN:?RUN not set}" "${CFGDIR:?CFGDIR not set}" "${CFGS:?CFGS not set}"
+: "${BASE:?BASE not set}" "${RUN:?RUN not set}" "${CFGDIR:?CFGDIR not set}" "${VENV:?VENV not set}" "${SRC:?SRC not set}" "${CFGS:?CFGS not set}"
 JOBS=${JOBS:-6}
 
-export PATH="$CFGDIR/venv-vos/bin:$PATH"
+export PATH="$VOS/bin:$PATH"
 unset PYTHONPATH
 command -v vcp > /dev/null || { echo "no vcp; run 'submit.py setup' first" >&2; exit 1; }
 

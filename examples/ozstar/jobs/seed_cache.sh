@@ -8,7 +8,7 @@
 #
 # PAIRS is a comma-separated list of src:dst run names.
 set -euo pipefail
-: "${BASE:?BASE not set}" "${RUN:?RUN not set}" "${CFGDIR:?CFGDIR not set}" "${PAIRS:?PAIRS not set}"
+: "${BASE:?BASE not set}" "${RUN:?RUN not set}" "${CFGDIR:?CFGDIR not set}" "${VENV:?VENV not set}" "${SRC:?SRC not set}" "${PAIRS:?PAIRS not set}"
 
 linked=0
 IFS=',' read -ra items <<< "$PAIRS"

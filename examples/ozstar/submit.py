@@ -101,7 +101,9 @@ def job_env(extra: dict[str, str] | None = None) -> str:
     env = {"BASE": ozroot.base_root(), "RUN": ozroot.run_root(),
            "CFGDIR": ozroot.config_dir(), "DATA": ozroot.data_dir(),
            "PSFDIR": ozroot.psf_dir(), "BIN": ozroot.bin_dir(),
-           "STPSF": ozroot.stpsf_dir(), **(extra or {})}
+           "SRC": ozroot.src_dir(), "VENV": ozroot.venv_dir(),
+           "VOS": ozroot.vos_dir(), "STPSF": ozroot.stpsf_dir(),
+           **(extra or {})}
     return " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
 
 
@@ -144,6 +146,8 @@ def sbatch(script: str, job_name: str, env: dict[str, str],
                        {"BASE": ozroot.base_root(), "RUN": run,
                         "CFGDIR": ozroot.config_dir(), "DATA": ozroot.data_dir(),
                         "PSFDIR": ozroot.psf_dir(), "BIN": ozroot.bin_dir(),
+                        "SRC": ozroot.src_dir(), "VENV": ozroot.venv_dir(),
+                        "VOS": ozroot.vos_dir(),
                         "STPSF": ozroot.stpsf_dir(), **env}.items())
     dest = log_dir or f"{run}/logs"
     flags = ["--parsable", f"--job-name={job_name}",

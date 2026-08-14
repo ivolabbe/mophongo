@@ -43,6 +43,10 @@ examples/ozstar/*
 !examples/canfar/jobs/
 examples/canfar/jobs/*
 !examples/canfar/jobs/*.sh
+# .py as well as .sh: a job whose logic does not fit in shell ships its script
+# alongside the wrapper, and `submit.py push` uploads jobs/*.py for exactly
+# that. The OzStar block below already allows them.
+!examples/canfar/jobs/*.py
 !examples/ozstar/jobs/
 examples/ozstar/jobs/*
 !examples/ozstar/jobs/*.sh

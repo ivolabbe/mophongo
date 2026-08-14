@@ -1023,7 +1023,7 @@ class Pipeline:
         this function's; ``"off"`` skips the check entirely.
         """
         from .psf_factory import grid_provenance
-        from .jwst_psf import read_stdpsf_provenance
+        from .jwst_psf import fov_agnostic_pattern, read_stdpsf_provenance
 
         cfg = self.run_config
         if str(getattr(cfg, "psf_provenance", "warn")).lower() == "off":
@@ -1033,8 +1033,11 @@ class Pipeline:
             return []
         want = grid_provenance(csv, cfg.psf_date_mode, fov)
         stale: list[tuple[Path, str]] = []
+        # same relaxation the loader uses, so this checks exactly the files
+        # that will be loaded rather than a subset of them
+        rx = re.compile(fov_agnostic_pattern(pattern))
         for path in sorted(psf_dir.glob("*.fits")):
-            if not re.search(pattern, path.name):
+            if not rx.search(path.name):
                 continue
             got = read_stdpsf_provenance(path)
             if not got:

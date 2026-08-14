@@ -385,6 +385,50 @@ def make_extended_grid(
 # ──────────────────────────────────────────────────────────────────────────
 # STDPSF-format FITS writer
 # ──────────────────────────────────────────────────────────────────────────
+#: Field of view ``stpsf`` picks when ``fov_arcsec`` is not passed, per
+#: instrument. It computes ``fov_pixels`` from its own pixel-based default, so
+#: a grid built without an explicit FOV still has one -- it just was not
+#: recorded. These are the values the shipped MINERVA grids were built with,
+#: and they are what lets a filename carry an FOV token even when the config
+#: left the field of view unset.
+DEFAULT_FOV_ARCSEC = {"NIRCAM": 4.09, "MIRI": 8.10}
+
+
+def default_fov_arcsec(detector_or_instrument: str) -> float | None:
+    """Effective FOV for a detector or instrument name, or None if unknown."""
+    key = str(detector_or_instrument or "").upper()
+    if key in DEFAULT_FOV_ARCSEC:
+        return DEFAULT_FOV_ARCSEC[key]
+    if key.startswith("NRC"):
+        return DEFAULT_FOV_ARCSEC["NIRCAM"]
+    if key.startswith("MIRI"):
+        return DEFAULT_FOV_ARCSEC["MIRI"]
+    return None
+
+
+def fov_agnostic_pattern(pattern: str) -> str:
+    """Let a pattern without an ``_FOV`` token match filenames that have one.
+
+    Grids are now named with the field of view always present
+    (``..._MJD60308_FOV4_GRID25_OS4``), so FOV4 and FOV8 sets can share a
+    directory instead of needing one each. Patterns written before that -- in
+    every config generated so far -- have no ``_FOV`` and would match none of
+    the new files. Inserting an optional token keeps them working.
+
+    A pattern that already names an FOV is returned unchanged: it is being
+    specific on purpose, and the 30" halo grids depend on that.
+
+    The relaxation is deliberately loose, and can match a grid built at another
+    field of view with the same GRID/OS layout. That is the ambiguity the token
+    exists to remove, so new configs should name the FOV they want; this is for
+    reading what is already on disk.
+    """
+    text = str(pattern)
+    if "_FOV" in text or "_GRID" not in text:
+        return text
+    return text.replace("_GRID", r"(?:_FOV\d+)?_GRID", 1)
+
+
 def _fits_key(name: str) -> str:
     key = re.sub(r"[^A-Z0-9-]", "", name.upper())[:8]
     return key if key and key[0].isalpha() else "METAKEY"

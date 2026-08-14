@@ -634,48 +634,31 @@ class PSFRegionMap:
             )
         return expected
 
-    def gaussian_psf_map(
+    def _analytic_psf_map(
         self,
+        model: str,
         fwhm_pix: float,
         *,
+        beta: float | None = None,
         shape: int | tuple[int, int] | None = None,
         phase_match: bool = True,
         name: str | None = None,
     ) -> "PSFRegionMap":
-        """Return a theoretical Gaussian PSF map on this map's geometry.
-
-        One noise-free, unit-sum Gaussian is generated per source-PSF region.
-        With ``phase_match=True`` its core is placed at the measured subpixel
-        centroid of that region's PSF.  This preserves astrometry when the
-        target is narrower than the source; placing every target at the
-        geometric array center would otherwise encode the source PSF's
-        region-dependent pixel phase as a shift in the matching kernel.
-
-        Args:
-            fwhm_pix: Gaussian full width at half maximum in map pixels.
-            shape: Output stamp shape.  A scalar gives a square stamp.  The
-                default is the source PSF shape.  Larger shapes zero-pad the
-                source support during subsequent kernel inversion and reduce
-                Fourier wraparound.
-            phase_match: Match each Gaussian to its source PSF's fitted core
-                centroid.  Disable only when the source PSFs are known to be
-                registered to the geometric center already.
-            name: Optional map name.
-
-        Returns:
-            A new :class:`PSFRegionMap` with the same keys and geometry and a
-            cube of theoretical Gaussian PSFs.
-
-        Raises:
-            ValueError: If the source map is malformed, ``fwhm_pix`` is not
-                positive, or ``shape`` is smaller than the source stamps.
-        """
+        """Build a phase-matched analytic target map for public wrappers."""
         from .psf import PSF, psf_core_centroid
 
+        if model not in {"gaussian", "moffat"}:
+            raise ValueError(f"unsupported analytic target model {model!r}")
         keys = self._dense_psf_keys()
         source = np.asarray(self.psfs)
         if not np.isfinite(fwhm_pix) or float(fwhm_pix) <= 0.0:
             raise ValueError(f"fwhm_pix must be positive, got {fwhm_pix!r}")
+        if model == "moffat" and (
+            beta is None or not np.isfinite(beta) or float(beta) <= 1.0
+        ):
+            raise ValueError(
+                f"Moffat beta must be finite and greater than one, got {beta!r}"
+            )
         if shape is None:
             target_shape = tuple(map(int, source.shape[-2:]))
         elif isinstance(shape, (int, np.integer)):
@@ -695,6 +678,7 @@ class PSFRegionMap:
         pad_y = (target_shape[0] - source.shape[-2]) // 2
         pad_x = (target_shape[1] - source.shape[-1]) // 2
         targets: list[np.ndarray] = []
+        raw_sums: list[float] = []
         for key in keys:
             if phase_match:
                 xc, yc = psf_core_centroid(source[int(key)])
@@ -703,28 +687,51 @@ class PSFRegionMap:
             else:
                 xc = (target_shape[1] - 1) / 2.0
                 yc = (target_shape[0] - 1) / 2.0
-            target = PSF.gaussian(
-                target_shape, fwhm=float(fwhm_pix), x0=xc, y0=yc
-            ).array
+            if model == "gaussian":
+                target = PSF.gaussian(
+                    target_shape, fwhm=float(fwhm_pix), x0=xc, y0=yc
+                ).array
+            else:
+                target = PSF.moffat(
+                    target_shape,
+                    float(fwhm_pix),
+                    float(fwhm_pix),
+                    float(beta),
+                    x0=xc,
+                    y0=yc,
+                ).array
             target_sum = float(np.sum(target))
             if not np.isfinite(target_sum) or target_sum <= 0.0:
-                raise ValueError(f"invalid Gaussian target sum at psf_key={key}")
+                raise ValueError(
+                    f"invalid {model} target sum at psf_key={key}"
+                )
+            raw_sums.append(target_sum)
             targets.append(target / target_sum)
 
         regions = self.regions.copy()
-        regions["target_model"] = "gaussian"
+        key_rows = np.asarray(regions["psf_key"], dtype=int)
+        regions["target_model"] = model
         regions["target_fwhm_pix"] = float(fwhm_pix)
         regions["target_fwhm"] = float(fwhm_pix) * float(self.pscale)
+        regions["target_discrete_sum"] = np.asarray(raw_sums)[key_rows]
         regions["target_phase_match"] = bool(phase_match)
         regions["target_ny"] = int(target_shape[0])
         regions["target_nx"] = int(target_shape[1])
+        if model == "moffat":
+            regions["target_beta"] = float(beta)
+        model_suffix = model
+        if model == "moffat":
+            model_suffix += f"_beta{float(beta):g}"
         target_map = PSFRegionMap(
             regions=regions,
             snap_tol=self.snap_tol,
             buffer_tol=self.buffer_tol,
             area_factor=self.area_factor,
             footprints=self.footprints,
-            name=name or f"{self.name or 'psf'}_gaussian_fwhm{fwhm_pix:g}px",
+            name=(
+                name
+                or f"{self.name or 'psf'}_{model_suffix}_fwhm{fwhm_pix:g}px"
+            ),
             pscale=self.pscale,
         )
         # Assign after construction: target/kernel maps do not need their
@@ -732,6 +739,81 @@ class PSFRegionMap:
         # irrelevant calculation expensive. The EE cache remains lazy.
         target_map.psfs = np.asarray(targets, dtype=np.float32)
         return target_map
+
+    def gaussian_psf_map(
+        self,
+        fwhm_pix: float,
+        *,
+        shape: int | tuple[int, int] | None = None,
+        phase_match: bool = True,
+        name: str | None = None,
+    ) -> "PSFRegionMap":
+        """Return a theoretical Gaussian PSF map on this map's geometry.
+
+        One noise-free, discrete-unit-sum Gaussian is generated per source
+        region. With ``phase_match=True`` its core is placed at that region's
+        measured subpixel centroid, preserving astrometry in a subsequent
+        matching kernel.
+
+        Args:
+            fwhm_pix: Gaussian full width at half maximum in map pixels.
+            shape: Output stamp shape. A scalar gives a square stamp. Larger
+                shapes provide padded support for inverse kernels.
+            phase_match: Match the source PSF's fitted core centroid.
+            name: Optional map name.
+
+        Returns:
+            A theoretical Gaussian :class:`PSFRegionMap`.
+
+        Raises:
+            ValueError: If a parameter or the source map is invalid.
+        """
+        return self._analytic_psf_map(
+            "gaussian",
+            fwhm_pix,
+            shape=shape,
+            phase_match=phase_match,
+            name=name,
+        )
+
+    def moffat_psf_map(
+        self,
+        fwhm_pix: float,
+        beta: float,
+        *,
+        shape: int | tuple[int, int] | None = None,
+        phase_match: bool = True,
+        name: str | None = None,
+    ) -> "PSFRegionMap":
+        """Return a theoretical circular Moffat PSF map.
+
+        The finite sampled targets are explicitly normalized to unit sum and
+        generated directly on the requested support. This matters for the
+        Moffat wings; making a small target and zero-padding it would silently
+        truncate and renormalize the intended profile.
+
+        Args:
+            fwhm_pix: Moffat full width at half maximum in map pixels.
+            beta: Power-law index greater than one.
+            shape: Output stamp shape. A scalar gives a square stamp. Larger
+                shapes provide padded support for inverse kernels.
+            phase_match: Match the source PSF's fitted core centroid.
+            name: Optional map name.
+
+        Returns:
+            A theoretical Moffat :class:`PSFRegionMap`.
+
+        Raises:
+            ValueError: If a parameter or the source map is invalid.
+        """
+        return self._analytic_psf_map(
+            "moffat",
+            fwhm_pix,
+            beta=beta,
+            shape=shape,
+            phase_match=phase_match,
+            name=name,
+        )
 
     def matching_kernel_map(
         self,

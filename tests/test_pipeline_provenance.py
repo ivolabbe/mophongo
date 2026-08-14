@@ -63,21 +63,62 @@ def test_psf_factory_kwargs_rejects_unparseable_pattern():
         _psf_factory_kwargs("not-a-stdpsf-pattern")
 
 
-def test_psf_factory_filename_fov_token_round_trips():
-    """include_fov names parse back to the same generator settings."""
+def test_psf_filenames_always_carry_the_fov():
+    """The FOV token is always written, so FOV4/8/30 share one directory.
+
+    Grids of the same GRID/OS layout built at different fields of view used to
+    be the same filename unless ``include_fov`` was set by hand, which is why
+    the halo grids needed a directory of their own.
+    """
     from mophongo.psf_factory import PSFFactory
 
     fac = PSFFactory(prefix="UDS", num_psfs=1, oversample=4,
-                     fov_arcsec=30.0, include_mjd=True, include_fov=True)
+                     fov_arcsec=30.0, include_mjd=True)
     name = fac.filename(detector="NRCA5", filt="F444W", mjd=59967.2)
     assert name == "UDS_NRCA5_F444W_MJD59967_FOV30_GRID1_OS4.fits"
     kw = _psf_factory_kwargs(name[:-5])
     assert kw["fov_arcsec"] == 30.0 and kw["include_fov"] is True
-    # without include_fov the token is absent (legacy naming unchanged)
-    fac_plain = PSFFactory(prefix="UDS", num_psfs=25, fov_arcsec=4.0,
-                           include_mjd=True)
-    assert fac_plain.filename(detector="NRCA5", filt="F444W", mjd=59967.2) \
+
+    # fov_arcsec unset means stpsf's own per-instrument default, which is a
+    # field of view like any other and is named rather than omitted
+    plain = PSFFactory(prefix="UDS", num_psfs=25, include_mjd=True)
+    assert plain.filename(detector="NRCA5", filt="F444W", mjd=59967.2) \
+        == "UDS_NRCA5_F444W_MJD59967_FOV4_GRID25_OS4.fits"
+    assert plain.filename(detector="MIRI", filt="F770W", num_psfs=9, mjd=59967.2) \
+        == "UDS_MIRI_F770W_MJD59967_FOV8_GRID9_OS4.fits"
+
+    # include_fov=False reproduces the pre-2026-08 names exactly
+    legacy = PSFFactory(prefix="UDS", num_psfs=25, fov_arcsec=4.0,
+                        include_mjd=True, include_fov=False)
+    assert legacy.filename(detector="NRCA5", filt="F444W", mjd=59967.2) \
         == "UDS_NRCA5_F444W_MJD59967_GRID25_OS4.fits"
+
+
+def test_fov_agnostic_pattern_reads_old_and_new_names():
+    """A pattern without _FOV finds files with one, and vice versa.
+
+    Every config generated so far has an FOV-less pattern, and every grid
+    already on disk has an FOV-less name. Both have to keep working while the
+    new names appear alongside them.
+    """
+    import re
+
+    from mophongo.jwst_psf import default_fov_arcsec, fov_agnostic_pattern
+
+    pattern = r"UDS_NRC.._F444W_MJD\d+_GRID25_OS4"
+    rx = re.compile(fov_agnostic_pattern(pattern))
+    assert rx.search("UDS_NRCA5_F444W_MJD59790_GRID25_OS4")        # old name
+    assert rx.search("UDS_NRCA5_F444W_MJD59790_FOV4_GRID25_OS4")   # new name
+
+    # a pattern that names an FOV is specific on purpose and is left alone --
+    # the halo grids rely on that
+    halo = r"UDS_NRC.._F444W_MJD\d+_FOV30_GRID1_OS4"
+    assert fov_agnostic_pattern(halo) == halo
+    assert not re.compile(halo).search("UDS_NRCA5_F444W_MJD59790_FOV4_GRID1_OS4")
+
+    assert default_fov_arcsec("NRCA5") == 4.09
+    assert default_fov_arcsec("MIRI") == 8.10
+    assert default_fov_arcsec("SOMETHING_ELSE") is None
 
 
 def test_repair_halo_pattern_derivation():

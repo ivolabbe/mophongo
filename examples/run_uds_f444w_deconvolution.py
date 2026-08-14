@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""Sharpen a modest MINERVA UDS F444W patch toward a 0.1 arcsec Gaussian.
+"""Sharpen a modest MINERVA UDS F444W patch toward an analytic target PSF.
 
 This is a real-data experiment over Mophongo's checked-out APIs, not a second
 deconvolution implementation.  It loads the production F444W PSFRegionMap,
-uses ``gaussian_psf_map`` to define phase-matched theoretical targets, uses
+uses a phase-matched Gaussian or Moffat target map, uses
 ``matching_kernel_map`` to derive the existing Wiener kernels, and applies
 them with ``PSFRegionMap.convolve_image``.
 
@@ -20,6 +20,12 @@ Run from the repository root, passing those paths when the ignored local
     poetry run python examples/run_uds_f444w_deconvolution.py \
         --config /path/to/uds_f444w.json \
         --psf-map /path/to/uds_f444w_psf_hi.geojson
+
+For the compact-support Moffat sensitivity test described in ``STATUS.md``::
+
+    poetry run python examples/run_uds_f444w_deconvolution.py \
+        --target-model moffat --target-fwhm 0.10 --target-beta 2.5 \
+        --kernel-size 160 --reg 2e-4 3e-4
 """
 
 from __future__ import annotations
@@ -301,6 +307,8 @@ def _fits_header(
     source_header: fits.Header,
     *,
     target_fwhm: float | None = None,
+    target_model: str | None = None,
+    target_beta: float | None = None,
     reg: float | None = None,
     kernel_size: int | None = None,
     source_map: str | None = None,
@@ -313,7 +321,10 @@ def _fits_header(
             header[keyword] = source_header[keyword]
     if target_fwhm is not None:
         header["DECONV"] = (True, "regularized PSF deconvolution")
-        header["TARGFWH"] = (float(target_fwhm), "requested Gaussian FWHM [arcsec]")
+        header["TARGMOD"] = (str(target_model or "gaussian"), "analytic target model")
+        header["TARGFWH"] = (float(target_fwhm), "requested target FWHM [arcsec]")
+        if target_beta is not None:
+            header["TARGBET"] = (float(target_beta), "Moffat power-law index")
         header["KERNMETH"] = ("wiener", "Mophongo matching-kernel method")
         header["WREG"] = (float(reg), "dimensionless Wiener regularization")
         header["KERNSIZE"] = (int(kernel_size), "kernel side [pixels]")
@@ -378,6 +389,7 @@ def _comparison_figure(
     wcs: WCS,
     center: tuple[float, float],
     field_rms: float,
+    target_label: str,
     path: Path,
 ) -> None:
     """Write full-patch and bright-star before/after panels."""
@@ -428,7 +440,9 @@ def _comparison_figure(
             )
     axes[0, 0].set_ylabel("40.96 arcsec patch")
     axes[1, 0].set_ylabel("7.2 arcsec star cutout")
-    fig.suptitle('MINERVA UDS F444W: regularized toward a 0.1" Gaussian', y=0.995)
+    fig.suptitle(
+        f"MINERVA UDS F444W: regularized toward {target_label}", y=0.995
+    )
     fig.tight_layout()
     fig.savefig(path, dpi=180)
     plt.close(fig)
@@ -441,6 +455,7 @@ def _tradeoff_figure(
     target_psf: np.ndarray,
     pscale: float,
     target_fwhm: float,
+    target_label: str,
     path: Path,
 ) -> None:
     """Write resolution/noise/ringing and realized-response diagnostics."""
@@ -493,7 +508,12 @@ def _tradeoff_figure(
     x, profile = _line_profile(source_psf)
     axes[1, 0].plot(x * pscale, profile / np.max(profile), label="native F444W")
     x, profile = _line_profile(target_psf)
-    axes[1, 0].plot(x * pscale, profile / np.max(profile), "k--", label='0.1" target')
+    axes[1, 0].plot(
+        x * pscale,
+        profile / np.max(profile),
+        "k--",
+        label=f"{target_label} target",
+    )
     for reg, response in responses.items():
         x, profile = _line_profile(response)
         axes[1, 0].plot(
@@ -607,13 +627,29 @@ def run(args: argparse.Namespace) -> Path:
 
     source_map = PSFRegionMap.from_geojson(args.psf_map, pscale=pscale)
     clipped = _clip_psf_map(source_map, outer_wcs, name="uds_f444w_patch_psf")
-    target_map = clipped.gaussian_psf_map(
-        float(args.target_fwhm) / pscale,
-        shape=int(args.kernel_size),
-        phase_match=True,
-        name="uds_f444w_gaussian_target",
-    )
-    target_path = out_dir / "uds_f444w_gaussian_target.geojson"
+    target_kwargs = {
+        "shape": int(args.kernel_size),
+        "phase_match": True,
+        "name": f"uds_f444w_{args.target_model}_target",
+    }
+    if args.target_model == "gaussian":
+        target_map = clipped.gaussian_psf_map(
+            float(args.target_fwhm) / pscale, **target_kwargs
+        )
+        target_label = f'{float(args.target_fwhm):g}" Gaussian'
+        target_beta = None
+    else:
+        target_map = clipped.moffat_psf_map(
+            float(args.target_fwhm) / pscale,
+            beta=float(args.target_beta),
+            **target_kwargs,
+        )
+        target_label = (
+            f'{float(args.target_fwhm):g}" Moffat '
+            f"($\\beta={float(args.target_beta):g}$)"
+        )
+        target_beta = float(args.target_beta)
+    target_path = out_dir / f"uds_f444w_{args.target_model}_target.geojson"
     target_map.to_file(target_path)
 
     key_image = _region_key_image(clipped, outer_wcs, outer_sci.shape)[inner]
@@ -777,6 +813,8 @@ def run(args: argparse.Namespace) -> Path:
                 inner_wcs,
                 source_header,
                 target_fwhm=float(args.target_fwhm),
+                target_model=str(args.target_model),
+                target_beta=target_beta,
                 reg=float(reg),
                 kernel_size=int(args.kernel_size),
                 source_map=str(args.psf_map),
@@ -834,6 +872,7 @@ def run(args: argparse.Namespace) -> Path:
         inner_wcs,
         tuple(args.center),
         input_rms,
+        target_label,
         out_dir / "uds_f444w_deconvolution_comparison.png",
     )
     _tradeoff_figure(
@@ -843,6 +882,7 @@ def run(args: argparse.Namespace) -> Path:
         target_example,
         pscale,
         float(args.target_fwhm),
+        target_label,
         out_dir / "uds_f444w_deconvolution_tradeoff.png",
     )
 
@@ -870,7 +910,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--center", type=float, nargs=2, default=DEFAULT_CENTER)
     parser.add_argument("--size", type=int, default=1024)
     parser.add_argument("--pixel-scale", type=float, default=0.04)
+    parser.add_argument(
+        "--target-model",
+        choices=("gaussian", "moffat"),
+        default="gaussian",
+    )
     parser.add_argument("--target-fwhm", type=float, default=0.1)
+    parser.add_argument(
+        "--target-beta",
+        type=float,
+        default=2.5,
+        help="Moffat power-law index; used only with --target-model moffat",
+    )
     parser.add_argument("--kernel-size", type=int, default=512)
     parser.add_argument(
         "--seg-dilate",

@@ -44,6 +44,29 @@ def test_gaussian_psf_map_is_unit_sum_padded_and_phase_matched():
         assert np.mean(psf_core_fwhm(target.psfs[key])) == pytest.approx(2.6, abs=0.08)
 
 
+def test_moffat_psf_map_is_unit_sum_padded_and_phase_matched():
+    source = _source_map()
+    target = source.moffat_psf_map(
+        2.5, beta=2.5, shape=64, phase_match=True
+    )
+
+    assert target.psfs.shape == (2, 64, 64)
+    assert target.psfs.dtype == np.float32
+    assert np.allclose(target.psfs.sum(axis=(1, 2)), 1.0, atol=2e-7)
+    assert np.all(target.regions["target_model"] == "moffat")
+    assert np.all(target.regions["target_fwhm_pix"] == 2.5)
+    assert np.all(target.regions["target_beta"] == 2.5)
+    assert np.all(target.regions["target_discrete_sum"] > 0.99)
+
+    for key in (0, 1):
+        source_xy = np.asarray(psf_core_centroid(source.psfs[key]))
+        target_xy = np.asarray(psf_core_centroid(target.psfs[key])) - 16.0
+        assert np.allclose(target_xy, source_xy, atol=0.15)
+        assert np.mean(psf_core_fwhm(target.psfs[key])) == pytest.approx(
+            2.7, abs=0.12
+        )
+
+
 def test_wiener_kernel_map_sharpens_and_records_stability_metrics(tmp_path):
     source = _source_map()
     target = source.gaussian_psf_map(2.5, shape=64, phase_match=True)
@@ -102,6 +125,10 @@ def test_gaussian_psf_map_validates_requested_shape():
         source.gaussian_psf_map(2.5, shape=16)
     with pytest.raises(ValueError, match="positive"):
         source.gaussian_psf_map(0.0)
+    with pytest.raises(ValueError, match="greater than one"):
+        source.moffat_psf_map(2.5, beta=1.0)
+    with pytest.raises(ValueError, match="greater than one"):
+        source.moffat_psf_map(2.5, beta=np.nan)
     target = source.gaussian_psf_map(2.5)
     with pytest.raises(TypeError, match="reg"):
         source.matching_kernel_map(target)

@@ -947,8 +947,11 @@ class PSF:
         fwhm_y: float,
         beta: float,
         theta: float = 0.0,
+        *,
+        x0: float | None = None,
+        y0: float | None = None,
     ) -> "PSF":
-        """Create a normalized Moffat PSF.
+        """Create an analytic Moffat PSF.
 
         Parameters
         ----------
@@ -957,13 +960,40 @@ class PSF:
         fwhm_x, fwhm_y : float
             FWHM along each axis in pixels.
         beta : float
-            Moffat power-law index.
+            Moffat power-law index. Must be greater than one so the
+            infinite-profile flux is finite.
         theta : float, optional
             Rotation angle in radians.
+        x0, y0 : float, optional
+            Subpixel center in zero-indexed array coordinates. Defaults to
+            the geometric center of the stamp.
+
+        Notes
+        -----
+        The analytic infinite profile has unit flux. A finite, discretely
+        sampled stamp is not renormalized here; callers that use it as a PSF
+        shape should normalize the returned array explicitly.
         """
         from .utils import moffat as moffat_psf
 
-        return cls(moffat_psf(size, fwhm_x, fwhm_y, beta, theta))
+        widths = np.asarray([fwhm_x, fwhm_y], dtype=float)
+        if not np.all(np.isfinite(widths)) or fwhm_x <= 0.0 or fwhm_y <= 0.0:
+            raise ValueError(
+                "Moffat fwhm_x and fwhm_y must be finite and positive"
+            )
+        if not np.isfinite(beta) or beta <= 1.0:
+            raise ValueError("Moffat beta must be finite and greater than one")
+        return cls(
+            moffat_psf(
+                size,
+                fwhm_x,
+                fwhm_y,
+                beta,
+                theta,
+                x0=x0,
+                y0=y0,
+            )
+        )
 
     @classmethod
     def gaussian(
@@ -1861,7 +1891,14 @@ class EffectivePSF:
                     f"local_dir does not exist: {p!s}"
                 )
             files_dir = list(p.rglob("*.fits"))
-            rx = re.compile(f"{filter_pattern}(?!_EXTENDED)")
+            # A pattern with no _FOV token matches filenames with one too:
+            # grids are named with the field of view always present now, and
+            # every config written before that omits it. Imported here rather
+            # than at module scope: jwst_psf pulls in stpsf, which this module
+            # does not otherwise need to import.
+            from .jwst_psf import fov_agnostic_pattern
+
+            rx = re.compile(f"{fov_agnostic_pattern(filter_pattern)}(?!_EXTENDED)")
             files = [f for f in files_dir if rx.search(os.path.basename(f))]
             if not files:
                 logger.warning(

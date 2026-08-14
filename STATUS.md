@@ -3,6 +3,29 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] PSF grid filenames always carry the field of view (2026-08-14).
+  `PSFFactory.include_fov` now defaults True, so a grid is named
+  `..._MJD60308_FOV4_GRID25_OS4.fits` and FOV4, FOV8 and FOV30 sets of the
+  same GRID/OS layout are distinct files that can share one directory instead
+  of needing one each.
+  * When `fov_arcsec` is unset the token still appears, resolved from stpsf's
+    own per-instrument default (`jwst_psf.default_fov_arcsec`: NIRCam 4.09,
+    MIRI 8.10). A grid built without an explicit FOV had one all along; it
+    just was not written down.
+  * Reading is backwards compatible in both directions.
+    `jwst_psf.fov_agnostic_pattern` inserts an optional `(?:_FOV\d+)?` before
+    `_GRID` when a pattern names no FOV, so every config written so far finds
+    both the old grids on disk and the new ones. A pattern that does name an
+    FOV is left alone -- the 30" halo patterns depend on being specific.
+    Applied at both match sites: `EffectivePSF.load_jwst_stdpsf` and
+    `Pipeline._stale_psf_grids`, so the staleness check sees exactly the files
+    the loader will load.
+  * `include_fov=False` reproduces pre-2026-08 names exactly.
+  * The relaxation is deliberately loose and can match a grid built at another
+    field of view with the same GRID/OS layout -- the ambiguity the token
+    exists to remove. New configs should name the FOV they want; this is for
+    reading what is already on disk.
+  * `poetry run pytest`: 389 passed.
 - [x] CANFAR run trees restructured around a release (2026-08-13). The root
   defaults to `/arc/projects/minerva/ifl/release_v1.0` and a tree under
   `/arc/home` is refused: the v1.0 campaign had put 200 GB there -- 132 GB of
@@ -93,6 +116,41 @@ This file records completed implementations, validation runs, and the current wo
     support/FOM dependent: the same region on an unpadded 100-pixel grid
     selects lambda=0.0562 and broadens to 0.179". Standard diagnostics and
     scan CSVs are under `scratch/uds_f444w_deconvolution/optimizer/`.
+  * Analytic-target/support follow-up (2026-08-14):
+    `PSFRegionMap.moffat_psf_map` now builds phase-matched, finite-stamp
+    discrete-unit-sum circular Moffat targets, records beta and the raw
+    discrete sum, and uses the same target-generic `matching_kernel_map` path.
+    `PSF.moffat` exposes subpixel `x0`/`y0` and validates positive widths and
+    beta > 1. The UDS driver accepts `--target-model gaussian|moffat` and
+    `--target-beta`, with target model/beta in its FITS provenance.
+  * The real three-region source-model scan shows that 512 pixels was inverse
+    kernel padding, not a physical PSF extent. A 160-pixel kernel is a robust
+    common support for the useful compromises (maximum outer-edge absolute
+    L1 < 0.01 and fractional L1 < 1e-3). Gaussian 0.14" at lambda=1e-4
+    realizes 0.153" with white-noise gain 1.01 and negative response 0.041;
+    the real patch has 1.43x source-masked field scatter. Gaussian 0.08" is
+    worse: at lambda=1e-3 it realizes 0.130" with gain 2.25 and negative
+    response 0.466, and approaching the requested width is not credible.
+  * The strongest winged sensitivity target is Moffat FWHM 0.10", beta=2.5,
+    lambda=2e-4 on 160-pixel support. It realizes 0.139" (the same core width
+    as the retained 0.10" Gaussian/lambda=1e-3 result), white-noise gain 1.50,
+    2.03x source-masked field scatter, 1.52x empty-aperture RMS, and 0.074
+    integrated negative response. The comparable Gaussian has gain 1.56,
+    2.22x / 1.87x scatter and 0.277 negative response. The Moffat therefore
+    rings less in the effective PSF but has a larger kernel L1 (22.1 versus
+    18.5) and is more sensitive to PSF mismatch; it is not a physical JWST
+    target or a clean 0.1" reconstruction.
+  * An actual UDS F356W-to-F444W PSF test is forward smoothing, not the same
+    inverse problem. On native 100-pixel stamps the stock Wiener optimizer
+    selects lambda=1e-3 and realizes 0.167x0.162" against the
+    0.166x0.160" target, with white-noise gain 0.31 and maximum normalized
+    Fourier gain 1.0. Its signed lobes correct diffraction/drizzle structure.
+    At 512-pixel padding the stock objective instead oversmooths by selecting
+    lambda=0.0178, another reminder to fix the scoring aperture/support or use
+    the native-grid result. The reverse F444W-to-F356W direction is genuine
+    deconvolution. A production F356W region map was not built because the
+    checkout has only single-epoch F356W grids while the mosaic spans 23 date
+    groups.
   * Six focused regressions cover phase matching, padding, unit DC,
     sharpening and diagnostics, numeric provenance round-trip, malformed-map
     validation, and convolution dtype/non-finite handling. Focused PSF/map

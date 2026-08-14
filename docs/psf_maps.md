@@ -228,7 +228,7 @@ are explicitly replaced by zero instead of allowing `+/-inf` to become huge
 finite values. For a signed deconvolution kernel, bad pixels should normally
 be inpainted or masked with a halo before this call: zero-filled holes ring.
 
-### Matching to a theoretical Gaussian target
+### Matching to a theoretical analytic target
 
 The same map machinery can sharpen an image toward a theoretical target PSF.
 {meth}`~mophongo.psf_map.PSFRegionMap.gaussian_psf_map` constructs one
@@ -236,7 +236,13 @@ noise-free, unit-sum Gaussian per region. The target's core is phase-matched
 to the measured subpixel centroid of the corresponding source PSF by default;
 otherwise a fixed array-center target would turn the region-dependent drizzle
 phase into an astrometric shift. A larger `shape` zero-pads the finite source
-support during inversion and suppresses circular FFT wraparound.
+support during inversion and suppresses circular FFT wraparound. It is kernel
+support, not a claim that the physical PSF itself is hundreds of pixels wide.
+{meth}`~mophongo.psf_map.PSFRegionMap.moffat_psf_map` provides the same path
+for a circular Moffat target and records its `beta`. Winged targets are
+rendered directly on the requested support before discrete unit
+normalization; rendering a small Moffat and then padding it would truncate
+and renormalize the intended wings.
 
 {meth}`~mophongo.psf_map.PSFRegionMap.matching_kernel_map` then delegates each
 source/target pair to the existing {func}`mophongo.utils.matching_kernel`,
@@ -260,6 +266,25 @@ kernels = source.matching_kernel_map(
 image = fits.getdata("f444w_sci.fits")
 sharpened = kernels.convolve_image(image, WCS(fits.getheader("f444w_sci.fits")))
 ```
+
+A Moffat sensitivity target uses the identical kernel path:
+
+```python
+target = source.moffat_psf_map(
+    0.10 / source.pscale,
+    beta=2.5,
+    shape=160,
+    phase_match=True,
+)
+kernels = source.matching_kernel_map(
+    target, method="wiener", reg=2e-4,
+)
+```
+
+A Moffat is an empirical winged profile, not a physical JWST diffraction
+model, so compare its realized encircled energy as well as its core FWHM.
+Changing the analytic target cannot restore modes beyond the F444W optical
+cutoff.
 
 The strictly positive regularization is a required argument on purpose. The standard automatic
 PSF-matching score was tuned for stable *smoothing* kernels and can choose a
@@ -295,6 +320,21 @@ aligned `sci_hi`/`wht_hi`/`segmap` paths and pass its matching map with
 driver reports both release-segmentation-masked field scatter and fixed
 empty-aperture RMS. These include correlated background and residual ringing;
 neither is a propagated WHT. The input WHT product is labelled native-only.
+It accepts `--target-model gaussian|moffat` and `--target-beta`. On the UDS
+patch a 160-pixel, 0.10-arcsec Moffat (`beta=2.5`, `reg=2e-4`) realizes a
+0.139-arcsec core. The same-width 0.10-arcsec Gaussian compromise has about
+four times as much integrated negative response; the Moffat result still has
+visible rings and must be treated as a profile-sensitivity test. A
+0.14-arcsec Gaussian is the safer low-amplification option but realizes only
+about 0.153 arcsec at `reg=1e-4`. A 0.08-arcsec Gaussian is more ill
+conditioned, not less.
+
+Forward matching from F356W to the broader F444W PSF is a different problem:
+it mostly attenuates high frequencies and should reduce white-noise RMS. The
+reverse F444W-to-F356W direction is deconvolution and has the same missing-mode
+limit as sharpening toward an analytic target. Signed lobes in an
+F356W-to-F444W kernel can correct diffraction/drizzle structure without
+making the operation a deconvolution.
 
 ### Derived maps
 

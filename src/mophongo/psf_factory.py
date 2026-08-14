@@ -42,7 +42,7 @@ from typing import Any, Iterable, Protocol, Sequence
 import numpy as np
 from astropy.time import Time
 
-from .jwst_psf import jwst_backend, write_stdpsf
+from .jwst_psf import default_fov_arcsec, jwst_backend, write_stdpsf
 
 logger = logging.getLogger(__name__)
 
@@ -303,10 +303,14 @@ class PSFFactory:
     span: float = 5.0
     delta_day: float = 2.0
     include_mjd: bool = True
-    # Embed the field of view in saved filenames as ``_FOV{int}``. Set for
-    # non-default FOVs (e.g. the 30" halo grids) so they cannot collide
-    # with the standard small-FOV grids of the same GRID/OS layout.
-    include_fov: bool = False
+    # Embed the field of view in saved filenames as ``_FOV{int}``. On by
+    # default: FOV4, FOV8 and FOV30 grids of the same GRID/OS layout are then
+    # distinct filenames and can share one directory instead of needing one
+    # each. When ``fov_arcsec`` is unset the token still appears, resolved
+    # from stpsf's own per-instrument default (jwst_psf.default_fov_arcsec),
+    # because the grid has a field of view either way -- it just was not
+    # written down before. Set False to reproduce pre-2026-08 filenames.
+    include_fov: bool = True
     overwrite: bool = False
     verbose: bool = False
     #: Processes used to build grids. One ``(detector, date)`` pair is one
@@ -357,14 +361,18 @@ class PSFFactory:
         (project/detector/filter/epoch) and the sampling tail
         (FOV / grid layout / oversampling factor). Stripping ``_MJD\\d+``
         yields the canonical sampling key used by :class:`DrizzlePSF` for
-        nearest-MJD lookup. The FOV token appears only when
-        ``include_fov`` is set, so large-FOV halo grids cannot collide
-        with the standard grids of the same GRID/OS layout.
+        nearest-MJD lookup. The FOV token is always written (see
+        ``include_fov``), so grids built at different fields of view are
+        distinct filenames and can share a directory.
         """
         n = num_psfs if num_psfs is not None else self.num_psfs
         det_samp = use_detsampled_psf if use_detsampled_psf is not None else self.use_detsampled_psf
         sampling = "DET" if det_samp else "OS4"
         fov = fov_arcsec if fov_arcsec is not None else self.fov_arcsec
+        if fov is None:
+            # unset means stpsf's own pixel-based default, which is a field of
+            # view like any other and belongs in the name
+            fov = default_fov_arcsec(detector)
         parts = [self.prefix, detector, filt]
         if self.include_mjd and mjd is not None:
             parts.append(f"MJD{int(round(mjd))}")

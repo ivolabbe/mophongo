@@ -1323,6 +1323,10 @@ def plot_repair_diagnostic(
     Layout (2×5):
         Row 0:  data/A | A·ψ shifted | residual shifted | residual SNR |
                 residual no-shift
+
+    Both residual panels (0, 2) and (0, 4) share one linear stretch scaled to
+    the shifted residual's MAD, so the shifted and no-shift fits can be read
+    against each other.
         Row 1:  hole+fit-ring overlay | subtracted/repaired | 2× zoom |
                 radial profile | SNR polar (r, θ)
 
@@ -1529,12 +1533,15 @@ def plot_repair_diagnostic(
         f"⟨SNR²⟩^½={rms_check:.2f}"
     )
 
-    # (0, 4): residual NO-SHIFT (same log stretch as the data panels).
+    # (0, 4): residual NO-SHIFT, on exactly the scaling of the shifted
+    # residual at (0, 2). The two panels exist to be compared, and a log
+    # stretch here against a linear one there made that impossible: it also
+    # clipped every negative pixel, which is where over-subtraction shows.
+    # Same grey_kw, not a fresh MAD, so identical residuals look identical.
     if A_ns > 0:
         resid_ns = (sci - psf_ns_scl) / A
-        resid_ns_show = np.where(hole_mask, np.nan,
-                                 np.log10(np.maximum(resid_ns, 0) + offset))
-        ax[0, 4].imshow(resid_ns_show, **log_kw)
+        resid_ns_show = np.where(hole_mask, np.nan, resid_ns)
+        ax[0, 4].imshow(resid_ns_show, **grey_kw)
         ax[0, 4].contour(ring_mask_noshift.astype(float), levels=[0.5],
                          colors="black", linewidths=0.5)
         ax[0, 4].contour(hole_mask.astype(float), levels=[0.5],

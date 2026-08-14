@@ -14,3 +14,14 @@ allow: push --delete
 # the working tree and origin/main, not just by date), because a dropped stash
 # is only recoverable from the reflog and only until it expires.
 allow: stash drop
+
+# History rewrite of 2026-08-14: `git filter-repo` removed data/PSF and
+# data/PSF8 from every commit (0.43 GB of ePSF grids that .gitignore had always
+# meant to exclude but which predated the rule, so they stayed tracked). Every
+# SHA changes, so a rewritten branch can only reach origin with --force.
+# --force-with-lease is not an option: filter-repo drops the remote, and with it
+# the remote-tracking refs a lease is checked against.
+#
+# main is still refused outright by git-safe and that rail stays. Backup for
+# this rewrite: scratchpad/mophongo-backup-20260814.bundle (1.5 GB, --all).
+allow: push --force

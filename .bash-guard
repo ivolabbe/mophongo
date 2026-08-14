@@ -1,0 +1,15 @@
+# Repo-scoped bash-guard allowlist, merged on top of ~/.claude/bash-guard/config.
+
+# History rewrite of 2026-08-14: `git filter-repo` removed data/PSF and
+# data/PSF8 from every commit (0.43 GB of ePSF grids that .gitignore had
+# always meant to exclude, but which predated the rule and so stayed tracked).
+# A rewrite changes every SHA, so a rewritten branch can only reach origin with
+# --force: --force-with-lease cannot help, because filter-repo drops the remote
+# and with it the remote-tracking refs a lease is checked against.
+#
+# Scope note: this permits force-pushing any branch from this repo, not just
+# that one. git-safe still refuses main outright, which is the rail that
+# matters. Before relying on this again, confirm a backup bundle exists
+# (`git bundle create ... --all`) and that no one else has commits on the
+# branch being replaced.
+allow: git-force-push

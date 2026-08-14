@@ -64,7 +64,7 @@ def test_psf_factory_kwargs_rejects_unparseable_pattern():
 
 
 def test_psf_filenames_always_carry_the_fov():
-    """The FOV token is always written, so FOV4/8/30 share one directory.
+    """The FOV token is always written, so FOV6/11/30 share one directory.
 
     Grids of the same GRID/OS layout built at different fields of view used to
     be the same filename unless ``include_fov`` was set by hand, which is why
@@ -79,13 +79,14 @@ def test_psf_filenames_always_carry_the_fov():
     kw = _psf_factory_kwargs(name[:-5])
     assert kw["fov_arcsec"] == 30.0 and kw["include_fov"] is True
 
-    # fov_arcsec unset means stpsf's own per-instrument default, which is a
-    # field of view like any other and is named rather than omitted
+    # fov_arcsec unset means DEFAULT_FOV_PIXELS native pixels, which is a
+    # field of view like any other and is named rather than omitted: 101 px of
+    # a NIRCam long-wave SCA is 6.35 arcsec
     plain = PSFFactory(prefix="UDS", num_psfs=25, include_mjd=True)
     assert plain.filename(detector="NRCA5", filt="F444W", mjd=59967.2) \
-        == "UDS_NRCA5_F444W_MJD59967_FOV4_GRID25_OS4.fits"
+        == "UDS_NRCA5_F444W_MJD59967_FOV6_GRID25_OS4.fits"
     assert plain.filename(detector="MIRI", filt="F770W", num_psfs=9, mjd=59967.2) \
-        == "UDS_MIRI_F770W_MJD59967_FOV8_GRID9_OS4.fits"
+        == "UDS_MIRI_F770W_MJD59967_FOV11_GRID9_OS4.fits"
 
     # include_fov=False reproduces the pre-2026-08 names exactly
     legacy = PSFFactory(prefix="UDS", num_psfs=25, fov_arcsec=4.0,
@@ -116,9 +117,46 @@ def test_fov_agnostic_pattern_reads_old_and_new_names():
     assert fov_agnostic_pattern(halo) == halo
     assert not re.compile(halo).search("UDS_NRCA5_F444W_MJD59790_FOV4_GRID1_OS4")
 
-    assert default_fov_arcsec("NRCA5") == 4.09
-    assert default_fov_arcsec("MIRI") == 8.10
+    # the default is DEFAULT_FOV_PIXELS native pixels, so it is per detector:
+    # NIRCam long-wave 63 mas, short-wave 31, MIRI 111
+    from mophongo.jwst_psf import DEFAULT_FOV_PIXELS
+
+    assert default_fov_arcsec("NRCA5") == pytest.approx(DEFAULT_FOV_PIXELS * 0.0629, rel=1e-3)
+    assert default_fov_arcsec("NRCB1") == pytest.approx(DEFAULT_FOV_PIXELS * 0.031, rel=2e-2)
+    assert default_fov_arcsec("MIRI") == pytest.approx(DEFAULT_FOV_PIXELS * 0.1109, rel=1e-3)
     assert default_fov_arcsec("SOMETHING_ELSE") is None
+
+
+def test_psf_size_larger_than_grid_fov_warns(caplog):
+    """A stamp wider than the grid it is drizzled from is flagged, not silent."""
+    from types import SimpleNamespace
+
+    from mophongo.pipeline import Pipeline, RunConfig
+
+    obj = Pipeline.__new__(Pipeline)
+    obj.run_config = RunConfig(
+        name="x", out_dir="x", sci_hi="a.fits", segmap="s.fits",
+        catalog="c.fits", sci_lo="lo.fits", wht_lo="w.fits",
+        csv_hi="h.csv", csv_lo="l.csv", psf_size=4.0,
+    )
+    meta = {"UDS_MIRI_F770W_MJD59790_FOV11_GRID9_OS4": {"fov": 11.2},
+            "UDS_MIRI_F770W_MJD59949_FOV3_GRID9_OS4": {"fov": 3.1},
+            "UDS_MIRI_F770W_MJD59960_GRID9_OS4": {"fov": None}}  # pre-FOV grid
+    dpsf = SimpleNamespace(epsf_obj=SimpleNamespace(epsf_meta=meta))
+
+    with caplog.at_level(logging.WARNING, logger="mophongo.pipeline"):
+        obj._check_psf_size_fits_grids(dpsf, "lo")
+    assert "exceeds the field of view of 1 of 3" in caplog.text
+    assert "FOV=3.1" in caplog.text
+
+    # every grid wide enough, and an unset psf_size, say nothing
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="mophongo.pipeline"):
+        obj.run_config.psf_size = 2.0
+        obj._check_psf_size_fits_grids(dpsf, "lo")
+        obj.run_config.psf_size = None
+        obj._check_psf_size_fits_grids(dpsf, "lo")
+    assert caplog.text == ""
 
 
 def test_repair_halo_pattern_derivation():

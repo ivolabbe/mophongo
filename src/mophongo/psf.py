@@ -1933,6 +1933,11 @@ class EffectivePSF:
                         "yk": yk,
                         "oversample": int(h.get("OVERSAMP", 4)),
                         "mjd": mjd_hdr if mjd_hdr > 0 else None,
+                        # stpsf's own record of the grid's field of view
+                        # [arcsec, full array side]; None on grids written
+                        # before it was carried. Callers compare a requested
+                        # stamp size against it.
+                        "fov": float(h["FOV"]) if "FOV" in h else None,
                     }
             return
 

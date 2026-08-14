@@ -2,6 +2,16 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] Homogenize the ePSF grids on one field of view (2026-08-14). 118 of the
+  369 science grids are the older, smaller build -- UDS entirely (both F444W
+  detectors, all four MIRI bands), plus COSMOS's 22+22 NIRCam and 16 F770W
+  epochs -- at FOV4/FOV8 against FOV6/FOV11 elsewhere; EGS is already uniform.
+  Nothing is wrong today: the epochs of a family are disjoint, so no MJD is
+  served by two grids, and the fit crops to `psf_size` either way (a 101-px
+  build agrees with a 65-px one to 1.1e-4 of peak over the shared region).
+  Rebuild them at the default so the set is one thing rather than two. The 124
+  FOV30 halo grids stay as they are.
+
 - [ ] Turn the theoretical-target deconvolution experiment into a calibrated
   science product only if a use case justifies its noise/ringing cost
   (2026-08-13). The UDS F444W patch proves the mechanics and the tradeoff:

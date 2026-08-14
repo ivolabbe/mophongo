@@ -304,12 +304,13 @@ class PSFFactory:
     delta_day: float = 2.0
     include_mjd: bool = True
     # Embed the field of view in saved filenames as ``_FOV{int}``. On by
-    # default: FOV4, FOV8 and FOV30 grids of the same GRID/OS layout are then
+    # default: FOV6, FOV11 and FOV30 grids of the same GRID/OS layout are then
     # distinct filenames and can share one directory instead of needing one
     # each. When ``fov_arcsec`` is unset the token still appears, resolved
-    # from stpsf's own per-instrument default (jwst_psf.default_fov_arcsec),
-    # because the grid has a field of view either way -- it just was not
-    # written down before. Set False to reproduce pre-2026-08 filenames.
+    # from the default the build will use (``jwst_psf.default_fov_arcsec``,
+    # i.e. DEFAULT_FOV_PIXELS native pixels), because the grid has a field of
+    # view either way -- it just was not written down before. Set False to
+    # reproduce pre-2026-08 filenames.
     include_fov: bool = True
     overwrite: bool = False
     verbose: bool = False

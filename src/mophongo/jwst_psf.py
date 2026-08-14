@@ -21,6 +21,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -167,11 +168,12 @@ def build_jwst_psf(
     else:
         date_obj = None
 
-    # Omit fov_arcsec entirely when unset rather than passing None: stpsf
-    # computes fov_pixels as fov_arcsec / pixelscale whenever the key is
-    # present, so a None divides and raises. Leaving it out selects stpsf's own
-    # pixel-based default, which is what the shipped grids were built with
-    # (4.09 arcsec for NIRCam, 8.10 for MIRI).
+    # Unset means DEFAULT_FOV_PIXELS, asked for in pixels rather than left to
+    # stpsf's fallback. Same grid either way today, but stating it keeps the
+    # size in this repo: stpsf's fallback is a default like any other, and a
+    # config that sets no field of view should still produce the same grids
+    # next year. Passing fov_arcsec=None instead would raise -- stpsf divides
+    # it by the pixel scale whenever the key is present.
     grid_kwargs = dict(
         num_psfs=num_psfs,
         oversample=oversample,
@@ -181,6 +183,8 @@ def build_jwst_psf(
     )
     if fov_arcsec is not None:
         grid_kwargs["fov_arcsec"] = fov_arcsec
+    else:
+        grid_kwargs["fov_pixels"] = DEFAULT_FOV_PIXELS
     grid = inst.psf_grid(**grid_kwargs)
     if date_obj is not None:
         grid.meta["DATE-OBS"] = date_obj.isot
@@ -385,25 +389,49 @@ def make_extended_grid(
 # ──────────────────────────────────────────────────────────────────────────
 # STDPSF-format FITS writer
 # ──────────────────────────────────────────────────────────────────────────
-#: Field of view ``stpsf`` picks when ``fov_arcsec`` is not passed, per
-#: instrument. It computes ``fov_pixels`` from its own pixel-based default, so
-#: a grid built without an explicit FOV still has one -- it just was not
-#: recorded. These are the values the shipped MINERVA grids were built with,
-#: and they are what lets a filename carry an FOV token even when the config
-#: left the field of view unset.
-DEFAULT_FOV_ARCSEC = {"NIRCAM": 4.09, "MIRI": 8.10}
+#: Grid width in native detector pixels when ``fov_arcsec`` is not given.
+#: This is ``stpsf``'s own default (``CreatePSFLibrary`` falls back to 101 when
+#: neither ``fov_pixels`` nor ``fov_arcsec`` is passed), stated here rather
+#: than left implicit so the filename can carry the field of view a grid was
+#: actually built at, and so a future change to that default cannot silently
+#: change what the grids contain. 101 is odd, which keeps the PSF centred on a
+#: pixel; see ``parity`` in :func:`build_jwst_psf`.
+DEFAULT_FOV_PIXELS = 101
+
+#: Native pixel scales [arcsec] used when ``stpsf`` cannot be queried (no
+#: reference data installed). Only a fallback: the live instrument model is
+#: asked first, so these cannot drift into the filenames unnoticed.
+_FALLBACK_PIXELSCALE = {"NIRCAM_LW": 0.06290713, "NIRCAM_SW": 0.03122585,
+                        "MIRI": 0.110917025}
 
 
+@lru_cache(maxsize=None)
 def default_fov_arcsec(detector_or_instrument: str) -> float | None:
-    """Effective FOV for a detector or instrument name, or None if unknown."""
+    """FOV of a grid built without an explicit ``fov_arcsec``, in arcsec.
+
+    :data:`DEFAULT_FOV_PIXELS` native pixels wide, so the answer is per
+    detector rather than per instrument: the NIRCam long-wave SCAs are 63
+    mas/pixel and the short-wave ones 31, MIRI 111. Returns ``None`` for a
+    name that names neither.
+    """
     key = str(detector_or_instrument or "").upper()
-    if key in DEFAULT_FOV_ARCSEC:
-        return DEFAULT_FOV_ARCSEC[key]
-    if key.startswith("NRC"):
-        return DEFAULT_FOV_ARCSEC["NIRCAM"]
-    if key.startswith("MIRI"):
-        return DEFAULT_FOV_ARCSEC["MIRI"]
-    return None
+    if key.startswith("NRC") or key == "NIRCAM":
+        try:
+            inst = stpsf.NIRCam()
+            if key.startswith("NRC"):
+                inst.detector = key
+            scale = float(inst.pixelscale)
+        except Exception:  # noqa: BLE001 - no stpsf reference data
+            long_wave = key.endswith("5") or key.endswith("LONG")
+            scale = _FALLBACK_PIXELSCALE["NIRCAM_LW" if long_wave else "NIRCAM_SW"]
+    elif key.startswith("MIRI"):
+        try:
+            scale = float(stpsf.MIRI().pixelscale)
+        except Exception:  # noqa: BLE001 - no stpsf reference data
+            scale = _FALLBACK_PIXELSCALE["MIRI"]
+    else:
+        return None
+    return DEFAULT_FOV_PIXELS * scale
 
 
 def fov_agnostic_pattern(pattern: str) -> str:

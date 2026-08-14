@@ -3,6 +3,32 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] JWST ePSF grids build at a stated 101 native pixels (2026-08-14).
+  `jwst_psf.DEFAULT_FOV_PIXELS = 101` is passed as `fov_pixels` whenever a
+  config sets no `psf_fov_arcsec`, instead of omitting the key and inheriting
+  whatever `stpsf.gridded_library.CreatePSFLibrary` falls back to. Same grid
+  as before -- that fallback is also 101 -- but the size now lives in this
+  repo and cannot change under a dependency bump.
+  * `default_fov_arcsec` returns `101 x pixelscale`, read from the live stpsf
+    instrument rather than tabulated, so it is per *detector*: 6.354" on the
+    NIRCam long-wave SCAs, 3.11" short-wave, 11.203" MIRI. It previously
+    returned 4.09/8.10, which are what `fov_arcsec=4`/`8` produce after the
+    odd-parity bump -- the values the older grids were built with, not any
+    default. A grid built with no FOV set was therefore *named* FOV4 while
+    holding 6.35", the ambiguity the token exists to remove.
+  * `psf_size` is unchanged and unrelated: it is the drizzled stamp side,
+    applied to both bands, and the grid FOV only has to be at least that.
+    `Pipeline._check_psf_size_fits_grids` now warns when it is not, naming the
+    smallest offending grid -- `eval_ePSF` returns zero outside the grid, so
+    the stamp would otherwise be silently zero-padded and the PSF wings lost.
+  * Loading stays FOV-agnostic (`fov_agnostic_pattern`), so the FOV-less
+    patterns every config carries keep finding both generations of grid.
+    Verified against the 493 grids on arc: a `..._MJD\d+_GRID9_OS4` pattern
+    loads the nine `FOV8`-named UDS F770W grids and reads their FOV back.
+  * The 493 grids were audited for a `(stem, MJD, GRID, sampling)` key served
+    at more than one FOV: none. Three families hold two FOVs over disjoint
+    epochs (see TODO.md).
+  * `poetry run pytest`: 396 passed.
 - [x] PSF grid filenames always carry the field of view (2026-08-14).
   `PSFFactory.include_fov` now defaults True, so a grid is named
   `..._MJD60308_FOV4_GRID25_OS4.fits` and FOV4, FOV8 and FOV30 sets of the

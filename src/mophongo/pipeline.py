@@ -1110,6 +1110,7 @@ class Pipeline:
                 "%s-res band: loaded %d ePSF grid(s) matching %r",
                 band, len(dpsf.epsf_obj.epsf), pattern,
             )
+            self._check_psf_size_fits_grids(dpsf, band)
             return
 
         if not cfg.psf_autobuild:
@@ -1150,6 +1151,35 @@ class Pipeline:
         logger.info(
             "%s-res band: generated and loaded %d ePSF grid(s)",
             band, len(dpsf.epsf_obj.epsf),
+        )
+        self._check_psf_size_fits_grids(dpsf, band)
+
+    def _check_psf_size_fits_grids(self, dpsf, band: str) -> None:
+        """Warn when the requested stamp is wider than the grids that feed it.
+
+        ``psf_size`` is the drizzled stamp side in arcsec; a grid's ``FOV``
+        header is its own side in arcsec. Asking for more than the grid holds
+        does not fail: ``eval_ePSF`` returns zero outside the grid's support,
+        so the stamp is simply padded with zeros and the missing wings are
+        quietly absent from the kernel and from every template. That is worth
+        a line in the log rather than a silent truncation of the PSF.
+        """
+        size = self.run_config.psf_size
+        if not size:
+            return
+        meta_by_key = getattr(dpsf.epsf_obj, "epsf_meta", None) or {}
+        fovs = {key: meta.get("fov") for key, meta in meta_by_key.items()}
+        short = {key: fov for key, fov in fovs.items()
+                 if fov is not None and float(size) > float(fov)}
+        if not short:
+            return
+        worst = min(short, key=lambda k: short[k])
+        logger.warning(
+            "%s-res band: psf_size=%.3g\" exceeds the field of view of %d of "
+            "%d ePSF grid(s); the stamp is zero-padded beyond the grid and the "
+            "PSF wings outside it are lost. Smallest: %s at FOV=%.3g\". Rebuild "
+            "those grids at a larger fov_arcsec, or lower psf_size.",
+            band, float(size), len(short), len(fovs), worst, short[worst],
         )
 
     def _region_maps(self):

@@ -7,12 +7,16 @@
 # fit table and template table are not rewritten.
 set -euo pipefail
 : "${RUN:?RUN not set}" "${CFG:?CFG not set}"
+RUNNUM=${RUNNUM:-1}
+# A run pins one mophongo version: its source and venv live beside its configs
+# in run<N>/config, not at the tree root, so two runs can differ.
+CFGDIR=$RUN/run$RUNNUM/config
 export MPLCONFIGDIR=$RUN/.mplconfig
 export MPLBACKEND=Agg
 mkdir -p $RUN
 cd $RUN
 echo "=== $CFG [scene plots] on $(hostname): $(nproc) cores, $(free -g | awk '/Mem/{print $2}')GB"
-echo "=== mophongo: $(cat $RUN/setup/SRC_VERSION 2>/dev/null || echo 'SRC_VERSION missing')"
-time $RUN/setup/venv/bin/python $RUN/jobs/scene_plots.py $RUN/setup/${CFG}_canfar.json
+echo "=== mophongo: $(cat $CFGDIR/SRC_VERSION 2>/dev/null || echo 'SRC_VERSION missing')"
+time $CFGDIR/venv/bin/python $RUN/jobs/scene_plots.py $CFGDIR/${CFG}_canfar.json
 echo "=== scene figures: $(ls $RUN/run*/*/$CFG/scenes 2>/dev/null | wc -l)"
 echo RUN_DONE

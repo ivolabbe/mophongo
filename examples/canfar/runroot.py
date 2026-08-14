@@ -26,14 +26,27 @@ from pathlib import Path
 #: enough for a release, and the grids and outputs in it are useful to the
 #: collaboration rather than to one user.
 #:
-#: The tree beneath it separates what a release *is* from what made it::
+#: The tree beneath it::
 #:
-#:     <root>/setup/                source, venv, configs, tarballs
-#:     <root>/data/                 staged mosaics
-#:     <root>/PSF/                  ePSF grids
+#:     <root>/bin/                      job scripts
+#:     <root>/data/                     staged mosaics
+#:     <root>/PSF/                      ePSF grids
+#:     <root>/run<N>/config/mophongo/   the source this run used
+#:     <root>/run<N>/config/venv/       the environment built from it
+#:     <root>/run<N>/config/*.json      the configs it ran
 #:     <root>/run<N>/<field>/<band>/    one directory per fitted band
 #:     <root>/run<N>/<field>/<field>_repair_cache.fits
-DEFAULT_RUN = "/arc/projects/minerva/ifl/release_v1.0"
+#:
+#: Inputs and grids are shared across runs because they do not change. The
+#: source and the environment are NOT: a run pins one mophongo version, and
+#: keeping the checkout and the venv inside the run is what makes that
+#: reproducible rather than a claim about what was installed at the time.
+DEFAULT_RUN = "/arc/projects/minerva/ifl/mophongo"
+
+
+def config_dir(root: str, number: int) -> str:
+    """Where one run keeps its source, environment and configs."""
+    return f"{root}/run{number}/config"
 
 
 def run_number() -> int:

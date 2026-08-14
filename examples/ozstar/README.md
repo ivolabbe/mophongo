@@ -11,24 +11,44 @@ on the laptop staying awake.
 
 ## Layout
 
+Everything stable sits *above* the run directory; a run holds only what that
+version of the catalog produced.
+
 ```
-$OZSTAR_RUN/                        default /fred/<project>/<user>/mophongo/run
-├── venv/                  mophongo, built with the module python
-├── venv-vos/              CADC transfer tools, built with /usr/bin/python3
-├── mophongo/              the GitHub clone
-├── PSF/                   MJD-tagged ePSF grids, shared by every run
-├── jobs/                  setup_env.sh, stage.sh, run.slurm, ...
-├── data/                  staged inputs, shared between the bands of a field
-├── logs/                  SLURM job output
-├── <name>_ozstar.json     rewritten configs
-├── <name>_stage.tsv       per-config copy lists
-└── out/<name>/            run outputs
+$OZSTAR_BASE/               default /fred/<project>/<user>/mophongo
+├── bin/                job scripts, shared by every run
+│   ├── venv/             mophongo + dependencies (module python)
+│   └── venv-vos/         CADC transfer tools (OS python)
+├── mophongo/           the GitHub clone
+├── PSF/                MJD-tagged ePSF grids
+├── data/               inputs staged from CANFAR arc
+└── run3/               one catalog version      $OZSTAR_RUN
+    ├── config/           <name>_ozstar.json, <name>_stage.tsv
+    ├── logs/             SLURM logs of jobs with no single output dir
+    └── <field>/          uds, cosmos, egs
+        ├── <field>_repair_cache.fits
+        └── <field>_<band>/   the fit's out_dir, and its own SLURM log
 ```
+
+**The version is the run directory, never a name suffix.** Outputs are
+`run3/uds/uds_f770w`, not `run3/uds/uds_f770w_v3`: a suffix would repeat the
+version in every path and every output filename, and make two attempts at one
+release impossible to compare without renaming files. `ozify.py` refuses a
+`--suffix` that looks like a version; bump `$OZSTAR_RUN` instead. `--suffix`
+remains for genuine variants, such as a `_trial` patch beside the full field.
+
+Data, grids, clone and both venvs are shared because a release is re-fitted
+many times against the same 64 GB of inputs and the same ~500 grids, and only
+the configs and the outputs change. It also means deleting a run destroys only
+that run — which was learned the hard way, when consolidating two runs left the
+entire campaign in one directory and a single `rm -rf` took all of it.
 
 Two venvs, because the two kinds of node do not share a software stack. The
 datamover nodes, which are the only ones that can reach CANFAR, have no `/apps`
 module tree at all, so the module python the science venv is built against does
 not exist there; `venv-vos` is built from the OS python, which is on every node.
+Note a venv is not relocatable — its shebangs are absolute — so `setup` rebuilds
+rather than moves one.
 
 Everything lives on `/fred`. `/home` has a 20 GB quota and a single field's
 staged inputs are about 15 GB.
@@ -49,17 +69,19 @@ P=~/.venvs/canfar/bin/python
 ## Everything at once
 
 ```bash
-$P campaign.py                        # every config in ../minerva, trial patches
-$P campaign.py --fields uds           # one field
-$P campaign.py --r-trial 0 --suffix _v1.0b     # the full-field release
-$P campaign.py --dry-run              # print the plan, submit nothing
+OZSTAR_RUN=run3 ./release.sh --skip-stage   # the full-field release
+$P campaign.py --fields uds                 # one field
+$P campaign.py --dry-run                    # print the plan, submit nothing
 ```
 
-It rewrites the configs, uploads them, builds the environment, submits one
-staging job per field and then one fit per config, wiring the dependencies:
-each field's fits wait on that field's staging, and a field with no PSF grids
-yet sends one band ahead of the others to build them. `release_v1.0b.sh` is the
-release recipe with the arguments already filled in.
+It rewrites the configs, uploads them, builds the environment, and submits the
+work as one dependency graph: a staging job per field (unless the inputs are
+already on `/fred`), then one saturation-repair job per field, then that field's
+band fits chained behind it with `--dependency=afterok`. The repair is shared
+because it depends on the detection band alone, so one job per field fills the
+cache the bands then reload. `release.sh` is the release recipe with the
+arguments filled in; set `$OZSTAR_RUN` to choose which run directory it lands
+in.
 
 Then watch with `submit.py status` / `logs` / `fetch`.
 
@@ -75,6 +97,7 @@ $P submit.py push uds_f770w                    # upload config and job scripts
 $P submit.py stage uds_f770w                   # datamover job: arc -> /fred/data
 $P submit.py run   uds_f770w --after <jobid>   # the fit
 $P submit.py fetch uds_f770w                   # bring the small outputs home
+$P submit.py push-arc <dir> arc:<uri>          # datamover job: /fred -> CANFAR
 ```
 
 A cheap smoke run on a small patch, without touching the source config:
@@ -95,7 +118,9 @@ imported; queued ones pick it up when they start.
 It indexes the relevant `arc:projects/minerva` subtrees — reusing
 `../canfar/arcify.py`, since finding the files is the same problem on both
 platforms — and then rewrites every input path in a local `RunConfig` to
-`$OZSTAR_RUN/data/<basename>`, writing the copy list to `<name>_stage.tsv`.
+`$OZSTAR_BASE/data/<basename>`, writing the copy list to `<name>_stage.tsv`,
+and points `out_dir` at `$OZSTAR_RUN/<field>/<name>` with a per-field
+`repair_cache_path` one level above it.
 Unlike the CANFAR version it lists *every* input, compressed or not: nothing
 can be read in place.
 
@@ -131,15 +156,73 @@ Copying is much cheaper than rebuilding when the grids are already local, so
 scp writes straight to the destination name, the build skips a filename that
 exists, and a half-written grid then reaches a fit as a truncated FITS.
 
-Once `$OZSTAR_RUN/PSF` is populated the fits need no network at all, which is
-the point — the grids are cached there and every later run reads them.
+Once `$OZSTAR_BASE/PSF` is populated the fits need no network at all, which is
+the point — the grids sit above the run directory and every later run reads
+them.
+
+The build is parallel and deduplicated: it enumerates `(pattern, csv)` across
+all configs, so a field's F444W set is built once rather than once per band,
+and fans the epochs of each pattern over the cores the session may use. That
+matters because the shared grids dominate — F444W is 25 PSFs per grid across
+every epoch plus the 30" halo grids, against 9 per grid for a band's own MIRI
+set. Measured: 301 grids in 17.9 min against 3h44m for the serial version.
+
+Two things to know. A login session is cgroup-capped (four cores here) and
+`nproc` under-reports it because the site sets `OMP_NUM_THREADS=1`, so the
+worker count comes from `sched_getaffinity`. And the workers share one stpsf
+OPD cache: on a cold cache two can read an OPD while a third is still
+downloading it, which fails that epoch with `Empty or corrupt FITS file`. It
+fails loudly per epoch and a re-run repairs it, but a first build against an
+empty `$STPSF_PATH` is safest done serially.
+
+The grids are one per epoch: `PSFFactory.date_mode` defaults to `"all"` (one
+per unique integer MJD) and the configs state `psf_date_mode` explicitly. The
+old default, `"modal"`, gave a single date for an exposure list spanning years,
+which silently defeats the MJD-tagged lookup the grids exist for. See
+`../canfar/README.md` for the full account; it applies to both platforms.
+
+## Sending results back to CANFAR
+
+`push-arc` is a `datamover` job that copies a directory on `/fred` into
+`arc:`. Being a SLURM job is the point: a transfer measured in hours outlives
+the laptop, the ssh session and the terminal.
+
+```bash
+$P submit.py push-arc /fred/.../mophongo/PSF arc:projects/minerva/ifl/mophongo/PSF
+$P submit.py push-arc /fred/.../mophongo/run3 arc:.../mophongo/run3 --compress
+```
+
+It diffs the destination first and sends only what is missing, so a job that
+hits the 24 h wall is resubmitted rather than restarted.
+
+Measured throughput to arc: **1.25 MB/s on one stream, 14 MB/s on six**. The
+bottleneck is per-connection latency to Canada, not bandwidth, which is why
+this fans out rather than calling `vsync`. Many small files run slower than
+that ceiling — per-file round trips dominate.
+
+Decide what to send before deciding how. A full campaign is ~520 GB, of which
+the photometry is ~350 MB:
+
+| product | share | regenerable |
+|---|---|---|
+| `*_stamps.h5` | ~30% | yes |
+| `*_residual.fits` | ~11% | yes |
+| `scenes/` (10k PNGs) | ~9% | yes, `scene_plots.py` redraws without refitting |
+| **`*_fit_table.fits`** | **0.07%** | **no** |
+
+`--compress` gzips before sending, which pays on the zero-heavy products and
+not on ePSF grids (measured 1.1x — dense float arrays). Two footnotes worth
+having: `vls -R` returns nothing here, silently, so the diff lists per
+directory instead; and `vcp` leaves files `0600`, useless in shared project
+space, so the job opens read permission at the end.
 
 ## Resources
 
 Eight cores per fit, and memory per *field*: 72 GB for UDS and COSMOS, 96 GB
 for EGS (`submit.MEM_GB_BY_FIELD`). `--cores` and `--mem` override.
 
-Measured, on the UDS full-field bands at 16 cores / 96 GB:
+Measured on the v1.0b campaign (UDS bands at 16 cores / 96 GB; the defaults
+above came from these numbers):
 
 | run | wall | peak RSS |
 |---|---|---|

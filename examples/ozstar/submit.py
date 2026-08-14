@@ -389,6 +389,25 @@ def do_run(args: argparse.Namespace) -> None:
         sync=not args.no_sync, step=getattr(args, "step", "all"))
 
 
+def push_arc(srcdir: str, dest: str, jobs: int = 6, compress: bool = False,
+             dryrun: bool = False, walltime: str = "24:00:00") -> str:
+    """Submit the datamover job that pushes a directory to CANFAR arc.
+
+    A SLURM job, so it outlives the laptop, the ssh session and the terminal -
+    which is the whole point for a transfer measured in hours.
+    """
+    return sbatch("push_arc.sh", f"{JOB_PREFIX}-push",
+                  {"SRCDIR": srcdir, "DEST": dest, "JOBS": str(jobs),
+                   "COMPRESS": "1" if compress else "0",
+                   "DRYRUN": "1" if dryrun else "0"},
+                  extra=[f"--partition={STAGE_PARTITION}", f"--time={walltime}"])
+
+
+def do_push_arc(args: argparse.Namespace) -> None:
+    push_arc(args.srcdir, args.dest, args.jobs, args.compress, args.dry_run,
+             args.time)
+
+
 def do_status(args: argparse.Namespace) -> None:
     fmt = "%.12i %.30j %.10P %.9T %.11M %.11l %.5C %.9m %R"
     print(ssh(f"squeue -u {ozroot.user()} -o {shlex.quote(fmt)}").rstrip())
@@ -500,6 +519,18 @@ def main() -> None:
                    help="do not pull the latest main first (it is pulled by default, "
                         "so a run never uses a stale clone)")
     p.set_defaults(func=do_run)
+
+    p = sub.add_parser("push-arc", help="datamover job: push a directory to CANFAR arc")
+    p.add_argument("srcdir", help="local directory on /fred")
+    p.add_argument("dest", help="arc: URI to push into")
+    p.add_argument("--jobs", type=int, default=6,
+                   help="parallel streams; 6 measured 14 MB/s against 1.25 for one")
+    p.add_argument("--compress", action="store_true",
+                   help="gzip before sending; pays on zero-heavy products "
+                        "(residuals, stamps), not on dense ePSF grids (1.1x)")
+    p.add_argument("--dry-run", action="store_true", help="list what would be sent")
+    p.add_argument("--time", default="24:00:00")
+    p.set_defaults(func=do_push_arc)
 
     p = sub.add_parser("status", help="the queue")
     p.add_argument("--done", metavar="YYYY-MM-DD",

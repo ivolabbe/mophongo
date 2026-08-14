@@ -9,6 +9,10 @@
 # PAIRS is a comma-separated list of src:dst run names.
 set -euo pipefail
 : "${RUN:?RUN not set}" "${PAIRS:?PAIRS not set}"
+RUNNUM=${RUNNUM:-1}
+# A run pins one mophongo version: its source and venv live beside its configs
+# in run<N>/config, not at the tree root, so two runs can differ.
+CFGDIR=$RUN/run$RUNNUM/config
 
 copied=0
 IFS=',' read -ra items <<< "$PAIRS"

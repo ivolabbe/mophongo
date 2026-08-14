@@ -138,21 +138,61 @@ mismatches the pipeline would otherwise trip over:
 - MIRI frame tables ship as `*_f770_wcs.csv` while the filter parser expects the
   `f770w` spelling, so they are copied under the expected name.
 
-It also repoints `psf_dir` at the uploaded grids and `out_dir` into the run tree.
+It also repoints `psf_dir` at the uploaded grids, `out_dir` at
+`run<N>/<field>/<name>`, and `repair_cache_path` at a per-field cache one level
+above that.
+
+## PSF grids: one per epoch
+
+`PSFFactory.date_mode` defaults to `"all"` — one grid per unique integer MJD in
+the exposure list — and the MINERVA configs state `psf_date_mode` explicitly
+rather than relying on it. This matters because the grids are MJD-tagged and
+looked up by nearest date: the old default, `"modal"`, returned the centre of
+the densest five-day window, i.e. a *single* date. Bands whose exposures span up
+to four years were then fitted with one epoch's wavefront, and nothing said so.
+
+Two consequences worth knowing. Autobuild only fires when *nothing* matches the
+pattern, so a band left holding one grid never gains the rest — an incomplete
+set is indistinguishable from a complete one at load time. And grids built under
+the old default are still single-epoch; check a band's grid count against
+`dates_from_csv(csv, mode="all")` before trusting it.
 
 ## Layout on arc
 
+Everything stable sits *above* the numbered run; a run holds only what that
+version of the catalog produced.
+
 ```
-$CANFAR_RUN/                        e.g. /arc/projects/minerva/ifl
-├── venv/                  mophongo and its dependencies
-├── mophongo/              the uploaded source
-├── PSF/                   STPSF MJD-tagged grids, shared by every run
-├── jobs/                  setup_env.sh, stage.sh, run.sh, seed_cache.sh, ...
-├── data/                  decompressed inputs, shared between bands
-├── <name>_canfar.json     rewritten configs
-├── <name>_stage.tsv       per-config copy lists
-└── out/<name>/            run outputs
+$CANFAR_RUN/                    e.g. /arc/projects/minerva/ifl/release_v1.0
+├── bin/                job scripts, shared by every run
+├── PSF/                STPSF MJD-tagged grids
+├── data/               decompressed inputs, shared between bands
+└── run<N>/             one catalog version      $CANFAR_RUNNUM
+    ├── config/           <name>_canfar.json, <name>_stage.tsv, venv, source
+    └── <field>/          uds, cosmos, egs
+        ├── <field>_repair_cache.fits
+        └── <field>_<band>/   the fit's out_dir
 ```
+
+**The version is the run directory, never a name suffix** — `run1/uds/uds_f770w`,
+not `run1/uds/uds_f770w_v1.0`. A suffix repeats the version in every path and
+every output filename, and makes two attempts at one release impossible to
+compare without renaming files. Bump `$CANFAR_RUNNUM` instead; `arcify.py`
+refuses a `--suffix` that looks like a version. `--suffix` remains for genuine
+variants, such as a `_trial` patch beside the full field.
+
+Data and grids are shared because a release is re-fitted many times against the
+same inputs and the same grids, and only the configs and outputs change. The
+per-field level is what lets a field's bands share one saturation-repair cache:
+`RunConfig.repair_cache_path` resolves `..` against `out_dir`, so band one fits
+the saturated cores and the rest reload. `examples/ozstar` uses the same
+layout, and both call the same `_repair_cache_name`, so the two cannot drift.
+
+The generated configs are **not** tracked in git: `arcify.py` rewrites them for
+one account and one cluster, so they are working data like `examples/minerva`.
+The config actually used by a run is copied into its own output directory,
+which is better provenance than a repo copy — it cannot drift from the products
+beside it.
 
 `/arc/home/<user>` keeps only `.ssh`, `.ssl` and a README pointing here: its
 quota is far too small for a campaign's outputs, which is why `runroot.py`

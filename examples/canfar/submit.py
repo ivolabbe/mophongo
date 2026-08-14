@@ -326,6 +326,39 @@ def do_seed(args: argparse.Namespace) -> None:
     print(tidy(first_log(ids), 25))
 
 
+def do_psf(args: argparse.Namespace) -> None:
+    """Build every ePSF grid the configs will ask for, one job per field.
+
+    The same dedicated step OzStar runs on its login node, as a container job
+    here. Doing it before any fit is what removes the leader logic downstream:
+    the work list is known up front, so ``build_psfs.py`` deduplicates the
+    ``(pattern, csv)`` pairs and a field's F444W set is built once rather than
+    once per band, by one process pool that cannot race with itself. Inside a
+    fit the autobuild sees only its own band and has to be serialised against
+    the others.
+
+    One job per field, several fields at once: fields share no pattern, so
+    their work lists are disjoint. Within a job the fan-out is over epochs,
+    ``--workers`` wide.
+    """
+    by_field: dict[str, list[str]] = {}
+    for name in args.names:
+        by_field.setdefault(name.split("_")[0], []).append(name)
+    do_upload_cfg(args.names)
+    ids = []
+    for field, names in sorted(by_field.items()):
+        log.info("%s: %d config(s)", field, len(names))
+        ids.append(launch(session_name("mophongo-psf", field), "build_psfs.sh",
+                          args.cores, args.ram,
+                          {"RUN": RUN, "CFGS": ",".join(names),
+                           "WORKERS": str(args.workers)}))
+    if args.no_wait:
+        return
+    wait(ids)
+    for sid in ids:
+        print(tidy(first_log([sid]), 12))
+
+
 def do_stage(args: argparse.Namespace) -> None:
     """Stage inputs: one band per field first, then the rest concurrently.
 
@@ -605,6 +638,18 @@ def main() -> None:
     p = sub.add_parser("seed", help="copy cached PSF/kernel maps between runs")
     p.add_argument("pairs", nargs="+", metavar="SRC:DST")
     p.set_defaults(func=do_seed)
+
+    p = sub.add_parser("psf", help="build the ePSF grids, one job per field")
+    p.add_argument("names", nargs="+")
+    # 16 cores is the platform maximum and the fan-out is over epochs, of which
+    # a field has dozens; the grids themselves are a few hundred MB each while
+    # being written, so memory tracks workers rather than field size.
+    p.add_argument("--cores", type=int, default=16)
+    p.add_argument("--ram", type=int, default=64)
+    p.add_argument("--workers", type=int, default=0,
+                   help="processes per pattern; 0 = every core the container got")
+    p.add_argument("--no-wait", action="store_true")
+    p.set_defaults(func=do_psf)
 
     p = sub.add_parser("stage", help="decompress a config's inputs on /arc")
     p.add_argument("names", nargs="+")

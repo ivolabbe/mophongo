@@ -11,9 +11,12 @@
 # job finished the file first.
 set -euo pipefail
 : "${RUN:?RUN not set}" "${CFG:?CFG not set}"
+RUNNUM=${RUNNUM:-1}
+# the manifest sits beside the config it belongs to, in this run's config dir
+CFGDIR=$RUN/run$RUNNUM/config
 D=$RUN/data
 mkdir -p $D
-manifest=$RUN/${CFG}_stage.tsv
+manifest=$CFGDIR/${CFG}_stage.tsv
 [[ -s $manifest ]] || { echo "no manifest: $manifest" >&2; exit 1; }
 
 while IFS=$'\t' read -r src dst; do

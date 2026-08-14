@@ -9,6 +9,7 @@ each stage by hand::
     python campaign.py --fields uds cosmos   # only those fields
     python campaign.py --from stage          # inputs already pushed and built
     python campaign.py --from arcify --skip stage   # inputs already decompressed
+    python campaign.py --skip psf repair     # grids and repair caches in place
     python campaign.py --dry-run             # print the plan, do nothing
 
 To ship a code change into a campaign without rebuilding the venv, fast-forward
@@ -17,30 +18,37 @@ the run's checkout first and start the campaign after it::
     python submit.py sync
     python campaign.py --from arcify --skip stage
 
-The submission is two phases, and the split is the point:
+The submission is three phases, and the split is the point:
 
-1. ``prep`` - one short job per field, every field at once, **waited on**. It
-   builds that field's shared F444W and 30" halo ePSF grids and runs the
-   saturation repair into a per-field cache.
-2. ``run`` - every band of every field, fired off together and not waited on.
+1. ``psf`` - one job per field, every field at once, **waited on**. It builds
+   every ePSF grid the field's configs name: the shared F444W set, the 30"
+   halo set, and each band's MIRI set, deduplicated across the configs and
+   fanned out over epochs inside the job. Skipped when the grids are already
+   on arc, which is the usual case after a release has been fitted once.
+2. ``repair`` - one F444W-only job per field, every field at once, **waited
+   on**. The saturation repair depends on the detection band alone, so one run
+   of it serves every band of the field.
+3. ``run`` - every band of every field, in a single dispatch, not waited on.
 
-Everything phase 1 produces is shared by a field's bands and depends on the
-detection band alone, so without it each band rebuilds the same grids, re-runs
-the same repair, and several of them write one cache file at the same time.
-Phase 1 costs one short job per field and buys a clean parallel fan-out.
+The first two phases exist so the third needs no order at all. Everything they
+produce is shared by a field's bands and depends on the detection band alone,
+so without them each band rebuilds the same grids, re-runs the same repair, and
+several of them write one cache file at the same time. This is the same shape
+``examples/ozstar`` uses, where the grid build has to be a separate step
+regardless: its compute nodes cannot reach MAST.
 
 Three more things this encodes, all learned the hard way:
 
 * Fits are submitted and *not* waited on. A campaign must not depend on a
   laptop-side process staying alive; jobs live on CANFAR once submitted. Only
-  the prep phase waits, because everything after it depends on the result.
+  the two preparation phases wait, because everything after them depends on
+  the result.
 * Staging runs one band per field to completion before the rest, because bands
   of a field share that field's F444W mosaic and segmap - several GB that would
   otherwise be decompressed once per band.
-* With ``--skip prep``, a field whose PSF grids are missing runs one band alone
-  first. With no grid matching the config pattern the pipeline builds one, and
-  several bands of a field building the same grids at once race on a single
-  ``psf_dir``.
+* The grid check reads the arc PSF directory, not the laptop: that is where the
+  run will look, and a field whose grids an earlier job built is complete there
+  while the local directory has never held them.
 
 Progress afterwards: ``submit.py status``, ``submit.py logs <id>``,
 ``submit.py fetch <name>``.
@@ -62,11 +70,11 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 PSF_DIR = REPO / "data" / "PSF"
 PYTHON = sys.executable
-STEPS = ["push", "setup", "arcify", "seed", "stage", "prep", "run"]
+STEPS = ["push", "setup", "arcify", "seed", "psf", "stage", "repair", "run"]
 
 
-#: Band a field's prep job runs. It builds the shared F444W and halo grids and
-#: the saturation repair, so every other band of the field starts warm. F770W
+#: Band a field's repair job runs. The repair depends on the detection band
+#: alone, so any band of the field produces the same cache. F770W
 #: by preference: it is the shortest MIRI band, so its own lo-res grids and
 #: fit are the cheapest way to get the shared products built. Falls back to
 #: whichever band sorts first when a field has no F770W.
@@ -74,7 +82,7 @@ PREP_BAND = "f770w"
 
 
 def prep_leader(bands: list[str]) -> str:
-    """The band whose job builds a field's shared products."""
+    """The band whose job builds a field's shared repair cache."""
     for name in bands:
         if name.split("_")[1:2] == [PREP_BAND] or f"_{PREP_BAND}" in name:
             return name
@@ -112,7 +120,7 @@ def configs_for(fields: list[str] | None) -> list[Path]:
 def arc_psf_names() -> list[str]:
     """Grid filenames already sitting in the run tree's ``PSF/`` directory.
 
-    The question ``has_shared_grids`` really asks is whether the *run* will
+    The question ``has_all_grids`` really asks is whether the *run* will
     find its grids, and the run reads ``$RUN/PSF`` on arc rather than the
     laptop. A field whose grids an earlier job built is complete there while
     the local directory has never held them, and serialising a leader for it
@@ -136,26 +144,29 @@ def arc_psf_names() -> list[str]:
     return out.stdout.split()
 
 
-def has_shared_grids(cfg_path: Path, extra_names: list[str] | None = None) -> bool:
-    """Whether the field's *hi-res* PSF grids already exist.
+def has_all_grids(cfg_path: Path, extra_names: list[str] | None = None) -> bool:
+    """Whether every ePSF grid family this config needs is already on arc.
 
-    ``extra_names`` are filenames known to be on arc already; they count the
-    same as local ones, since the run reads the arc copy.
+    ``extra_names`` are filenames known to be on arc; they count the same as
+    local ones, since the run reads the arc copy.
 
-    Only ``pattern_hi`` matters here. Every band of a field matches the same
-    F444W grids, so several bands building those at once write the same
-    filenames into one ``psf_dir``. The per-band MIRI grids of ``pattern_lo``
-    have distinct names and can be built concurrently without racing.
+    All three families, because this decides whether the ``psf`` step has work
+    to do: the shared F444W set of ``pattern_hi``, the band's own MIRI set of
+    ``pattern_lo``, and - with ``repair_saturated`` - the 30" halo set every
+    band of the field derives from ``pattern_hi``.
 
-    With ``repair_saturated`` the 30" halo grids are shared the same way -
-    every band of the field derives the same ``_FOV30_GRID1_OS4`` names from
-    ``pattern_hi`` - so they count here too.
+    A family counts as present when *anything* matches it. That is deliberately
+    weak: it cannot tell a complete set of epochs from one grid, which is what
+    ``psf_provenance`` is for. It exists to skip a step that would otherwise
+    queue three jobs to discover there is nothing to build.
     """
     cfg = json.loads(re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text()))
     pattern = cfg.get("pattern_hi")
     if not pattern:
         return True
     patterns = [pattern]
+    if cfg.get("pattern_lo"):
+        patterns.append(cfg["pattern_lo"])
     if cfg.get("repair_saturated"):
         # same derivation as Pipeline._repair_halo_pattern
         patterns.append(cfg.get("repair_psf_pattern")
@@ -212,6 +223,19 @@ def main() -> None:
     if "seed" in todo and args.seed_from is not None:
         pairs = [f"{c.stem}{args.seed_from}:{c.stem}{args.suffix}" for c in cfgs]
         run_step(["submit.py", "seed", *pairs], args.dry_run)
+    # Phase 1: every ePSF grid the release needs, one job per field, waited on.
+    # Skipped when the grids are all there already, which is the usual case
+    # once a release has been fitted once - the check reads arc, not the
+    # laptop, since that is where the run will look.
+    if "psf" in todo:
+        on_arc = [] if args.dry_run else arc_psf_names()
+        missing = [c.stem for c in cfgs if not has_all_grids(c, on_arc)]
+        if missing or args.dry_run:
+            log.info("psf: %d of %d config(s) still need grids (%s)",
+                     len(missing), len(cfgs), ", ".join(missing[:4]) or "-")
+            run_step(["submit.py", "psf", *names], args.dry_run)
+        else:
+            log.info("psf: every grid is on arc already; skipping")
     if "stage" in todo:
         run_step(["submit.py", "stage", *names], args.dry_run)
     # Left out unless overridden, so submit.py picks the per-field size rather
@@ -226,36 +250,27 @@ def main() -> None:
     for name, cfg in zip(names, cfgs):
         by_field.setdefault(name.split("_")[0], []).append((name, cfg))
 
-    # Phase 1: one prep job per field, all fields at once, waited on. Each
-    # builds that field's shared ePSF grids and runs the saturation repair
-    # into a per-field cache. It is short next to a fit, and it is what lets
-    # phase 2 fire every band of every field in parallel: without it each band
-    # rebuilds the same grids and re-runs the same repair, and several of them
-    # write one cache file at the same time.
-    if "prep" in todo:
+    # Phase 2: the saturation repair, one F444W-only job per field, all fields
+    # at once, waited on. It depends on the detection band alone, so one run
+    # of it serves every band of the field; submitting the bands without it
+    # means each re-runs the same repair and several write one cache file at
+    # the same time.
+    if "repair" in todo:
         first = [prep_leader([n for n, _ in entries])
                  for entries in by_field.values()]
-        log.info("prep: %d field(s), %s", len(first), ", ".join(first))
-        run_step(["submit.py", "run", *first, "--step", "prep", *common],
+        log.info("repair: %d field(s), %s", len(first), ", ".join(first))
+        run_step(["submit.py", "run", *first, "--step", "repair", *common],
                  args.dry_run)
 
     if "run" not in todo:
         return
 
-    on_arc = [] if args.dry_run else arc_psf_names()
-    for field, entries in by_field.items():
-        bands = [n for n, _ in entries]
-        # prep already built the grids; without it, fall back to the old
-        # one-band-first order so concurrent builds do not race on psf_dir
-        needs_build = ("prep" not in todo
-                       and not has_shared_grids(entries[0][1], on_arc))
-        if needs_build and len(bands) > 1:
-            log.info("%s: shared grids missing (F444W or the 30\" halo), "
-                     "running %s alone to build them", field, bands[0])
-            run_step(["submit.py", "run", bands[0], *common], args.dry_run)
-            run_step(["submit.py", "run", *bands[1:], *common, "--no-wait"], args.dry_run)
-        else:
-            run_step(["submit.py", "run", *bands, *common, "--no-wait"], args.dry_run)
+    # Phase 3: every band of every field, in one dispatch. Nothing is shared
+    # that has not already been built, so there is no leader to elect and no
+    # order to keep -- which is the point of paying for phases 1 and 2.
+    all_bands = [n for entries in by_field.values() for n, _ in entries]
+    log.info("run: %d band(s) in one dispatch", len(all_bands))
+    run_step(["submit.py", "run", *all_bands, *common, "--no-wait"], args.dry_run)
 
     log.info("submitted. watch with:  python submit.py status")
 

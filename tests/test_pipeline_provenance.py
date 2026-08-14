@@ -127,6 +127,35 @@ def test_fov_agnostic_pattern_reads_old_and_new_names():
     assert default_fov_arcsec("SOMETHING_ELSE") is None
 
 
+def test_epsf_key_resolves_across_the_fov_token():
+    """A FOV-less pattern must resolve to the FOV-named key that was loaded.
+
+    The loader relaxes the pattern to find the files, so the keys it stores are
+    filenames carrying ``_FOV``. Resolving the per-frame key with the raw
+    pattern then matched nothing and returned the pattern itself, and every
+    position failed with a KeyError listing the keys that plainly did match --
+    which is how the first CANFAR run2 campaign died, nine minutes into each
+    prep job.
+    """
+    from types import SimpleNamespace
+
+    from mophongo.psf import DrizzlePSF
+
+    keys = ["COSMOS_NRCA5_F444W_MJD59934_FOV4_GRID25_OS4",
+            "COSMOS_NRCA5_F444W_MJD60043_FOV6_GRID25_OS4"]
+    dpsf = DrizzlePSF.__new__(DrizzlePSF)
+    dpsf.epsf_obj = SimpleNamespace(
+        epsf={k: None for k in keys},
+        epsf_meta={"COSMOS_NRCA5_F444W_MJD59934_FOV4_GRID25_OS4": {"mjd": 59934.0},
+                   "COSMOS_NRCA5_F444W_MJD60043_FOV6_GRID25_OS4": {"mjd": 60043.0}},
+    )
+    pattern = r"COSMOS_NRC.._F444W_MJD\d+_GRID25_OS4"
+
+    # nearest MJD wins, across both field-of-view generations
+    assert dpsf._resolve_epsf_key(pattern, "jw01_nrcalong_cal.fits", 59940.0) == keys[0]
+    assert dpsf._resolve_epsf_key(pattern, "jw01_nrcalong_cal.fits", 60050.0) == keys[1]
+
+
 def test_psf_size_larger_than_grid_fov_warns(caplog):
     """A stamp wider than the grid it is drizzled from is flagged, not silent."""
     from types import SimpleNamespace

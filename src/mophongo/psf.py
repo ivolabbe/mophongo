@@ -2406,8 +2406,15 @@ class DrizzlePSF:
         if pattern in self.epsf_obj.epsf:
             return pattern  # exact literal match, no work needed
 
+        # The keys are filenames, which carry an _FOV token the configs'
+        # patterns do not, so relax the pattern exactly as the loader did when
+        # it read those files. Without this the load succeeds and the lookup
+        # then fails on every position, which is a KeyError listing hundreds of
+        # keys that plainly do match.
+        from .jwst_psf import fov_agnostic_pattern
+
         try:
-            rx = re.compile(f"^{pattern}$")
+            rx = re.compile(f"^{fov_agnostic_pattern(pattern)}$")
         except re.error:
             return pattern  # not a valid regex; let caller fail clearly
         matches = sorted(k for k in self.epsf_obj.epsf if rx.match(k))

@@ -85,37 +85,6 @@ def build_one_date(job: tuple[str, str, str, float | None, float]) -> int:
     return len(list(Path(psf_dir).glob("*.fits"))) - before
 
 
-def build_for_pattern(pattern: str, csv: str, psf_dir: str, date_mode: str,
-                      fov_default: float | None, workers: int = 1) -> int:
-    """Build every grid implied by ``pattern`` and the exposure list.
-
-    The fan-out is over epochs and lives here rather than inside
-    ``PSFFactory``: the run tree pulls mophongo from GitHub main, so a toolkit
-    script cannot assume a parameter that has not landed there yet. Each epoch
-    writes its own filenames, so the workers cannot collide.
-    """
-    from mophongo.psf_factory import dates_from_csv
-
-    dates = dates_from_csv(csv, mode=date_mode)
-    log.info("  %s: %d date(s) from %s", pattern, len(dates), Path(csv).name)
-    jobs = [(pattern, csv, psf_dir, fov_default, float(m)) for m in dates]
-    if workers <= 1 or len(jobs) == 1:
-        return sum(build_one_date(j) for j in jobs)
-
-    added = 0
-    # spawn: stpsf and its OPD state do not survive a fork cleanly
-    with ProcessPoolExecutor(max_workers=min(workers, len(jobs)),
-                             mp_context=mp.get_context("spawn")) as pool:
-        futures = {pool.submit(build_one_date, j): j for j in jobs}
-        for fut in as_completed(futures):
-            mjd = futures[fut][4]
-            try:
-                added += fut.result()
-            except Exception as exc:  # noqa: BLE001 - one epoch must not stop the rest
-                log.error("  FAILED MJD%d: %s: %s", mjd, type(exc).__name__, exc)
-    return added
-
-
 def pattern_tasks(configs: list[Path]) -> list[tuple[str, str, str, float | None]]:
     """Every distinct ``(pattern, csv, psf_dir, fov)`` the configs imply.
 
@@ -148,6 +117,34 @@ def pattern_tasks(configs: list[Path]) -> list[tuple[str, str, str, float | None
     return tasks
 
 
+def epoch_tasks(tasks: list[tuple[str, str, str, float | None]],
+                date_mode: str) -> list[tuple[str, str, str, float | None, float]]:
+    """Expand ``(pattern, csv, psf_dir, fov)`` into one entry per epoch.
+
+    One grid is one filename, so the epoch is the smallest unit that can be
+    handed to a worker -- or to another container -- with no possibility of a
+    collision. Ordered deterministically, so every shard of a campaign derives
+    the same list and slicing it is all the coordination they need.
+
+    Epochs already on disk are dropped here rather than inside the factory, so
+    the shards divide the work that is actually left.
+    """
+    from mophongo.psf_factory import dates_from_csv
+
+    out: list[tuple[str, str, str, float | None, float]] = []
+    for pattern, csv, psf_dir, fov in tasks:
+        dates = dates_from_csv(csv, mode=date_mode)
+        have = {int(m.group(1))
+                for f in Path(psf_dir).glob("*.fits")
+                if re.search(pattern.replace("_GRID", r"(?:_FOV\d+)?_GRID", 1), f.name)
+                for m in [re.search(r"_MJD(\d+)", f.name)] if m}
+        missing = [d for d in dates if int(round(d)) not in have]
+        log.info("  %s: %d date(s), %d already built", pattern, len(dates),
+                 len(dates) - len(missing))
+        out += [(pattern, csv, psf_dir, fov, float(d)) for d in missing]
+    return sorted(out, key=lambda t: (t[0], t[4]))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("configs", nargs="+", type=Path)
@@ -160,31 +157,73 @@ def main() -> None:
     ap.add_argument("--date-mode", default="all",
                     help="one grid per unique integer MJD by default; see "
                          "psf_factory.dates_from_csv")
+    ap.add_argument("--shard", default="1/1", metavar="K/N",
+                    help="build only shard K of N of the whole work list. "
+                         "Every shard derives the same deduplicated list from "
+                         "the same configs and takes every Nth item, so the "
+                         "shards are disjoint by construction and no two "
+                         "processes -- in this container or another -- can "
+                         "target one filename. This is what lets a campaign "
+                         "fan the grids over as many jobs as it likes rather "
+                         "than one per field")
     args = ap.parse_args()
+
+    k, _, n = args.shard.partition("/")
+    k, n = int(k), int(n or 1)
+    if not 1 <= k <= n:
+        raise SystemExit(f"--shard K/N needs 1 <= K <= N (got {args.shard})")
 
     # sched_getaffinity, not cpu_count: the cgroup cap is what we actually get.
     workers = args.workers or len(os.sched_getaffinity(0))
 
-    tasks = pattern_tasks(args.configs)
-    log.info("%d distinct pattern(s) from %d config(s), %d worker(s)",
-             len(tasks), len(args.configs), workers)
+    # The unit of work is one (pattern, epoch): one grid, one filename. The
+    # whole list is known here, so it is enumerated and deduplicated once and
+    # then sliced -- the F444W set a field's seven bands share appears in it
+    # exactly once, whichever shard happens to own each of its epochs.
+    epochs = epoch_tasks(pattern_tasks(args.configs), args.date_mode)
+    mine = epochs[k - 1::n]
+    log.info("%d grid(s) over %d config(s); shard %d/%d takes %d, %d worker(s)",
+             len(epochs), len(args.configs), k, n, len(mine), workers)
+
+    if not mine:
+        log.info("nothing to build")
+        log.info("PSF_BUILD_DONE")
+        return
+
+    # Serially, before any fan-out: build_jwst_psf resolves each epoch's
+    # wavefront by querying MAST and caching it under STPSF_PATH, and workers
+    # doing that concurrently race to write the same cache files -- which
+    # surfaces as "Empty or corrupt FITS file" on whichever epoch lost.
+    from mophongo.psf_factory import prewarm_opds
+
+    for inst in ("NIRCAM", "MIRI"):
+        dates = [t[4] for t in mine if f"_{inst[:4]}" in t[0].upper()
+                 or (inst == "NIRCAM" and "_NRC" in t[0].upper())]
+        if dates:
+            try:
+                prewarm_opds(inst, sorted(set(dates)))
+            except Exception as exc:  # noqa: BLE001 - the worker will fetch it
+                log.warning("  OPD prewarm for %s failed (%s); workers will fetch",
+                            inst, type(exc).__name__)
 
     total = 0
     start_all = time.time()
-    for i, (pattern, csv, psf_dir, fov) in enumerate(tasks, 1):
-        start = time.time()
-        log.info("=== [%d/%d] %s", i, len(tasks), pattern)
-        try:
-            added = build_for_pattern(pattern, csv, psf_dir, args.date_mode,
-                                      fov, workers)
-        except Exception as exc:  # noqa: BLE001 - one pattern must not stop the rest
-            log.error("FAILED %s: %s: %s", pattern, type(exc).__name__, exc)
-            continue
-        total += added
-        log.info("=== [%d/%d] %s done in %.1f min, +%d grid(s) (%d total, "
-                 "%.1f min elapsed)", i, len(tasks), pattern,
-                 (time.time() - start) / 60, added, total,
-                 (time.time() - start_all) / 60)
+    done = 0
+    with ProcessPoolExecutor(max_workers=min(workers, len(mine)),
+                             mp_context=mp.get_context("spawn")) as pool:
+        futures = {pool.submit(build_one_date, job): job for job in mine}
+        for fut in as_completed(futures):
+            pattern, _, _, _, mjd = futures[fut]
+            done += 1
+            try:
+                total += fut.result()
+            except Exception as exc:  # noqa: BLE001 - one epoch must not stop the rest
+                log.error("FAILED %s MJD%d: %s: %s", pattern, mjd,
+                          type(exc).__name__, exc)
+                continue
+            log.info("[%d/%d] %s MJD%d done (%d built, %.1f min elapsed)",
+                     done, len(mine), pattern, mjd, total,
+                     (time.time() - start_all) / 60)
     log.info("built %d grid(s) in %.1f min", total, (time.time() - start_all) / 60)
     log.info("PSF_BUILD_DONE")
 

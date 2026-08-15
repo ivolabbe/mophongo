@@ -386,31 +386,29 @@ def do_seed(args: argparse.Namespace) -> None:
 
 
 def do_psf(args: argparse.Namespace) -> None:
-    """Build every ePSF grid the configs will ask for, one job per field.
+    """Build every ePSF grid the configs will ask for, sharded over N jobs.
 
-    The same dedicated step OzStar runs on its login node, as a container job
-    here. Doing it before any fit is what removes the leader logic downstream:
-    the work list is known up front, so ``build_psfs.py`` deduplicates the
-    ``(pattern, csv)`` pairs and a field's F444W set is built once rather than
-    once per band, by one process pool that cannot race with itself. Inside a
-    fit the autobuild sees only its own band and has to be serialised against
-    the others.
+    The unit of work is one ``(pattern, epoch)`` -- one grid, one filename --
+    and the whole list is known before anything starts, which is what makes
+    this embarrassingly parallel. ``build_psfs.py`` derives the same
+    deduplicated list in every job and takes every Nth entry, so the shards are
+    disjoint by construction: the F444W set a field's seven bands share is
+    enumerated once, and no two containers can target the same file. Nothing
+    has to be serialised, and the fan-out is not tied to the number of fields.
 
-    One job per field, several fields at once: fields share no pattern, so
-    their work lists are disjoint. Within a job the fan-out is over epochs,
-    ``--workers`` wide.
+    Inside a fit it cannot work this way -- the autobuild sees one band's
+    patterns and has no idea what the other sixteen will want -- which is why
+    a band building grids has to be alone in its ``psf_dir``.
     """
-    by_field: dict[str, list[str]] = {}
-    for name in args.names:
-        by_field.setdefault(name.split("_")[0], []).append(name)
     do_upload_cfg(args.names)
     ids = []
-    for field, names in sorted(by_field.items()):
-        log.info("%s: %d config(s)", field, len(names))
-        ids.append(launch(session_name("mophongo-psf", field), "build_psfs.sh",
+    for k in range(1, args.jobs + 1):
+        ids.append(launch(session_name("mophongo-psf", str(k)), "build_psfs.sh",
                           args.cores, args.ram,
-                          {"RUN": RUN, "CFGS": ",".join(names),
+                          {"RUN": RUN, "CFGS": ",".join(args.names),
+                           "SHARD": f"{k}/{args.jobs}",
                            "WORKERS": str(args.workers)}))
+    log.info("%d shard(s) over %d config(s)", args.jobs, len(args.names))
     if args.no_wait:
         return
     wait(ids)
@@ -700,15 +698,16 @@ def main() -> None:
     p.add_argument("pairs", nargs="+", metavar="SRC:DST")
     p.set_defaults(func=do_seed)
 
-    p = sub.add_parser("psf", help="build the ePSF grids, one job per field")
+    p = sub.add_parser("psf", help="build the ePSF grids, sharded over jobs")
     p.add_argument("names", nargs="+")
-    # 16 cores is the platform maximum and the fan-out is over epochs, of which
-    # a field has dozens; the grids themselves are a few hundred MB each while
-    # being written, so memory tracks workers rather than field size.
-    p.add_argument("--cores", type=int, default=16)
-    p.add_argument("--ram", type=int, default=64)
+    # Shards are disjoint by construction, so this is a free dial: more jobs is
+    # more grids at once, bounded by what the platform will schedule.
+    p.add_argument("--jobs", type=int, default=6,
+                   help="containers to spread the grid list over (default 6)")
+    p.add_argument("--cores", type=int, default=8)
+    p.add_argument("--ram", type=int, default=32)
     p.add_argument("--workers", type=int, default=0,
-                   help="processes per pattern; 0 = every core the container got")
+                   help="processes per job; 0 = every core the container got")
     p.add_argument("--no-wait", action="store_true")
     p.set_defaults(func=do_psf)
 

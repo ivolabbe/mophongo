@@ -3,6 +3,53 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] ePSF completeness is a question about dates (2026-08-15).
+  `Pipeline._missing_psf_dates` returns `dates_from_csv(csv, psf_date_mode)`
+  minus the `_MJD` tokens of the files matching the pattern, and `_load_epsf`
+  builds exactly those, one `PSFFactory(date_mode=<mjd>)` call each. A band
+  holding 99 of 100 epochs costs one grid. It also catches what a match count
+  cannot: a set built under the old `modal` default holds one grid for a band
+  spanning years, matches the pattern, loads, and looks healthy -- here it is
+  one epoch present and the rest missing.
+  * Grids carry no provenance any more. `grid_provenance`, `csv_fingerprint`,
+    `read_stdpsf_provenance` and `write_stdpsf(provenance=...)` are gone, with
+    the `HIERARCH MPH` cards they wrote. A grid is its detector, filter, epoch
+    and field of view, all of them already in the filename, and none of them a
+    function of the rest of the exposure list -- so stamping the list meant
+    that adding one frame invalidated every grid built from it.
+  * FOV is not compared either: a drizzled stamp smaller than the grid it
+    comes from is fine, and `_check_psf_size_fits_grids` warns when it is not.
+  * `RunConfig.psf_provenance` keeps its name and now decides only what
+    happens when epochs are missing and `psf_autobuild` is off: `"warn"`
+    (default) names them and fits with the rest, `"error"` refuses, `"off"`
+    skips the check.
+  * Removed with it: `examples/canfar/jobs/{convert_psf_names.py,
+    restamp_psfs.py,convert_all_psfs.sh}` and
+    `tests/test_convert_psf_names.py`, whose purpose was stamping those cards.
+    The FOV renaming they also did is already applied to all 493 grids on arc.
+  * `poetry run pytest`: 391 passed.
+- [x] Deep audit of `astrowhit/aperpy@aperpy-2` and clean-slate aperture
+  photometry design (2026-08-14). The upstream branch is pinned at
+  `dfe8a43cd2c76a3f886e0b506cf33d2b3a2f0038`; the completed report is
+  `docs/APERPY2_CLEAN_IMPLEMENTATION_REPORT.md`.
+  * Decision: build a sibling Mophongo `AperturePipeline`, not an upstream
+    wrapper/direct port and not an expansion of the template-fit `Pipeline`.
+    `DrizzlePSF`-derived `PSFRegionMap` products should be the strict JWST
+    default, with an explicit empirical/static fallback for unsupported or
+    unprovenanced inputs.
+  * The PSF work is not the dominant implementation cost: local PSF/kernel
+    maps and region-wise whole-image convolution already exist. The main gaps
+    are arbitrary-radius absolute COG lookups, mask/variance/covariance
+    treatment, direct SEP aperture/Kron semantics, empirical empty-aperture
+    calibration, artifact provenance, and validation fixtures absent upstream.
+  * The readiness audit found three PSFFactory regressions: public `build()`
+    raises `NameError` on undefined `csv_path`/`mode`, `from_csv()` does not set
+    the provenance its writers consume, and filenames hard-code `OS4`.
+    `PSFRegionMap` persistence/cache identity and strict no-coverage behavior
+    also need hardening before it is a production default; tracked in TODO.
+  * Validation: focused existing convolution/EE tests passed (20 passed,
+    14 deselected). The `PSFFactory.build()` failure was reproduced directly.
+    No full suite was run for this documentation-only audit.
 - [x] JWST ePSF grids build at a stated 101 native pixels (2026-08-14).
   `jwst_psf.DEFAULT_FOV_PIXELS = 101` is passed as `fov_pixels` whenever a
   config sets no `psf_fov_arcsec`, instead of omitting the key and inheriting

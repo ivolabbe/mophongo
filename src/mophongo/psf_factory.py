@@ -107,46 +107,6 @@ def _cluster_mjds(mjd: np.ndarray, delta_day: float = 2.0) -> list[float]:
     return centres
 
 
-def csv_fingerprint(csv_path: str | os.PathLike) -> str:
-    """Short content hash of an exposure list.
-
-    Content, not path or mtime: the same listing re-downloaded to a new
-    location is the same input, and a listing rewritten in place with a new
-    exposure is not. Unreadable returns ``""``, which never matches.
-    """
-    import hashlib
-
-    try:
-        return hashlib.sha256(Path(csv_path).read_bytes()).hexdigest()[:16]
-    except OSError:
-        return ""
-
-
-def grid_provenance(
-    csv_path: str | os.PathLike,
-    date_mode: str | float | Time,
-    fov_arcsec: float | None = None,
-) -> dict[str, str]:
-    """Provenance cards for grids built from ``csv_path`` under ``date_mode``.
-
-    These are the two inputs the filename does not record. A grid is named
-    for its detector, filter, MJD, grid size and oversampling, so a set built
-    with ``date_mode="modal"`` — one epoch for a band whose exposures span
-    years — is indistinguishable on disk from a per-epoch set, and the
-    autobuild in ``Pipeline._load_epsf`` fires only when *nothing* matches
-    the pattern, so the wrong set is reused forever. Stamping the exposure
-    list and the date mode is what lets a load check rather than assume.
-    """
-    prov = {
-        "csv": Path(csv_path).name,
-        "csvhash": csv_fingerprint(csv_path),
-        "datemode": str(date_mode),
-    }
-    if fov_arcsec is not None:
-        prov["fov"] = f"{float(fov_arcsec):g}"
-    return prov
-
-
 def dates_from_csv(
     csv_path: str | os.PathLike,
     mode: str | float | Time = "modal",
@@ -221,8 +181,7 @@ def _build_and_save(job: dict) -> str:
 
     backend = BACKENDS[job["telescope"]]
     grid = backend.build(**job["build"])
-    write_stdpsf(job["outpath"], grid, overwrite=job["overwrite"],
-                 provenance=job["provenance"], verbose=False)
+    write_stdpsf(job["outpath"], grid, overwrite=job["overwrite"], verbose=False)
     return job["outpath"]
 
 
@@ -337,12 +296,6 @@ class PSFFactory:
     #: code runs again in every worker. A script that drives this needs the
     #: usual ``if __name__ == "__main__":`` guard.
     workers: int = 1
-    #: What the grids being written were derived from, stamped into each file
-    #: as ``HIERARCH MPH *`` cards. Set by :meth:`from_csv`; a grid built by
-    #: the lower-level entry points carries whatever the caller sets here.
-    #: See :func:`mophongo.jwst_psf.read_stdpsf_provenance`.
-    provenance: dict | None = None
-
     # ── filename helper ────────────────────────────────────────────────
     def filename(
         self,
@@ -413,9 +366,6 @@ class PSFFactory:
         os_ = oversample if oversample is not None else self.oversample
         fov = fov_arcsec if fov_arcsec is not None else self.fov_arcsec
         det_samp = use_detsampled_psf if use_detsampled_psf is not None else self.use_detsampled_psf
-        # stamp what these grids come from, so a later run can tell whether
-        # the cache on disk was built the way it now wants
-        self.provenance = grid_provenance(csv_path, mode, fov)
 
         grid = backend.build(
             instrument=instrument,
@@ -548,7 +498,7 @@ class PSFFactory:
             prewarm_opds(instrument, [mjd for _, mjd, _ in jobs])
             payload = [
                 {"telescope": telescope, "outpath": str(path),
-                 "overwrite": self.overwrite, "provenance": self.provenance,
+                 "overwrite": self.overwrite,
                  "build": {**build_kw, "detector": det, "date": mjd}}
                 for det, mjd, path in jobs
             ]
@@ -599,6 +549,5 @@ class PSFFactory:
         if outpath is None:
             return None
         outpath.parent.mkdir(parents=True, exist_ok=True)
-        write_stdpsf(outpath, grid, overwrite=self.overwrite,
-                     provenance=self.provenance, verbose=self.verbose)
+        write_stdpsf(outpath, grid, overwrite=self.overwrite, verbose=self.verbose)
         return outpath

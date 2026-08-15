@@ -442,182 +442,137 @@ def test_repair_step_is_a_noop_without_saturation_repair(tmp_path):
     assert calls == []
 
 
-def _stdpsf(path, provenance=None):
-    """A minimal STDPSF-shaped grid file, optionally stamped."""
+def _stdpsf(path, mjd=None):
+    """A minimal STDPSF-shaped grid file."""
     import numpy as np
 
     from mophongo.jwst_psf import write_stdpsf
 
     write_stdpsf(path, np.zeros((4, 5, 5), dtype=np.float32),
                  xgrid=np.array([10, 30]), ygrid=np.array([10, 30]),
-                 detector="NRCA1", filt="F444W", overwrite=True,
-                 provenance=provenance)
+                 detector="NRCA1", filt="F444W", overwrite=True)
 
 
-def test_psf_grid_provenance_round_trips(tmp_path):
-    """What a grid was built from survives the write and reads back."""
-    from mophongo.jwst_psf import read_stdpsf_provenance
-    from mophongo.psf_factory import csv_fingerprint, grid_provenance
-
-    csv = tmp_path / "uds_wcs.csv"
-    csv.write_text("file,mjd-avg\nexp1.fits,60000.0\n")
-    want = grid_provenance(csv, "all", 30.0)
-    assert want == {"csv": "uds_wcs.csv", "csvhash": csv_fingerprint(csv),
-                    "datemode": "all", "fov": "30"}
-
-    path = tmp_path / "grid.fits"
-    _stdpsf(path, want)
-    assert read_stdpsf_provenance(path) == want
-
-    # content, not path or mtime: a rewritten listing is a different input
-    csv.write_text("file,mjd-avg\nexp1.fits,60000.0\nexp2.fits,61500.0\n")
-    assert grid_provenance(csv, "all", 30.0)["csvhash"] != want["csvhash"]
-
-    # unstamped and unreadable both read as "nothing known"
-    _stdpsf(tmp_path / "bare.fits")
-    assert read_stdpsf_provenance(tmp_path / "bare.fits") == {}
-    assert read_stdpsf_provenance(tmp_path / "absent.fits") == {}
+def _pipe_with(tmp_path, psf_dir, csv, **extra):
+    return Pipeline.from_config(_write_config(tmp_path, {
+        "psf_dir": str(psf_dir), "psf_date_mode": "all",
+        "csv_hi": str(csv), **extra}))
 
 
-def test_stale_psf_grids_flags_a_different_date_mode_or_exposure_list(tmp_path):
-    """Grids that match the pattern but not this run are reported stale.
+def _csv(path, mjds):
+    path.write_text("file,mjd-avg\n"
+                    + "".join(f"exp{i}.fits,{m}\n" for i, m in enumerate(mjds)))
+    return path
 
-    The autobuild fires only when *nothing* matches the pattern, so a grid
-    built under the old one-epoch-per-band default matches, loads, and is
-    never corrected. This check is what makes that visible.
+
+PATTERN = r"UDS_NRC.._F444W_MJD\d+_GRID25_OS4"
+
+
+def test_missing_psf_dates_is_the_set_difference(tmp_path):
+    """Completeness is dates required minus dates on disk, nothing else.
+
+    A grid is its detector, filter, epoch and field of view; none of those
+    depend on the rest of the exposure list, so adding a frame must cost the
+    one epoch it introduces rather than invalidating the grids already there.
     """
-    from mophongo.psf_factory import grid_provenance
-
     psf_dir = tmp_path / "PSF"
     psf_dir.mkdir()
-    csv = tmp_path / "uds_wcs.csv"
-    csv.write_text("file,mjd-avg\nexp1.fits,60000.0\n")
-    pattern = r"UDS_NRC.._F444W_MJD\d+_GRID25_OS4"
+    csv = _csv(tmp_path / "uds_wcs.csv", [60000.0, 60001.0, 60002.0])
+    for mjd in (60000, 60002):
+        _stdpsf(psf_dir / f"UDS_NRCA5_F444W_MJD{mjd}_FOV6_GRID25_OS4.fits")
 
-    current = grid_provenance(csv, "all", None)
-    _stdpsf(psf_dir / "UDS_NRCA1_F444W_MJD60000_GRID25_OS4.fits", current)
-    _stdpsf(psf_dir / "UDS_NRCA2_F444W_MJD60000_GRID25_OS4.fits",
-            grid_provenance(csv, "modal", None))          # wrong date mode
-    _stdpsf(psf_dir / "UDS_NRCA3_F444W_MJD60000_GRID25_OS4.fits",
-            {"csv": "other.csv", "csvhash": "deadbeef", "datemode": "all"})
-    _stdpsf(psf_dir / "UDS_NRCA4_F444W_MJD60000_GRID25_OS4.fits")  # unstamped
-    _stdpsf(psf_dir / "UDS_NRCB1_F1000W_MJD60000_GRID25_OS4.fits",
-            grid_provenance(csv, "modal", None))          # other pattern
+    pipe = _pipe_with(tmp_path, psf_dir, csv)
+    assert pipe._missing_psf_dates(PATTERN, str(csv)) == [60001.0]
 
-    pipe = Pipeline.from_config(_write_config(tmp_path, {
-        "psf_dir": str(psf_dir), "psf_date_mode": "all"}))
-    stale = pipe._stale_psf_grids(pattern, str(csv), None)
-    names = {p.name: reason for p, reason in stale}
+    # the FOV token in the filenames is not compared: a drizzled stamp may be
+    # smaller than the grid it comes from, and _check_psf_size_fits_grids is
+    # what speaks up when it is not
+    _stdpsf(psf_dir / "UDS_NRCA5_F444W_MJD60001_FOV11_GRID25_OS4.fits")
+    assert pipe._missing_psf_dates(PATTERN, str(csv)) == []
 
-    assert "UDS_NRCA1_F444W_MJD60000_GRID25_OS4.fits" not in names
-    assert "UDS_NRCB1_F1000W_MJD60000_GRID25_OS4.fits" not in names  # not matched
-    assert "datemode" in names["UDS_NRCA2_F444W_MJD60000_GRID25_OS4.fits"]
-    assert "csvhash" in names["UDS_NRCA3_F444W_MJD60000_GRID25_OS4.fits"]
-    assert "before provenance" in names["UDS_NRCA4_F444W_MJD60000_GRID25_OS4.fits"]
+    # a new frame asks for one more epoch, not for all of them again
+    _csv(csv, [60000.0, 60001.0, 60002.0, 60003.0])
+    assert pipe._missing_psf_dates(PATTERN, str(csv)) == [60003.0]
 
-    # opt out and everything matching the pattern is reused as before
-    off = Pipeline.from_config(_write_config(tmp_path, {
-        "psf_dir": str(psf_dir), "psf_date_mode": "all",
-        "psf_provenance": "off"}))
-    assert off._stale_psf_grids(pattern, str(csv), None) == []
+    assert _pipe_with(tmp_path, psf_dir, csv,
+                      psf_provenance="off")._missing_psf_dates(PATTERN, str(csv)) == []
 
 
-def test_psf_provenance_modes(tmp_path, caplog):
-    """warn reuses and says so; error refuses; the default is warn.
+def test_a_single_epoch_set_is_seen_as_incomplete(tmp_path):
+    """The case a match count cannot see: one grid for a multi-year band.
 
-    Stale grids are reused for now because the release still holds ~416
-    cluster-mode ones that would otherwise all rebuild on first contact. The
-    intended end state is rebuild -- see TODO.md.
+    A set built under the old ``date_mode="modal"`` default holds one epoch,
+    matches the pattern, loads, and looks entirely healthy.
     """
+    psf_dir = tmp_path / "PSF"
+    psf_dir.mkdir()
+    csv = _csv(tmp_path / "uds_wcs.csv", [59790.0, 60154.0, 60509.0])
+    _stdpsf(psf_dir / "UDS_NRCA5_F444W_MJD60154_FOV6_GRID25_OS4.fits")
+
+    pipe = _pipe_with(tmp_path, psf_dir, csv)
+    assert pipe._missing_psf_dates(PATTERN, str(csv)) == [59790.0, 60509.0]
+
+
+def test_load_epsf_builds_only_the_missing_epochs(tmp_path, monkeypatch):
+    """One factory call per missing date, and none for the epochs on disk."""
+    psf_dir = tmp_path / "PSF"
+    psf_dir.mkdir()
+    csv = _csv(tmp_path / "uds_wcs.csv", [60000.0, 60001.0, 60002.0])
+    _stdpsf(psf_dir / "UDS_NRCA5_F444W_MJD60000_FOV6_GRID25_OS4.fits")
+
+    built: list[float] = []
+
+    class _Factory:
+        def __init__(self, **kw):
+            built.append(kw["date_mode"])
+            assert kw.get("overwrite", False) is False
+
+        def from_csv(self, *a, **kw):
+            return []
+
+    class _Dpsf:
+        class epsf_obj:
+            epsf = {"one": object()}
+            epsf_meta = {"one": {"fov": 6.35}}
+
+            @staticmethod
+            def load_jwst_stdpsf(**kw):
+                return None
+
+    import mophongo.psf_factory as pf
+    monkeypatch.setattr(pf, "PSFFactory", _Factory)
+
+    pipe = _pipe_with(tmp_path, psf_dir, csv)
+    pipe._load_epsf(_Dpsf(), PATTERN, str(csv), "hi")
+    assert built == [60001.0, 60002.0]
+
+
+def test_missing_epochs_without_autobuild_warn_or_raise(tmp_path, caplog):
+    """With nothing able to build them, say which epochs are absent."""
     import logging
 
     import pytest
 
-    from mophongo.psf_factory import grid_provenance
-
     psf_dir = tmp_path / "PSF"
     psf_dir.mkdir()
-    csv = tmp_path / "uds_wcs.csv"
-    csv.write_text("file,mjd-avg\nexp1.fits,60000.0\n")
-    pattern = r"UDS_NRC.._F444W_MJD\d+_GRID25_OS4"
-    _stdpsf(psf_dir / "UDS_NRCA1_F444W_MJD60000_GRID25_OS4.fits",
-            grid_provenance(csv, "modal", None))
-
-    assert RunConfig.psf_provenance == "warn"
-
-    def pipe_for(mode):
-        return Pipeline.from_config(_write_config(tmp_path, {
-            "psf_dir": str(psf_dir), "psf_date_mode": "all",
-            "psf_provenance": mode, "csv_hi": str(csv)}))
-
-    class _Epsf:
-        epsf = {"one": object()}
-
-        def load_jwst_stdpsf(self, **kw):
-            return None
+    csv = _csv(tmp_path / "uds_wcs.csv", [60000.0, 60001.0])
+    _stdpsf(psf_dir / "UDS_NRCA5_F444W_MJD60000_FOV6_GRID25_OS4.fits")
 
     class _Dpsf:
-        epsf_obj = _Epsf()
+        class epsf_obj:
+            epsf = {"one": object()}
+            epsf_meta = {"one": {"fov": 6.35}}
 
-    warned = pipe_for("warn")
+            @staticmethod
+            def load_jwst_stdpsf(**kw):
+                return None
+
+    warned = _pipe_with(tmp_path, psf_dir, csv, psf_autobuild=False)
     with caplog.at_level(logging.WARNING):
-        warned._load_epsf(_Dpsf(), pattern, str(csv), "hi")
-    text = caplog.text
-    assert "USING THEM ANYWAY" in text and "datemode" in text
+        warned._load_epsf(_Dpsf(), PATTERN, str(csv), "hi")
+    assert "MJD60001" in caplog.text
 
-    with pytest.raises(FileNotFoundError, match="not built the way this run wants"):
-        pipe_for("error")._load_epsf(_Dpsf(), pattern, str(csv), "hi")
-
-
-def test_rebuild_removes_stale_grids_and_keeps_current_ones(tmp_path, monkeypatch):
-    """Rebuild deletes what disagrees and builds only what is missing.
-
-    Overwriting in place would not converge: a `cluster` grid is named for a
-    cluster midpoint and an `all` grid for a rounded MJD, so the new set never
-    regenerates the old filenames. The stale files would survive, keep
-    matching the pattern, and be re-flagged on every later run.
-    """
-    from mophongo.psf_factory import grid_provenance
-
-    psf_dir = tmp_path / "PSF"
-    psf_dir.mkdir()
-    csv = tmp_path / "uds_wcs.csv"
-    csv.write_text("file,mjd-avg\nexp1.fits,60000.0\n")
-    pattern = r"UDS_NRC.._F444W_MJD\d+_GRID25_OS4"
-
-    current = psf_dir / "UDS_NRCA1_F444W_MJD60000_GRID25_OS4.fits"
-    stale = psf_dir / "UDS_NRCA2_F444W_MJD59999_GRID25_OS4.fits"
-    _stdpsf(current, grid_provenance(csv, "all", None))
-    _stdpsf(stale, grid_provenance(csv, "cluster", None))
-
-    built = {}
-
-    class _Factory:
-        def __init__(self, **kw):
-            built.update(kw)
-
-        def from_csv(self, *a, **k):
-            return []
-
-    class _Epsf:
-        epsf = {"one": object()}
-
-        def load_jwst_stdpsf(self, **kw):
-            return None
-
-    class _Dpsf:
-        epsf_obj = _Epsf()
-
-    # _load_epsf imports PSFFactory from the module at call time
-    import mophongo.psf_factory as pf
-    monkeypatch.setattr(pf, "PSFFactory", _Factory)
-
-    pipe = Pipeline.from_config(_write_config(tmp_path, {
-        "psf_dir": str(psf_dir), "psf_date_mode": "all",
-        "psf_provenance": "rebuild", "csv_hi": str(csv)}))
-    pipe._load_epsf(_Dpsf(), pattern, str(csv), "hi")
-
-    assert not stale.exists(), "the disagreeing grid should be gone"
-    assert current.exists(), "a grid that agrees must be left alone"
-    # and the factory is not told to overwrite, so it skips what survives
-    assert not built.get("overwrite", False)
+    strict = _pipe_with(tmp_path, psf_dir, csv,
+                        psf_autobuild=False, psf_provenance="error")
+    with pytest.raises(FileNotFoundError, match="MJD60001"):
+        strict._load_epsf(_Dpsf(), PATTERN, str(csv), "hi")

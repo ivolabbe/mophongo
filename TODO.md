@@ -2,6 +2,25 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] Add direct tests of the `PSFFactory` public entry points (2026-08-14,
+  from the Aperpy clean-implementation audit): `build()` called on its own
+  rather than through `from_csv()`, and `filename()` across OS1/2/4/8 -- it
+  writes `OS4` for every oversampled grid. The provenance half of that audit
+  item is gone rather than fixed: grids no longer carry an exposure hash,
+  date mode or FOV card, so there is nothing left to keep in step (2026-08-15).
+
+- [ ] If the clean Aperpy-style pipeline is approved, implement it as a sibling
+  `AperturePipeline` following
+  `docs/APERPY2_CLEAN_IMPLEMENTATION_REPORT.md` (2026-08-14), with
+  `DrizzlePSF`/`PSFRegionMap` as the strict JWST default. Phase zero must add a
+  provider contract, versioned/content-validated map persistence, strict
+  no-coverage behavior, and absolute arbitrary-radius `ee_at`/`radius_at_ee`;
+  then recover SEP aperture/Kron semantics in a one-region fixture before
+  enabling spatial matching. Treat diagonal `K**2` variance as an
+  approximation and calibrate release errors with empty apertures by
+  depth/kernel class. Keep HST empirical PSFs, survey flags, dust/Gaia, and
+  EAZY as explicit fallbacks or downstream adapters.
+
 - [ ] Homogenize the ePSF grids on one field of view (2026-08-14). 118 of the
   369 science grids are the older, smaller build -- UDS entirely (both F444W
   detectors, all four MIRI bands), plus COSMOS's 22+22 NIRCam and 16 F770W
@@ -67,58 +86,27 @@ This file tracks future desired features, checks, and investigations.
     would demand ~1.6 cores per worker, which suits a 10-core laptop and not a
     4-core container. The shipped default should suit the container.
 
-- [ ] Flip `psf_provenance` from `"warn"` to `"rebuild"` (2026-08-13). Grids
-  now carry the exposure-list hash, date mode and FOV they were built from,
-  and `Pipeline._stale_psf_grids` compares them on load. The default is
-  `"warn"`: a mismatch is logged loudly and the grids are used anyway, because
-  the release still holds ~416 `cluster`-mode grids and unstamped legacy files
-  that would otherwise all rebuild the first time a band touched them, which
-  is not what anyone wants to discover mid-campaign.
-  `"rebuild"` is the end state: grids that disagree with the config are
-  deleted and the missing MJDs are built, so the release converges on
-  `all`-mode grids as bands run instead of needing a deliberate purge, and no
-  run ever fits with PSFs its config does not describe. Existing grids whose
-  encoded MJD filename is already in the target set are skipped
-  (`psf_factory.py:407`), so a band that is current except for one new epoch
-  costs one grid, not seventeen. Flip it once the cost is affordable -- about
-  416 grids and an estimated 9 hours of CPU worst case, spread across the
-  campaign rather than paid up front. Flipping means the `RunConfig` default and the
-  `psf_provenance` line `make_minerva_configs.py` writes. (`"error"` halts
-  instead of rebuilding, which is the stricter option if a rebuild mid-run is
-  ever the wrong thing; `"off"` skips the check.)
-
-- [ ] Decide whether to rebuild the existing PSF grids in `all` mode
-  (2026-08-13). The default is now `all`, but the grids already on disk (and
-  on arc, and on `/fred`) were built in `cluster` mode -- UDS F770W has 9
-  where `all` wants 17, COSMOS F444W 44 against 78. `_load_epsf` autobuilds
-  only when *nothing* matches the pattern, so those bands will never gain the
-  missing dates on their own -- but as of the provenance check they are no
-  longer reused *silently*: a `cluster`-mode grid reports a `datemode`
-  mismatch on every load. With `psf_provenance="warn"` it is still used;
-  running a field with `psf_provenance="rebuild"` is how to upgrade it, about
-  416 grids and an estimated 9 hours of nice'd login-node CPU in total. Until then a
-  release mixes `cluster`-mode grids (UDS, COSMOS F444W/F770W) with `all`-mode
-  ones (everything autobuilt from now on). Worth measuring first whether the
-  difference is detectable in the photometry: if the wavefront drift between
-  adjacent cluster dates is small, `cluster` is the cheaper convention and the
-  default should arguably be reconsidered rather than the grids rebuilt.
-
-- [x] `PSFFactory` grids carry provenance (2026-08-13). A filename records
-  detector, filter, MJD, grid size and oversampling but not the exposure list
-  or the `date_mode` that chose the MJDs, so a `cluster`-mode set was
-  indistinguishable on disk from an `all`-mode one and `_load_epsf` -- which
-  autobuilds only when *nothing* matches the pattern -- reused it forever.
-  `grid_provenance()` now stamps the exposure-list content hash, the date mode
-  and the FOV into each file as `HIERARCH MPH` cards;
-  `Pipeline._stale_psf_grids` compares them on load, and
-  `RunConfig.psf_provenance` decides what happens: `"warn"` (default for now)
-  reuses them loudly, `"rebuild"` regenerates in place with `overwrite=True`,
-  `"error"` refuses to run, `"off"` skips the check. Unstamped legacy grids
-  count as stale since they cannot be shown to agree.
-  * Follow-up: this catches a *wrong* grid set, not an *incomplete* one. A
-    band with one grid and one with seventeen still both "match", provided
-    both were built the same way. Comparing the loaded dates against
-    `dates_from_csv(csv, mode=cfg.psf_date_mode)` would close that too.
+- [x] Missing ePSF epochs are built; nothing else is (2026-08-15). The grids
+  already on disk (and on arc, and on `/fred`) were built in `cluster` mode --
+  UDS F770W has 9 where `all` wants 17, COSMOS F444W 44 against 78 -- and
+  `_load_epsf` used to autobuild only when *nothing* matched the pattern, so
+  those bands could never gain the missing dates on their own.
+  `Pipeline._missing_psf_dates` now asks the only question that matters:
+  `dates_from_csv(csv, psf_date_mode)` minus the `_MJD` tokens on disk. What
+  is missing is built, one factory call per epoch, and what is there is left
+  alone. A band holding 99 of 100 epochs costs one grid.
+  * This also retires the provenance experiment. Grids carry no
+    `HIERARCH MPH` cards, no exposure-list hash and no date mode: a grid is
+    its detector, filter, epoch and field of view, all of them already in its
+    filename, and none of them a function of the rest of the exposure list.
+    Stamping the list meant that adding one frame invalidated every grid built
+    from it, which is the opposite of what the file records. FOV is not
+    compared either -- a drizzled stamp smaller than its grid is fine, and
+    `_check_psf_size_fits_grids` warns when it is not.
+  * Still worth measuring: whether `cluster` and `all` differ detectably in
+    the photometry. If the wavefront drift between adjacent cluster dates is
+    small, `cluster` is the cheaper convention and the default is the thing to
+    reconsider, not the grids.
 
 - [ ] Measure the OzStar side of the campaign (2026-08-13). `examples/ozstar/`
   is written and running but has no measured numbers in it yet: staging wall

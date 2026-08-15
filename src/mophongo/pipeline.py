@@ -159,17 +159,17 @@ class RunConfig:
     # PSF stamp size in arcsec; None = full native ePSF stamp as generated
     psf_size: float | None = 4.0
     psf_autobuild: bool = True  # generate missing PSF grids with PSFFactory
-    # What to do about cached PSF grids that were NOT built from this run's
-    # exposure list and date mode (see Pipeline._stale_psf_grids):
-    #   "warn"    - say so loudly and use them anyway (current default)
-    #   "rebuild" - regenerate them in place
-    #   "error"   - refuse to run
-    #   "off"     - do not look
-    # "warn" while the release still holds ~416 cluster-mode grids that would
-    # otherwise all rebuild on first contact. The intended end state is
-    # "rebuild", so the grids converge on the config's own convention as bands
-    # run: a grid built another way is a silent photometric difference, and it
-    # is what fitted a whole release against one epoch per band. See TODO.md.
+    # What to do when the exposure list implies epochs that no grid provides
+    # and `psf_autobuild` is off (see Pipeline._missing_psf_dates). With
+    # autobuild on -- the default -- the missing epochs are simply built and
+    # this never applies.
+    #   "warn"  - name the missing epochs and fit with the ones that exist
+    #   "error" - refuse to run
+    #   "off"   - do not look; load whatever matches the pattern
+    # Grids themselves carry no provenance: a grid is its detector, filter,
+    # epoch and field of view, all of them in its filename, and none of them
+    # a function of the rest of the exposure list. Adding a frame to that list
+    # leaves every existing grid correct and asks for at most one more.
     psf_provenance: str = "warn"
     # Processes used when building ePSF grids. One (detector, date) grid is an
     # independent job of tens to low hundreds of MB, so this scales with cores
@@ -1000,157 +1000,106 @@ class Pipeline:
             self._load_epsf(self.dpsf_lo, cfg.pattern_lo, cfg.csv_lo, "lo")
             self._epsf_loaded = True
 
-    def _stale_psf_grids(
-        self, pattern: str, csv: str, fov: float | None
-    ) -> list[tuple[Path, str]]:
-        """Grid files matching ``pattern`` that this run should not reuse.
+    def _missing_psf_dates(self, pattern: str, csv: str) -> list[float]:
+        """Epochs this band needs for which no grid file exists.
 
-        A grid filename records the detector, filter, MJD, grid size and
-        oversampling — but not the exposure list it came from, nor the
-        ``date_mode`` that chose its MJDs. Those are stamped into the file as
-        ``HIERARCH MPH`` cards when it is written (:func:`grid_provenance`),
-        and compared here.
+        A grid is a function of its detector, filter, epoch and field of view,
+        and every one of those is in its own filename. Whether the *set* is
+        complete is a different question, and not one any single file can
+        answer: it is the dates the exposure list implies under
+        ``psf_date_mode``, minus the dates already on disk. Asking it this way
+        is what makes adding a frame to the exposure list cost one grid instead
+        of all of them -- the existing epochs are still exactly right.
 
-        This matters because the autobuild fires only when *nothing* matches
-        the pattern. A band holding one grid built under the old
-        ``date_mode="modal"`` default — a single epoch for exposures spanning
-        years — matches, loads, and is never corrected. Grids written before
-        provenance existed carry no cards; they cannot be shown to agree, so
-        they count as stale rather than being trusted.
-
-        Returns ``(path, reason)`` pairs; empty means every match is current.
-        What happens to them is ``RunConfig.psf_provenance``'s decision, not
-        this function's; ``"off"`` skips the check entirely.
+        Matching is on the ``_MJD<int>`` token, which is how the files are
+        named (:meth:`PSFFactory.filename` rounds), so it works for the
+        non-integer dates ``cluster`` and ``modal`` produce as well as for the
+        integer ones of ``all``. Field of view is deliberately not compared:
+        the drizzled stamp may be smaller than the grid it comes from, and
+        :meth:`_check_psf_size_fits_grids` is what says so when it is not.
         """
-        from .psf_factory import grid_provenance
-        from .jwst_psf import fov_agnostic_pattern, read_stdpsf_provenance
+        from .jwst_psf import fov_agnostic_pattern
+        from .psf_factory import dates_from_csv
 
         cfg = self.run_config
         if str(getattr(cfg, "psf_provenance", "warn")).lower() == "off":
             return []
+        want = dates_from_csv(csv, cfg.psf_date_mode)
         psf_dir = Path(cfg.psf_dir)
-        if not psf_dir.is_dir():
-            return []
-        want = grid_provenance(csv, cfg.psf_date_mode, fov)
-        stale: list[tuple[Path, str]] = []
-        # same relaxation the loader uses, so this checks exactly the files
-        # that will be loaded rather than a subset of them
         rx = re.compile(fov_agnostic_pattern(pattern))
-        for path in sorted(psf_dir.glob("*.fits")):
-            if not rx.search(path.name):
-                continue
-            got = read_stdpsf_provenance(path)
-            if not got:
-                stale.append((path, "built before provenance was recorded"))
-                continue
-            for key in ("csvhash", "datemode", "fov"):
-                if key in want and got.get(key) != want[key]:
-                    stale.append(
-                        (path, f"{key} {got.get(key)!r} != {want[key]!r}")
-                    )
-                    break
-        return stale
+        have: set[int] = set()
+        if psf_dir.is_dir():
+            for path in psf_dir.glob("*.fits"):
+                if not rx.search(path.name):
+                    continue
+                token = re.search(r"_MJD(\d+)", path.name)
+                if token:
+                    have.add(int(token.group(1)))
+        return [d for d in want if int(round(d)) not in have]
 
     def _load_epsf(self, dpsf, pattern: str, csv: str, band: str) -> None:
-        """Load the ePSF grids for one band, generating them if absent.
+        """Load the ePSF grids for one band, building the epochs that are absent.
 
-        ``load_jwst_stdpsf`` matches files under ``psf_dir`` against *pattern*
-        and loads nothing when none match, so a missing grid would otherwise
-        pass unnoticed and the run would continue without a PSF. When
-        ``psf_autobuild`` is set the grids are generated from the band's
-        exposure list; either way an empty result is an error.
+        Completeness is a question about dates, not about files: the exposure
+        list under ``psf_date_mode`` says which epochs this band needs, and
+        :meth:`_missing_psf_dates` says which of them no file provides. Only
+        those are built, one call per epoch, so a band already holding 99 of
+        100 epochs costs one grid rather than a hundred.
+
+        This is what catches the case a match count cannot: a set built under
+        the old ``date_mode="modal"`` default holds one grid for a band whose
+        exposures span years, matches the pattern, loads, and looks fine. Here
+        it is one epoch present and the rest missing.
         """
         cfg = self.run_config
         kw = _psf_factory_kwargs(pattern)
         fov = kw.get("fov_arcsec", cfg.psf_fov_arcsec)
-        stale = self._stale_psf_grids(pattern, csv, fov)
+        missing = self._missing_psf_dates(pattern, csv)
         mode = str(getattr(cfg, "psf_provenance", "warn")).lower()
-        if stale:
-            # The autobuild below fires only when NOTHING matches the pattern,
-            # so grids that match but were built from another exposure list or
-            # another date mode are reused for the life of the run tree unless
-            # something says otherwise here. That is how a whole release came
-            # to be fitted against one epoch per band.
+
+        if missing and not cfg.psf_autobuild:
             summary = (
-                f"{band}-res band: {len(stale)} ePSF grid(s) matching "
-                f"{pattern!r} under {cfg.psf_dir} were not built the way this "
-                f"run wants ({'; '.join(sorted({r for _, r in stale}))}). "
-                f"First: {stale[0][0].name}"
+                f"{band}-res band: {len(missing)} of "
+                f"{len(missing) + len(set(dpsf.epsf_obj.epsf))} epoch(s) that "
+                f"{Path(csv).name} implies under date_mode="
+                f"{cfg.psf_date_mode!r} have no grid under {cfg.psf_dir} "
+                f"(first MJD{int(round(missing[0]))}), and psf_autobuild is off"
             )
             if mode == "error":
-                raise FileNotFoundError(
-                    summary + ". Set psf_provenance to 'rebuild' to regenerate "
-                    "them, or 'warn' to use them anyway."
-                )
-            if mode == "rebuild":
-                # Delete the stale files, then build only what is missing.
-                # Overwriting in place does not converge: a `cluster` grid is
-                # named for a cluster midpoint and an `all` grid for a rounded
-                # MJD, so the new set does not regenerate the old filenames.
-                # They would survive, keep matching the pattern, keep being
-                # loaded alongside the fresh ones, and be re-flagged on every
-                # later run. Removing them is what makes the rebuild final --
-                # and it is why this is opt-in rather than the default.
-                logger.warning(
-                    "%s. Removing them and building what is missing.", summary,
-                )
-                for path, reason in stale:
-                    logger.info("  removing %s (%s)", path.name, reason)
-                    path.unlink(missing_ok=True)
-            else:
-                logger.warning(
-                    "%s. USING THEM ANYWAY (psf_provenance=%r): the PSFs this "
-                    "run fits with are not the ones its config describes.",
-                    summary, mode,
-                )
-                stale = []      # reuse: fall through to the ordinary load
-        dpsf.epsf_obj.load_jwst_stdpsf(local_dir=str(cfg.psf_dir), filter_pattern=pattern)
-        if dpsf.epsf_obj.epsf and not stale:
-            logger.info(
-                "%s-res band: loaded %d ePSF grid(s) matching %r",
-                band, len(dpsf.epsf_obj.epsf), pattern,
+                raise FileNotFoundError(summary)
+            logger.warning("%s; fitting with the epochs that are there", summary)
+
+        if missing and cfg.psf_autobuild:
+            from .psf_factory import PSFFactory
+
+            logger.warning(
+                "%s-res band: building %d missing epoch(s) for %r from %s "
+                "(minutes each, cached in %s)",
+                band, len(missing), pattern, Path(csv).name, cfg.psf_dir,
             )
-            self._check_psf_size_fits_grids(dpsf, band)
-            return
+            Path(cfg.psf_dir).mkdir(parents=True, exist_ok=True)
+            # An _FOV token in the pattern carries its own field of view;
+            # otherwise the config's psf_fov_arcsec applies.
+            kw.pop("fov_arcsec", None)
+            # One call per epoch: a literal MJD as date_mode selects exactly
+            # that date (psf_factory.dates_from_csv), so nothing already on
+            # disk is touched and no other epoch is recomputed.
+            for mjd in missing:
+                PSFFactory(outdir=str(cfg.psf_dir), fov_arcsec=fov,
+                           date_mode=float(mjd),
+                           workers=int(getattr(cfg, "psf_workers", 1) or 1),
+                           **kw).from_csv(str(csv), save=True)
 
-        if not cfg.psf_autobuild:
-            raise FileNotFoundError(
-                f"no PSF grids under {cfg.psf_dir} match {pattern!r} for the "
-                f"{band}-res band, and psf_autobuild is off"
-            )
-
-        from .psf_factory import PSFFactory
-
-        logger.warning(
-            "no PSF grids match %r under %s; generating them from %s with "
-            "PSFFactory(%s). This is slow (minutes to tens of minutes) but "
-            "one-off: the grids are cached in %s.",
-            pattern, cfg.psf_dir, csv,
-            ", ".join(f"{k}={v!r}" for k, v in sorted(kw.items())),
-            cfg.psf_dir,
-        )
-        Path(cfg.psf_dir).mkdir(parents=True, exist_ok=True)
-        # An _FOV token in the pattern carries its own field of view;
-        # otherwise the config's psf_fov_arcsec applies.
-        kw.pop("fov_arcsec", None)
-        # No overwrite: the stale files are already gone, and the factory
-        # skips any grid that still exists, so this builds the missing dates
-        # rather than the whole set. A band that is already current except for
-        # one new epoch costs one grid, not seventeen.
-        PSFFactory(outdir=str(cfg.psf_dir), fov_arcsec=fov,
-                   date_mode=cfg.psf_date_mode,
-                   workers=int(getattr(cfg, "psf_workers", 1) or 1),
-                   **kw).from_csv(str(csv), save=True)
         dpsf.epsf_obj.load_jwst_stdpsf(local_dir=str(cfg.psf_dir), filter_pattern=pattern)
         if not dpsf.epsf_obj.epsf:
             raise FileNotFoundError(
-                f"PSFFactory ran for the {band}-res band but no file under "
-                f"{cfg.psf_dir} matches {pattern!r}; the pattern and the "
-                "generated filenames disagree"
+                f"no PSF grids under {cfg.psf_dir} match {pattern!r} for the "
+                f"{band}-res band"
+                + ("" if cfg.psf_autobuild else " and psf_autobuild is off")
             )
         logger.info(
-            "%s-res band: generated and loaded %d ePSF grid(s)",
-            band, len(dpsf.epsf_obj.epsf),
+            "%s-res band: loaded %d ePSF grid(s) matching %r",
+            band, len(dpsf.epsf_obj.epsf), pattern,
         )
         self._check_psf_size_fits_grids(dpsf, band)
 

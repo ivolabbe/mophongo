@@ -108,14 +108,25 @@ def resolve_ref(ref: str) -> str:
     return remote
 
 
-def vcp(src: Path | str, dst: str, tries: int = 3) -> None:
+def vcp(src: Path | str, dst: str, tries: int = 3, timeout: int = 60) -> None:
     """Copy one file with ``vcp``. VOSpace flakes, so transient errors retry.
 
     A missing source is not transient: it raises ``FileNotFoundError`` at once
     rather than burning the retries.
+
+    Each attempt is capped. ``vcp`` can hang indefinitely on a connection the
+    far end has stopped answering, and it has: a 17-band dispatch sat inside
+    one upload for 21 hours, having printed the line before it, with nothing
+    submitted and no error. A timeout turns that into a retry.
     """
     for attempt in range(1, tries + 1):
-        proc = subprocess.run([str(VCP), str(src), dst], capture_output=True, text=True)
+        try:
+            proc = subprocess.run([str(VCP), str(src), dst],
+                                  capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log.warning("  vcp attempt %d/%d timed out after %ds: %s",
+                        attempt, tries, timeout, dst)
+            continue
         if proc.returncode == 0:
             return
         message = (proc.stderr or proc.stdout).strip()
@@ -125,6 +136,52 @@ def vcp(src: Path | str, dst: str, tries: int = 3) -> None:
                     proc.returncode, message.splitlines()[-1:] or "")
         time.sleep(5)
     raise SystemExit(f"vcp failed after {tries} attempts: {src} -> {dst}")
+
+
+def run_root_local() -> Path | None:
+    """The run tree as a local path, when a writable /arc mount exposes it.
+
+    Small files through VOSpace are slow and, when the service is unwell,
+    unreliable: a 17-band dispatch died uploading a 900-byte manifest after
+    three read timeouts, having already lost a day to one that never returned.
+    The sshfs mount is writable and answers in milliseconds, so file movement
+    should use it and keep ``vcp`` for when it is absent.
+
+    ``$CANFAR_RUN_LOCAL`` names the mounted run tree outright. Otherwise the
+    conventional mount points are tried, and since a mount stands for some
+    prefix of the arc path (``canfar-mount.sh /projects/minerva ~/canfar``
+    roots it at the project), each suffix of the run tree is tried under each
+    until one exists.
+    """
+    explicit = os.environ.get("CANFAR_RUN_LOCAL")
+    if explicit:
+        path = Path(explicit).expanduser()
+        return path if path.is_dir() else None
+    parts = RUN.strip("/").split("/")            # arc, projects, minerva, ifl, ...
+    for mount in ("canfar", "canfar_projects", "canfar_home"):
+        base = Path.home() / mount
+        if not base.is_dir():
+            continue
+        for start in range(1, len(parts)):
+            candidate = base.joinpath(*parts[start:])
+            if candidate.is_dir():
+                return candidate
+    return None
+
+
+def put(src: Path, dst_vos: str, dst_rel: str) -> None:
+    """Copy one small file to the run tree, through the mount when there is one.
+
+    ``dst_rel`` is the destination relative to the run root; ``dst_vos`` the
+    same place as an ``arc:`` URI, used when nothing is mounted.
+    """
+    local = run_root_local()
+    if local is not None:
+        dest = local / dst_rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(Path(src).read_bytes())
+        return
+    vcp(src, dst_vos)
 
 
 def do_push(args: argparse.Namespace) -> None:
@@ -145,7 +202,7 @@ def do_push(args: argparse.Namespace) -> None:
     for script in sorted(p for p in (HERE / "jobs").iterdir()
                          if p.suffix in (".sh", ".py")):
         log.info("uploading jobs/%s", script.name)
-        vcp(script, f"{RUN_VOS}/jobs/{script.name}")
+        put(script, f"{RUN_VOS}/jobs/{script.name}", f"jobs/{script.name}")
 
 
 def do_upload_cfg(names: list[str]) -> None:
@@ -156,9 +213,11 @@ def do_upload_cfg(names: list[str]) -> None:
             if not path.exists():
                 raise SystemExit(f"missing {path}; run arcify.py first")
             # setup makes this directory, but stage may reach it first
-            subprocess.run([str(VCP.parent / "vmkdir"), "-p", cfg_vos()],
-                           capture_output=True)
-            vcp(path, f"{cfg_vos()}/{suffix}")
+            if run_root_local() is None:
+                subprocess.run([str(VCP.parent / "vmkdir"), "-p", cfg_vos()],
+                               capture_output=True)
+            put(path, f"{cfg_vos()}/{suffix}",
+                f"run{run_number()}/config/{suffix}")
 
 
 def launch(name: str, script: str, cores: int, ram: int, env: dict[str, str],
@@ -400,12 +459,14 @@ def tidy(text: str, lines: int = 40) -> str:
 def cores_for(name: str, override: int | None) -> int:
     """Cores to request for one config.
 
-    Four, for everything. Measured utilisation is about 0.2 of a core - the runs
-    wait on ``/arc`` rather than compute, and the fitting path has no thread
-    pool - so the extra cores are headroom rather than throughput, at the price
-    of waiting longer to be scheduled when the platform is busy.
+    Eight, for everything, matching ``examples/ozstar``. Measured utilisation
+    of the fit itself is about 0.2 of a core -- it waits on ``/arc`` and the
+    fitting path has no thread pool -- so most of this is headroom rather than
+    throughput. What it buys is threaded BLAS in the dense scene solves and
+    room for the ePSF work, without asking for the platform maximum and
+    queueing behind it.
     """
-    return 4 if override is None else override
+    return 8 if override is None else override
 
 
 #: GB per field, for fields that need more than DEFAULT_RAM.
@@ -662,7 +723,7 @@ def main() -> None:
                         "field's shared PSF grids and repair cache and stops, "
                         "so the bands that follow start warm")
     p.add_argument("--cores", type=int, default=None,
-                   help="override; 4 by default, for a full field or a patch alike")
+                   help="override; 8 by default, for a full field or a patch alike")
     # Per field: 64 GB standard, 82 for EGS (see ram_for). An under-sized
     # request is OOM-killed with no traceback, which reads as a silent failure
     # rather than an error, and the headroom costs nothing - the quota's 32 GB

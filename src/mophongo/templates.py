@@ -417,6 +417,12 @@ class Template(Cutout2D):
     FLAG_SATURATED = 0x80  # catalog ``FLAG_SATURATED_<FILTER>`` provenance
     FLAG_PSF_EXTENDED = 0x100  # build scheme blended PSF wings into the template
     FLAG_EXTEND_FAILED = 0x200  # extension attempted but the PSF was unusable
+    #: Part of this template's segment falls where the detection band has no
+    #: exposure. Set by :meth:`Templates.extract_templates` when a weight map
+    #: is given; a source whose *position* is uncovered gets no template at
+    #: all, so this marks the partial case -- the flux is measured over the
+    #: covered pixels only and is a lower limit on the segment's light.
+    FLAG_NO_COVERAGE = 0x400
 
     def __init__(
         self,
@@ -1827,11 +1833,25 @@ class Templates:
                     )
                 logger.info("extend_mode='wren': sky rms fallback %.4g", bg_rms)
 
+        n_partial = 0
         for pos, label, height, width in tqdm(sized, desc="Extracting templates"):
             # Create template cutout
             cut = Template(hires_image, pos, (height, width), wcs=wcs, label=label)
             sl_o, sl_c = cut.slices_original, cut.slices_cutout
             seg_stamp = self.segmap[sl_o]
+
+            # A source can sit inside the detection footprint while part of its
+            # segment reaches outside it -- the edge of a combined catalog's
+            # coverage. The template is still usable: the uncovered pixels are
+            # blank and drop out of the unit-sum normalisation. But the flux is
+            # then measured over the covered part only, so it is a lower limit
+            # on the segment's light, and that is worth carrying rather than
+            # inferring later from a mosaic nobody kept.
+            if det_w is not None:
+                seg_here = seg_stamp == label
+                if np.any(seg_here & ~(np.asarray(det_w[sl_o]) > 0)):
+                    cut.flag |= Template.FLAG_NO_COVERAGE
+                    n_partial += 1
 
             if build_mode == "none":
                 # zero out all non segment pixels
@@ -1921,6 +1941,12 @@ class Templates:
 
             templates.append(cut)
 
+        if n_partial:
+            logger.info(
+                "%d template(s) flagged FLAG_NO_COVERAGE: part of the segment "
+                "falls outside the detection band's exposure, so the flux "
+                "covers only the exposed pixels", n_partial,
+            )
         self._templates = templates
         return templates
 

@@ -36,7 +36,7 @@ def test_uncovered_sources_get_no_template(caplog):
 
     import numpy as np
 
-    from mophongo.templates import Templates
+    from mophongo.templates import Template, Templates
 
     ny = nx = 60
     image = np.zeros((ny, nx), dtype=float)
@@ -58,9 +58,22 @@ def test_uncovered_sources_get_no_template(caplog):
     assert [int(t.id) for t in out] == [1], "the uncovered source must be dropped"
     assert "no detection-band coverage" in caplog.text
 
-    # without a weight map nothing is dropped: the caller said nothing about
-    # coverage, so the old behaviour stands
-    assert len(Templates().extract_templates(image, segmap, positions)) == 2
+    assert not out[0].flag & Template.FLAG_NO_COVERAGE, "this one is fully covered"
+
+    # a source inside the footprint whose segment reaches outside it keeps its
+    # template and carries the flag: the flux is over the exposed pixels only
+    edge = np.ones((ny, nx), dtype=float)
+    edge[:, 17:] = 0.0
+    flagged = Templates().extract_templates(image, segmap, positions[:1],
+                                            detection_weight=edge)
+    assert len(flagged) == 1
+    assert flagged[0].flag & Template.FLAG_NO_COVERAGE
+
+    # without a weight map nothing is dropped or flagged: the caller said
+    # nothing about coverage, so the old behaviour stands
+    plain = Templates().extract_templates(image, segmap, positions)
+    assert len(plain) == 2
+    assert not any(t.flag & Template.FLAG_NO_COVERAGE for t in plain)
 
     # a placeholder map of zeros carries no information and is ignored, rather
     # than silently returning nothing

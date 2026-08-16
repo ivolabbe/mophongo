@@ -404,6 +404,17 @@ constants:
 | 7 | 128 | `FLAG_SATURATED` | source carried a `FLAG_SATURATED_*` catalog flag (provenance) |
 | 8 | 256 | `FLAG_PSF_EXTENDED` | the build scheme blended PSF wings into the template |
 | 9 | 512 | `FLAG_EXTEND_FAILED` | extension was attempted but the PSF was unusable |
+| 10 | 1024 | `FLAG_NO_COVERAGE` | part of the segment falls where the detection band has no exposure |
+
+`FLAG_NO_COVERAGE` marks a source the detection image only partly sees, which
+a combined catalog and segmap can produce: another band defined the segment and
+this one has no exposure under part of it. The template is still built and
+fitted -- the blank pixels drop out of the unit-sum normalisation -- but the
+flux covers the exposed pixels only and is a lower limit on the segment's
+light. A source whose *position* is uncovered gets no template at all and does
+not reach the fit table, so the flag marks the partial case by construction.
+It requires a weight map: `extract_templates` sets it only when
+`detection_weight` is given, and treats an all-zero map as no information.
 
 `FLAG_PSF_EXTENDED` and `FLAG_EXTEND_FAILED` are set by the build-time
 schemes only (`"psf_wings"`, `"wren"`, `"classic"`). A template is flagged as

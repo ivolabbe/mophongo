@@ -688,7 +688,7 @@ def test_pipeline_prebuilt_native_templates_recover_scalar_fluxes():
             reg_flux=0.0,
             fit_astrometry_niter=0,
             fit_astrometry_joint=False,
-            aperture_diam=None,
+            phot={"aperture_diam": None},
             astrom_minimum_snr=0.0,
         ),
     )

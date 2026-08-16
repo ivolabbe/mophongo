@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Tuple, Optional
 
 import numpy as np
@@ -27,6 +27,37 @@ logger = logging.getLogger(__name__)
 # Correlated templates (overlapping) require full covariance accounting; your current implementation approximates this by assuming per-template independence.
 # If template noise is negligible, simplify to: weights = wht2 (as in your current default).
 # Flux-dependent variance (via A^2) introduces mild nonlinearity; it's safe to fix A from initial fit for a single iteration.
+
+
+@dataclass
+class PhotConfig:
+    """Aperture photometry settings (the ``phot`` block of ``fit``).
+
+    Everything about *measuring* fluxes in apertures and about the detection
+    catalog's own aperture columns. None of it enters the linear solve, which
+    is why it sits apart from the rest of :class:`FitConfig` rather than
+    beside the solver and astrometry knobs.
+    """
+
+    # Image measurement aperture, as a diameter:
+    # - float/int: fixed size, in `units`
+    # - str: column name in the input catalog for per-source sizes
+    # - None: fall back to 1.5 * FWHM (in pixels) measured from the template
+    aperture_diam: float | np.ndarray | str | None = None
+    # Catalog aperture: a diameter, or the name of a table column holding one
+    aperture_catalog: float | str | None = None
+    units: str = "arcsec"  # "arcsec" or "pix", for both apertures above
+
+    # Catalog-side aperture-to-total, totcor_cat = (f_kron/f_aper) / EE_H(k*R_kron)
+    # (the flux-estimator report's "tcorH", renamed). Computed when the three
+    # column names below exist in the input catalog; radius column in arcsec.
+    # These name columns of the *input* catalog rather than configuring a
+    # measurement, so they read as `phot.kron_flux_col` and keep no `cat_`
+    # prefix -- the block already says where they come from.
+    kron_flux_col: str | None = None  # detection-catalog Kron (AUTO) flux
+    aper_flux_col: str | None = None  # detection-catalog flux in the R_phi aperture
+    kron_radius_col: str | None = None  # circularized Kron radius [arcsec]
+    kron_k: float = 2.5  # Kron scaling: EE_H evaluated at k * R_kron
 
 
 @dataclass
@@ -126,20 +157,9 @@ class FitConfig:
     # instead of leaving a hand-set number behind. Set an int to override.
     scene_minimum_anchors: int | None = None
 
-    # Photometry aperture control:
-    # - float/int: fixed aperture diameter size (in arcsec or pixels per `aperture_units`)
-    # - str: column name in the input catalog for per-source aperture sizes
-    # - None: fallback to 1.5 * FWHM (in pixels) measured from template
-    aperture_diam: float | np.ndarray | None = None  # image measurement aperture (diameter)
-    aperture_catalog: float | str | None = None  # catalog aperture (diameter or table column name)
-    aperture_units: str = "arcsec"  # "arcsec" or "pix"
-    # Catalog-side aperture-to-total, totcor_cat = (f_kron/f_aper) / EE_H(k*R_kron)
-    # (the flux-estimator report's "tcorH", renamed). Computed when the three
-    # column names below exist in the input catalog; radius column in arcsec.
-    cat_kron_flux_col: str | None = None  # detection-catalog Kron (AUTO) flux
-    cat_aper_flux_col: str | None = None  # detection-catalog flux in the R_phi aperture
-    cat_kron_radius_col: str | None = None  # circularized Kron radius [arcsec]
-    cat_kron_k: float = 2.5  # Kron scaling: EE_H evaluated at k * R_kron
+    # Aperture photometry and the catalog columns it compares against, as one
+    # block (see PhotConfig). Nothing in the linear solve reads these.
+    phot: "PhotConfig" = field(default_factory=lambda: PhotConfig())
 
     # Template extraction: dilate each segment by this many pixels (disk radius)
     # to capture more of the point-source PSF wings. Off by default (0): the
@@ -230,6 +250,19 @@ class FitConfig:
             # default to 2x # of Chebyshev terms + 1
             n_poly = (poly_order + 1) * (poly_order + 2)
             self.scene_minimum_anchors = n_poly + 1
+
+        # Coerce a JSON `phot` object into a PhotConfig, as RunConfig does for
+        # `psf`. Unknown keys raise rather than being ignored: a misspelled
+        # aperture setting that silently does nothing is worse than a stop.
+        if isinstance(self.phot, dict):
+            known = {f.name for f in fields(PhotConfig)}
+            unknown = set(self.phot) - known
+            if unknown:
+                raise ValueError(
+                    f"unknown phot config key(s): {sorted(unknown)}; "
+                    f"known keys are {sorted(known)}"
+                )
+            self.phot = PhotConfig(**self.phot)
 
 
 

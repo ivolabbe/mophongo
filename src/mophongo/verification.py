@@ -1052,7 +1052,7 @@ def run_pipeline_extension_scenario(
             flagged position-mismatched and excluded from the recovery plots.
         fit_overrides: Extra :class:`~mophongo.fit.FitConfig` keyword overrides
             merged over the scenario defaults, e.g. a per-band
-            ``aperture_diam`` or scene limits matching a production run.
+            ``phot.aperture_diam`` or scene limits matching a production run.
         target_label: Display name of the low-resolution band in plot titles
             and axis labels. The data plumbing keys that band ``f770w``
             internally regardless; this only fixes what the figures say, e.g.
@@ -1099,7 +1099,7 @@ def run_pipeline_extension_scenario(
         fit_astrometry_joint=True,
         astrom_minimum_snr=0.0,
         scene_minimum_anchors=10,
-        aperture_diam=0.5,
+        phot={"aperture_diam": 0.5},
         template_dilate_segmap=int(template_dilate_segmap),
     )
     fit_kwargs.update(fit_overrides or {})

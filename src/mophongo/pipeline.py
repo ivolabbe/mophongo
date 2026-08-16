@@ -4265,14 +4265,14 @@ class Pipeline:
         # array leaves it None, which only disables the flux_beyond_aper
         # crowding bookkeeping).
         r_ap = None
-        scalar_ap = np.isscalar(config.aperture_diam) and not isinstance(config.aperture_diam, str)
+        scalar_ap = np.isscalar(config.phot.aperture_diam) and not isinstance(config.phot.aperture_diam, str)
         if scalar_ap:
-            if config.aperture_units == "arcsec":
+            if config.phot.units == "arcsec":
                 pscale = self._pixel_scale_arcsec(self.wcs[0] if self.wcs is not None else None)
                 if pscale:
-                    r_ap = 0.5 * float(config.aperture_diam) / pscale
+                    r_ap = 0.5 * float(config.phot.aperture_diam) / pscale
             else:
-                r_ap = 0.5 * float(config.aperture_diam)
+                r_ap = 0.5 * float(config.phot.aperture_diam)
 
         # Largest matching-kernel effective half-width over the fitted bands
         # (95% encircled radius of |K|, not the zero-padded array size).
@@ -4356,21 +4356,21 @@ class Pipeline:
 
     def _resolve_image_ap_radius_pix(self, idx: int, cfg: _FitConfig) -> float:
         """
-        Diameter source: cfg.aperture_diam
+        Diameter source: cfg.phot.aperture_diam
         - float/int => same for all images
         - np.ndarray(len(images)-1) => per image (idx>=1), pick [idx-1]
         - None => 1.5 × FWHM of PSF[idx] (in *pixels* of image idx),
                     fallback 3.0 pixels if PSF is missing.
-        Units: cfg.aperture_units ("arcsec" or "pix")
+        Units: cfg.phot.units ("arcsec" or "pix")
         """
         diam = None
-        if isinstance(cfg.aperture_diam, (int, float)):
-            diam = float(cfg.aperture_diam)
-        elif isinstance(cfg.aperture_diam, np.ndarray):
+        if isinstance(cfg.phot.aperture_diam, (int, float)):
+            diam = float(cfg.phot.aperture_diam)
+        elif isinstance(cfg.phot.aperture_diam, np.ndarray):
             # array corresponds to images[1:], so use [idx-1]
-            if cfg.aperture_diam.size != (len(self.images) - 1):
+            if cfg.phot.aperture_diam.size != (len(self.images) - 1):
                 raise ValueError("aperture_diam array must have len(images)-1 elements")
-            diam = float(cfg.aperture_diam[idx - 1])  # idx>=1 by construction here
+            diam = float(cfg.phot.aperture_diam[idx - 1])  # idx>=1 by construction here
 
         if diam is None:
             # default: 1.5×FWHM of this image PSF (pixels)
@@ -4392,7 +4392,7 @@ class Pipeline:
             return float(rad_pix)
 
         # convert diameter to pixels if needed
-        if cfg.aperture_units.lower().startswith("arc"):
+        if cfg.phot.units.lower().startswith("arc"):
             pscale = self._pixel_scale_arcsec(self.wcs[idx] if self.wcs is not None else None)
             if not pscale or pscale <= 0:
                 raise ValueError("aperture_diam in arcsec requires valid WCS for each image")
@@ -4411,7 +4411,7 @@ class Pipeline:
         - float/int => fixed *diameter* for all sources
         - None => default 1.5 × FWHM of PSF[0] in pixels (fallback 3.0)
 
-        Units: cfg.aperture_units ("arcsec" or "pix")
+        Units: cfg.phot.units ("arcsec" or "pix")
         """
         # get reference pixel scale
         pscale_ref = self._pixel_scale_arcsec(self.wcs[0] if self.wcs is not None else None)
@@ -4419,15 +4419,15 @@ class Pipeline:
         out: dict[int, float] = {}
 
         # if no catalog, default to r_default for all (if given)
-        if cfg.aperture_catalog is None:
+        if cfg.phot.aperture_catalog is None:
             for i, _ in enumerate(cat["id"]):
                 out[int(cat["id"][i])] = r_default
             return out
 
         # get from catalog
-        if isinstance(cfg.aperture_catalog, (int, float)):
-            diam = float(cfg.aperture_catalog)
-            if cfg.aperture_units.lower().startswith("arc"):
+        if isinstance(cfg.phot.aperture_catalog, (int, float)):
+            diam = float(cfg.phot.aperture_catalog)
+            if cfg.phot.units.lower().startswith("arc"):
                 if not pscale_ref or pscale_ref <= 0:
                     raise ValueError("aperture_catalog in arcsec requires valid ref WCS")
                 rad = diam / (2.0 * pscale_ref)
@@ -4438,10 +4438,10 @@ class Pipeline:
             return out
 
         # string column name
-        col = str(cfg.aperture_catalog)
+        col = str(cfg.phot.aperture_catalog)
         if col not in cat.colnames:
             raise ValueError(f"aperture_catalog column '{col}' not found in table")
-        if cfg.aperture_units.lower().startswith("arc"):
+        if cfg.phot.units.lower().startswith("arc"):
             if not pscale_ref or pscale_ref <= 0:
                 raise ValueError("aperture_catalog in arcsec requires valid ref WCS")
             for i, _ in enumerate(cat["id"]):
@@ -4478,13 +4478,13 @@ class Pipeline:
         This is the flux-estimator report's ``tcorH``, renamed: the
         detection catalog's Kron-to-aperture flux ratio times the inverse
         encircled energy of the high-resolution PSF at the scaled circularized
-        Kron radius.  Computed only when the three ``cat_*_col`` FitConfig
+        Kron radius.  Computed only when the three ``phot`` column
         knobs name existing catalog columns; otherwise empty.  The Kron radius
-        column is in arcsec; ``cat_kron_k`` scales it (SExtractor AUTO: 2.5).
+        column is in arcsec; ``phot.kron_k`` scales it (SExtractor AUTO: 2.5).
         Written once to the band-independent ``totcor_cat`` catalog column.
         """
         cfg = self.config
-        cols = (cfg.cat_kron_flux_col, cfg.cat_aper_flux_col, cfg.cat_kron_radius_col)
+        cols = (cfg.phot.kron_flux_col, cfg.phot.aper_flux_col, cfg.phot.kron_radius_col)
         source_cat = self.catalog
         if source_cat is None or any(c is None for c in cols):
             return {}
@@ -4513,9 +4513,9 @@ class Pipeline:
             ci = id_to_row.get(sid)
             if ci is None:
                 continue
-            f_kron = float(row[cfg.cat_kron_flux_col])
-            f_aper = float(row[cfg.cat_aper_flux_col])
-            r_kron = float(row[cfg.cat_kron_radius_col])  # arcsec
+            f_kron = float(row[cfg.phot.kron_flux_col])
+            f_aper = float(row[cfg.phot.aper_flux_col])
+            r_kron = float(row[cfg.phot.kron_radius_col])  # arcsec
             if not (np.isfinite(f_kron) and np.isfinite(f_aper) and f_aper > 0
                     and np.isfinite(r_kron) and r_kron > 0):
                 n_bad += 1
@@ -4528,7 +4528,7 @@ class Pipeline:
             if stamp is None:
                 n_bad += 1
                 continue
-            r_pix = float(cfg.cat_kron_k) * r_kron / pscale
+            r_pix = float(cfg.phot.kron_k) * r_kron / pscale
             cy, cx = (stamp.shape[0] - 1) / 2.0, (stamp.shape[1] - 1) / 2.0
             aper = CircularAperture((cx, cy), r=max(r_pix, 0.5))
             ee_h = float(aperture_photometry(stamp, aper, method="exact")["aperture_sum"][0])
@@ -4704,8 +4704,8 @@ class Pipeline:
         sat_cols = [c for c in catalog.colnames if c.startswith("FLAG_SATURATED_")]
         keep_cols.extend(sat_cols)
         cat = cat[keep_cols]
-        if config.aperture_catalog is not None:
-            cat[config.aperture_catalog] = catalog[config.aperture_catalog]
+        if config.phot.aperture_catalog is not None:
+            cat[config.phot.aperture_catalog] = catalog[config.phot.aperture_catalog]
         return cat
 
     def _prepare_hi_templates(self, cat: Table, config: _FitConfig) -> list[Template]:
@@ -5212,7 +5212,7 @@ class Pipeline:
             )
 
 
-            if config.aperture_diam is not None:
+            if config.phot.aperture_diam is not None:
                 pscale = self._pixel_scale_arcsec(
                     self.wcs[ifilt] if self.wcs is not None else None
                 )

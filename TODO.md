@@ -1295,3 +1295,15 @@ This file tracks future desired features, checks, and investigations.
   - [ ] split off real data as submodule?
   - [ ] other code review, misc refactoring, consolidation
   - [ ] remove unused modules, orphan code
+
+- [ ] Decide where the MINERVA SED estimator experiment belongs (2026-08-16).
+  `tests/test_sed_estimator_experiment.py` imports
+  `scratch.minerva_sed_estimator_experiment`, and `scratch/` is gitignored, so
+  the module is absent from every fresh checkout. That broke collection and
+  with it the whole CI run -- the suite reported one error and never ran, on
+  `main` as well as on branches. The import is now guarded with
+  `pytest.importorskip`, which stops it taking the run down but leaves the test
+  dead everywhere except a working tree that happens to have the experiment.
+  Either promote the estimator into `src/mophongo/` if it has become
+  reusable, or move the test into `scratch/` with it. `CLAUDE.md` is explicit:
+  tests are tracked and must not depend on scratch work.

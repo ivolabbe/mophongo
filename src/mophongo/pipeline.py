@@ -888,6 +888,35 @@ class SceneRefit:
                     worst = max(worst, aij * fi / (diag[j] * fj))
         return float(worst)
 
+    def plot_scene(self, which: str = "variant", *, display_sig: float = 5.0,
+                   path: str | Path | None = None, **kwargs):
+        """The run's own six-panel scene diagnostic, for a refitted scene.
+
+        The same figure ``write_outputs`` writes to ``scenes/`` -- template,
+        image, model, segmap, residual, colour composite, with the fitted shift
+        field on the model panel -- drawn from this refit's solve rather than
+        the run's. Takes the detection image and segmap from the pipeline, as
+        the run does.
+
+        The residual panel shows this scene's own residual, not the global one:
+        the saved full-field residual has the *run's* model subtracted, so
+        using it here would show the old fit under a new solve.
+
+        Args:
+            which: ``"variant"`` (default) or ``"baseline"``.
+            display_sig: greyscale stretch, as in :meth:`Scene.plot`.
+            path: save here when given.
+            **kwargs: forwarded to :meth:`Scene.plot`.
+        """
+        scene = self.baseline if which == "baseline" else self.variant
+        if scene is None:
+            raise ValueError(f"no {which} solve on this refit")
+        fig, _ = scene.plot(self.pipeline.images[0], self.pipeline.segmap,
+                            display_sig=display_sig, **kwargs)
+        if path is not None:
+            fig.savefig(path, dpi=200, bbox_inches="tight")
+        return fig
+
     def plot(self, path: str | Path | None = None):
         """Data, both models and both residuals, on one stretch."""
         import matplotlib.pyplot as plt

@@ -1491,3 +1491,15 @@ def test_refit_scene_freezes_membership_and_restores_state(tmp_path):
         pipe.refit_scene(scene_id, config=cfg, extend_mode="none")
     with pytest.raises(ValueError, match="unknown FitConfig field"):
         pipe.refit_scene(scene_id, not_a_field=1)
+
+    # both figures draw: the A/B strip and the run's own six-panel diagnostic
+    import matplotlib.pyplot as plt
+
+    fig = res.plot(tmp_path / "refit_compare.png")
+    assert (tmp_path / "refit_compare.png").exists()
+    plt.close(fig)
+    fig = res.plot_scene(path=tmp_path / "refit_scene.png")
+    assert (tmp_path / "refit_scene.png").exists()
+    plt.close(fig)
+    with pytest.raises(ValueError, match="no baseline solve"):
+        same.plot_scene("baseline")

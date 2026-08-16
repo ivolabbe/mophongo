@@ -42,8 +42,17 @@ done
 # One pool over the whole deduplicated (pattern, epoch) list, not one pool per
 # pattern: a field's F444W set is enumerated once however many bands share it,
 # and the workers never drain between patterns waiting for the slowest epoch of
-# the previous one. $SHARD exists for the platforms that can spread this over
-# several machines; here there is only the login node, so it stays 1/1.
+# the previous one.
+#
+# The cgroup here is per USER, not per session: /sys/fs/cgroup/grommet/$USER
+# pins this account to four specific CPUs (cpuset.cpus = 25,37,43,50 on
+# tooarrana2) and every process of every one of your sessions shares them.
+# Starting more processes on this node divides the same four cores. What does
+# add cores is another login node -- tooarrana1, farnarkle1, farnarkle2 each
+# carry their own cgroup for you -- which is what $SHARD is for:
+#
+#     ssh tooarrana1 SHARD=1/2 ... build_psfs.sh
+#     ssh tooarrana2 SHARD=2/2 ... build_psfs.sh
 setsid nohup nice -n 10 "$VENV/bin/python" "$BIN/build_psfs.py" \
     --date-mode "${DATE_MODE:-all}" --shard "${SHARD:-1/1}" \
     "${configs[@]}" > "$LOG" 2>&1 < /dev/null &

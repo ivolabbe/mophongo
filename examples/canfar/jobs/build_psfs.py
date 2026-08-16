@@ -160,13 +160,13 @@ def main() -> None:
                          "psf_factory.dates_from_csv")
     ap.add_argument("--shard", default="1/1", metavar="K/N",
                     help="build only shard K of N of the whole work list. "
-                         "Every shard derives the same deduplicated list from "
-                         "the same configs and takes every Nth item, so the "
-                         "shards are disjoint by construction and no two "
-                         "processes -- in this container or another -- can "
-                         "target one filename. This is what lets a campaign "
-                         "fan the grids over as many jobs as it likes rather "
-                         "than one per field")
+                         "Every shard derives the same deduplicated, ordered "
+                         "list from the same configs and takes the Kth "
+                         "contiguous block, so the shards are disjoint by "
+                         "construction and no two processes -- in this "
+                         "container, or on another machine -- can target one "
+                         "filename. This is what lets a campaign fan the "
+                         "grids over as many jobs as it likes")
     args = ap.parse_args()
 
     k, _, n = args.shard.partition("/")
@@ -182,7 +182,13 @@ def main() -> None:
     # then sliced -- the F444W set a field's seven bands share appears in it
     # exactly once, whichever shard happens to own each of its epochs.
     epochs = epoch_tasks(pattern_tasks(args.configs), args.date_mode)
-    mine = epochs[k - 1::n]
+    # Contiguous block, not every Nth entry. The list is sorted by (pattern,
+    # epoch), so a block is a run of nearby dates of one band: the wavefront
+    # OPDs its workers need overlap heavily, and each is fetched once into
+    # this machine's cache. Round-robin would scatter adjacent epochs across
+    # every shard and have each of them fetch the same OPDs separately.
+    size = -(-len(epochs) // n)                      # ceil, so N blocks cover it
+    mine = epochs[(k - 1) * size:k * size]
     log.info("%d grid(s) over %d config(s); shard %d/%d takes %d, %d worker(s)",
              len(epochs), len(args.configs), k, n, len(mine), workers)
 

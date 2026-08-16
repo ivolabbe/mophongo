@@ -401,6 +401,19 @@ def do_psf(args: argparse.Namespace) -> None:
     a band building grids has to be alone in its ``psf_dir``.
     """
     do_upload_cfg(args.names)
+
+    # One job, waited on, before any fan-out: $STPSF_PATH is shared by every
+    # container, and mast_retrieve_opd writes straight to the final filename
+    # with no temp file and no lock. Two shards fetching one OPD at the same
+    # moment race, and whichever reads it mid-write gets a truncated FITS.
+    # Fetching them all once, serially, leaves the shards reading only.
+    if args.jobs > 1 and not args.no_prewarm:
+        log.info("prewarming the OPD cache before %d shards", args.jobs)
+        warm = launch(session_name("mophongo-psf", "warm"), "build_psfs.sh", 1, 8,
+                      {"RUN": RUN, "CFGS": ",".join(args.names), "PREWARM": "1"})
+        wait([warm])
+        print(tidy(first_log([warm]), 8))
+
     ids = []
     for k in range(1, args.jobs + 1):
         ids.append(launch(session_name("mophongo-psf", str(k)), "build_psfs.sh",
@@ -708,6 +721,8 @@ def main() -> None:
     p.add_argument("--ram", type=int, default=32)
     p.add_argument("--workers", type=int, default=0,
                    help="processes per job; 0 = every core the container got")
+    p.add_argument("--no-prewarm", action="store_true",
+                   help="skip the serial OPD fetch; only safe with --jobs 1")
     p.add_argument("--no-wait", action="store_true")
     p.set_defaults(func=do_psf)
 

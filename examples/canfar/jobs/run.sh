@@ -13,6 +13,9 @@ RUNNUM=${RUNNUM:-1}
 CFGDIR=$RUN/run$RUNNUM/config
 STEP=${STEP:-all}
 export MPLCONFIGDIR=$RUN/.mplconfig
+# Same shared OPD cache the psf step fills; a fit that has to autobuild an
+# epoch reads it rather than fetching into the home quota.
+export STPSF_PATH=${STPSF_PATH:-$RUN/stpsf-data}
 export MPLBACKEND=Agg
 mkdir -p $RUN
 cd $RUN

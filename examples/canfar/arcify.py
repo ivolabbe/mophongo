@@ -117,6 +117,110 @@ def roots_for(local_path: str) -> list[str]:
             f"{ARC}/{field}/catalogs/{version}/ACS+WEBB_chi-mean/ancillary"]
 
 
+#: Where each kind of release version is enumerated on arc, and the shape of a
+#: version directory there. Mirrors the mapping ``roots_for`` walks in the
+#: other direction.
+RELEASE_TREES = {
+    "nircam": ("mosaics/nircam", re.compile(r"^n[\d.]+$")),
+    "miri": ("mosaics/miri", re.compile(r"^m[\d.]+$")),
+    "catalog": ("catalogs", re.compile(r"^n[\d.]+(?:_m[\d.]+)?_v[\d.]+$")),
+}
+
+
+def _version_key(version: str) -> list[tuple[int, ...]]:
+    """Sort key for a release version, numerically per component.
+
+    ``n3.0`` and ``n10.0`` sort the way a human means, and so do the compound
+    catalog versions: ``n3.0_m3.1_v1.2.1`` compares component by component.
+    """
+    return [tuple(int(n) for n in re.findall(r"\d+", part))
+            for part in version.split("_")]
+
+
+def _version_shape(version: str) -> tuple[str, ...]:
+    """The letters of a version: ``n3.0_m3.1_v1.2.1`` -> ``('n', 'm', 'v')``.
+
+    Versions are comparable only within a shape. A NIRCam-only catalog
+    (``n3.0_v1.3``) and one built with MIRI (``n3.0_m3.1_v1.2.1``) are
+    different products, not two points on one sequence, and ordering them
+    against each other invents an answer.
+    """
+    return tuple(re.sub(r"[\d.]", "", part) for part in version.split("_"))
+
+
+def newest_like(version: str, candidates: list[str]) -> str:
+    """The newest candidate of the same shape as ``version``, or ``""``."""
+    same = [c for c in candidates if _version_shape(c) == _version_shape(version)]
+    return max(same, key=_version_key) if same else ""
+
+
+def versions_on_arc(client: Client, field: str, kind: str) -> list[str]:
+    """Release versions of one kind present for one field, oldest first."""
+    subdir, shape = RELEASE_TREES[kind]
+    try:
+        children = client.get_children_info(f"{ARC}/{field}/{subdir}")
+    except Exception as exc:  # noqa: BLE001 - a missing subtree is not fatal
+        log.warning("  ! %s/%s: %s", field, subdir, exc)
+        return []
+    names = [getattr(c, "name", None) or c.uri.rstrip("/").rsplit("/", 1)[-1]
+             for c in children]
+    return sorted((n for n in names if shape.match(n)), key=_version_key)
+
+
+def config_versions(cfg: dict) -> dict[str, str]:
+    """The release versions one config is pinned to, by kind.
+
+    Read back off the arc paths the config already carries, so this describes
+    what a run would actually read rather than what a generator once intended.
+    """
+    got: dict[str, str] = {}
+    for key, kind in (("csv_hi", "nircam"), ("csv_lo", "miri"),
+                      ("catalog", "catalog"), ("segmap", "catalog")):
+        value = str(cfg.get(key) or "")
+        subdir, shape = RELEASE_TREES[kind]
+        for part in Path(value).parts:
+            if shape.match(part):
+                got.setdefault(kind, part)
+                break
+        else:
+            # staged files sit flat in data/, with the version in the filename
+            match = re.search(r"[-_](n[\d.]+(?:_m[\d.]+)?_v[\d.]+)[-_]",
+                              Path(value).name)
+            if match and shape.match(match.group(1)):
+                got.setdefault(kind, match.group(1))
+    return got
+
+
+def check_release_versions(cfg_paths: list[Path]) -> list[tuple[str, str, str, str]]:
+    """Report configs pinned to something older than what arc now holds.
+
+    Alert only: nothing is rewritten. Moving a campaign onto a new release is
+    a deliberate act -- it changes the photometry, so it belongs to a new run
+    number with a note saying why -- and it is not something a launch should
+    do because a directory appeared upstream.
+
+    Returns ``(config, kind, pinned, latest)`` for each version behind.
+    """
+    cert = Path.home() / ".ssl/cadcproxy.pem"
+    if not cert.exists():
+        raise SystemExit(f"no CADC certificate at {cert}; run canfar-cert.sh first")
+    client = Client(vospace_certfile=str(cert))
+
+    latest: dict[tuple[str, str], list[str]] = {}
+    behind: list[tuple[str, str, str, str]] = []
+    for cfg_path in cfg_paths:
+        cfg = json.loads(re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text()))
+        field = str(cfg.get("name", cfg_path.stem)).split("_")[0]
+        for kind, pinned in sorted(config_versions(cfg).items()):
+            key = (field, kind)
+            if key not in latest:
+                latest[key] = versions_on_arc(client, field, kind)
+            newest = newest_like(pinned, latest[key])
+            if newest and _version_key(newest) > _version_key(pinned):
+                behind.append((cfg_path.stem, kind, pinned, newest))
+    return behind
+
+
 def arc_index(client: Client, roots: list[str]) -> dict[str, str]:
     """Map basename -> POSIX ``/arc`` path for every file under ``roots``."""
     index: dict[str, str] = {}
@@ -255,7 +359,25 @@ def main() -> None:
                     help="override the trial-patch radius in arcmin (0 = full field)")
     ap.add_argument("--suffix", default="",
                     help="append to the run name, e.g. _test, to keep outputs separate")
+    ap.add_argument("--check-versions", action="store_true",
+                    help="report configs pinned to an older release than arc "
+                         "now holds, and rewrite nothing")
     args = ap.parse_args()
+
+    if args.check_versions:
+        behind = check_release_versions(args.configs)
+        if not behind:
+            log.info("every config is pinned to the newest release on arc")
+            return
+        log.warning("%d config/version pair(s) are behind arc:", len(behind))
+        for name, kind, pinned, newest in behind:
+            log.warning("  %-14s %-8s %s -> %s", name, kind, pinned, newest)
+        log.warning("Nothing was rewritten. Moving to a new release changes the "
+                    "photometry, so it belongs in a new run: bump $CANFAR_RUNNUM, "
+                    "point the source configs at the new version, re-run arcify "
+                    "and stage, and say what changed in the run's README.")
+        return
+
     check_suffix(args.suffix)
 
     cert = Path.home() / ".ssl/cadcproxy.pem"

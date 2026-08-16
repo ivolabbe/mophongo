@@ -181,6 +181,75 @@ def has_all_grids(cfg_path: Path, extra_names: list[str] | None = None) -> bool:
     return all(any(re.search(pat, n) for n in names) for pat in patterns)
 
 
+def write_run_readme(names: list[str], cfgs: list[Path], note: str,
+                     dry: bool) -> None:
+    """Write ``run<N>/README.md``: what this run is, and how it differs.
+
+    A run directory is the unit of versioning here, and a number says nothing
+    about why it exists. This records the three things that actually change
+    between runs -- the mophongo commit, the release versions the configs are
+    pinned to, and whatever the person launching it types as ``--note`` -- and
+    diffs the versions against the previous run's README so the difference is
+    stated rather than reconstructed months later from file dates.
+
+    Written before the work is submitted, so a run that dies halfway still
+    says what it was trying to do.
+    """
+    import submit
+    from arcify import config_versions
+
+    run = submit.run_number()
+    local = submit.run_root_local()
+    versions: dict[str, dict[str, str]] = {}
+    for name, cfg_path in zip(names, cfgs):
+        # the source config, not the rewritten one: arcify flattens the staged
+        # inputs into data/, which drops the version directory the release is
+        # actually named for
+        cfg = json.loads(re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text()))
+        versions[name.split("_")[0]] = config_versions(cfg)
+
+    try:
+        commit = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],
+                                capture_output=True, text=True).stdout.strip()
+    except Exception:  # noqa: BLE001 - a README is not worth failing a launch
+        commit = "unknown"
+
+    lines = [f"# run{run}", ""]
+    if note:
+        lines += [note, ""]
+    lines += [f"- mophongo: `{commit}`",
+              f"- bands: {len(names)} ({', '.join(sorted(names))})", "",
+              "## Release versions", "",
+              "| field | nircam | miri | catalog |", "|---|---|---|---|"]
+    for field in sorted(versions):
+        v = versions[field]
+        lines.append(f"| {field} | {v.get('nircam', '-')} | {v.get('miri', '-')} "
+                     f"| {v.get('catalog', '-')} |")
+
+    # what changed against the run before, read from its own README
+    previous = None
+    if local is not None and run > 1:
+        prev_path = local / f"run{run - 1}" / "README.md"
+        if prev_path.exists():
+            previous = prev_path.read_text()
+    if previous:
+        changed = [ln for ln in lines if ln.startswith("| ") and ln not in previous
+                   and not ln.startswith("| field")]
+        lines += ["", f"## Against run{run - 1}", ""]
+        lines += ([f"- changed: `{ln.strip()}`" for ln in changed]
+                  or ["- same release versions"])
+
+    text = "\n".join(lines) + "\n"
+    if dry or local is None:
+        log.info("run%d README (%s):\n%s", run,
+                 "dry run" if dry else "no /arc mount; not written", text)
+        return
+    dest = local / f"run{run}" / "README.md"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text)
+    log.info("wrote %s", dest)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -201,6 +270,9 @@ def main() -> None:
     ap.add_argument("--seed-from", default=None, metavar="SUFFIX",
                     help="seed PSF/kernel caches from the runs with this suffix "
                          "(use '' for the unsuffixed ones); skips rebuilding them")
+    ap.add_argument("--note", default="",
+                    help="one line for run<N>/README.md saying what this run "
+                         "changes; the number alone records nothing")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -208,6 +280,7 @@ def main() -> None:
     cfgs = configs_for(args.fields)
     names = [c.stem + args.suffix for c in cfgs]
     log.info("campaign over %d config(s): %s", len(names), ", ".join(names))
+    write_run_readme(names, cfgs, args.note, args.dry_run)
 
     if "push" in todo:
         run_step(["submit.py", "push"], args.dry_run)

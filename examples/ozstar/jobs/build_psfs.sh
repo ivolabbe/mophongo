@@ -39,10 +39,14 @@ for cfg in $CFGS; do
     configs+=("$CFGDIR/${cfg}_ozstar.json")
 done
 
-# Bands of a field share the hi-res grids, so the driver walks them one at a
-# time: concurrent builds would write the same filenames into one psf_dir.
+# One pool over the whole deduplicated (pattern, epoch) list, not one pool per
+# pattern: a field's F444W set is enumerated once however many bands share it,
+# and the workers never drain between patterns waiting for the slowest epoch of
+# the previous one. $SHARD exists for the platforms that can spread this over
+# several machines; here there is only the login node, so it stays 1/1.
 setsid nohup nice -n 10 "$VENV/bin/python" "$BIN/build_psfs.py" \
-    --date-mode "${DATE_MODE:-all}" "${configs[@]}" > "$LOG" 2>&1 < /dev/null &
+    --date-mode "${DATE_MODE:-all}" --shard "${SHARD:-1/1}" \
+    "${configs[@]}" > "$LOG" 2>&1 < /dev/null &
 
 echo "PSF build detached, pid $!"
 echo "LOG=$LOG"

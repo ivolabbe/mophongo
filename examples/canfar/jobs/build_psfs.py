@@ -1,25 +1,28 @@
 #!/usr/bin/env python
-"""Pre-build every ePSF grid a config's fit will ask for.
+"""Pre-build every ePSF grid a campaign's configs will ask for.
 
-The CANFAR copy of ``examples/ozstar/jobs/build_psfs.py``; the two are kept
-identical on purpose, since finding and building the grids is the same problem
-on both platforms. Only the wrapper differs: OzStar runs this on the login
-node, the one machine with both internet and the module stack, while here it
-is an ordinary container job -- CANFAR compute has outbound internet, so the
-MAST wavefront lookup works from a node.
+Identical in ``examples/canfar/jobs`` and ``examples/ozstar/jobs``: finding and
+building the grids is the same problem on both platforms, and only the wrapper
+differs. OzStar must run it on the login node, the one machine with both
+internet and the module stack -- ``stpsf`` resolves each epoch's wavefront by
+querying MAST, and a compute node has neither DNS nor a route. CANFAR compute
+has outbound internet, so there it is an ordinary container job and can be
+sharded over several.
 
-Because this is a *dedicated* step and not grid generation inside a fit, the
-whole work list is known up front. The ``(pattern, csv)`` pairs are therefore
-deduplicated across configs: a field's F444W set is built once however many
-bands share it, rather than once per band, and since each pattern is handled
-exactly once no two workers can write the same filename. The pipeline's
-autobuild has to serialise a field's bands precisely because it cannot see the
-whole list. That matters because the shared grids dominate -- F444W is 25 PSFs
-per grid across every epoch, plus the 30" halo grids, against 9 per grid for a
-band's own MIRI set.
+The unit of work is one ``(pattern, epoch)``: one grid, one filename. Because
+this is a dedicated step rather than grid generation inside a fit, the whole
+list is known up front, so it is deduplicated across configs -- a field's F444W
+set is enumerated once however many bands share it -- and every entry has a
+distinct output name. Nothing has to be serialised, and ``--shard K/N`` lets
+several processes or containers divide the list without talking to each other:
+each derives the same ordered list and takes every Nth entry.
 
-Three grid families, and the last two are why this exists rather than a bare
-``python -m mophongo.pipeline <cfg> psfs``:
+That is what a fit cannot do. The autobuild inside a band sees its own two
+patterns and has no idea what the other sixteen will want, so two bands of a
+field building at once race on the same F444W filenames.
+
+Epochs already on disk are dropped before the split, so the shards divide the
+work that is actually left. Three grid families are covered:
 
 * ``pattern_hi``  - the F444W photometry grids, shared by every band of a field;
 * ``pattern_lo``  - the band's MIRI grids;
@@ -27,14 +30,12 @@ Three grid families, and the last two are why this exists rather than a bare
   inside ``load_data``, not ``build_psfs``, so the ``psfs`` step never touches
   them.
 
-``PSFFactory`` is called directly, rather than through the pipeline's
-autobuild, for two reasons. It takes ``date_mode`` explicitly, so the grids are
-per-date whatever the deployed mophongo defaults to; and the autobuild only
-fires when *nothing* matches the pattern, so a band left holding one grid from
-an earlier single-date build would never gain the rest. The factory itself
-skips files that already exist, so re-running is cheap and additive.
+``PSFFactory`` is called directly rather than through the pipeline's autobuild:
+it takes ``date_mode`` explicitly, so the grids are per-date whatever the
+deployed mophongo defaults to. The factory skips files that already exist, so
+re-running is cheap and additive.
 
-    python build_psfs.py [--date-mode all] <run>/config/<name>_canfar.json [...]
+    python build_psfs.py [--date-mode all] [--shard 1/6] <config.json> [...]
 """
 from __future__ import annotations
 

@@ -639,9 +639,14 @@ def assemble_scene_system_AB(
     if nA == 0:
         return sp.csr_matrix((0, 0)), sp.csr_matrix((0, 0)), np.zeros(0, float)
 
-    # Determine if the scene has enough bright members to solve for shifts
+    # Determine if the scene has enough bright members to solve for shifts.
+    # One anchor is enough: it contributes two constraints (dx and dy), which
+    # exactly determines the default order-0 basis. Higher orders are
+    # underdetermined by a single anchor and lean on the shift-block ridge
+    # (FitConfig.reg_astrom, 1e-4 of the diagonal scale), which pulls the
+    # unconstrained coefficients to zero rather than letting them run.
     bright_idx = [i for i, S in enumerate(basis_vals) if S is not None]
-    has_shift = len(bright_idx) >= 2
+    has_shift = len(bright_idx) >= 1
     if not has_shift:
         return sp.csr_matrix((nA, 0)), sp.csr_matrix((0, 0)), np.zeros(0, float)
 
@@ -1114,9 +1119,9 @@ class Scene:
         resamples the templates
         (:meth:`~mophongo.templates.Templates.apply_template_shifts`) and
         clears ``A``/``b`` so the next pass rebuilds them against the
-        shifted templates. Scenes with fewer than two bright members fall
-        back to flux-only and leave their templates unshifted (logged as a
-        warning).
+        shifted templates. A scene with no member passing the anchor cuts
+        falls back to flux-only and leaves its templates unshifted (logged as
+        a warning); one anchor is enough to solve the default order-0 shift.
         """
         cfg = config or self.config or FitConfig()
         if self.image is None or self.weights is None:
@@ -1226,7 +1231,7 @@ class Scene:
                 )
                 logger.debug(f"[scenes] betas {self.id}:{self.shifts}")
             else:
-                # <2 bright members: shift blocks were empty and the solver
+                # no bright members: shift blocks were empty and the solver
                 # fell back to flux-only — leave templates unshifted.
                 # TODO: consider merging this scene with a neighbor rather
                 # than skipping. merge_small_scenes applies the same three
@@ -1236,8 +1241,8 @@ class Scene:
                 for tmpl in self.templates:
                     tmpl.to_shift = np.zeros(2, dtype=float)
                 logger.warning(
-                    "[Scenes] Scene %s: fewer than 2 sources pass the astrometric "
-                    "anchor cuts (SNR > %g, isolation >= %g%s); astrometry skipped "
+                    "[Scenes] Scene %s: no source passes the astrometric anchor "
+                    "cuts (SNR > %g, isolation >= %g%s); astrometry skipped "
                     "for this scene.",
                     getattr(self, "id", -1),
                     float(cfg.snr_thresh_astrom),

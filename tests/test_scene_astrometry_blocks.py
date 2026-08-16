@@ -392,3 +392,43 @@ def test_leverage_cap_preserves_implied_shift():
     # isolated anchors all see the same true shift, so down-weighting one of
     # them cannot move the solution
     assert implied_dx(0.5) == pytest.approx(implied_dx(None), rel=1e-9)
+
+
+def test_a_single_anchor_still_solves_the_order_zero_shift():
+    """One anchor is enough: it constrains dx and dy, which is the whole basis.
+
+    The old rule needed two and left single-anchor scenes unshifted, which is
+    a scene whose one good source carries a measurable offset that nothing
+    ever applied.
+    """
+    truth = (0.35, -0.2)
+    tmpl = _gauss_template(100.0, 100.0, 2.5)
+    faint = _gauss_template(140.0, 100.0, 2.5, label=2)
+    templates = [tmpl, faint]
+
+    # image = the template shifted by the truth, so the offset is recoverable
+    image = np.zeros((NY, NX), dtype=float)
+    moved = nd_shift(_embed(tmpl), (truth[1], truth[0]), order=3)
+    image += moved + 0.15 * _embed(faint)
+    weights = np.ones((NY, NX), dtype=float)
+
+    # only the first template passes the anchor cuts
+    basis_vals, _centre, _scale = make_scene_basis(
+        templates, np.array([True, False]), order=0
+    )
+    assert sum(b is not None for b in basis_vals) == 1
+
+    A, b, _ = build_normal(templates, image, weights)
+    AB, BB, bB = assemble_scene_system_AB(
+        templates, image, weights, basis_vals,
+        alpha0=np.array([1.0, 0.15]), order=0,
+    )
+    assert AB.shape[1] == 2, "one anchor must still open the two shift columns"
+
+    flux, _err, shifts, _info = SceneFitter._solve_flux_and_shifts(
+        A.tocsr(), b, AB, BB, bB, FitConfig(),
+    )
+    assert shifts is not None and len(shifts) == 2
+    # sign convention aside, the magnitude must come back to within a fraction
+    # of a pixel rather than being zeroed
+    assert np.hypot(*shifts) == pytest.approx(np.hypot(*truth), rel=0.35)

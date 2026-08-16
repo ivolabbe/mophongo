@@ -165,7 +165,7 @@ class SceneFitter:
         used as given. When shift blocks are supplied and non-empty, the shift block
         is regularized by ``config.reg_astrom`` times the median positive
         diagonal of ``BB`` and solved jointly; empty shift blocks (a scene
-        with fewer than two bright members) fall back to flux-only.
+        with no bright member) fall back to flux-only.
 
         Parameters
         ----------
@@ -201,7 +201,7 @@ class SceneFitter:
             lam_A = _finite_nonnegative(reg_flux)
         Areg = A + sp.eye(A.shape[0], format="csr") * lam_A
 
-        # empty shift blocks (scene with <2 bright members) fall back to flux-only
+        # empty shift blocks (no bright member at all) fall back to flux-only
         if AB is not None and BB is not None and bB is not None and AB.shape[1] > 0:
             scale_BB = _positive_diagonal_scale(BB)
             reg_astrom = _finite_nonnegative(getattr(config, "reg_astrom", 1e-4))

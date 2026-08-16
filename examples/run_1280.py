@@ -145,7 +145,7 @@ if locals().get("r_trial", 0) > 0:
 
 # first fit, no shifts: first image is template, 2nd and on the fitting images
 config = FitConfig(
-    fit_astrometry_niter=2, fit_astrometry_joint=True, scene_minimum_bright=10, aperture_diam=0.5
+    fit_astrometry_niter=2, fit_astrometry_joint=True, scene_minimum_anchors=10, aperture_diam=0.5
 )
 
 pipe = Pipeline(

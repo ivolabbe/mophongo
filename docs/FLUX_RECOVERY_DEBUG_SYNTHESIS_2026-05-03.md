@@ -113,23 +113,23 @@ kernel could not be the primary cause.
 
 ### Root Cause
 
-`SceneFitter.solve()` was using `config.reg_astrom` as a photometric ridge on
-the flux normal matrix. `reg_astrom` belongs only to the astrometric shift
+`SceneFitter.solve()` was using `config.astrom_reg` as a photometric ridge on
+the flux normal matrix. `astrom_reg` belongs only to the astrometric shift
 block. Applying it to fluxes suppresses broad, low-norm templates.
 
 Decisive scan:
 
 ```text
-scene flux-only, reg_astrom=1e-04:
+scene flux-only, astrom_reg=1e-04:
   hi=0.9324  lo=0.8991
 
-scene flux-only, reg_astrom=1e-08:
+scene flux-only, astrom_reg=1e-08:
   hi=0.9746  lo=0.9864
 
-scene flux-only, reg_astrom=0:
+scene flux-only, astrom_reg=0:
   hi=0.9746  lo=0.9864
 
-scene flux-only, reg_astrom=1e-02:
+scene flux-only, astrom_reg=1e-02:
   hi=0.1853  lo=0.0977
 ```
 
@@ -139,7 +139,7 @@ Separate photometric and astrometric regularization:
 
 ```text
 flux block:       reg_flux   * scale(A)
-astrometry block: reg_astrom * scale(BB)
+astrometry block: astrom_reg * scale(BB)
 ```
 
 Also fixed:
@@ -149,7 +149,7 @@ SceneFitter.solve_flux static signature
 fit_astrometry_niter=0 now reaches flux-only behavior
 ```
 
-Recommendation: keep `reg_astrom` completely out of any flux-only matrix.
+Recommendation: keep `astrom_reg` completely out of any flux-only matrix.
 Any future solver path must have a regression test proving this separation.
 
 ## 2. PSF Flux Conservation And Kernel Normalization

@@ -91,8 +91,8 @@ spline interpolation (`templates.py:800-820`).
 | `astrom_model` | `"gp"` | `"polynomial"` or `"gp"` |
 | `astrom_kwargs` | `{"poly": {"order": 0}}` | Order of the shift basis |
 | `scene_coupling_thresh` | `1e-3` | Off-diagonal threshold for scene split |
-| `scene_minimum_bright` | `5` | Bright sources needed per scene for astrometry |
-| `snr_thresh_astrom` | `15.0` | SNR cut defining "bright" |
+| `scene_minimum_anchors` | `5` | Bright sources needed per scene for astrometry |
+| `astrom_minimum_snr` | `15.0` | SNR cut defining "bright" |
 | `fft_fast` | `False` | If non-zero, crop kernel per source by encircled energy |
 | `fit_covariances` | `False` | Full off-diagonal errors via Hutchinson |
 | `aperture_diam` | `None` | Diameter for the aperture-photometry pass |
@@ -121,7 +121,7 @@ A `Scene` is a dataclass with a list of connected `Template`s, cached
 normal blocks (`A`, `b`), a bounding box, and a `SceneFitter`. Scene
 formation in `generate_scenes` (`scene.py:474`) builds the full normal
 matrix once, splits into connected components by coupling strength,
-then merges components with fewer than `scene_minimum_bright` bright
+then merges components with fewer than `scene_minimum_anchors` bright
 sources into their nearest neighbours via an STRtree-accelerated
 union-find. Inside `Scene.solve`, `make_scene_basis` constructs the
 Chebyshev basis evaluated at each bright template position (scaled to
@@ -287,7 +287,7 @@ bug.
 
 Both runs use the same config:
 `FitConfig(fit_astrometry_niter=2, fit_astrometry_joint=True,
-scene_minimum_bright=10, aperture_diam=0.5)`, the same detection image,
+scene_minimum_anchors=10, aperture_diam=0.5)`, the same detection image,
 and the same MINERVA catalogue. The only real difference in the user
 script is the PSF stamp size: `psf_size = 2.0"` (770) vs `size = 8.0"`
 (1500) — a concession to the broader F1500W PSF.
@@ -339,7 +339,7 @@ position-dependent sub-pixel residual everywhere.
 
 `examples/uds_1500/` contains a single scene plot
 (`uds_1500_scene_1.png`); `examples/uds_770/` contains ~164 scene
-plots. With `scene_minimum_bright=10` and `snr_thresh_astrom=15`, most
+plots. With `scene_minimum_anchors=10` and `astrom_minimum_snr=15`, most
 F1500W sources fail the SNR cut, and `merge_small_scenes`
 (`scene.py`) merges scenes until each has ≥ 10 bright sources — the
 field is small enough (trial radius 1′) that this collapses to a
@@ -394,7 +394,7 @@ after the joint astrometry tries to compensate.
 4. Rerun with `FitConfig(fit_astrometry_niter=0)`. If residuals *improve*,
    the astrometry solver is absorbing the kernel error as a bogus shift
    and making things worse.
-5. Rerun with `scene_minimum_bright=3` (or lower). If scenes split and
+5. Rerun with `scene_minimum_anchors=3` (or lower). If scenes split and
    per-scene shifts differ, the scene-collapse story is confirmed.
 6. Rerun with `astrom_kwargs={"poly": {"order": 1}}`. A linear shift
    field within the single mega-scene should absorb position-dependent

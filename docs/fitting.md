@@ -229,7 +229,7 @@ scenes, labels = generate_scenes(
     templates, image, weight,
     coupling_thresh=cfg.scene_coupling_thresh,
     max_size=cfg.scene_max_size,
-    minimum_bright=cfg.scene_minimum_bright,
+    minimum_bright=cfg.scene_minimum_anchors,
 )
 for scn in scenes:
     scn.set_band(image, weight, config=cfg)
@@ -297,7 +297,7 @@ arguments and results are returned, so the same instance serves every scene.
 {meth}`~mophongo.scene_fitter.SceneFitter.solve` returns a namespace with
 `flux`, `err`, `shifts`, `info`. The flux block receives a small adaptive
 ridge (`FitConfig.reg_flux`; `None` applies an adaptive `1e-6` times the matrix scale, `0.0` none at all) and
-the shift block a relative ridge `FitConfig.reg_astrom`; a scene with fewer
+the shift block a relative ridge `FitConfig.astrom_reg`; a scene with fewer
 than two bright members has empty shift blocks and falls back to the
 flux-only path, {meth}`~mophongo.scene_fitter.SceneFitter.solve_flux`, which
 whitens the matrix by its diagonal as described under
@@ -437,9 +437,9 @@ solve leaves the fitted shifts alone and costs one pass.
 
 The tolerance is a stopping rule, not an accuracy claim, and `0.1` fit-grid
 pixels is chosen against the noise rather than against the arithmetic. The
-weakest scene the anchor cuts admit — `scene_minimum_bright` = 5 members at
-`snr_thresh_astrom` = 15 — has a centroid good to roughly
-$\sigma_{\rm PSF}/({\rm SNR}\sqrt{N}) \approx 0.08$ fit pixels, so iterating
+weakest scene the anchor cuts admit — `scene_minimum_anchors` = 3 members at
+`astrom_minimum_snr` = 15 — has a centroid good to roughly
+$\sigma_{\rm PSF}/({\rm SNR}\sqrt{N}) \approx 0.10$ fit pixels, so iterating
 below that measures nothing; and the systematic floor from PSF and kernel
 mismatch is a bias, which no number of passes removes. Tightening the
 tolerance buys passes, not precision. Because the fit grid is the
@@ -526,17 +526,18 @@ page.
 | `astrom_shift_tol` | `float` | `0.1` | Stop iterating a scene once its largest per-template shift increment (fit-grid pixels) drops below this. |
 | `astrom_damping` | `float` | `0.8` | Factor applied to each pass's fitted shift increment before it is applied to the templates; `1.0` is undamped. |
 | `fit_astrometry_joint` | `bool` | `True` | Fit shifts jointly with fluxes inside each scene; if `False`, shifts come from the separate {class}`mophongo.astrometry.AstroCorrect` step. |
-| `reg_astrom` | `float` | `1e-4` | Ridge on the shift block, relative to its diagonal scale. |
-| `snr_thresh_astrom` | `float` | `15.0` | Minimum SNR proxy $b_i/\sqrt{A_{ii}}$ for a bright astrometric anchor; `0` keeps all. |
-| `astrom_isolation_thresh` | `float` | `0.6` | Minimum flux dominance (0–1) within its own footprint for a template to anchor astrometry; `0.0` disables the cut. |
+| `astrom_reg` | `float` | `1e-4` | Ridge on the shift block, relative to its diagonal scale. |
+| `astrom_minimum_snr` | `float` | `15.0` | Minimum SNR proxy $b_i/\sqrt{A_{ii}}$ for a bright astrometric anchor; `0` keeps all. |
+| `astrom_isolation_thresh` | `float` | `0.7` | Minimum flux dominance (0–1) within its own footprint for a template to anchor astrometry; `0.0` disables the cut. Roughly a separation cut: 0.6 admits blends down to ~1.2 PSF sigma, 0.7 to ~2. Not superseded by `astrom_robust` — see below. |
 | `astrom_leverage_cap` | `float \| None` | `0.9` | Cap each anchor's leverage at this quantile of the scene's anchor information. Bounds how much one bright source can move the shift field; `None` leaves the weights alone. |
+| `astrom_robust` | `bool` | `True` | Weight each anchor by how well it agrees with the shift field its neighbours define, and by how well its own stamp fits once it is allowed to move ({mod}`mophongo.astrom_robust`). Set `False` to recover the unweighted fit. |
 | `astrom_exclude_stars` | `bool` | `False` | Exclude `is_star` templates from the shift fit. Off by default: unsaturated stars are the best anchors, and saturated ones already sit in singleton scenes. |
-| `astrom_model` | `str` | `"gp"` | Model for the separate (non-joint) astrometry step: `"poly"` or `"gp"`; any other value raises `ValueError`. |
+| `astrom_model` | `str` | `"poly"` | Model for the separate (non-joint) astrometry step: `"poly"` or `"gp"`; any other value raises `ValueError`. The joint path ignores it and always uses the polynomial basis. |
 | `astrom_centroid` | `str` | `"centroid"` | Shift measurement for the separate step: `"centroid"` or `"correlation"`. |
 | `astrom_kwargs` | `dict` | `{"poly": {"order": 0}, "gp": {"length_scale": 400}}` | Per-model options; the joint scene fit reads `astrom_kwargs["poly"]["order"]`. |
 | `multi_resolution_method` | `str` | `"upsample"` | Multi-resolution handling (see {doc}`pipeline`). |
 | `normal` | `str` | `"tree"` | Normal-matrix builder; only `"tree"` is implemented. |
-| `scene_minimum_bright` | `int` | `5` | Minimum bright anchors per scene; smaller scenes are merged. `None` derives it from the polynomial order in `__post_init__`. |
+| `scene_minimum_anchors` | `int \| None` | `None` | Minimum bright anchors per scene; smaller scenes are merged. `None` derives it from the polynomial order as `(order+1)(order+2)+1` — 3 at order 0, 7 at order 1. Also the gate for `astrom_robust`. |
 | `run_scene_solver` | `bool` | `True` | Must remain `True`; the scene solver is the only fitting path and `False` raises. |
 | `scene_coupling_thresh` | `float` | `1e-3` | Leakage score above which templates share a scene. |
 | `scene_max_size` | `int \| None` | `800` | Soft cap on templates per scene, enforced by local threshold-raising. `None` disables. |

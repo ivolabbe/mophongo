@@ -337,7 +337,7 @@ def arcify(cfg_path: Path, index: dict[str, str], out_dir: Path,
     # numbered run and grouped by field. `..` from out_dir is the field
     # directory, so the repair cache lands beside the bands that share it.
     field = str(name).split("_")[0]
-    cfg["psf_dir"] = f"{run}/PSF"
+    cfg.setdefault("psf", {})["dir"] = f"{run}/PSF"
     cfg["out_dir"] = f"{run}/run{run_number()}/{field}/{name}"
     cfg["repair_cache_path"] = f"../{_repair_cache_name(cfg)}"
 

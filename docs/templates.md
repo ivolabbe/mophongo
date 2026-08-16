@@ -451,6 +451,33 @@ neighbors can both model it. `"wren"` never claims those pixels: its support is
 restricted to the territory the ownership map assigns to the source, so the
 partition prevents the double counting up front.
 
+The rule generalizes beyond `"psf_wings"`: whatever supplies a template's
+support outside its own segment, it should not be applied over a *neighboring*
+segment. Segmentation does not deblend — a neighbor's pixels hold light from
+both sources — and the neighbor's own template already models those pixels, so
+extending a second template across them gives two free amplitudes the same
+flux to fit. The post-extraction passes enforce it through
+`background_only=True`, their default; `"classic"` is the deliberate exception,
+kept as the IDL code behaves.
+
+#### Encircled energy of a template
+
+The fitted amplitude is converted to a total flux by dividing by `ee_psf_lo`,
+the encircled energy of the band PSF stamp ({doc}`outputs`). That is exact for
+a point source: its convolved template *is* the PSF, so the fraction of its
+light inside the finite support is the PSF's own,
+$EE_{\rm tmpl} = EE_{\rm psf}$.
+
+An extended source is broader than the PSF, so convolution pushes a larger
+fraction of its light past the same support and
+$EE_{\rm tmpl} < EE_{\rm psf}$; dividing by `ee_psf_lo` alone then still falls
+short of the total. The deficit is measurable rather than unknown: the
+encircled energy of the template before convolution over that of the convolved
+template on the same support, $EE_{\rm tmpl,hi} / EE_{\rm tmpl,lo}$, is the
+size of the correction. Measured at the photometry aperture radius it is the
+fit table's `psfcor_<i>` column ({doc}`outputs`); it is not folded into
+`flux_<i>_total`, which corrects for the PSF support only.
+
 #### Post-extraction passes
 
 The two remaining modes run after extraction as method calls on the container.

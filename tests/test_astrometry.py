@@ -60,8 +60,8 @@ def _run_scenes(templates, science, weight, cfg):
         science,
         weight,
         coupling_thresh=cfg.scene_coupling_thresh,
-        snr_thresh_astrom=cfg.snr_thresh_astrom,
-        minimum_bright=cfg.scene_minimum_bright,
+        astrom_minimum_snr=cfg.astrom_minimum_snr,
+        minimum_bright=cfg.scene_minimum_anchors,
     )
     for scene in scenes:
         scene.set_band(science, weight, config=cfg)
@@ -237,8 +237,8 @@ def test_scene_solver_recovers_known_shift():
 
     cfg = FitConfig(
         fit_astrometry_joint=True,
-        snr_thresh_astrom=3.0,
-        scene_minimum_bright=2,
+        astrom_minimum_snr=3.0,
+        scene_minimum_anchors=2,
         scene_coupling_thresh=0.01,
         astrom_kwargs={"poly": {"order": 0}, "gp": {"length_scale": 400}},
         # synthetic data with a known shift: measure the solver undamped, so the
@@ -297,8 +297,8 @@ def test_scene_shift_uncertainty_scales_with_psf_width():
 
     cfg = FitConfig(
         fit_astrometry_joint=True,
-        snr_thresh_astrom=3.0,
-        scene_minimum_bright=2,
+        astrom_minimum_snr=3.0,
+        scene_minimum_anchors=2,
         scene_coupling_thresh=0.01,
         astrom_kwargs={"poly": {"order": 0}, "gp": {"length_scale": 400}},
         # synthetic data with a known shift: measure the solver undamped, so the
@@ -341,7 +341,7 @@ def test_scene_shift_depends_on_alpha0_scale():
     The shift signal is bB ∝ alpha0 × image_gradient and the gradient information
     matrix BB ∝ alpha0².  Their ratio shift ≈ bB/BB ∝ 1/alpha0.  When alpha0 is
     scaled by factor k, the recovered shift should scale by 1/k.  This confirms
-    that the old reg_astrom flux bias (alpha0 ≈ 0.57×) was inflating shifts by ~1.75×.
+    that the old astrom_reg flux bias (alpha0 ≈ 0.57×) was inflating shifts by ~1.75×.
     """
     images, segmap, catalog, psfs, truth, wht = make_simple_data(
         nsrc=10, size=101, peak_snr=30, seed=55
@@ -360,8 +360,8 @@ def test_scene_shift_depends_on_alpha0_scale():
 
     cfg = FitConfig(
         fit_astrometry_joint=True,
-        snr_thresh_astrom=0.0,
-        scene_minimum_bright=1,
+        astrom_minimum_snr=0.0,
+        scene_minimum_anchors=1,
         scene_coupling_thresh=0.005,
         astrom_kwargs={"poly": {"order": 0}, "gp": {"length_scale": 400}},
     )
@@ -452,8 +452,8 @@ def test_scene_shift_iteration_converges():
 
     cfg = FitConfig(
         fit_astrometry_joint=True,
-        snr_thresh_astrom=3.0,
-        scene_minimum_bright=2,
+        astrom_minimum_snr=3.0,
+        scene_minimum_anchors=2,
         scene_coupling_thresh=0.01,
         astrom_kwargs={"poly": {"order": 0}, "gp": {"length_scale": 400}},
         # synthetic data with a known shift: measure the solver undamped, so the

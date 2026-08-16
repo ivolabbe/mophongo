@@ -22,10 +22,10 @@ def test_scene_fitter_flux_only():
     assert np.all(np.isfinite(sol.err))
 
 
-def test_scene_fitter_reg_astrom_does_not_regularize_flux():
+def test_scene_fitter_astrom_reg_does_not_regularize_flux():
     A = sp.csr_matrix([[1e-3]])
     b = np.array([1e-3])
-    sol = SceneFitter.solve(A, b, config=FitConfig(reg_flux=0.0, reg_astrom=1e-2))
+    sol = SceneFitter.solve(A, b, config=FitConfig(reg_flux=0.0, astrom_reg=1e-2))
     np.testing.assert_allclose(sol.flux, [1.0], rtol=1e-5)
 
 
@@ -35,7 +35,7 @@ def test_scene_fitter_with_shift_block():
     AB = sp.csr_matrix([[1.0], [2.0]])
     BB = sp.csr_matrix([[3.0]])
     bB = np.array([0.5])
-    cfg = FitConfig(reg_flux=1e-12, reg_astrom=0.0, positivity=False)
+    cfg = FitConfig(reg_flux=1e-12, astrom_reg=0.0, positivity=False)
     sol = SceneFitter.solve(A, b, AB=AB, BB=BB, bB=bB, config=cfg)
     M = np.block([[A.toarray(), AB.toarray()], [AB.T.toarray(), BB.toarray()]])
     M[: A.shape[0], : A.shape[0]] += np.eye(A.shape[0]) * cfg.reg_flux

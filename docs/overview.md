@@ -118,10 +118,11 @@ photometry with `photutils` is simpler and sufficient.
 - **API reference** — {doc}`api` is the autosummary listing of all public
   modules.
 
-## Minimal example
+## Quickstart
 
-The array-level entry point is {func}`mophongo.pipeline.run`, a thin wrapper
-that constructs a {class}`mophongo.pipeline.Pipeline` and calls
+{doc}`quickstart` walks through both entry points. The array-level one is
+{func}`mophongo.pipeline.run`, a thin wrapper that constructs a
+{class}`mophongo.pipeline.Pipeline` and calls
 {meth}`mophongo.pipeline.Pipeline.run`:
 
 ```python
@@ -150,80 +151,8 @@ experiments; runs on real mosaics use the JSON config path, which builds
 drizzled position-dependent PSFs, per-region kernels, and file outputs. The
 "Choosing an entry point" table in {doc}`quickstart` lists the differences.
 
-### Parameters of `pipeline.run` (and `Pipeline.__init__`)
-
-All arguments after `segmap` are keyword-only. Sequence arguments run
-parallel to `images` (index 0 = detection image).
-
-`images` (`Sequence[np.ndarray]`, required)
-: Science images. The first is the high-resolution detection image; each
-  subsequent image is fit.
-
-`segmap` (`np.ndarray`, required)
-: Segmentation map on the detection-image grid; pixel values are catalog ids.
-
-`catalog` (`Table | None`, default `None`)
-: Source catalog with `id`, `x`, `y` columns matching the segmentation ids.
-  The output table is a trimmed copy (`id`, `x`, `y`, plus any deblending and
-  saturation flag columns) with the flux columns added; the input table is
-  not modified. Required in practice: `run()` raises `NotImplementedError`
-  when no catalog is given.
-
-`psfs` (`Sequence[np.ndarray] | None`, default `None`)
-: Per-image PSFs, as arrays or {class}`mophongo.psf_map.PSFRegionMap`
-  instances; must match `images` in length when given. The detection-image
-  PSF (`psfs[0]`) supplies the wings for template extension, and every build
-  scheme except `"none"` requires it — with the default scheme a run without
-  it raises rather than substituting another band's PSF.
-
-`weights` (`Sequence[np.ndarray] | None`, default `None`)
-: Per-image inverse-variance maps. `wht_images` is an accepted alias. The
-  detection-image entry may be `None` — the build schemes that grade data
-  against a PSF model by signal-to-noise then use a single scalar noise
-  estimate for the whole detection image — but every fitted image needs a
-  map; omitting both arguments is not supported and fails inside
-  {meth}`mophongo.pipeline.Pipeline.run`.
-
-`wht_images` (`Sequence[np.ndarray] | None`, default `None`)
-: Alias for `weights`, kept for backward compatibility.
-
-`kernels` (`Sequence[np.ndarray | PSFRegionMap] | None`, default `None`)
-: Precomputed PSF-matching kernels per image (array or region map). A `None`
-  entry fits the templates without further convolution; config-driven runs
-  build kernels from the high- and low-resolution PSF maps automatically.
-
-`psf_throughputs` (`Sequence[float] | None`, default `None`)
-: Per-filter finite-stamp PSF sums used to convert fitted amplitudes into
-  `flux_<i>_total` (see conventions below); must match `images` in length.
-
-`wcs` (`Sequence[WCS] | None`, default `None`)
-: Per-image WCS. Required for multi-resolution fitting (bin factors are
-  derived from the WCS pixel scales) and for sky coordinates in outputs.
-
-`window` (default `None`)
-: Stored on the instance but not consumed by the fit as of this writing; the
-  annotated `Window` type is not defined in the package. Leave unset.
-
-`extend_mode` (`str | None`, default `None`)
-: Selector for the template build scheme: `"psf_wings"` (the wings scaled to
-  the segment data), `"psf_convolution"` and `"psf_model"` (post-extraction
-  filling of the zero pixels), `"wren"` and `"classic"` (the reference
-  implementations), or `"none"` to leave templates truncated at the segment
-  boundary. When given it overrides `FitConfig.extend_mode`; `None` — the
-  default — leaves the choice to that field, which itself defaults to
-  `"psf_wings"`, so both entry points extend templates unless told
-  otherwise. `extend_templates` is a deprecated alias for this argument, and
-  the spelling `"psf"` a deprecated alias for `"psf_convolution"`.
-  {doc}`pipeline` describes each scheme.
-
-`templates` (`Templates | Sequence[Template] | None`, default `None`)
-: Pre-built templates to reuse instead of extracting them from `segmap`.
-
-`config` (`FitConfig | None`, default `None`)
-: Fitting configuration; a default {class}`mophongo.fit.FitConfig` is used
-  when omitted. The fitting-related fields are documented in {doc}`fitting`,
-  the full reference on {doc}`pipeline`.
-
+The full argument list of `pipeline.run` and `Pipeline.__init__`, and the
+`RunConfig` fields of the config-driven path, are in {doc}`pipeline`.
 {func}`mophongo.pipeline.run` returns `(table, residuals, pipeline)`;
 {meth}`mophongo.pipeline.Pipeline.run` returns `(table, residuals)` and keeps
 the fitter, templates, and model images on the instance.

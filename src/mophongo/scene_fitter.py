@@ -163,7 +163,7 @@ class SceneFitter:
         applies the adaptive ridge, ``1e-6`` times the median positive
         diagonal of ``A``; ``0.0`` applies none at all; a positive value is
         used as given. When shift blocks are supplied and non-empty, the shift block
-        is regularized by ``config.reg_astrom`` times the median positive
+        is regularized by ``config.astrom_reg`` times the median positive
         diagonal of ``BB`` and solved jointly; empty shift blocks (a scene
         with no bright member) fall back to flux-only.
 
@@ -175,7 +175,7 @@ class SceneFitter:
             Right hand side.
         config
             Solver configuration. ``reg_flux`` regularizes the flux block,
-            and ``reg_astrom`` regularizes only the shift block.
+            and ``astrom_reg`` regularizes only the shift block.
         AB, BB, bB
             Optional blocks coupling the fluxes to shift parameters.
         cg_kwargs
@@ -189,7 +189,7 @@ class SceneFitter:
             ``shifts`` (shift coefficients, ``None`` on the flux-only path)
             and ``info`` (always ``{"cg_info": 0}`` for the direct solver).
         """
-        # Flux regularization must use only the photometric ridge; reg_astrom
+        # Flux regularization must use only the photometric ridge; astrom_reg
         # is reserved for the shift block below. Three-state semantics:
         # None -> adaptive ridge 1e-6 * median positive diagonal (the
         # conditioning default), 0.0 -> genuinely no ridge, >0 -> that value.
@@ -204,18 +204,20 @@ class SceneFitter:
         # empty shift blocks (no bright member at all) fall back to flux-only
         if AB is not None and BB is not None and bB is not None and AB.shape[1] > 0:
             scale_BB = _positive_diagonal_scale(BB)
-            reg_astrom = _finite_nonnegative(getattr(config, "reg_astrom", 1e-4))
-            lam_b = reg_astrom * scale_BB
+            astrom_reg = _finite_nonnegative(getattr(config, "astrom_reg", 1e-4))
+            lam_b = astrom_reg * scale_BB
             BBreg = BB + sp.eye(BB.shape[0], format="csr") * lam_b
 
-            flux, err, shifts, info = SceneFitter._solve_flux_and_shifts(
+            flux, err, shifts, shift_cov, info = SceneFitter._solve_flux_and_shifts(
                 Areg, b, AB, BBreg, bB, config
             )
         else:
             flux, err, info = SceneFitter.solve_flux(Areg, b, config)
-            shifts = None
+            shifts, shift_cov = None, None
 
-        return SimpleNamespace(flux=flux, err=err, shifts=shifts, info=info)
+        return SimpleNamespace(
+            flux=flux, err=err, shifts=shifts, shift_cov=shift_cov, info=info
+        )
 
     @staticmethod
     def solve_flux(
@@ -298,11 +300,61 @@ class SceneFitter:
         else:
             S_w = A_w.toarray() - AB_w @ AB_w.T
         err = SceneFitter._flux_errors(S_w) / d
+        shift_cov = SceneFitter._shift_covariance(A_w, AB_w, Linv)
 
         if cfg.positivity:
             x = np.maximum(0.0, x)
 
-        return x, err, beta, {"cg_info": int(info)}
+        return x, err, beta, shift_cov, {"cg_info": int(info)}
+
+    @staticmethod
+    def _shift_covariance(
+        A_w: sp.spmatrix, AB_w: sp.spmatrix, Linv: np.ndarray
+    ) -> np.ndarray:
+        """Covariance of the unwhitened shift coefficients, fluxes marginalized.
+
+        The counterpart of :meth:`_flux_errors`, for the other block. In
+        whitened variables the joint matrix is ``[[A_w, AB_w], [AB_wᵀ, I]]``,
+        so the shift block of its inverse is
+        ``(I − AB_wᵀ A_w⁻¹ AB_w)⁻¹`` -- the shift information *after* the
+        fluxes have been allowed to absorb what they can. Unwhitening with
+        ``beta = L⁻ᵀ betaw`` gives ``Linvᵀ · cov · Linv``.
+
+        Ignoring the marginalization and taking ``BB⁻¹`` instead would be free
+        (``Linvᵀ Linv``) but wrong by the flux-shift degeneracy, which reaches
+        tens of percent once a neighbour sits about a FWHM from an anchor.
+
+        Cost is one sparse factorization of the flux block plus ``nB``
+        back-solves, and ``nB`` is 2 at the default order 0.
+
+        Parameters
+        ----------
+        A_w
+            Whitened flux block.
+        AB_w
+            Whitened flux-shift coupling, ``(nA, nB)``.
+        Linv
+            Inverse Cholesky factor of the shift block used to whiten it.
+
+        Returns
+        -------
+        ndarray
+            ``(nB, nB)`` covariance, or NaN where the factorization or the
+            inverse fails.
+        """
+        ABd = AB_w.toarray() if sp.issparse(AB_w) else np.asarray(AB_w, dtype=float)
+        nB = ABd.shape[1]
+        if nB == 0:
+            return np.zeros((0, 0), dtype=float)
+        try:
+            factor = splu((A_w.tocsc() if sp.issparse(A_w) else sp.csc_matrix(A_w)))
+            Ainv_AB = np.column_stack([factor.solve(ABd[:, k]) for k in range(nB)])
+            cov_w = np.linalg.inv(np.eye(nB) - ABd.T @ Ainv_AB)
+        except (np.linalg.LinAlgError, RuntimeError, ValueError):
+            logger.debug("[scenes] shift covariance unavailable", exc_info=True)
+            return np.full((nB, nB), np.nan, dtype=float)
+        cov = Linv.T @ cov_w @ Linv
+        return cov if np.all(np.isfinite(cov)) else np.full((nB, nB), np.nan)
 
     @staticmethod
     def _flux_errors(A, dense_threshold: int = 500) -> np.ndarray:

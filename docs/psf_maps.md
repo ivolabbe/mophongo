@@ -389,7 +389,7 @@ each band it forms the region map from the exposure footprints of the
 band's {class}`mophongo.psf.DrizzlePSF`, clips it to the drizzled mosaic
 outline with `overlay_with`, and drizzles a PSF at every region centroid.
 The low-resolution cube optionally receives a Gaussian broadening (the
-`psf_blur_fwhm` run setting). Stamps keep their native sums, so a stamp sum
+`psf.blur_fwhm` run setting). Stamps keep their native sums, so a stamp sum
 is a realized encircled energy: {meth}`mophongo.pipeline.Pipeline.run` divides
 each fitted amplitude (`flux_<i>`) by the encircled energy of the lo-res stamp
 at that source's position to get the total (`flux_<i>_total`), and falls back

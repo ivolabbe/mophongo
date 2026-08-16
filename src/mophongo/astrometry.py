@@ -214,7 +214,7 @@ class AstroCorrect:
     constructor field ``cfg`` (:class:`~mophongo.fit.FitConfig`) supplies
     the astrometry options: ``astrom_model`` (``"poly"`` or ``"gp"``),
     ``astrom_centroid`` (``"centroid"`` or ``"correlation"``),
-    ``snr_thresh_astrom``, and ``astrom_kwargs`` (per-model keyword dicts,
+    ``astrom_minimum_snr``, and ``astrom_kwargs`` (per-model keyword dicts,
     e.g. ``{"poly": {"order": 2}, "gp": {"length_scale": 400}}``).
     """
 
@@ -296,7 +296,7 @@ class AstroCorrect:
         ``templates`` is a sequence of
         :class:`~mophongo.templates.Template`, ``residual`` the current
         residual image, and ``coeffs`` the fitted amplitudes. Shifts are
-        measured at templates with ``flux/err >= cfg.snr_thresh_astrom``
+        measured at templates with ``flux/err >= cfg.astrom_minimum_snr``
         (see :func:`measure_template_shifts`) and fit with the configured
         field model. For the polynomial model the basis order comes from
         ``astrom_kwargs["poly"]["order"]`` (fallback 0); for the Gaussian
@@ -318,7 +318,7 @@ class AstroCorrect:
             coeffs,
             residual,
             box_size=astrom_kw.pop("box_size", 7),
-            snr_threshold=self.cfg.snr_thresh_astrom,
+            snr_threshold=self.cfg.astrom_minimum_snr,
             method=self.cfg.astrom_centroid.lower(),
         )
 

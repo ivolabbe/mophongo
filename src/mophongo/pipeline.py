@@ -121,6 +121,76 @@ def _quiet_hierarch_warnings():
 # the outermost samples stay inside the scene rather than sitting on its edge
 _SHIFT_SAMPLE_SPREAD = 0.7
 
+#: Host serving the FITSMap viewers, prefixed to a config that gives a bare
+#: ``<field>/<release>`` path rather than a full URL. Not tied to any one
+#: survey: point ``RunConfig.minerva_viewer`` at another host and it is used
+#: as given.
+FITSMAP_URL = "https://minerva.colorado.edu"
+
+
+def _cheb_order_from_coeffs(shifts: Sequence[float] | None) -> int | None:
+    """Chebyshev order behind a flat ``[bx | by]`` coefficient vector.
+
+    Inverts ``n_terms(order) = (order+1)(order+2)/2`` on half the vector, and
+    returns None when the length matches no order -- which is the signal that
+    the coefficients cannot be interpreted, not that the scene has none.
+    """
+    from .astrometry import n_terms
+
+    if shifts is None or len(shifts) < 2:
+        return None
+    p = len(shifts) // 2
+    order = int(round((np.sqrt(8.0 * p + 1.0) - 3.0) / 2.0))
+    return order if order >= 0 and n_terms(order) == p else None
+
+
+@dataclass
+class PsfConfig:
+    """PSF grid selection and stamp settings of a run (the ``psf`` config block).
+
+    Everything that decides *which* ePSF grids a run uses and what the
+    delivered stamps look like. Loaded from the ``"psf"`` object of the run
+    JSON; unknown keys raise.
+    """
+
+    # directory of STDPSF grid files (generated grids are cached here too)
+    dir: str = "data/PSF"
+    pattern_hi: str = ""  # STDPSF filename regex for the hi-res band
+    pattern_lo: str = ""  # STDPSF filename regex for the lo-res band
+    # PSF stamp size in arcsec; None = full native ePSF stamp as generated
+    size: float | None = 4.0
+    autobuild: bool = True  # generate missing PSF grids with PSFFactory
+    # What to do when the exposure list implies epochs that no grid provides
+    # and `autobuild` is off (see Pipeline._missing_psf_dates). With autobuild
+    # on -- the default -- the missing epochs are simply built and this never
+    # applies.
+    #   "warn"  - name the missing epochs and fit with the ones that exist
+    #   "error" - refuse to run
+    #   "off"   - do not look; load whatever matches the pattern
+    # Grids themselves carry no provenance: a grid is its detector, filter,
+    # epoch and field of view, all of them in its filename, and none of them
+    # a function of the rest of the exposure list. Adding a frame to that list
+    # leaves every existing grid correct and asks for at most one more.
+    provenance: str = "warn"
+    # Processes used when building ePSF grids. One (detector, date) grid is an
+    # independent job of tens to low hundreds of MB, so this scales with cores
+    # rather than with memory. It parallelises within one pattern only: bands
+    # of a field share pattern_hi, so two bands building at once still race on
+    # the same F444W filenames -- which is why a campaign builds one band of a
+    # field first and fans out afterwards (see docs/campaigns.md).
+    workers: int = 1
+    fov_arcsec: float | None = None  # PSFFactory field of view; None = backend default
+    # Which exposure dates get their own grid when autobuilding. "all" (one
+    # per unique integer MJD) is the default because the grids are MJD-tagged
+    # and looked up by nearest date: collapsing an exposure list that spans
+    # years onto one date ("modal") or a few ("cluster") silently discards
+    # that. See psf_factory.dates_from_csv for the full set of modes.
+    date_mode: str | float = "all"
+    # extra Gaussian broadening of the lo-res model PSF (FWHM arcsec);
+    # "default" = mock_mosaic.DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC[filter_lo],
+    # a number = that value, None = no broadening
+    blur_fwhm: float | str | None = "default"
+
 
 @dataclass
 class RunConfig:
@@ -152,45 +222,10 @@ class RunConfig:
     # '_sci' -> '_wht' naming" (see :meth:`Pipeline.resolve_wht_hi`).
     wht_hi: str | None = None
     # --- PSFs -------------------------------------------------------------
-    psf_dir: str = "data/PSF"
-    pattern_hi: str = ""  # STDPSF filename regex for the hi-res band
-    pattern_lo: str = ""  # STDPSF filename regex for the lo-res band
-    filter_lo: str = ""  # lo-res filter name, e.g. "f770w" (blur lookup)
-    # PSF stamp size in arcsec; None = full native ePSF stamp as generated
-    psf_size: float | None = 4.0
-    psf_autobuild: bool = True  # generate missing PSF grids with PSFFactory
-    # What to do when the exposure list implies epochs that no grid provides
-    # and `psf_autobuild` is off (see Pipeline._missing_psf_dates). With
-    # autobuild on -- the default -- the missing epochs are simply built and
-    # this never applies.
-    #   "warn"  - name the missing epochs and fit with the ones that exist
-    #   "error" - refuse to run
-    #   "off"   - do not look; load whatever matches the pattern
-    # Grids themselves carry no provenance: a grid is its detector, filter,
-    # epoch and field of view, all of them in its filename, and none of them
-    # a function of the rest of the exposure list. Adding a frame to that list
-    # leaves every existing grid correct and asks for at most one more.
-    psf_provenance: str = "warn"
-    # Processes used when building ePSF grids. One (detector, date) grid is an
-    # independent job of tens to low hundreds of MB, so this scales with cores
-    # rather than with memory. It parallelises within one pattern only: bands
-    # of a field share pattern_hi, so two bands building at once still race on
-    # the same F444W filenames -- which is why a campaign builds one band of a
-    # field first and fans out afterwards (see docs/campaigns.md).
-    psf_workers: int = 1
-    psf_fov_arcsec: float | None = None  # PSFFactory field of view; None = backend default
-    # Which exposure dates get their own grid when autobuilding. "all" (one
-    # per unique integer MJD) is the default because the grids are MJD-tagged
-    # and looked up by nearest date: collapsing an exposure list that spans
-    # years onto one date ("modal") or a few ("cluster") silently discards
-    # that. See psf_factory.dates_from_csv for the full set of modes.
-    psf_date_mode: str | float = "all"
-    # extra Gaussian broadening of the lo-res model PSF (FWHM arcsec);
-    # "default" = mock_mosaic.DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC[filter_lo],
-    # a number = that value, None = no broadening
-    psf_blur_fwhm: float | str | None = "default"
-    # optional [n_frames_hi, n_frames_lo] sanity assert on the WCS csvs
-    expect_frames: list[int] | None = None
+    filter_lo: str = ""  # lo-res filter name, e.g. "f770w" (blur lookup, labels)
+    # Grid selection and stamp settings; a plain dict in the JSON is coerced
+    # to a PsfConfig by __post_init__.
+    psf: PsfConfig = field(default_factory=PsfConfig)
     # --- templates --------------------------------------------------------
     # The template build scheme is selected by ``fit["extend_mode"]``
     # (FitConfig.extend_mode): 'default' -> 'psf_wings'. Without an extension
@@ -207,9 +242,9 @@ class RunConfig:
     # Large-FOV STDPSF pattern for the repair's halo model (full halo +
     # diffraction spikes, so segments far from the core can be flagged).
     # Empty (default) derives '{prefix}_{det}_{filt}_MJD\d+_FOV30_GRID1_OS4'
-    # from pattern_hi and, with psf_autobuild, generates the grids once
-    # (~minutes; cached in psf_dir). The core fit always keeps the
-    # MJD-matched pattern_hi ePSFs; the halo model is grafted outside
+    # from psf.pattern_hi and, with psf.autobuild, generates the grids once
+    # (~minutes; cached in psf.dir). The core fit always keeps the
+    # MJD-matched psf.pattern_hi ePSFs; the halo model is grafted outside
     # their support.
     repair_psf_pattern: str = ""
     # Reuse a previous run's repair from the cache file when its recorded
@@ -233,7 +268,7 @@ class RunConfig:
     # pixel coordinates, slices and WCS are unchanged.
     #
     # The margin covers what reaches outside the patch: PSF support (half of
-    # ``psf_size`` — 4" for production and canfar runs, 8" for the verification
+    # ``psf.size`` — 4" for production and canfar runs, 8" for the verification
     # runs), template stamps and convolution wings. The 60" default clears
     # both by a wide margin and still reads a few per cent of a mosaic.
     #
@@ -242,9 +277,12 @@ class RunConfig:
     # the flux errors differ from a full-field run. Use it to iterate, not to
     # produce release numbers.
     trial: dict[str, Any] | None = None
-    # Viewer path for the scene-catalog `minerva_link` column, as
-    # `<field>/<release>`. None derives the field from the leading token of
-    # `name` and pairs it with `minerva_release`; "" drops the column.
+    # FITSMap root for the scene-catalog `minerva_link` column, as a full URL:
+    # "https://minerva.colorado.edu/cosmos" or ".../uds/DR0". Fields do not
+    # agree on whether a release is part of the path, so the config states the
+    # root rather than the code assembling one from the field name. A bare
+    # `<field>/<release>` is accepted and gets FITSMAP_URL in front. None or ""
+    # drops the column, because a guessed link is worse than no link.
     minerva_viewer: str | None = None
     minerva_release: str = "DR0"
     # --- fitting ----------------------------------------------------------
@@ -253,6 +291,15 @@ class RunConfig:
     # per-source stamps FITS: tmpl_hi/tmpl_lo at native sizes + per-source PSF
     # region keys (PSF stamps stay in the cached <name>_psf_*.geojson maps)
     save_stamps: bool = True
+
+    def __post_init__(self) -> None:
+        """Coerce a JSON ``psf`` object into a :class:`PsfConfig`."""
+        if isinstance(self.psf, dict):
+            known = {f.name for f in fields(PsfConfig)}
+            unknown = set(self.psf) - known
+            if unknown:
+                raise ValueError(f"unknown psf config keys: {sorted(unknown)}")
+            self.psf = PsfConfig(**self.psf)
 
     @classmethod
     def from_json(cls, path: str | Path) -> "RunConfig":
@@ -268,6 +315,28 @@ class RunConfig:
             raise ValueError(
                 f"{sorted(legacy)} were replaced by a single `trial` field: "
                 'trial={"center": [ra, dec], "radius": <arcmin>}. '
+                "Regenerate the config (examples/make_minerva_configs.py) or "
+                "edit it by hand."
+            )
+        # The flat psf_* keys moved into a `psf` block, mirroring `fit`, and
+        # expect_frames was dropped: it asserted the row counts of the very
+        # csvs the run reads, so it only ever fired when the exposure list
+        # changed, which is when a run wants the new frames rather than a
+        # raise.
+        moved = {
+            "psf_dir": "dir", "pattern_hi": "pattern_hi",
+            "pattern_lo": "pattern_lo", "psf_size": "size",
+            "psf_autobuild": "autobuild", "psf_provenance": "provenance",
+            "psf_workers": "workers", "psf_fov_arcsec": "fov_arcsec",
+            "psf_date_mode": "date_mode", "psf_blur_fwhm": "blur_fwhm",
+        }
+        flat = set(moved) & set(data)
+        if flat or "expect_frames" in data:
+            nested = ", ".join(f'"{moved[k]}"' for k in sorted(flat)) or "..."
+            raise ValueError(
+                f"{sorted(flat | ({'expect_frames'} & set(data)))} are no "
+                'longer top-level config keys: the psf settings live in a '
+                f'"psf" block ({{{nested}}}) and expect_frames was removed. '
                 "Regenerate the config (examples/make_minerva_configs.py) or "
                 "edit it by hand."
             )
@@ -1272,9 +1341,89 @@ class Pipeline:
                           variant=var_scene, baseline=base_scene, pipeline=self,
                           ifilt=ifilt)
 
+    def _refine_scene_astrometry(self, scene, config: "_FitConfig") -> bool | None:
+        """Drive one scene through the astrometric refinement to convergence.
+
+        Up to ``config.fit_astrometry_niter`` solve/apply passes, each damped
+        by ``astrom_damping``, stopping once the largest per-template increment
+        drops below ``astrom_shift_tol``; then one flux-only solve on the final
+        templates.
+
+        That closing solve is not optional bookkeeping. Every pass fits fluxes
+        on the templates as they stood *before* that pass's shift was applied,
+        so without it the stored fluxes, errors and model belong to a basis
+        that no longer exists and the last shift is never accounted for.
+
+        Records ``astrom_step``, ``astrom_niter`` and ``astrom_converged`` on
+        the scene. ``astrom_converged`` stays ``None`` where no shift was ever
+        fitted -- a flux-only run, or a scene with too few anchors to carry a
+        shift block -- because calling that "converged" would claim an
+        astrometric solution that was never solved for.
+
+        Both :meth:`run` and :meth:`_solve_frozen_scene` go through here, so a
+        refit is refined exactly as the run refined it. A refit that took a
+        single pass would not be comparable with anything the run wrote: the
+        scene catalog and the scene figures report the accumulated shift after
+        this loop.
+
+        Args:
+            scene: a :class:`~mophongo.scene.Scene` with its band already set.
+            config: the fit configuration to refine under.
+
+        Returns:
+            ``scene.astrom_converged``.
+        """
+        from dataclasses import replace
+
+        niter = max(int(config.fit_astrometry_niter), 1)
+        shift_tol = float(getattr(config, "astrom_shift_tol", 0.02))
+        final_cfg = (
+            replace(config, fit_astrometry_niter=0)
+            if config.fit_astrometry_niter > 0
+            else None
+        )
+
+        with self._phase("astrometry passes"):
+            for j in range(niter):
+                prev = np.array([t.shifted[:2] for t in scene.templates], dtype=float)
+                scene.solve(config=config, apply_shifts=True)
+                cur = np.array([t.shifted[:2] for t in scene.templates], dtype=float)
+                step = (
+                    float(np.max(np.abs(cur - prev)))
+                    if prev.size and cur.shape == prev.shape
+                    else 0.0
+                )
+                scene.astrom_step, scene.astrom_niter = step, j + 1
+                if scene.shifts is not None and len(scene.shifts) > 0:
+                    scene.astrom_converged = step < shift_tol
+                if scene.astrom_converged is not False:
+                    break
+
+        if final_cfg is not None:
+            with self._phase("final flux solve"):
+                scene.solve(config=final_cfg)
+
+        logger.debug(
+            "[Scenes] scene %s: %d pass(es), last increment %.4f pix, %s",
+            scene.id, scene.astrom_niter, scene.astrom_step or 0.0,
+            "converged" if scene.astrom_converged
+            else ("no shift fitted" if scene.astrom_converged is None
+                  else "still moving"),
+        )
+        return scene.astrom_converged
+
     def _solve_frozen_scene(self, id_scene: int, ids: np.ndarray,
                             config: "_FitConfig", ifilt: int):
         """Extract, convolve and solve one frozen source set. Restores state.
+
+        The scene is driven through the same astrometric refinement
+        :meth:`run` uses -- up to ``fit_astrometry_niter`` solve/apply passes,
+        damped by ``astrom_damping``, stopping at ``astrom_shift_tol``, then a
+        closing flux-only solve on the final templates. A single pass would not
+        be comparable with anything the run wrote: the run's scene catalog and
+        scene figures report the *accumulated* shift after that loop, so a
+        one-pass refit would be measured against a converged result and read as
+        a large disagreement when it is only an unfinished one.
 
         ``_convolved_templates`` is not idempotent: on the upsample path it
         rebinds ``images[ifilt]`` and ``wcs[ifilt]`` to their reference-grid
@@ -1296,13 +1445,49 @@ class Pipeline:
             "extend_mode": getattr(self, "extend_mode", None),
         }
         try:
-            cat = self.catalog[np.isin(np.asarray(self.catalog["id"], int), ids)]
+            cat_ids = np.asarray(self.catalog["id"], int)
+            cat = self.catalog[np.isin(cat_ids, ids)]
+            # Extraction is positions-driven, so a frozen id that is not a row
+            # of self.catalog contributes nothing: the scene came back short --
+            # or, when nothing matched, empty, and the failure surfaced far
+            # downstream as "No templates to convolve".
+            #
+            # A shortfall does not invalidate the comparison, so it is a
+            # warning: both sides of a refit are built from this same subset,
+            # so the A/B stays internally consistent. It does mean the refit is
+            # not the run's own scene, which matters when reading either side
+            # against what the run wrote. The usual cause is version skew --
+            # the catalog is re-derived by today's `load_data` while the fit on
+            # disk was written by an earlier one (the detection-coverage cut in
+            # ff3b8d4 drops 569 COSMOS F770W sources an older run kept) -- or a
+            # config whose footprint or trial cut differs from the run's.
+            if len(cat) != len(ids):
+                missing = np.setdiff1d(ids, cat_ids)
+                if not len(cat):
+                    raise RuntimeError(
+                        f"scene {id_scene}: none of its {len(ids)} frozen "
+                        f"source id(s) are rows of the pipeline catalog, so "
+                        f"there is nothing to rebuild. The membership table "
+                        f"and the catalog describe different source sets. "
+                        f"Catalog holds {len(cat_ids)} source(s) "
+                        f"(ids {cat_ids[:3].tolist()} ...); wanted "
+                        f"{ids[:3].tolist()} ..."
+                    )
+                logger.warning(
+                    "scene %d: %d of %d frozen source id(s) are missing from "
+                    "the pipeline catalog and cannot be rebuilt; refitting the "
+                    "remaining %d. Both sides use this same subset, so the "
+                    "comparison holds, but neither is the run's own scene. "
+                    "Missing %s%s",
+                    id_scene, len(missing), len(ids), len(cat),
+                    missing[:5].tolist(), " ..." if missing.size > 5 else "",
+                )
             self._prepare_hi_templates(cat, config)
             templates, weights_i = self._convolved_templates(ifilt, config)
             scene = Scene(id=int(id_scene), templates=templates,
                           fitter=SceneFitter(), bbox=_bbox_union(templates))
             scene.set_band(self.images[ifilt], weights_i, config=config)
-            scene.solve(config=config)
+            self._refine_scene_astrometry(scene, config)
             # the band arrays the scene keeps are the ones it was solved
             # against, which on the upsample path are NOT the restored ones
             return scene
@@ -1320,7 +1505,7 @@ class Pipeline:
 
     # -- shared helpers ----------------------------------------------------
     def _blur_fwhm(self) -> float | None:
-        blur = self.run_config.psf_blur_fwhm
+        blur = self.run_config.psf.blur_fwhm
         if blur == "default":
             from .mock_mosaic import DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC
 
@@ -1328,8 +1513,8 @@ class Pipeline:
         return float(blur) if blur else None
 
     def _size_kw(self) -> dict:
-        if self.run_config.psf_size is not None:
-            return dict(size=self.run_config.psf_size)
+        if self.run_config.psf.size is not None:
+            return dict(size=self.run_config.psf.size)
         return dict(size=None, ee_fraction=None)
 
     def _ensure_dpsfs(self, load_epsf: bool = False) -> None:
@@ -1344,18 +1529,13 @@ class Pipeline:
             self.dpsf_lo = DrizzlePSF(
                 driz_image=str(cfg.sci_lo), csv_file=str(cfg.csv_lo)
             )
-            if cfg.expect_frames:
-                n_hi, n_lo = cfg.expect_frames
-                got_hi = len(self.dpsf_hi.footprint)
-                got_lo = len(self.dpsf_lo.footprint)
-                if got_hi != n_hi or got_lo != n_lo:
-                    raise ValueError(
-                        f"frame-count mismatch: hi {got_hi} (expect {n_hi}), "
-                        f"lo {got_lo} (expect {n_lo})"
-                    )
+            logger.info(
+                "exposures behind the mosaics: hi %d, lo %d",
+                len(self.dpsf_hi.footprint), len(self.dpsf_lo.footprint),
+            )
         if load_epsf and not self._epsf_loaded:
-            self._load_epsf(self.dpsf_hi, cfg.pattern_hi, cfg.csv_hi, "hi")
-            self._load_epsf(self.dpsf_lo, cfg.pattern_lo, cfg.csv_lo, "lo")
+            self._load_epsf(self.dpsf_hi, cfg.psf.pattern_hi, cfg.csv_hi, "hi")
+            self._load_epsf(self.dpsf_lo, cfg.psf.pattern_lo, cfg.csv_lo, "lo")
             self._epsf_loaded = True
 
     def _missing_psf_dates(self, pattern: str, csv: str) -> list[float]:
@@ -1365,7 +1545,7 @@ class Pipeline:
         and every one of those is in its own filename. Whether the *set* is
         complete is a different question, and not one any single file can
         answer: it is the dates the exposure list implies under
-        ``psf_date_mode``, minus the dates already on disk. Asking it this way
+        ``psf.date_mode``, minus the dates already on disk. Asking it this way
         is what makes adding a frame to the exposure list cost one grid instead
         of all of them -- the existing epochs are still exactly right.
 
@@ -1380,10 +1560,10 @@ class Pipeline:
         from .psf_factory import dates_from_csv
 
         cfg = self.run_config
-        if str(getattr(cfg, "psf_provenance", "warn")).lower() == "off":
+        if str(cfg.psf.provenance).lower() == "off":
             return []
-        want = dates_from_csv(csv, cfg.psf_date_mode)
-        psf_dir = Path(cfg.psf_dir)
+        want = dates_from_csv(csv, cfg.psf.date_mode)
+        psf_dir = Path(cfg.psf.dir)
         rx = re.compile(fov_agnostic_pattern(pattern))
         have: set[int] = set()
         if psf_dir.is_dir():
@@ -1398,18 +1578,18 @@ class Pipeline:
     def _existing_grid_fov(self, pattern: str) -> float | None:
         """Largest field of view already on disk for ``pattern``, if any.
 
-        Neither the pattern nor ``psf_fov_arcsec`` is required to name a
+        Neither the pattern nor ``psf.fov_arcsec`` is required to name a
         field of view. When one isn't given, a missing epoch should still
         match whatever this band's grids already use rather than falling
         back to the backend default -- otherwise one config can quietly
         produce a mixed FOV4/FOV6 set. First-ever build for a pattern has
         nothing to match, so this returns ``None`` and the backend default
         applies; :meth:`_check_psf_size_fits_grids` warns afterwards if the
-        result is too small for ``psf_size``.
+        result is too small for ``psf.size``.
         """
         from .jwst_psf import fov_agnostic_pattern
 
-        psf_dir = Path(self.run_config.psf_dir)
+        psf_dir = Path(self.run_config.psf.dir)
         if not psf_dir.is_dir():
             return None
         rx = re.compile(fov_agnostic_pattern(pattern))
@@ -1426,7 +1606,7 @@ class Pipeline:
         """Load the ePSF grids for one band, building the epochs that are absent.
 
         Completeness is a question about dates, not about files: the exposure
-        list under ``psf_date_mode`` says which epochs this band needs, and
+        list under ``psf.date_mode`` says which epochs this band needs, and
         :meth:`_missing_psf_dates` says which of them no file provides. Only
         those are built, one call per epoch, so a band already holding 99 of
         100 epochs costs one grid rather than a hundred.
@@ -1438,52 +1618,52 @@ class Pipeline:
         """
         cfg = self.run_config
         kw = _psf_factory_kwargs(pattern)
-        fov = kw.get("fov_arcsec", cfg.psf_fov_arcsec)
+        fov = kw.get("fov_arcsec", cfg.psf.fov_arcsec)
         if fov is None:
             fov = self._existing_grid_fov(pattern)
         missing = self._missing_psf_dates(pattern, csv)
-        mode = str(getattr(cfg, "psf_provenance", "warn")).lower()
+        mode = str(cfg.psf.provenance).lower()
 
-        if missing and not cfg.psf_autobuild:
+        if missing and not cfg.psf.autobuild:
             summary = (
                 f"{band}-res band: {len(missing)} of "
                 f"{len(missing) + len(set(dpsf.epsf_obj.epsf))} epoch(s) that "
                 f"{Path(csv).name} implies under date_mode="
-                f"{cfg.psf_date_mode!r} have no grid under {cfg.psf_dir} "
-                f"(first MJD{int(round(missing[0]))}), and psf_autobuild is off"
+                f"{cfg.psf.date_mode!r} have no grid under {cfg.psf.dir} "
+                f"(first MJD{int(round(missing[0]))}), and psf.autobuild is off"
             )
             if mode == "error":
                 raise FileNotFoundError(summary)
             logger.warning("%s; fitting with the epochs that are there", summary)
 
-        if missing and cfg.psf_autobuild:
+        if missing and cfg.psf.autobuild:
             from .psf_factory import PSFFactory
 
             logger.warning(
                 "%s-res band: building %d missing epoch(s) for %r from %s "
                 "(minutes each, cached in %s)",
-                band, len(missing), pattern, Path(csv).name, cfg.psf_dir,
+                band, len(missing), pattern, Path(csv).name, cfg.psf.dir,
             )
-            Path(cfg.psf_dir).mkdir(parents=True, exist_ok=True)
+            Path(cfg.psf.dir).mkdir(parents=True, exist_ok=True)
             # An _FOV token in the pattern carries its own field of view;
-            # otherwise psf_fov_arcsec applies, then the FOV already on disk
+            # otherwise psf.fov_arcsec applies, then the FOV already on disk
             # (`fov`, resolved above), then the backend default.
             kw.pop("fov_arcsec", None)
             # One call per epoch: a literal MJD as date_mode selects exactly
             # that date (psf_factory.dates_from_csv), so nothing already on
             # disk is touched and no other epoch is recomputed.
             for mjd in missing:
-                PSFFactory(outdir=str(cfg.psf_dir), fov_arcsec=fov,
+                PSFFactory(outdir=str(cfg.psf.dir), fov_arcsec=fov,
                            date_mode=float(mjd),
-                           workers=int(getattr(cfg, "psf_workers", 1) or 1),
+                           workers=int(cfg.psf.workers or 1),
                            **kw).from_csv(str(csv), save=True)
 
-        dpsf.epsf_obj.load_jwst_stdpsf(local_dir=str(cfg.psf_dir), filter_pattern=pattern)
+        dpsf.epsf_obj.load_jwst_stdpsf(local_dir=str(cfg.psf.dir), filter_pattern=pattern)
         if not dpsf.epsf_obj.epsf:
             raise FileNotFoundError(
-                f"no PSF grids under {cfg.psf_dir} match {pattern!r} for the "
+                f"no PSF grids under {cfg.psf.dir} match {pattern!r} for the "
                 f"{band}-res band"
-                + ("" if cfg.psf_autobuild else " and psf_autobuild is off")
+                + ("" if cfg.psf.autobuild else " and psf.autobuild is off")
             )
         logger.info(
             "%s-res band: loaded %d ePSF grid(s) matching %r",
@@ -1494,14 +1674,14 @@ class Pipeline:
     def _check_psf_size_fits_grids(self, dpsf, band: str) -> None:
         """Warn when the requested stamp is wider than the grids that feed it.
 
-        ``psf_size`` is the drizzled stamp side in arcsec; a grid's ``FOV``
+        ``psf.size`` is the drizzled stamp side in arcsec; a grid's ``FOV``
         header is its own side in arcsec. Asking for more than the grid holds
         does not fail: ``eval_ePSF`` returns zero outside the grid's support,
         so the stamp is simply padded with zeros and the missing wings are
         quietly absent from the kernel and from every template. That is worth
         a line in the log rather than a silent truncation of the PSF.
         """
-        size = self.run_config.psf_size
+        size = self.run_config.psf.size
         if not size:
             return
         meta_by_key = getattr(dpsf.epsf_obj, "epsf_meta", None) or {}
@@ -1512,10 +1692,10 @@ class Pipeline:
             return
         worst = min(short, key=lambda k: short[k])
         logger.warning(
-            "%s-res band: psf_size=%.3g\" exceeds the field of view of %d of "
+            "%s-res band: psf.size=%.3g\" exceeds the field of view of %d of "
             "%d ePSF grid(s); the stamp is zero-padded beyond the grid and the "
             "PSF wings outside it are lost. Smallest: %s at FOV=%.3g\". Rebuild "
-            "those grids at a larger fov_arcsec, or lower psf_size.",
+            "those grids at a larger fov_arcsec, or lower psf.size.",
             band, float(size), len(short), len(fovs), worst, short[worst],
         )
 
@@ -1549,9 +1729,9 @@ class Pipeline:
         """Build (or reload) per-band PSF maps with PSFs at their own centroids."""
         self._ensure_dpsfs()
         cfg = self.run_config
-        want_hi = {"pattern": cfg.pattern_hi, "psf_size": float(cfg.psf_size or 0.0),
+        want_hi = {"pattern": cfg.psf.pattern_hi, "psf_size": float(cfg.psf.size or 0.0),
                    "blur_fwhm": 0.0}
-        want_lo = {"pattern": cfg.pattern_lo, "psf_size": float(cfg.psf_size or 0.0),
+        want_lo = {"pattern": cfg.psf.pattern_lo, "psf_size": float(cfg.psf.size or 0.0),
                    "blur_fwhm": float(self._blur_fwhm() or 0.0)}
         if self.f_psf_hi.exists() and self.f_psf_lo.exists() and not overwrite:
             cached_hi = PSFRegionMap.from_geojson(str(self.f_psf_hi))
@@ -1695,7 +1875,7 @@ class Pipeline:
             prm_kern,
             kernel_method=method,
             kernel_reg=float("nan") if reg is None else float(reg),
-            psf_size=float(self.run_config.psf_size or 0.0),
+            psf_size=float(self.run_config.psf.size or 0.0),
         )
         logger.info(
             "kernel map: method=%s reg=%s, DC before renormalization "
@@ -1785,7 +1965,7 @@ class Pipeline:
         prov: dict[str, str] = {
             "sci_hi": str(cfg.sci_hi),
             "wht_hi": str(self.resolve_wht_hi()),
-            "pattern": cfg.pattern_hi,
+            "pattern": cfg.psf.pattern_hi,
             "halo": pattern_halo or "",
             "kwargs": json.dumps(cfg.repair_kwargs or {}, sort_keys=True),
             # A trial run only repairs its own patch, so its cache must not
@@ -1935,21 +2115,21 @@ class Pipeline:
         return sci, wht, cat, seg
 
     def _repair_halo_pattern(self) -> str:
-        """Canonical large-FOV halo-grid pattern derived from ``pattern_hi``.
+        """Canonical large-FOV halo-grid pattern derived from ``psf.pattern_hi``.
 
         Keeps the prefix/detector/filter of the photometry grids and swaps
         the sampling tail for the 30" single-position halo layout:
         ``{prefix}_{det}_{filt}_MJD\\d+_FOV30_GRID1_OS4``. Building these
         is a one-off of a few minutes per detector (stpsf at 30" FOV),
-        cached in ``psf_dir``; :meth:`_load_epsf` handles the build when
-        ``psf_autobuild`` is on.
+        cached in ``psf.dir``; :meth:`_load_epsf` handles the build when
+        ``psf.autobuild`` is on.
         """
-        m = _PSF_PATTERN_RE.match(self.run_config.pattern_hi.strip())
+        m = _PSF_PATTERN_RE.match(self.run_config.psf.pattern_hi.strip())
         if m is None:
             logger.warning(
-                "cannot derive a halo-grid pattern from pattern_hi=%r; "
+                "cannot derive a halo-grid pattern from psf.pattern_hi=%r; "
                 "set repair_psf_pattern explicitly",
-                self.run_config.pattern_hi,
+                self.run_config.psf.pattern_hi,
             )
             return ""
         return (
@@ -2061,12 +2241,12 @@ class Pipeline:
 
             self._ensure_dpsfs(load_epsf=True)
             # Large-FOV grids for the halo model (halo + spikes); the core
-            # fit keeps the MJD-matched pattern_hi ePSFs and the halo is
+            # fit keeps the MJD-matched psf.pattern_hi ePSFs and the halo is
             # grafted outside their support. Same two-PSF split as the
             # original standalone repair flow.
             pattern_halo = cfg.repair_psf_pattern or self._repair_halo_pattern()
             stamp_dpsf = None
-            if pattern_halo and pattern_halo != cfg.pattern_hi:
+            if pattern_halo and pattern_halo != cfg.psf.pattern_hi:
                 from .psf import DrizzlePSF
 
                 stamp_dpsf = DrizzlePSF(
@@ -2079,11 +2259,11 @@ class Pipeline:
                 except (FileNotFoundError, ValueError) as exc:
                     # Missing grids with autobuild off, or a pattern the
                     # autobuild grammar cannot parse (e.g. a legacy-order
-                    # spelling): degrade to the pattern_hi reach instead of
+                    # spelling): degrade to the psf.pattern_hi reach instead of
                     # failing the run — the repair itself is unaffected.
                     logger.warning(
                         "halo PSF grids unavailable for %r (%s); flag reach "
-                        "limited to the pattern_hi field of view",
+                        "limited to the psf.pattern_hi field of view",
                         pattern_halo, exc,
                     )
                     stamp_dpsf, pattern_halo = None, ""
@@ -2113,7 +2293,7 @@ class Pipeline:
                 seg0 = segmap.copy()
                 rep = repair_in_memory(
                     tmpl_hi, wht0,
-                    dpsf=self.dpsf_hi, wcs=wcs_hi, psf_pattern=cfg.pattern_hi,
+                    dpsf=self.dpsf_hi, wcs=wcs_hi, psf_pattern=cfg.psf.pattern_hi,
                     catalog=cat, segmap=segmap,
                     stamp_dpsf=stamp_dpsf,
                     stamp_pattern=pattern_halo or None,
@@ -2288,9 +2468,18 @@ class Pipeline:
 
         if getattr(self, "run_config", None) is None:
             raise RuntimeError("load_outputs requires a config-driven Pipeline")
+        self.scene_fit = None
         if self.f_fit_table.exists():
-            self.table = Table.read(self.f_fit_table)
+            # hdu=1 explicitly: the file carries a SCENES extension too, and a
+            # bare read warns about the ambiguity before picking this one
+            self.table = Table.read(self.f_fit_table, hdu=1)
             logger.info("loaded %s (%d rows)", self.f_fit_table.name, len(self.table))
+            with fits.open(self.f_fit_table) as hdul:
+                has_scenes = "SCENES" in [h.name for h in hdul]
+            if has_scenes:
+                self.scene_fit = Table.read(self.f_fit_table, hdu="SCENES")
+                logger.info("loaded %s[SCENES] (%d scenes)",
+                            self.f_fit_table.name, len(self.scene_fit))
         else:
             logger.warning("no fit table %s", self.f_fit_table)
         if self.f_residual.exists():
@@ -2426,6 +2615,204 @@ class Pipeline:
             rows=rows,
             names=["id", "id_parent", "x", "y", "dx", "dy", "flux", "err", "id_scene"],
         )
+
+    def write_scene_catalog(self, path: str | Path) -> Table:
+        """Write the human-readable per-scene summary and return it.
+
+        Deliberately short: this file is for reading. Everything the solver
+        recorded per scene -- iteration counts, step sizes, the robust-pass
+        verdict, and the shift coefficients -- is in the ``SCENES`` extension
+        of the fit table, which is what a machine should read.
+
+        ``dx``, ``dy`` are the *applied* shift field sampled at the scene
+        centre, so they stay a summary of what the sources actually moved
+        rather than the last pass's coefficients, which is a different and
+        smaller thing.
+
+        Public because a run that died drawing figures re-emits this from a
+        reloaded fit, and it has to be the same file either way.
+        """
+        cfg = self.run_config
+        # chi2 is judged against the residual with *every* scene's model
+        # subtracted; Scene.residual() keeps the neighbours' light and would
+        # charge it to this scene.
+        residuals = getattr(self, "residuals", None)
+        global_residual = residuals[0] if residuals else None
+        rows = []
+        for s in self.scenes:
+            xy = np.mean([t.position_original for t in s.templates], axis=0)
+            ra, dec = self.wcs[0].wcs_pix2world([xy], 0)[0]
+            # The scene's total shift at the centroid of its own templates,
+            # taken as the plain mean of what was actually applied. See
+            # Scene.mean_shift for why this is not a field evaluation.
+            dx, dy = s.mean_shift()
+            anchors = getattr(s, "is_bright", None)
+            rep = getattr(s, "anchor_report", None)
+            applied = bool(rep is not None and rep.applied)
+            rows.append(
+                (s.id, len(s.templates),
+                 0 if anchors is None else int(np.sum(anchors)), ra, dec,
+                 float(dx), float(dy), s.shift_error(), s.shift_scatter(),
+                 float(rep.sys_floor) if applied else np.nan,
+                 s.chi2_dof(global_residual),
+                 -1 if s.astrom_converged is None else int(not s.astrom_converged))
+            )
+        table = Table(
+            rows=rows,
+            names=["id", "n_templates", "n_anchor", "ra", "dec", "dx", "dy",
+                   "sigma_shift", "shift_rms", "astrom_floor", "chi2_dof",
+                   "flag_astrom"],
+        )
+        # No viewer, no column: a guessed URL is worse than none, since the
+        # fields do not agree on whether the release is part of the path.
+        viewer = (cfg.minerva_viewer or "") if cfg is not None else ""
+        if viewer and "://" not in viewer:
+            viewer = f"{FITSMAP_URL}/{viewer.strip('/')}"  # bare <field>/<release>
+        if viewer:
+            table["minerva_link"] = [
+                f"{viewer.rstrip('/')}/?ra={ra:.7f}&dec={dec:.7f}&zoom=7"
+                for ra, dec in zip(table["ra"], table["dec"])
+            ]
+        table.write(str(path), format="ascii.csv", overwrite=True)
+        return table
+
+    def restore_scene_fit(self, scenes: Sequence[Any]) -> int:
+        """Put the ``SCENES`` extension back onto regrouped scene objects.
+
+        ``load_fit`` does not rebuild scenes -- membership survives as
+        ``id_scene`` and the caller regroups from it -- so the solver state
+        those scenes never had is reattached here, matched by scene id.
+        Restores the shift coefficients and their basis, the astrometry
+        counters and the robust-pass verdict, which is everything
+        :meth:`write_scene_catalog` and :meth:`plot_shift_field` read.
+
+        Returns the number of scenes matched, and does nothing when the fit
+        table has no such extension -- runs written before it existed reload
+        exactly as they did.
+        """
+        table = getattr(self, "scene_fit", None)
+        if table is None:
+            return 0
+        by_id = {int(r["id"]): r for r in table}
+        matched = 0
+        for s in scenes:
+            row = by_id.get(int(s.id))
+            if row is None:
+                continue
+            order = int(row["shift_order"])
+            if order >= 0 and int(row["n_coeff"]) > 0:
+                s.shifts = np.asarray(row["shift_coeff"][: int(row["n_coeff"])], float)
+                # `basis` is the per-template design, rebuilt on demand by the
+                # evaluators; only the normalisation has to survive the trip
+                s.shift_basis = [None,
+                                 (float(row["shift_x0"]), float(row["shift_y0"])),
+                                 (float(row["shift_sx"]), float(row["shift_sy"]))]
+            s.astrom_niter = int(row["astrom_niter"])
+            conv = int(row["astrom_converged"])
+            s.astrom_converged = None if conv < 0 else bool(conv)
+            step = float(row["astrom_step"])
+            s.astrom_step = None if np.isnan(step) else step
+            matched += 1
+        return matched
+
+    def _band_label(self, ifilt: int) -> str:
+        """Name one of ``self.images`` for a log line.
+
+        ``image 1`` says nothing in a run log that is read weeks later beside
+        sixteen other bands, so name the file. A run config describes one
+        reference and one lo-res band; a pipeline driven directly can hold
+        more, and those keep the index rather than borrowing a name.
+        """
+        cfg = getattr(self, "run_config", None)
+        path = None if cfg is None else (cfg.sci_hi, cfg.sci_lo)[ifilt] if ifilt < 2 else None
+        if not path:
+            return f"image {ifilt}"
+        name = Path(path).name
+        filt = (cfg.filter_lo or "") if ifilt else ""
+        return f"{filt} ({name})" if filt else name
+
+    def _scene_fit_table(self) -> Table:
+        """Per-scene fit state: the shift field the anchors solved.
+
+        The per-template table records the shift each source *received*; this
+        records where that came from. ``shift_coeff`` with ``shift_order`` and
+        the ``(x0, y0, sx, sy)`` normalisation are exactly the arguments of
+        :meth:`AstroCorrect.build_poly_predictor`, so the field can be
+        evaluated anywhere rather than only at the sources that sampled it.
+
+        Two things it is not, both of which matter when reading it back:
+
+        * **The last pass, not the sum of them.** ``Scene.solve`` overwrites
+          ``shifts`` on every astrometric pass, so a scene with
+          ``astrom_niter`` above 1 kept only the final pass's coefficients.
+          The total offset a source ended up with is the per-template ``dx``,
+          ``dy`` of ``<name>_templates.fits``, and refitting those is what
+          :meth:`_scene_shift_samples` does.
+        * **Undamped.** The applied shift is ``astrom_damping`` times this
+          field, so the factor is stored beside it rather than left to the
+          config that happened to be in force.
+
+        ``shift_coeff`` is padded with NaN to the widest order in the run and
+        cut back with ``n_coeff``; ``shift_order`` is -1 for a scene that
+        solved no shifts, which includes every scene when astrometry is off.
+        Order is per scene, not per run -- a saturated scene is forced to 0 so
+        its fragments move rigidly.
+        """
+        damping = float(getattr(self.config, "astrom_damping", 1.0))
+        widths = [len(s.shifts) for s in self.scenes
+                  if getattr(s, "shifts", None) is not None]
+        nmax = max(widths) if widths else 1
+        coeff = np.full((len(self.scenes), nmax), np.nan)
+        residuals = getattr(self, "residuals", None)
+        sc_residual = residuals[0] if residuals else None
+
+        rows = []
+        for i, s in enumerate(self.scenes):
+            xy = np.mean([t.position_original for t in s.templates], axis=0)
+            ra, dec = self.wcs[0].wcs_pix2world([xy], 0)[0]
+
+            shifts = getattr(s, "shifts", None)
+            basis = getattr(s, "shift_basis", None)
+            order = _cheb_order_from_coeffs(shifts)
+            if order is None or basis is None:
+                order, ncoef = -1, 0
+                x0 = y0 = sx = sy = np.nan
+            else:
+                ncoef = len(shifts)
+                coeff[i, :ncoef] = np.asarray(shifts, dtype=float)
+                _, (x0, y0), (sx, sy) = basis
+
+            rep = getattr(s, "anchor_report", None)
+            applied = bool(rep is not None and rep.applied)
+            anchors = getattr(s, "is_bright", None)
+            rows.append(
+                (int(s.id), len(s.templates),
+                 0 if anchors is None else int(anchors.sum()),
+                 float(xy[0]), float(xy[1]), float(ra), float(dec),
+                 int(order), int(ncoef),
+                 float(x0), float(y0), float(sx), float(sy),
+                 damping if order >= 0 else np.nan,
+                 int(s.astrom_niter),
+                 -1 if s.astrom_converged is None else int(s.astrom_converged),
+                 float(s.astrom_step if s.astrom_step is not None else np.nan),
+                 int(applied),
+                 int(rep.n_rejected) if applied else -1,
+                 float(rep.sys_floor) if applied else np.nan,
+                 float(rep.n_eff) if applied else np.nan,
+                 s.shift_scatter(), s.shift_error(), s.chi2_dof(sc_residual))
+            )
+        table = Table(
+            rows=rows,
+            names=["id", "n_templates", "n_anchor", "x", "y", "ra", "dec",
+                   "shift_order", "n_coeff",
+                   "shift_x0", "shift_y0", "shift_sx", "shift_sy",
+                   "astrom_damping",
+                   "astrom_niter", "astrom_converged", "astrom_step",
+                   "astrom_robust", "astrom_nreject", "astrom_floor",
+                   "astrom_neff", "shift_rms", "sigma_shift", "chi2_dof"],
+        )
+        table["shift_coeff"] = coeff
+        return table
 
     # -- inspection --------------------------------------------------------
     def __repr__(self) -> str:
@@ -2628,17 +3015,15 @@ class Pipeline:
             ``(xy, dxy)`` in reference-image pixels, both ``(n, 2)``, or None
             when the scene has no usable shift solution.
         """
-        from .astrometry import cheb_basis, n_terms
+        from .astrometry import cheb_basis
 
         shifts = getattr(scene, "shifts", None)
         basis = getattr(scene, "shift_basis", None)
         if shifts is None or basis is None or len(shifts) < 2 or not scene.templates:
             return None
         _, (x0, y0), (Sx, Sy) = basis
-        # invert n_terms(order) = (order+1)(order+2)/2 on the dx half of shifts
-        p = len(shifts) // 2
-        order = int(round((np.sqrt(8.0 * p + 1.0) - 3.0) / 2.0))
-        if order < 0 or n_terms(order) != p:
+        order = _cheb_order_from_coeffs(shifts)
+        if order is None:
             logger.warning(
                 "scene %s: %d shift coefficients match no Chebyshev order; skipped",
                 getattr(scene, "id", -1), len(shifts),
@@ -2815,6 +3200,19 @@ class Pipeline:
             if getattr(self, "all_templates", None):
                 self._template_fit_table().write(self.f_templates, overwrite=True)
 
+            # Per-scene fit state, as a SCENES extension of the fit table.
+            # Written here rather than beside the scene catalog further down,
+            # because everything below this point draws figures, and the
+            # figure loop is where a band dies: three of the seventeen in the
+            # 2026-08-16 campaign stopped inside it, and the solution they had
+            # already found went with them. Read it back with
+            # ``Table.read(f_fit_table, hdu="SCENES")``.
+            if self.scenes:
+                scene_hdu = fits.BinTableHDU(
+                    self._scene_fit_table().as_array(), name="SCENES"
+                )
+                fits.append(self.f_fit_table, scene_hdu.data, scene_hdu.header)
+
         scene_dir = self.out_dir / "scenes"
         if cfg.scene_plots and self.scenes:
             scene_dir.mkdir(parents=True, exist_ok=True)
@@ -2828,46 +3226,18 @@ class Pipeline:
             for t in s.templates
             if getattr(t, "is_saturated", False)
         ]
-        rows = []
-        for s in self.scenes:
-            xy = np.mean([t.position_original for t in s.templates], axis=0)
-            ra, dec = self.wcs[0].wcs_pix2world([xy], 0)[0]
-            # total applied shift at the scene center, NaN where none was fitted
-            sampled = self._scene_shift_samples(s, at=xy)
-            dx, dy = sampled[1][0] if sampled is not None else (np.nan, np.nan)
-            rows.append(
-                (s.id, len(s.templates), int(s.is_bright.sum()), ra, dec,
-                 float(dx), float(dy),
-                 int(s.astrom_niter),
-                 -1 if s.astrom_converged is None else int(not s.astrom_converged),
-                 float(s.astrom_step if s.astrom_step is not None else np.nan))
-            )
-            if cfg.scene_plots:
-                import matplotlib.pyplot as plt
+        self.write_scene_catalog(f"{stem}_scene_catalog.csv")
 
+        if cfg.scene_plots:
+            import matplotlib.pyplot as plt
+
+            for s in self.scenes:
                 fig, _ = s.plot(
                     self.images[0], self.segmap, display_sig=5,
                     null_segments=sat_ids,
                 )
                 fig.savefig(scene_dir / f"{cfg.name}_scene_{s.id}.png", dpi=300)
                 plt.close(fig)
-        scene_table = Table(
-            rows=rows,
-            names=["id", "n_templates", "is_bright", "ra", "dec", "dx", "dy",
-                   "astrom_niter", "flag_astrom", "astrom_step"],
-        )
-        viewer = cfg.minerva_viewer
-        if viewer is None:
-            viewer = f"{str(cfg.name).split('_')[0].lower()}/{cfg.minerva_release}"
-        if viewer:
-            scene_table["minerva_link"] = [
-                f"https://minerva.colorado.edu/{viewer.strip('/')}/"
-                f"?ra={ra:.7f}&dec={dec:.7f}&zoom=7"
-                for ra, dec in zip(scene_table["ra"], scene_table["dec"])
-            ]
-        scene_table.write(
-            f"{stem}_scene_catalog.csv", format="ascii.csv", overwrite=True
-        )
 
         # Two full-field views of the partition, answering different
         # questions, side by side in one figure and sharing one colour per
@@ -3085,6 +3455,11 @@ class Pipeline:
             rows["ee_psf_lo"].append(float(getattr(t_lo, "ee_psf_lo", np.nan)))
             rows["ee_tmpl"].append(float(getattr(t_lo, "ee_tmpl", np.nan)))
             rows["err_pred"].append(float(getattr(t_lo, "err_pred", np.nan)))
+            # Weight this source carried as an astrometric anchor. 1.0 unless
+            # FitConfig.astrom_robust downweighted it, 0.0 if it was rejected;
+            # 1.0 for every non-anchor. Written so an A/B pair of runs can be
+            # compared source by source, not just scene by scene.
+            rows["astrom_weight"].append(float(getattr(t_lo, "astrom_weight", 1.0)))
             shift = np.asarray(getattr(t_lo, "shifted", (0.0, 0.0)), dtype=float)
             rows["shift_x"].append(float(shift[0]))
             rows["shift_y"].append(float(shift[1]))
@@ -3220,10 +3595,17 @@ class Pipeline:
         k = bin_factor_from_wcs(self.wcs[0], self.wcs[ifilt]) if self.wcs is not None else 1
         self.fit_bin_factors.append(int(k))
         if k > 1 and config.multi_resolution_method == "upsample":
-            logger.info("upsampling image %d by factor %d", ifilt, k)
-            self.images[ifilt], _ = _upsample_boxed(
-                self.images[ifilt], None, k, self.trial_box_lo
+            logger.info("upsampling %s by factor %d", self._band_label(ifilt), k)
+            # The weight goes with the image, or the restored instance carries
+            # a native-grid weight beside a reference-grid image while
+            # `wcs[ifilt] = wcs[0]` hides the discrepancy from the next caller
+            # (see _convolved_templates).
+            w_i = self.weights[ifilt] if self.weights is not None else None
+            self.images[ifilt], w_i = _upsample_boxed(
+                self.images[ifilt], w_i, k, self.trial_box_lo
             )
+            if self.weights is not None:
+                self.weights[ifilt] = w_i
             self.wcs[ifilt] = self.wcs[0]
 
         shape_hi = self.images[0].shape
@@ -3288,6 +3670,9 @@ class Pipeline:
                 t_lo.id_scene = int(row["id_scene"])
                 t_lo.ee_psf_lo = float(row["ee_psf_lo"])
                 t_lo.ee_tmpl = float(row["ee_tmpl"])
+                # absent from stamp files written before astrom_robust existed
+                if "astrom_weight" in row:
+                    t_lo.astrom_weight = float(row["astrom_weight"])
                 t_lo.shifted = np.array(
                     [float(row["shift_x"]), float(row["shift_y"])], dtype=float
                 )
@@ -3592,7 +3977,7 @@ class Pipeline:
 
         A campaign submits a field's bands together, and each would otherwise
         re-run the same repair: it depends on the detection image, its weight,
-        ``pattern_hi``, the halo pattern, ``repair_kwargs`` and the trial box
+        ``psf.pattern_hi``, the halo pattern, ``repair_kwargs`` and the trial box
         (:meth:`_repair_provenance`), and on nothing that varies between bands.
         Running it once per field turns that duplicated work into a cache hit,
         and removes the concurrent writes to a shared cache file that come with
@@ -3706,6 +4091,11 @@ class Pipeline:
         # int16, not int8: astropy writes an int8 column as a FITS logical,
         # and -1 comes back as True.
         cat[f"flag_astrom_{idx}"] = np.full(len(cat), -1, dtype=np.int16)
+        # Anchor weight from FitConfig.astrom_robust: 1.0 when the pass is off,
+        # declined, or found nothing to downweight; 0.0 for a rejected anchor.
+        # Always written, so an A/B pair of runs differs in the column values
+        # rather than in the schema.
+        cat[f"astrom_weight_{idx}"] = np.ones(len(cat), dtype=np.float32)
 
         if not np.isfinite(throughput) or throughput <= 0.0:
             logger.warning(
@@ -3732,6 +4122,11 @@ class Pipeline:
         # first template wins for a parent: deblend children of one source share
         # a scene, so any of them names it
         scene_of_parent: dict[int, int] = {}
+        # Weakest anchor weight among a parent's templates: a source whose only
+        # fragment was rejected reads 0, one never downweighted reads 1. The
+        # minimum rather than a mean, because the question the column answers
+        # is whether any part of this source was thrown out of the shift fit.
+        astrom_w_of_parent: dict[int, float] = {}
         for k, (tmpl, pid, fl, er, ep) in enumerate(
             zip(templates, parent_ids, fluxes, errs, err_pred)
         ):
@@ -3739,6 +4134,8 @@ class Pipeline:
                 continue
             if scene_ids is not None and k < len(scene_ids):
                 scene_of_parent.setdefault(pid, int(scene_ids[k]))
+            aw = float(getattr(tmpl, "astrom_weight", 1.0))
+            astrom_w_of_parent[pid] = min(astrom_w_of_parent.get(pid, 1.0), aw)
             ee = getattr(tmpl, "ee_psf_lo", np.nan)
             if not np.isfinite(ee) or ee <= 0.0:
                 ee = throughput
@@ -3785,6 +4182,7 @@ class Pipeline:
             cat[f"err_{idx}_total"][ci] = err_total_sum[pid]
             cat[f"err_pred_{idx}_total"][ci] = err_pred_total_sum[pid]
             cat[f"throughput_{idx}"][ci] = throughput
+            cat[f"astrom_weight_{idx}"][ci] = astrom_w_of_parent.get(pid, 1.0)
             sid = scene_of_parent.get(pid, -1)
             cat[f"scene_{idx}"][ci] = sid
             if scene_flags:
@@ -3867,14 +4265,14 @@ class Pipeline:
         # array leaves it None, which only disables the flux_beyond_aper
         # crowding bookkeeping).
         r_ap = None
-        scalar_ap = np.isscalar(config.aperture_diam) and not isinstance(config.aperture_diam, str)
+        scalar_ap = np.isscalar(config.phot.aperture_diam) and not isinstance(config.phot.aperture_diam, str)
         if scalar_ap:
-            if config.aperture_units == "arcsec":
+            if config.phot.units == "arcsec":
                 pscale = self._pixel_scale_arcsec(self.wcs[0] if self.wcs is not None else None)
                 if pscale:
-                    r_ap = 0.5 * float(config.aperture_diam) / pscale
+                    r_ap = 0.5 * float(config.phot.aperture_diam) / pscale
             else:
-                r_ap = 0.5 * float(config.aperture_diam)
+                r_ap = 0.5 * float(config.phot.aperture_diam)
 
         # Largest matching-kernel effective half-width over the fitted bands
         # (95% encircled radius of |K|, not the zero-padded array size).
@@ -3958,21 +4356,21 @@ class Pipeline:
 
     def _resolve_image_ap_radius_pix(self, idx: int, cfg: _FitConfig) -> float:
         """
-        Diameter source: cfg.aperture_diam
+        Diameter source: cfg.phot.aperture_diam
         - float/int => same for all images
         - np.ndarray(len(images)-1) => per image (idx>=1), pick [idx-1]
         - None => 1.5 × FWHM of PSF[idx] (in *pixels* of image idx),
                     fallback 3.0 pixels if PSF is missing.
-        Units: cfg.aperture_units ("arcsec" or "pix")
+        Units: cfg.phot.units ("arcsec" or "pix")
         """
         diam = None
-        if isinstance(cfg.aperture_diam, (int, float)):
-            diam = float(cfg.aperture_diam)
-        elif isinstance(cfg.aperture_diam, np.ndarray):
+        if isinstance(cfg.phot.aperture_diam, (int, float)):
+            diam = float(cfg.phot.aperture_diam)
+        elif isinstance(cfg.phot.aperture_diam, np.ndarray):
             # array corresponds to images[1:], so use [idx-1]
-            if cfg.aperture_diam.size != (len(self.images) - 1):
+            if cfg.phot.aperture_diam.size != (len(self.images) - 1):
                 raise ValueError("aperture_diam array must have len(images)-1 elements")
-            diam = float(cfg.aperture_diam[idx - 1])  # idx>=1 by construction here
+            diam = float(cfg.phot.aperture_diam[idx - 1])  # idx>=1 by construction here
 
         if diam is None:
             # default: 1.5×FWHM of this image PSF (pixels)
@@ -3994,7 +4392,7 @@ class Pipeline:
             return float(rad_pix)
 
         # convert diameter to pixels if needed
-        if cfg.aperture_units.lower().startswith("arc"):
+        if cfg.phot.units.lower().startswith("arc"):
             pscale = self._pixel_scale_arcsec(self.wcs[idx] if self.wcs is not None else None)
             if not pscale or pscale <= 0:
                 raise ValueError("aperture_diam in arcsec requires valid WCS for each image")
@@ -4013,7 +4411,7 @@ class Pipeline:
         - float/int => fixed *diameter* for all sources
         - None => default 1.5 × FWHM of PSF[0] in pixels (fallback 3.0)
 
-        Units: cfg.aperture_units ("arcsec" or "pix")
+        Units: cfg.phot.units ("arcsec" or "pix")
         """
         # get reference pixel scale
         pscale_ref = self._pixel_scale_arcsec(self.wcs[0] if self.wcs is not None else None)
@@ -4021,15 +4419,15 @@ class Pipeline:
         out: dict[int, float] = {}
 
         # if no catalog, default to r_default for all (if given)
-        if cfg.aperture_catalog is None:
+        if cfg.phot.aperture_catalog is None:
             for i, _ in enumerate(cat["id"]):
                 out[int(cat["id"][i])] = r_default
             return out
 
         # get from catalog
-        if isinstance(cfg.aperture_catalog, (int, float)):
-            diam = float(cfg.aperture_catalog)
-            if cfg.aperture_units.lower().startswith("arc"):
+        if isinstance(cfg.phot.aperture_catalog, (int, float)):
+            diam = float(cfg.phot.aperture_catalog)
+            if cfg.phot.units.lower().startswith("arc"):
                 if not pscale_ref or pscale_ref <= 0:
                     raise ValueError("aperture_catalog in arcsec requires valid ref WCS")
                 rad = diam / (2.0 * pscale_ref)
@@ -4040,10 +4438,10 @@ class Pipeline:
             return out
 
         # string column name
-        col = str(cfg.aperture_catalog)
+        col = str(cfg.phot.aperture_catalog)
         if col not in cat.colnames:
             raise ValueError(f"aperture_catalog column '{col}' not found in table")
-        if cfg.aperture_units.lower().startswith("arc"):
+        if cfg.phot.units.lower().startswith("arc"):
             if not pscale_ref or pscale_ref <= 0:
                 raise ValueError("aperture_catalog in arcsec requires valid ref WCS")
             for i, _ in enumerate(cat["id"]):
@@ -4080,13 +4478,13 @@ class Pipeline:
         This is the flux-estimator report's ``tcorH``, renamed: the
         detection catalog's Kron-to-aperture flux ratio times the inverse
         encircled energy of the high-resolution PSF at the scaled circularized
-        Kron radius.  Computed only when the three ``cat_*_col`` FitConfig
+        Kron radius.  Computed only when the three ``phot`` column
         knobs name existing catalog columns; otherwise empty.  The Kron radius
-        column is in arcsec; ``cat_kron_k`` scales it (SExtractor AUTO: 2.5).
+        column is in arcsec; ``phot.kron_k`` scales it (SExtractor AUTO: 2.5).
         Written once to the band-independent ``totcor_cat`` catalog column.
         """
         cfg = self.config
-        cols = (cfg.cat_kron_flux_col, cfg.cat_aper_flux_col, cfg.cat_kron_radius_col)
+        cols = (cfg.phot.kron_flux_col, cfg.phot.aper_flux_col, cfg.phot.kron_radius_col)
         source_cat = self.catalog
         if source_cat is None or any(c is None for c in cols):
             return {}
@@ -4115,9 +4513,9 @@ class Pipeline:
             ci = id_to_row.get(sid)
             if ci is None:
                 continue
-            f_kron = float(row[cfg.cat_kron_flux_col])
-            f_aper = float(row[cfg.cat_aper_flux_col])
-            r_kron = float(row[cfg.cat_kron_radius_col])  # arcsec
+            f_kron = float(row[cfg.phot.kron_flux_col])
+            f_aper = float(row[cfg.phot.aper_flux_col])
+            r_kron = float(row[cfg.phot.kron_radius_col])  # arcsec
             if not (np.isfinite(f_kron) and np.isfinite(f_aper) and f_aper > 0
                     and np.isfinite(r_kron) and r_kron > 0):
                 n_bad += 1
@@ -4130,7 +4528,7 @@ class Pipeline:
             if stamp is None:
                 n_bad += 1
                 continue
-            r_pix = float(cfg.cat_kron_k) * r_kron / pscale
+            r_pix = float(cfg.phot.kron_k) * r_kron / pscale
             cy, cx = (stamp.shape[0] - 1) / 2.0, (stamp.shape[1] - 1) / 2.0
             aper = CircularAperture((cx, cy), r=max(r_pix, 0.5))
             ee_h = float(aperture_photometry(stamp, aper, method="exact")["aperture_sum"][0])
@@ -4306,8 +4704,8 @@ class Pipeline:
         sat_cols = [c for c in catalog.colnames if c.startswith("FLAG_SATURATED_")]
         keep_cols.extend(sat_cols)
         cat = cat[keep_cols]
-        if config.aperture_catalog is not None:
-            cat[config.aperture_catalog] = catalog[config.aperture_catalog]
+        if config.phot.aperture_catalog is not None:
+            cat[config.phot.aperture_catalog] = catalog[config.phot.aperture_catalog]
         return cat
 
     def _prepare_hi_templates(self, cat: Table, config: _FitConfig) -> list[Template]:
@@ -4472,7 +4870,7 @@ class Pipeline:
 
         if k > 1:
             if config.multi_resolution_method == "upsample":
-                logger.info("upsampling image %d by factor %d", ifilt, k)
+                logger.info("upsampling %s by factor %d", self._band_label(ifilt), k)
                 images[ifilt], weights_i = _upsample_boxed(
                     images[ifilt],
                     weights_i,
@@ -4480,6 +4878,20 @@ class Pipeline:
                     self.trial_box_lo,
                 )
                 wcs[ifilt] = wcs[0]
+                # Keep the instance's own weight on the same grid as its own
+                # image. The upsampled weight used to live only in this local,
+                # so afterwards images[ifilt] was on the reference grid while
+                # weights[ifilt] was still native -- and `wcs[ifilt] = wcs[0]`
+                # above erases the evidence, because the next call computes
+                # k = 1 and upsamples neither. A second pass over the same band
+                # (`_solve_frozen_scene`, or any refit) then indexed a native
+                # weight map with reference-grid slices. Numpy clips
+                # out-of-range slices rather than raising, so that read
+                # silently returned the wrong region: templates in genuinely
+                # covered sky were pruned as uncovered, and the scene residual
+                # was masked over valid pixels.
+                if weights is not None:
+                    weights[ifilt] = weights_i
             else:
                 logger.info("downsampling templates and kernels by factor %d", k)
                 tmpls_lo = Templates()
@@ -4508,6 +4920,17 @@ class Pipeline:
             tmpls_lo._templates = list(self.tmpls._templates)
 
         if weights_i is not None:
+            # Slicing a too-small weight map with reference-grid slices is not
+            # an error in numpy -- it clips and returns the wrong region -- so
+            # the pairing has to be checked rather than trusted.
+            if weights_i.shape != images[ifilt].shape:
+                raise RuntimeError(
+                    f"band {ifilt}: weight map {weights_i.shape} is not on the "
+                    f"same grid as the image {images[ifilt].shape}. Slicing it "
+                    f"with fit-grid coordinates would silently read the wrong "
+                    f"pixels: templates over covered sky would be pruned as "
+                    f"uncovered and residuals masked over valid data."
+                )
             tmpls_lo.prune_outside_weight(weights_i)
 
         templates = tmpls_lo.convolve_templates(
@@ -4634,9 +5057,9 @@ class Pipeline:
                 weights_i,
                 coupling_thresh=float(config.scene_coupling_thresh),
                 max_size=config.scene_max_size,
-                snr_thresh_astrom=float(config.snr_thresh_astrom),
+                astrom_minimum_snr=float(config.astrom_minimum_snr),
                 isolation_thresh=float(config.astrom_isolation_thresh),
-                minimum_bright=int(config.scene_minimum_bright),
+                minimum_bright=int(config.scene_minimum_anchors),
                 max_merge_radius=float(getattr(config, "scene_max_merge_radius", np.inf)),
                 exclude_stars=bool(config.astrom_exclude_stars),
             )
@@ -4694,63 +5117,18 @@ class Pipeline:
             # pass. The results are identical either way; what goes is the
             # barrier, which is what stops a scene from being handed to a
             # worker process (see docs/SCALING_FIXED_MEMORY.md).
+            # That unit of work is `_refine_scene_astrometry`, shared with
+            # `_solve_frozen_scene` so a refit is refined exactly as the run
+            # refined it.
             logger.info(
                 "[Scenes] solving %d scene(s), up to %d astrometric pass(es) "
                 "each (tol %s)", len(scenes), niter_scene, tol_txt,
             )
-            # A flux-only run (fit_astrometry_niter = 0) takes one pass through
-            # the loop below -- solve() dispatches to the flux-only path on the
-            # same flag -- and skips the closing re-solve.
-            final_cfg = (
-                replace(config, fit_astrometry_niter=0)
-                if config.fit_astrometry_niter > 0
-                else None
-            )
             unconverged: list[Scene] = []
             for scn in scenes:
                 scn.set_band(images[ifilt], weights_i, config=config)
-                with self._phase("astrometry passes"):
-                  for j in range(niter_scene):
-                    prev = np.array([t.shifted[:2] for t in scn.templates], dtype=float)
-                    scn.solve(config=config, apply_shifts=True)
-                    cur = np.array([t.shifted[:2] for t in scn.templates], dtype=float)
-                    step = (
-                        float(np.max(np.abs(cur - prev)))
-                        if prev.size and cur.shape == prev.shape
-                        else 0.0
-                    )
-                    scn.astrom_step, scn.astrom_niter = step, j + 1
-                    # a verdict only means something where shifts were fitted:
-                    # a flux-only run, or a scene with too few bright anchors
-                    # to carry a shift block, never moves, and reporting that
-                    # as "converged" would claim an astrometric solution that
-                    # was never solved for. Those keep astrom_converged None
-                    # and flag -1 -- and stop here, since nothing will move
-                    # them on a later pass either.
-                    if scn.shifts is not None and len(scn.shifts) > 0:
-                        scn.astrom_converged = step < shift_tol
-                    if scn.astrom_converged is not False:
-                        break
-                if scn.astrom_converged is False:
+                if self._refine_scene_astrometry(scn, config) is False:
                     unconverged.append(scn)
-                # Each pass solved fluxes on the templates as they stood
-                # *before* that pass's shift was applied, so the stored fluxes,
-                # errors and model belong to a basis that no longer exists --
-                # the last shift applied is never accounted for. Re-solve
-                # fluxes once on the final templates, regardless of the
-                # convergence verdict, so what is written is stationary for the
-                # basis actually used to build the model, residual and stamps.
-                # Shifts are left untouched: this is a flux-only pass.
-                if final_cfg is not None:
-                    with self._phase("final flux solve"):
-                        scn.solve(config=final_cfg)
-                logger.debug(
-                    "[Scenes] scene %s: %d pass(es), last increment %.4f pix, %s",
-                    scn.id, scn.astrom_niter, scn.astrom_step or 0.0,
-                    "converged" if scn.astrom_converged
-                    else ("no shift fitted" if scn.astrom_converged is None
-                          else "still moving"),
-                )
 
             niters = [s.astrom_niter for s in scenes]
             logger.info(
@@ -4760,7 +5138,7 @@ class Pipeline:
                 tol_txt,
                 int(np.median(niters)) if niters else 0, max(niters, default=0),
                 "; fluxes re-solved on the final templates"
-                if final_cfg is not None else "",
+                if config.fit_astrometry_niter > 0 else "",
             )
 
             # Scenes still moving when the budget ran out: their shifts are the
@@ -4834,7 +5212,7 @@ class Pipeline:
             )
 
 
-            if config.aperture_diam is not None:
+            if config.phot.aperture_diam is not None:
                 pscale = self._pixel_scale_arcsec(
                     self.wcs[ifilt] if self.wcs is not None else None
                 )

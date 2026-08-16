@@ -239,7 +239,7 @@ def test_isolation_thresh_counts_only_isolated_toward_floor():
     # Without isolation: pair members count as bright -> pair scene stands alone.
     _, labels = generate_scenes(
         tmpls.templates, image, weight,
-        coupling_thresh=1e-3, minimum_bright=1, snr_thresh_astrom=1.0,
+        coupling_thresh=1e-3, minimum_bright=1, astrom_minimum_snr=1.0,
     )
     assert labels[0] == labels[1]  # blended pair coupled into one scene
     n_without = np.unique(labels).size
@@ -248,7 +248,7 @@ def test_isolation_thresh_counts_only_isolated_toward_floor():
     # scene is under the floor and merges toward the isolated source.
     _, labels_iso = generate_scenes(
         tmpls.templates, image, weight,
-        coupling_thresh=1e-3, minimum_bright=1, snr_thresh_astrom=1.0,
+        coupling_thresh=1e-3, minimum_bright=1, astrom_minimum_snr=1.0,
         isolation_thresh=0.95,
     )
     assert np.unique(labels_iso).size < n_without

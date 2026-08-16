@@ -11,7 +11,12 @@ each stage by hand::
     python campaign.py --from stage          # inputs already pushed and built
     python campaign.py --from arcify --skip stage   # inputs already decompressed
     python campaign.py --skip psf repair     # grids and repair caches in place
+    python campaign.py --check-versions      # say what arc has moved on to
     python campaign.py --dry-run             # print the plan, do nothing
+
+The step names, the filters and the flags match ``examples/ozstar/campaign.py``,
+so one campaign reads the same way on either platform, and each accepts the
+other's spelling of the config-rewrite step (``--from ozify`` works here).
 
 To ship a code change into a campaign without rebuilding the venv, fast-forward
 the run's checkout first and start the campaign after it::
@@ -72,6 +77,20 @@ REPO = HERE.parent.parent
 PSF_DIR = REPO / "data" / "PSF"
 PYTHON = sys.executable
 STEPS = ["push", "setup", "arcify", "seed", "psf", "stage", "repair", "run"]
+
+#: Step names the other platform uses for the same work, so that a command
+#: written for one runs on the other. ``ozify`` is OzStar's name for the config
+#: rewrite, and ``prep`` was its older name for ``repair``.
+STEP_ALIASES = {"ozify": "arcify", "prep": "repair"}
+
+
+def step_name(value: str) -> str:
+    """Canonical step name, accepting the OzStar spellings."""
+    name = STEP_ALIASES.get(value, value)
+    if name not in STEPS:
+        raise argparse.ArgumentTypeError(
+            f"unknown step {value!r}; choose from {', '.join(STEPS)}")
+    return name
 
 
 #: Band a field's repair job runs. The repair depends on the detection band
@@ -160,16 +179,16 @@ def has_all_grids(cfg_path: Path, extra_names: list[str] | None = None) -> bool:
 
     A family counts as present when *anything* matches it. That is deliberately
     weak: it cannot tell a complete set of epochs from one grid, which is what
-    ``psf_provenance`` is for. It exists to skip a step that would otherwise
+    ``psf.provenance`` is for. It exists to skip a step that would otherwise
     queue three jobs to discover there is nothing to build.
     """
     cfg = json.loads(re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text()))
-    pattern = cfg.get("pattern_hi")
+    pattern = cfg.get("psf", {}).get("pattern_hi")
     if not pattern:
         return True
     patterns = [pattern]
-    if cfg.get("pattern_lo"):
-        patterns.append(cfg["pattern_lo"])
+    if cfg.get("psf", {}).get("pattern_lo"):
+        patterns.append(cfg["psf"]["pattern_lo"])
     if cfg.get("repair_saturated"):
         # same derivation as Pipeline._repair_halo_pattern
         patterns.append(cfg.get("repair_psf_pattern")
@@ -182,6 +201,30 @@ def has_all_grids(cfg_path: Path, extra_names: list[str] | None = None) -> bool:
                 for p in patterns]
     names = [p.name for p in PSF_DIR.glob("*.fits")] + list(extra_names or [])
     return all(any(re.search(pat, n) for n in names) for pat in patterns)
+
+
+def check_versions(cfgs: list[Path]) -> None:
+    """Warn when a config is pinned to an older release than arc now holds.
+
+    A pre-flight, not a gate. Moving a campaign onto a new release changes the
+    photometry, so it is a deliberate act belonging to a new run number with a
+    note saying why - not something a launch should do, or refuse to do,
+    because a directory appeared upstream. So this says what is behind and
+    carries on with the pinned versions.
+    """
+    from arcify import check_release_versions
+
+    behind = check_release_versions(cfgs)
+    if not behind:
+        log.info("release check: every config is pinned to the newest on arc")
+        return
+    log.warning("release check: %d config/version pair(s) are behind arc:",
+                len(behind))
+    for name, kind, pinned, newest in behind:
+        log.warning("  %-14s %-8s %s -> %s", name, kind, pinned, newest)
+    log.warning("Continuing with the pinned versions. To move onto a new "
+                "release, point the source configs at it, bump $CANFAR_RUNNUM, "
+                "and re-run with --note saying what changed.")
 
 
 def write_run_readme(names: list[str], cfgs: list[Path], note: str,
@@ -258,9 +301,10 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--fields", nargs="+", help="restrict to these, e.g. uds cosmos")
     ap.add_argument("--bands", nargs="+", help="restrict to these, e.g. f770w")
-    ap.add_argument("--from", dest="start", choices=STEPS, default="push",
-                    help="skip everything before this step")
-    ap.add_argument("--skip", nargs="+", choices=STEPS, default=[],
+    ap.add_argument("--from", dest="start", type=step_name, default="push",
+                    metavar="STEP",
+                    help="skip everything before this step (%s)" % ", ".join(STEPS))
+    ap.add_argument("--skip", nargs="+", type=step_name, default=[], metavar="STEP",
                     help="drop these steps from the middle of the chain, e.g. "
                          "--skip stage when the inputs are already decompressed")
     # --mem is the OzStar spelling of the same knob, accepted so a campaign
@@ -279,6 +323,13 @@ def main() -> None:
     ap.add_argument("--note", default="",
                     help="one line for run<N>/README.md saying what this run "
                          "changes; the number alone records nothing")
+    ap.add_argument("--check-versions", action="store_true",
+                    help="report configs pinned to an older release than arc "
+                         "now holds, then carry on with the pinned versions")
+    ap.add_argument("--ref", default="main",
+                    help="git ref the source on arc must match (default: main)")
+    ap.add_argument("--force-stale", action="store_true",
+                    help="submit even though the source on arc is not that ref")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -286,6 +337,12 @@ def main() -> None:
     cfgs = configs_for(args.fields, args.bands)
     names = [c.stem + args.suffix for c in cfgs]
     log.info("campaign over %d config(s): %s", len(names), ", ".join(names))
+    # Before the README, so that what is behind is said before the versions
+    # this run pins are written down. Run under --dry-run too: it reads arc,
+    # which is neither a session nor a change to anything, and a plan is the
+    # moment the answer is most useful.
+    if args.check_versions:
+        check_versions(cfgs)
     write_run_readme(names, cfgs, args.note, args.dry_run)
 
     if "push" in todo:
@@ -322,6 +379,12 @@ def main() -> None:
     common = [] if args.ram is None else ["--ram", str(args.ram)]
     if args.cores is not None:
         common += ["--cores", str(args.cores)]
+    # Every job of a campaign runs one version of the code, so the ref the
+    # checkout is verified against is the campaign's rather than each
+    # dispatch's default.
+    common += ["--ref", args.ref]
+    if args.force_stale:
+        common.append("--force-stale")
 
     # Group by field: everything below is per-field, because a field's bands
     # share its F444W grids, its halo grids and its saturation repair.

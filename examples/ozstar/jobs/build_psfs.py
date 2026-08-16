@@ -103,18 +103,18 @@ def pattern_tasks(configs: list[Path]) -> list[tuple[str, str, str, float | None
     seen: set[tuple[str, str]] = set()
     for cfg_path in configs:
         cfg = RunConfig.from_json(str(cfg_path))
-        psf_dir = str(cfg.psf_dir)
+        psf_dir = str(cfg.psf.dir)
         Path(psf_dir).mkdir(parents=True, exist_ok=True)
-        pairs = [(cfg.pattern_hi, str(cfg.csv_hi)), (cfg.pattern_lo, str(cfg.csv_lo))]
+        pairs = [(cfg.psf.pattern_hi, str(cfg.csv_hi)), (cfg.psf.pattern_lo, str(cfg.csv_lo))]
         if getattr(cfg, "repair_saturated", False):
-            pat = cfg.repair_psf_pattern or halo_pattern(cfg.pattern_hi)
-            if pat and pat != cfg.pattern_hi:
+            pat = cfg.repair_psf_pattern or halo_pattern(cfg.psf.pattern_hi)
+            if pat and pat != cfg.psf.pattern_hi:
                 pairs.append((pat, str(cfg.csv_hi)))
         for pattern, csv in pairs:
             if not pattern or (pattern, csv) in seen:
                 continue
             seen.add((pattern, csv))
-            tasks.append((pattern, csv, psf_dir, cfg.psf_fov_arcsec))
+            tasks.append((pattern, csv, psf_dir, cfg.psf.fov_arcsec))
     return tasks
 
 

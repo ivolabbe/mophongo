@@ -216,18 +216,18 @@ segmentation map in memory, and proceeds — nothing on disk changes, and
 the repaired templates are what lands in the run's `*_stamps.fits`, so
 they can be inspected there as usual. Diagnostics (fit table, flag log,
 per-star PNGs) are written to `out_dir/repaired/`. The core fit reuses
-the pipeline's own `pattern_hi` ePSFs and the same epoch policy, so no
+the pipeline's own `psf.pattern_hi` ePSFs and the same epoch policy, so no
 extra PSF setup is needed; `repair_kwargs` forwards tuning options
 (`min_buffer_snr`, `flux_frac`, `min_snr`, `halo_nsigma`, `stamp_npix`).
 
 The *flag model* — the star model compared against each segment — is
-only defined where its ePSF is, and the MJD-matched `pattern_hi` grids
+only defined where its ePSF is, and the MJD-matched `psf.pattern_hi` grids
 typically span a few arcsec. The pipeline therefore uses a second,
 large-FOV halo grid set: 30" single-position grids named
 `{prefix}_{det}_{filt}_MJD{...}_FOV30_GRID1_OS4`. The pattern is derived
-from `pattern_hi` automatically, and missing grids are built once with
-stpsf (`psf_autobuild`; a few minutes per detector, cached in
-`psf_dir` — the run logs the one-off build). `repair_psf_pattern`
+from `psf.pattern_hi` automatically, and missing grids are built once with
+stpsf (`psf.autobuild`; a few minutes per detector, cached in
+`psf.dir` — the run logs the one-off build). `repair_psf_pattern`
 overrides the pattern when needed.
 
 The flag model itself is a **hybrid**: inside the small ePSF's support
@@ -236,7 +236,7 @@ PSF the core fit and fill use), and the halo grid continues the wings
 and diffraction spikes outside it, rescaled to match over the graft
 annulus ({func}`mophongo.repair.hybrid_psf_stamp`). The star's fitted
 centre — including the fitted sub-pixel shift — positions the whole
-model. The `RunConfig.psf_size` stamp trim does not apply to any of
+model. The `psf.size` stamp trim does not apply to any of
 this: the repair drizzles PSFs onto its own cutouts at full native ePSF
 support.
 
@@ -245,7 +245,7 @@ photometry run instead of a catalog release: flagged wing segments keep
 their labels (each catalog row still gets a template), and each
 saturated star's fragments — the rows sharing one `FLAG_SATURATED_TMPL`
 group id — are fit **together in their own scene**, one scene per star,
-exempt from the `scene_minimum_bright` merging criterion. Everything
+exempt from the `scene_minimum_anchors` merging criterion. Everything
 else is solved without them, so the star's poorly-constrained wings
 cannot contaminate neighbouring fluxes. In the per-scene diagnostic
 plots the saturated stars' segments are nulled when other scenes are

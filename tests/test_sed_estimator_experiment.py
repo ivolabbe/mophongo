@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
-from scratch.minerva_sed_estimator_experiment import (
-    ESTIMATORS,
-    estimate_cell,
-    split_half_cell,
+# The module under test lives in `scratch/`, which is gitignored, so it is
+# absent from a fresh checkout and from CI. Skip rather than fail collection:
+# the experiment is exploratory and its test is only meaningful where the
+# scratch tree exists.
+sed_experiment = pytest.importorskip(
+    "scratch.minerva_sed_estimator_experiment",
+    reason="scratch/ is gitignored and absent from this checkout",
 )
+
+ESTIMATORS = sed_experiment.ESTIMATORS
+estimate_cell = sed_experiment.estimate_cell
+split_half_cell = sed_experiment.split_half_cell
 
 
 def test_estimator_experiment_retains_signed_values_and_exposes_ivw_bias():

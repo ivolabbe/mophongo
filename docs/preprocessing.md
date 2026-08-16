@@ -225,7 +225,7 @@ accumulated in `Template.shifted`.
 {class}`mophongo.astrometry.AstroCorrect` is constructed from a
 {class}`~mophongo.fit.FitConfig`, which supplies all its options: the field
 model `astrom_model` (`"poly"` or `"gp"`), the measurement method
-`astrom_centroid`, the anchor cut `snr_thresh_astrom`, and the per-model
+`astrom_centroid`, the anchor cut `astrom_minimum_snr`, and the per-model
 keyword dicts in `astrom_kwargs` — all documented in {doc}`fitting`.
 {meth}`~mophongo.astrometry.AstroCorrect.fit` measures shifts from the
 current fit state (templates, residual image, fitted amplitudes), fits the

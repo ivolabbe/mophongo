@@ -91,6 +91,44 @@ matched = fftconvolve(psf_hi.array, kernel)
 print(f"{np.abs(matched - psf_lo.array).max():.1e}")  # 7.1e-07
 ```
 
+### `matching_kernel()` parameters
+
+{func}`mophongo.utils.matching_kernel` preserves the input sums: if
+`sum(psf_lo) / sum(psf_hi)` is not one, that ratio propagates into `sum(k)`,
+which is why pipeline-facing calls pass unit-sum shapes.
+
+`psf_hi_in`, `psf_lo_in` (`np.ndarray`, required)
+: High- and low-resolution PSF arrays.
+
+`window` (default `None`)
+: Fourier-domain window for `method="window"`; defaults to
+  `photutils.psf.matching.SplitCosineBellWindow(alpha=0.4, beta=0.1)`.
+
+`recenter` (`bool`, default `False`)
+: Shift the kernel to its measured centroid with bicubic interpolation.
+
+`pixel_ratio` (`float`, default `1.0`)
+: Pixel-scale ratio between the two PSF grids; a non-unity value resamples
+  one PSF onto the other's grid with flux-conserving cubic interpolation
+  before the kernel is computed.
+
+`method` (`str`, default `"window"`)
+: Kernel algorithm: `"window"`, `"tikhonov"`, `"wiener"`, or `"forward"`
+  (see below).
+
+`reg` (`float`, default `1e-3`)
+: Regularization strength for the `tikhonov`, `wiener`, and `forward`
+  methods.
+
+`wavelet` (`str`, default `"db4"`), `levels` (`int`, default `3`),
+`threshold_factor` (`float`, default `3.0`), `noise_sigma`
+(`float | None`, default `None`), `forward_wavelet_wiener` (`bool`,
+default `True`)
+: Wavelet-denoising controls for `method="forward"`.
+
+`signal_psd` (`np.ndarray | None`, default `None`)
+: Optional signal power spectrum for `method="wiener"`.
+
 ### Regularization methods
 
 **`"window"`**
@@ -324,15 +362,15 @@ grid = fac.build(telescope="JWST", instrument="NIRCAM",
 ### Automatic grid generation and per-band blur defaults
 
 The pipeline calls `PSFFactory.from_csv` itself when its ePSF loader finds
-no files matching the configured filename pattern and `psf_autobuild` is on
+no files matching the configured filename pattern and `psf.autobuild` is on
 (the default); see {doc}`pipeline`. The pipeline can also broaden the
 low-resolution model PSF by an extra Gaussian before kernel construction
-(`psf_blur_fwhm`): the `"default"` setting looks the FWHM up per filter in
+(`psf.blur_fwhm`): the `"default"` setting looks the FWHM up per filter in
 `mophongo.mock_mosaic.DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC`, which carries MIRI
 defaults (0.08 arcsec at F560W/F770W rising to 0.30 arcsec at F2100W, no
 broadening for unlisted filters), accounting for the broadening of real
 MIRI mosaics relative to the optical `stpsf` model. Production runs should
-keep this default blur on for MIRI bands; disable it (`psf_blur_fwhm=None`)
+keep this default blur on for MIRI bands; disable it (`psf.blur_fwhm` null)
 only when deliberately testing the unblurred optical model, for example
 when comparing drizzled model PSFs against real stars to measure the
 broadening itself.

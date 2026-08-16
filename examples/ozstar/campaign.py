@@ -10,11 +10,13 @@ once::
     python campaign.py --bands f770w            # only that band
     python campaign.py --from stage             # source and configs already up
     python campaign.py --skip psf repair        # grids and caches in place
+    python campaign.py --check-versions         # say what arc has moved on to
     python campaign.py --dry-run                # print the plan, submit nothing
 
 The step names, the filters and the flags match ``examples/canfar/campaign.py``,
-so one campaign reads the same way on either platform. What differs is who
-enforces the order between the phases.
+so one campaign reads the same way on either platform, and each accepts the
+other's spelling of the config-rewrite step (``--from arcify`` works here). What
+differs is who enforces the order between the phases.
 
 The submission is three phases, the same split CANFAR uses:
 
@@ -76,9 +78,19 @@ PSF_DIR = REPO / "data" / "PSF"
 PYTHON = sys.executable
 STEPS = ["ozify", "push", "setup", "seed", "psf", "stage", "repair", "run"]
 
-#: ``prep`` was this campaign's name for what CANFAR calls ``repair``, and both
-#: ran the same pipeline step. Accepted so existing scripts keep working.
-STEP_ALIASES = {"prep": "repair"}
+#: Step names the other platform uses for the same work, so that a command
+#: written for one runs on the other. ``arcify`` is CANFAR's name for the
+#: config rewrite; ``prep`` was this campaign's own older name for ``repair``.
+STEP_ALIASES = {"prep": "repair", "arcify": "ozify"}
+
+# The arc index and the release-version parser are the same problem on both
+# platforms, so canfar/arcify.py is imported rather than copied - the same
+# trick, and the same reason, as ozify.py. Appended, not prepended: arcify
+# imports canfar's own `runroot`, and this directory's equivalent is
+# deliberately named `ozroot` so the two cannot shadow each other. The imports
+# themselves stay inside the functions that need them, to keep `vos` off the
+# path of a `--help`.
+sys.path.append(str(HERE.parent / "canfar"))
 
 #: A per-band run config is named ``<field>_f<band>w.json``. The directory also
 #: holds inputs that are not RunConfigs (``minerva_sed_fields.json``), which
@@ -159,12 +171,12 @@ def grid_patterns(cfg_path: Path, shared_only: bool) -> list[str]:
     the shared families, while the ``psf`` step asks about all of them.
     """
     cfg = json.loads(re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text()))
-    pattern = cfg.get("pattern_hi")
+    pattern = cfg.get("psf", {}).get("pattern_hi")
     if not pattern:
         return []
     patterns = [pattern]
-    if not shared_only and cfg.get("pattern_lo"):
-        patterns.append(cfg["pattern_lo"])
+    if not shared_only and cfg.get("psf", {}).get("pattern_lo"):
+        patterns.append(cfg["psf"]["pattern_lo"])
     if cfg.get("repair_saturated"):
         # same derivation as Pipeline._repair_halo_pattern; the 30" halo grids
         # are shared by a field's bands exactly as pattern_hi is
@@ -183,11 +195,39 @@ def has_grids(cfg_path: Path, names: list[str], shared_only: bool = False) -> bo
 
     A family counts as present when *anything* matches it. That is deliberately
     weak: it cannot tell a complete set of epochs from one grid, which is what
-    ``psf_provenance`` is for. It exists to skip a build that would otherwise
+    ``psf.provenance`` is for. It exists to skip a build that would otherwise
     spend an hour discovering there is nothing to do.
     """
     return all(any(re.search(pat, n) for n in names)
                for pat in grid_patterns(cfg_path, shared_only))
+
+
+def check_versions(cfgs: list[Path]) -> None:
+    """Warn when a config is pinned to an older release than arc now holds.
+
+    A pre-flight, not a gate. Moving a campaign onto a new release changes the
+    photometry, so it is a deliberate act belonging to a new run directory with
+    a note saying why - not something a launch should do, or refuse to do,
+    because a directory appeared upstream. So this says what is behind and
+    carries on with the pinned versions.
+
+    Reading arc is a laptop operation and needs only the CADC certificate: the
+    datamover partition exists to *copy* inputs to ``/fred``, not to see them.
+    """
+    from arcify import check_release_versions
+
+    behind = check_release_versions(cfgs)
+    if not behind:
+        log.info("release check: every config is pinned to the newest on arc")
+        return
+    log.warning("release check: %d config/version pair(s) are behind arc:",
+                len(behind))
+    for name, kind, pinned, newest in behind:
+        log.warning("  %-14s %-8s %s -> %s", name, kind, pinned, newest)
+    log.warning("Continuing with the pinned versions. To move onto a new "
+                "release, point the source configs at it, bump $OZSTAR_RUN, and "
+                "re-run with --note saying what changed - and re-stage, since "
+                "/fred holds a copy of each input rather than reading arc.")
 
 
 def previous_run(name: str) -> str | None:
@@ -213,10 +253,6 @@ def write_run_readme(names: list[str], cfgs: list[Path], note: str,
     what it was trying to do. The copy under ``scratch/ozstar`` is kept as well
     as uploaded, since reading it back needs an ssh.
     """
-    # The arc index and the version parser are the same problem on both
-    # platforms, so canfar/arcify.py is imported rather than copied - the same
-    # trick, and the same reason, as ozify.py.
-    sys.path.append(str(HERE.parent / "canfar"))
     from arcify import config_versions
 
     run = ozroot.run_name()
@@ -315,6 +351,9 @@ def main() -> None:
     ap.add_argument("--note", default="",
                     help="one line for <run>/README.md saying what this run "
                          "changes; the run directory alone records nothing")
+    ap.add_argument("--check-versions", action="store_true",
+                    help="report configs pinned to an older release than arc "
+                         "now holds, then carry on with the pinned versions")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -323,6 +362,12 @@ def main() -> None:
     names = [c.stem + args.suffix for c in cfgs]
     log.info("campaign over %d config(s): %s", len(names), ", ".join(names))
     log.info("run tree %s on %s", ozroot.run_root(), ozroot.ssh_target())
+    # Before the README, so that what is behind is said before the versions
+    # this run pins are written down. Run under --dry-run too: it reads arc,
+    # which is neither the cluster nor a change to it, and a plan is the moment
+    # the answer is most useful.
+    if args.check_versions:
+        check_versions(cfgs)
     write_run_readme(names, cfgs, args.note, args.dry_run)
 
     if "ozify" in todo:

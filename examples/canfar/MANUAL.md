@@ -153,7 +153,7 @@ mkdir -p $MPLCONFIGDIR
 ### 4.3 PSF grids — nothing to do
 
 The MJD-tagged ePSF grids are **built on the fly**. `data/PSF/*` is gitignored,
-so a fresh clone has none of them, but `psf_autobuild` defaults to on: when no
+so a fresh clone has none of them, but `psf.autobuild` defaults to on: when no
 file under `psf_dir` matches the config's pattern, `Pipeline._load_epsf` runs
 `PSFFactory` over the band's exposure list (the `_wcs.csv` already on arc, which
 is where the MJD tags come from), writes the grids to `psf_dir`, and carries on.

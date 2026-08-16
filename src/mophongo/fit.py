@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Tuple, Optional
 
 import numpy as np
@@ -30,6 +30,37 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class PhotConfig:
+    """Aperture photometry settings (the ``phot`` block of ``fit``).
+
+    Everything about *measuring* fluxes in apertures and about the detection
+    catalog's own aperture columns. None of it enters the linear solve, which
+    is why it sits apart from the rest of :class:`FitConfig` rather than
+    beside the solver and astrometry knobs.
+    """
+
+    # Image measurement aperture, as a diameter:
+    # - float/int: fixed size, in `units`
+    # - str: column name in the input catalog for per-source sizes
+    # - None: fall back to 1.5 * FWHM (in pixels) measured from the template
+    aperture_diam: float | np.ndarray | str | None = None
+    # Catalog aperture: a diameter, or the name of a table column holding one
+    aperture_catalog: float | str | None = None
+    units: str = "arcsec"  # "arcsec" or "pix", for both apertures above
+
+    # Catalog-side aperture-to-total, totcor_cat = (f_kron/f_aper) / EE_H(k*R_kron)
+    # (the flux-estimator report's "tcorH", renamed). Computed when the three
+    # column names below exist in the input catalog; radius column in arcsec.
+    # These name columns of the *input* catalog rather than configuring a
+    # measurement, so they read as `phot.kron_flux_col` and keep no `cat_`
+    # prefix -- the block already says where they come from.
+    kron_flux_col: str | None = None  # detection-catalog Kron (AUTO) flux
+    aper_flux_col: str | None = None  # detection-catalog flux in the R_phi aperture
+    kron_radius_col: str | None = None  # circularized Kron radius [arcsec]
+    kron_k: float = 2.5  # Kron scaling: EE_H evaluated at k * R_kron
+
+
+@dataclass
 class FitConfig:
     """Configuration for template fitting: solver, astrometry and apertures."""
 
@@ -50,8 +81,8 @@ class FitConfig:
     # only captures part of a large offset per pass, so set
     # fit_astrometry_niter to the maximum passes allowed and let this tol stop.
     # 0.1 sits just above the statistical floor of the weakest scene the
-    # anchor cuts admit -- 5 bright members (scene_minimum_bright) at
-    # snr_thresh_astrom = 15 give a scene centroid good to ~0.08 fit pixels --
+    # anchor cuts admit -- 5 bright members (scene_minimum_anchors) at
+    # astrom_minimum_snr = 15 give a scene centroid good to ~0.08 fit pixels --
     # and well below PSF-matching centroid systematics, which are a bias no
     # tolerance can iterate away. The increment tested is the applied (damped)
     # one, so the last sub-tolerance step is on the templates, not discarded.
@@ -65,9 +96,16 @@ class FitConfig:
     astrom_damping: float = 0.8
     fit_astrometry_joint: bool = True  # Use joint astrometry fitting, or separate step
     # --- astrometry options -------------------------------------------------
-    reg_astrom: float = 1e-4
-    snr_thresh_astrom: float = 15.0  # 0 → keep all sources
-    astrom_isolation_thresh: float = 0.6  # min flux dominance to include in astrometry (0–1); 0.0 = no cut
+    astrom_reg: float = 1e-4
+    astrom_minimum_snr: float = 15.0  # 0 → keep all sources
+    # Minimum flux dominance within its own footprint for a template to anchor
+    # astrometry (0–1); 0.0 disables the cut. 0.7 admits blends no tighter
+    # than about 2 sigma. This is not made redundant by `astrom_robust`: a
+    # blended anchor's implied shift is *shrunk* toward zero, coherently, so
+    # blended anchors agree with each other and a robust estimator -- which is
+    # majority rule -- follows them rather than rejecting them. See
+    # mophongo.astrom_robust and TODO.md.
+    astrom_isolation_thresh: float = 0.7
     # Exclude sources flagged is_star from the astrometric shift fit. Off by
     # default: unsaturated stars are the best astrometric anchors, and
     # saturated ones are already isolated into their own scenes.
@@ -78,12 +116,31 @@ class FitConfig:
     # -- and if it is extended with an asymmetric colour gradient, its
     # residual dipole is indistinguishable from a shift and drags the field.
     # The cap bounds influence without changing the shift that anchor
-    # measures. See assemble_scene_system_AB and TODO.md (cross-anchor IRLS
-    # is the complementary fix this cannot provide).
+    # measures. See assemble_scene_system_AB.
     # 0.9 clips only the top tail: the handful of anchors carrying more
     # information than nine-tenths of their scene.
+    # `astrom_robust` supersedes this wherever it is active: it sets the same
+    # ceiling from the anchors' measured scatter instead of from a quantile,
+    # so the cap only applies in scenes the robust pass declines to judge.
     astrom_leverage_cap: float | None = 0.9
-    astrom_model: str = "gp"  # 'poly' or 'gp'
+    # Weight each astrometric anchor by how well it agrees with the shift field
+    # its neighbours define, and by how well its own stamp fits once it is
+    # allowed to move. On by default: a redescending estimator costs a few
+    # percent of efficiency on clean anchors, which is the cheaper error than
+    # letting one source with a colour gradient carry a scene. Gated on
+    # `scene_minimum_anchors` anchors (see below), which is also the floor scene
+    # merging works to, so a scene built to support the shift model is by
+    # construction big enough to be judged; below it the pass declines and
+    # `astrom_leverage_cap` is the only protection left. Set False to recover
+    # the unweighted fit.
+    astrom_robust: bool = True
+    # 'poly' or 'gp'. Only read by the non-joint `AstroCorrect` path
+    # (`astrometry.py:329`); the joint path takes its basis order straight from
+    # `astrom_kwargs["poly"]["order"]` (`scene.py:1475`) and never branches on
+    # this. Defaulted to 'poly' so the two paths agree on which model is in
+    # force under the default `fit_astrometry_joint=True`. A global GP is a
+    # possible joint model but needs the cross-scene solve in TODO.md.
+    astrom_model: str = "poly"
     astrom_centroid: str = "centroid"  # "centroid" (=old) | "correlation"
     astrom_kwargs: dict[str, dict] = field(
         default_factory=lambda: {"poly": {"order": 0}, "gp": {"length_scale": 400}}
@@ -92,24 +149,17 @@ class FitConfig:
     #    multi_resolution_method: str = "upsample"  # 'upsample' or 'downsample'
     multi_resolution_method: str = "upsample"  # 'upsample' or 'downsample'
     normal: str = "tree"  # 'loop' or 'tree'
-    # None → derive from astrometric model order in __post_init__
-    # Minimum bright sources per scene. If None reverts to (n_poly+1)*(n_poly+2)
-    scene_minimum_bright: int = 5
+    # Minimum bright anchors per scene: the floor `merge_small_scenes` merges
+    # toward, and the gate below which `astrom_robust` declines to judge a
+    # scene. None (the default) derives it from the astrometric model order in
+    # __post_init__ as (order+1)(order+2) + 1 -- one more anchor than the field
+    # has free parameters -- so raising the order raises the floor with it
+    # instead of leaving a hand-set number behind. Set an int to override.
+    scene_minimum_anchors: int | None = None
 
-    # Photometry aperture control:
-    # - float/int: fixed aperture diameter size (in arcsec or pixels per `aperture_units`)
-    # - str: column name in the input catalog for per-source aperture sizes
-    # - None: fallback to 1.5 * FWHM (in pixels) measured from template
-    aperture_diam: float | np.ndarray | None = None  # image measurement aperture (diameter)
-    aperture_catalog: float | str | None = None  # catalog aperture (diameter or table column name)
-    aperture_units: str = "arcsec"  # "arcsec" or "pix"
-    # Catalog-side aperture-to-total, totcor_cat = (f_kron/f_aper) / EE_H(k*R_kron)
-    # (the flux-estimator report's "tcorH", renamed). Computed when the three
-    # column names below exist in the input catalog; radius column in arcsec.
-    cat_kron_flux_col: str | None = None  # detection-catalog Kron (AUTO) flux
-    cat_aper_flux_col: str | None = None  # detection-catalog flux in the R_phi aperture
-    cat_kron_radius_col: str | None = None  # circularized Kron radius [arcsec]
-    cat_kron_k: float = 2.5  # Kron scaling: EE_H evaluated at k * R_kron
+    # Aperture photometry and the catalog columns it compares against, as one
+    # block (see PhotConfig). Nothing in the linear solve reads these.
+    phot: "PhotConfig" = field(default_factory=lambda: PhotConfig())
 
     # Template extraction: dilate each segment by this many pixels (disk radius)
     # to capture more of the point-source PSF wings. Off by default (0): the
@@ -190,8 +240,8 @@ class FitConfig:
     generate_scene_catalog: bool = False  # If True, generate scene catalog and exit
 
     def __post_init__(self):
-        # Derive scene_minimum_bright from astrometric polynomial order if not provided
-        if self.scene_minimum_bright is None:
+        # Derive scene_minimum_anchors from astrometric polynomial order if not provided
+        if self.scene_minimum_anchors is None:
             try:
                 # fallback matches the astrom_kwargs default above: order 0
                 poly_order = int(self.astrom_kwargs.get("poly", {}).get("order", 0))
@@ -199,7 +249,20 @@ class FitConfig:
                 poly_order = 0
             # default to 2x # of Chebyshev terms + 1
             n_poly = (poly_order + 1) * (poly_order + 2)
-            self.scene_minimum_bright = n_poly + 1
+            self.scene_minimum_anchors = n_poly + 1
+
+        # Coerce a JSON `phot` object into a PhotConfig, as RunConfig does for
+        # `psf`. Unknown keys raise rather than being ignored: a misspelled
+        # aperture setting that silently does nothing is worse than a stop.
+        if isinstance(self.phot, dict):
+            known = {f.name for f in fields(PhotConfig)}
+            unknown = set(self.phot) - known
+            if unknown:
+                raise ValueError(
+                    f"unknown phot config key(s): {sorted(unknown)}; "
+                    f"known keys are {sorted(known)}"
+                )
+            self.phot = PhotConfig(**self.phot)
 
 
 

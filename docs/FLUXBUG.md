@@ -17,10 +17,10 @@ self-consistency fit was already biased low, where no PSF-matching kernel is
 used. That made the kernel hypothesis impossible as the primary cause.
 
 The actual cause was an implementation error in the newer stateless scene
-solver. `SceneFitter.solve()` was using `config.reg_astrom` as a flux
-regularization term. `reg_astrom` is intended only for astrometric shift
+solver. `SceneFitter.solve()` was using `config.astrom_reg` as a flux
+regularization term. `astrom_reg` is intended only for astrometric shift
 parameters, but it was being added to the photometric normal matrix. With the
-default `reg_astrom=1e-4`, broad, low-norm Moffat templates had their fitted
+default `astrom_reg=1e-4`, broad, low-norm Moffat templates had their fitted
 fluxes suppressed.
 
 ## Observable Symptom
@@ -90,23 +90,23 @@ legacy solver, flux only:
   dilated3 hi=0.9746  lo=0.9864
 ```
 
-Then `reg_astrom` was scanned in the scene solver flux-only path:
+Then `astrom_reg` was scanned in the scene solver flux-only path:
 
 ```text
-scene flux-only, reg_astrom=1e-04:
+scene flux-only, astrom_reg=1e-04:
   hi=0.9324  lo=0.8991
 
-scene flux-only, reg_astrom=1e-08:
+scene flux-only, astrom_reg=1e-08:
   hi=0.9746  lo=0.9864
 
-scene flux-only, reg_astrom=0:
+scene flux-only, astrom_reg=0:
   hi=0.9746  lo=0.9864
 
-scene flux-only, reg_astrom=1e-02:
+scene flux-only, astrom_reg=1e-02:
   hi=0.1853  lo=0.0977
 ```
 
-That establishes causality: `reg_astrom` was regularizing the flux solve.
+That establishes causality: `astrom_reg` was regularizing the flux solve.
 
 ## Implementation Error
 
@@ -115,17 +115,17 @@ The erroneous implementation was in `src/mophongo/scene_fitter.py`.
 The buggy logic was effectively:
 
 ```python
-ridge = getattr(config, "reg_astrom", 0)
+ridge = getattr(config, "astrom_reg", 0)
 if ridge <= 0:
     ridge = 1e-6 * np.median(A.diagonal())
 Areg = A + sp.eye(A.shape[0], format="csr") * ridge
 ```
 
-Here `A` is the photometric normal matrix. Adding `reg_astrom` to this matrix
+Here `A` is the photometric normal matrix. Adding `astrom_reg` to this matrix
 mixes two different concepts:
 
 - `reg_flux`: photometric flux ridge regularization
-- `reg_astrom`: astrometric shift-block regularization
+- `astrom_reg`: astrometric shift-block regularization
 
 The shift-block regularization belongs only on the `BB` astrometric block.
 Applying it to `A` shrinks fitted fluxes. The shrinkage becomes visible when
@@ -151,7 +151,7 @@ path to skip the joint astrometric solve. The scene code checked
 ### 1. Use a strictly positive flux ridge for the flux matrix
 
 In `src/mophongo/scene_fitter.py`, the photometric normal matrix must use a
-photometric ridge, not `config.reg_astrom`. The default can be tiny, but it
+photometric ridge, not `config.astrom_reg`. The default can be tiny, but it
 should be strictly positive when used as numerical regularization:
 
 ```python
@@ -168,13 +168,13 @@ is positive semidefinite. Adding `lam_A * I` with a positive
 factor makes the regularized matrix positive definite, unless the matrix contains non-finite
 values. Filtering to finite, positive diagonal values avoids zero or NaN scale
 factors when many templates have zero support. The configured `config.reg_flux`
-is a dimensionless factor, analogous to `config.reg_astrom`, and must also be
+is a dimensionless factor, analogous to `config.astrom_reg`, and must also be
 checked explicitly: zero, negative, NaN, and infinity should all fall back to
 the finite positive default. Here `_finite_positive(value, default)` denotes a
 small helper that returns `float(value)` only when it is finite and positive,
 otherwise `default`.
 
-Keep `reg_astrom` only for the astrometric block. The existing pattern is the
+Keep `astrom_reg` only for the astrometric block. The existing pattern is the
 right idea for the shift block, but it should also filter non-finite diagonal
 values:
 
@@ -183,14 +183,14 @@ diag_BB = np.asarray(BB.diagonal(), dtype=float)
 pos_BB = diag_BB[np.isfinite(diag_BB) & (diag_BB > 0)]
 scale_BB = np.median(pos_BB) if pos_BB.size else 1.0
 
-lam_b = getattr(config, "reg_astrom", 1e-4) * scale_BB
+lam_b = getattr(config, "astrom_reg", 1e-4) * scale_BB
 BBreg = BB + sp.eye(BB.shape[0], format="csr") * lam_b
 ```
 
 The important separation is:
 
 - `lam_A = reg_flux * scale_A` regularizes the photometric flux block `A`.
-- `reg_astrom * scale_BB` regularizes the astrometric shift block `BB`.
+- `astrom_reg * scale_BB` regularizes the astrometric shift block `BB`.
 
 The line `scale_BB = np.median(diag_BB[diag_BB > 0]) ...` only protects the
 astrometric block scale. It does not provide any protection for the flux block
@@ -234,12 +234,12 @@ Add a focused unit test so this cannot recur:
 def test_scene_fitter_reg_astrom_does_not_regularize_flux():
     A = sp.csr_matrix([[1e-3]])
     b = np.array([1e-3])
-    cfg = FitConfig(reg_flux=0.0, reg_astrom=1e-2)
+    cfg = FitConfig(reg_flux=0.0, astrom_reg=1e-2)
     sol = SceneFitter.solve(A, b, config=cfg)
     np.testing.assert_allclose(sol.flux, [1.0], rtol=1e-5)
 ```
 
-This test is intentionally simple. If `reg_astrom` leaks into the flux matrix,
+This test is intentionally simple. If `astrom_reg` leaks into the flux matrix,
 the solved flux is strongly suppressed. If the implementation is correct, the
 answer remains one.
 

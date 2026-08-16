@@ -116,7 +116,7 @@ fit.
    - **Scene generation.** Templates are grouped into scenes of coupled
      sources ({func}`mophongo.scene.generate_scenes`), controlled by
      `FitConfig.scene_coupling_thresh`, `scene_max_size`,
-     `scene_minimum_bright`, and `scene_max_merge_radius`. See {doc}`fitting`.
+     `scene_minimum_anchors`, and `scene_max_merge_radius`. See {doc}`fitting`.
    - **Fitting.** Each scene is solved for template amplitudes, iterating up
      to `FitConfig.fit_astrometry_niter` passes with per-template astrometric
      shifts applied between passes, damped by `FitConfig.astrom_damping` and
@@ -310,25 +310,11 @@ Optional fields:
   high-resolution weight map costs as much memory as the mosaic. The
   detection background is measured alongside it but, unlike the low-resolution
   side, not subtracted.
-- `psf_dir` (*str*, default `"data/PSF"`) — directory of STDPSF grid files.
-- `pattern_hi`, `pattern_lo` (*str*, default `""`) — STDPSF filename regex
-  for each band, of the form
-  `{prefix}_{DET}_{FILT}[_MJD..]_GRID{N}_{OS4|DET}`.
 - `filter_lo` (*str*, default `""`) — lo-res filter name (e.g. `"f770w"`),
-  used for the default Gaussian-blur lookup.
-- `psf_size` (*float | None*, default `4.0`) — PSF stamp size in arcsec;
-  `None` keeps the full native ePSF stamp.
-- `psf_autobuild` (*bool*, default `True`) — generate missing PSF grids with
-  {class}`mophongo.psf_factory.PSFFactory` (see caching below).
-- `psf_fov_arcsec` (*float | None*, default `None`) — PSFFactory field of
-  view; `None` uses the backend default.
-- `psf_blur_fwhm` (*float | str | None*, default `"default"`) — extra
-  Gaussian broadening of the lo-res model PSF (FWHM, arcsec). `"default"`
-  looks up a per-filter value keyed by `filter_lo`; a number applies that
-  value; `None` applies no broadening.
-- `expect_frames` (*list[int] | None*, default `None`) — optional
-  `[n_frames_hi, n_frames_lo]` sanity check against the WCS csvs; a mismatch
-  raises.
+  used for the default Gaussian-blur lookup and for figure labels.
+- `psf` (*dict*, default `{}`) — the PSF block, loaded into a
+  {class}`mophongo.pipeline.PsfConfig` (see below). Like `fit`, it is a
+  nested object in the JSON rather than a row of top-level keys.
 - `bg_filter_sigma` (*float*, default `64.0`) — background filter scale
   passed to {func}`mophongo.catalog.get_bg_and_ivar`; the fitted image is the
   lo-res science image minus this background.
@@ -346,6 +332,51 @@ Optional fields:
 - `save_stamps` (*bool*, default `True`) — write the per-source stamps FITS
   (native-size hi/lo templates plus fit metadata; see
   {meth}`~mophongo.pipeline.Pipeline.write_stamps`).
+
+### The `psf` block
+
+{class}`mophongo.pipeline.PsfConfig` holds everything that decides which ePSF
+grids a run uses and what the delivered stamps look like. A JSON `"psf"`
+object is coerced to it on load; unknown keys raise, and omitted ones keep
+their defaults.
+
+```json
+"psf": {
+  "dir": "data/PSF",
+  "pattern_hi": "UDS_NRC.._F444W_MJD\\d+_GRID25_OS4",
+  "pattern_lo": "UDS_MIRI_F770W_MJD\\d+_GRID9_OS4",
+  "size": 4.0,
+  "date_mode": "all",
+  "provenance": "warn",
+  "blur_fwhm": "default"
+}
+```
+
+- `dir` (*str*, default `"data/PSF"`) — directory of STDPSF grid files;
+  generated grids are cached here too.
+- `pattern_hi`, `pattern_lo` (*str*, default `""`) — STDPSF filename regex
+  for each band, of the form
+  `{prefix}_{DET}_{FILT}[_MJD..]_GRID{N}_{OS4|DET}`.
+- `size` (*float | None*, default `4.0`) — PSF stamp size in arcsec; `None`
+  keeps the full native ePSF stamp.
+- `autobuild` (*bool*, default `True`) — generate missing PSF grids with
+  {class}`mophongo.psf_factory.PSFFactory` (see caching below).
+- `provenance` (*str*, default `"warn"`) — what to do when the exposure list
+  implies epochs no grid provides and `autobuild` is off: `"warn"` names them
+  and fits with the grids that exist, `"error"` refuses to run, `"off"` skips
+  the check.
+- `workers` (*int*, default `1`) — processes used when building ePSF grids;
+  it parallelises within one pattern only, since bands of a field share
+  `pattern_hi` and would race on the same filenames.
+- `fov_arcsec` (*float | None*, default `None`) — PSFFactory field of view;
+  `None` uses the backend default.
+- `date_mode` (*str | float*, default `"all"`) — which exposure dates get
+  their own grid when autobuilding (`"all"` = one per unique integer MJD; see
+  {func}`mophongo.psf_factory.dates_from_csv`).
+- `blur_fwhm` (*float | str | None*, default `"default"`) — extra Gaussian
+  broadening of the lo-res model PSF (FWHM, arcsec). `"default"` looks up a
+  per-filter value keyed by `filter_lo`; a number applies that value; `None`
+  applies no broadening.
 
 ### Per-frame WCS CSVs
 
@@ -517,19 +548,33 @@ Astrometry:
   extra pass. `1.0` is undamped.
 - `fit_astrometry_joint` (*bool*, default `True`) — solve shifts jointly
   with fluxes rather than as a separate step.
-- `reg_astrom` (*float*, default `1e-4`) — regularization of the astrometric
+- `astrom_reg` (*float*, default `1e-4`) — regularization of the astrometric
   shift solve.
-- `snr_thresh_astrom` (*float*, default `15.0`) — minimum SNR for a source
+- `astrom_minimum_snr` (*float*, default `15.0`) — minimum SNR for a source
   to constrain astrometry; `0` keeps all sources.
-- `astrom_isolation_thresh` (*float*, default `0.6`) — minimum flux
+- `astrom_isolation_thresh` (*float*, default `0.7`) — minimum flux
   dominance (0–1) for inclusion in the astrometric fit; `0.0` applies no
-  cut.
+  cut. In effect a separation cut: 0.6 admits blends down to ~1.2 PSF sigma,
+  0.7 to ~2. `astrom_robust` does not replace it — a blended anchor's implied
+  shift is shrunk toward zero *coherently*, so blended anchors agree with one
+  another and a robust estimator follows them instead of rejecting them.
+- `astrom_robust` (*bool*, default `True`) — weight each anchor by its
+  agreement with the shift field its neighbours define, and by how well its
+  own stamp fits once it is allowed to move. Catches the bright extended
+  source whose colour gradient reads as a displacement, which the flux²
+  weighting of the plain solve lets carry a scene on its own.
+  Gated on `scene_minimum_anchors` anchors, and where it is active it
+  supersedes `astrom_leverage_cap`: both bound how much one anchor can move
+  the field, but this one sets the ceiling from the anchors' measured scatter
+  rather than from a quantile.
 - `astrom_exclude_stars` (*bool*, default `False`) — exclude sources flagged
   `is_star` from the shift fit. Off by default: unsaturated stars are good
   astrometric anchors, and saturated ones are already isolated into their
   own scenes.
-- `astrom_model` (*str*, default `"gp"`) — spatial shift model,
-  `"poly"` or `"gp"`; any other value raises.
+- `astrom_model` (*str*, default `"poly"`) — spatial shift model,
+  `"poly"` or `"gp"`; any other value raises. Read only by the non-joint
+  astrometry step; the joint path (the default) always uses the polynomial
+  basis at `astrom_kwargs["poly"]["order"]`.
 - `astrom_centroid` (*str*, default `"centroid"`) — shift measurement,
   `"centroid"` or `"correlation"`.
 - `astrom_kwargs` (*dict*, default
@@ -617,9 +662,11 @@ Scenes:
   partner, and a merge that would leave the scene wider than this is refused.
   `np.inf` disables all three. The size cap above bounds a scene's template
   count and leaves its shape free; this bounds the shape.
-- `scene_minimum_bright` (*int | None*, default `5`) — minimum number of
-  bright sources per scene; when set to `None` it is derived from the
-  astrometric polynomial order as `(order + 1) * (order + 2) + 1`.
+- `scene_minimum_anchors` (*int | None*, default `None`) — minimum number of
+  bright anchors per scene, derived by default from the astrometric
+  polynomial order as `(order + 1) * (order + 2) + 1`, i.e. one more anchor
+  than the shift field has free parameters. Set an int to override. Also the
+  gate below which `astrom_robust` declines to judge a scene.
 - `generate_scene_catalog` (*bool*, default `False`) — write a scene catalog
   (`scene_catalog_<i>.ecsv`) and exit without fitting.
 
@@ -647,15 +694,16 @@ flux scale at the percent level, so a map built another way is rebuilt rather
 than silently reused. Passing `overwrite=True` to either step forces a
 rebuild.
 
-**PSF grid auto-build.** Loading the ePSF grids matches files under `psf_dir`
-against `pattern_hi`/`pattern_lo`. When no file matches and `psf_autobuild`
+**PSF grid auto-build.** Loading the ePSF grids matches files under `psf.dir`
+against `psf.pattern_hi`/`psf.pattern_lo`. When no file matches and
+`psf.autobuild`
 is `True` (the default), the pipeline derives the generator settings
 (prefix, grid size, oversampling, detector sampling, MJD tagging) from the
 pattern itself, runs {class}`mophongo.psf_factory.PSFFactory` over the band's
-exposure csv, writes the grids into `psf_dir`, and loads them; deriving the
+exposure csv, writes the grids into `psf.dir`, and loads them; deriving the
 settings from the search pattern guarantees the generated files are found
 again. This step is slow (it generates PSFs with stpsf). With
-`psf_autobuild=False` a missing grid raises `FileNotFoundError` instead of
+`psf.autobuild` false a missing grid raises `FileNotFoundError` instead of
 letting the run continue without a PSF. See {doc}`psf`.
 
 Other cached state: the stamps file (`<name>_stamps.fits`) records the grid

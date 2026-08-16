@@ -1052,7 +1052,7 @@ def run_pipeline_extension_scenario(
             flagged position-mismatched and excluded from the recovery plots.
         fit_overrides: Extra :class:`~mophongo.fit.FitConfig` keyword overrides
             merged over the scenario defaults, e.g. a per-band
-            ``aperture_diam`` or scene limits matching a production run.
+            ``phot.aperture_diam`` or scene limits matching a production run.
         target_label: Display name of the low-resolution band in plot titles
             and axis labels. The data plumbing keys that band ``f770w``
             internally regardless; this only fixes what the figures say, e.g.
@@ -1097,9 +1097,9 @@ def run_pipeline_extension_scenario(
         reg_flux=0.0,
         fit_astrometry_niter=int(fit_astrometry_niter),
         fit_astrometry_joint=True,
-        snr_thresh_astrom=0.0,
-        scene_minimum_bright=10,
-        aperture_diam=0.5,
+        astrom_minimum_snr=0.0,
+        scene_minimum_anchors=10,
+        phot={"aperture_diam": 0.5},
         template_dilate_segmap=int(template_dilate_segmap),
     )
     fit_kwargs.update(fit_overrides or {})
@@ -1695,7 +1695,7 @@ def save_scene_diagnostics(
             {
                 "id": int(scene.id),
                 "n_templates": int(len(scene.templates)),
-                "n_bright": int(np.sum(scene.is_bright)),
+                "n_anchor": int(np.sum(scene.is_bright)),
                 "bbox_y0": int(scene.bbox[0]),
                 "bbox_y1": int(scene.bbox[1]),
                 "bbox_x0": int(scene.bbox[2]),
@@ -1708,7 +1708,7 @@ def save_scene_diagnostics(
             }
         )
     table = Table(rows=rows)
-    table.sort(["n_bright", "n_templates", "id"], reverse=True)
+    table.sort(["n_anchor", "n_templates", "id"], reverse=True)
     table.write(out_dir / "scene_catalog.csv", overwrite=True)
 
     selected = scenes

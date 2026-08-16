@@ -398,7 +398,7 @@ constants:
 | 1 | 2 | `FLAG_CONVOLVED` | template has been convolved with a matching kernel |
 | 2 | 4 | `FLAG_SUM_ZERO` | template sum (or its fitting weight) is zero; its flux carries no information |
 | 3 | 8 | `FLAG_HAS_NAN` | template contained NaN values |
-| 4 | 16 | `FLAG_OUTSIDE_WEIGHT` | template footprint falls outside the positive weight map |
+| 4 | 16 | `FLAG_OUTSIDE_WEIGHT` | no support on the fitted band's weight map; the template is dropped from that band |
 | 5 | 32 | `FLAG_SHIFTED` | an astrometric shift was applied |
 | 6 | 64 | `FLAG_DEBLENDED` | source is a catalog deblend child (provenance) |
 | 7 | 128 | `FLAG_SATURATED` | source carried a `FLAG_SATURATED_*` catalog flag (provenance) |
@@ -422,10 +422,15 @@ PSF-extended when its blend weight fell below one, that is, when the scheme
 mixed a scaled PSF into the data rather than keeping the data alone; the
 post-extraction modes `"psf"` and `"psf_model"` set neither flag.
 
-`FLAG_HAS_NAN` and `FLAG_OUTSIDE_WEIGHT` are declared but nothing in the
-current code sets them: templates with no useful overlap with the weight map
-are dropped by `Templates.prune_outside_weight` before the fit rather than
-flagged, and never reach the stamps file at all.
+`FLAG_OUTSIDE_WEIGHT` is set by `Templates.prune_outside_weight`, which then
+drops the template: the band's weight map gives it no support, so its flux
+would carry no information. It is a *per-band* judgement, unlike
+`FLAG_NO_COVERAGE`, which describes the detection image and is therefore the
+same for all bands -- a source can be pruned from F1800W and fitted in F770W.
+Because the template is dropped, the flag never reaches a row of that band's
+outputs; it stays on the hi-res template the pruned copy came from, and the
+count (with the ids at debug level) goes to the log. `FLAG_HAS_NAN` is
+declared and nothing sets it.
 
 As of this writing these flags live in the stamps file (and on the in-memory
 `Template` objects), not as a column of the fit table.

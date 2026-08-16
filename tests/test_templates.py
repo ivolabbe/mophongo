@@ -83,3 +83,45 @@ def test_uncovered_sources_get_no_template(caplog):
                                              detection_weight=np.zeros((ny, nx)))
     assert len(both) == 2
     assert "zero everywhere" in caplog.text
+
+
+def test_pruned_templates_carry_the_outside_weight_flag(caplog):
+    """A source this band cannot measure is flagged, then dropped.
+
+    The flag is the only trace it leaves: a pruned template has no row in that
+    band's outputs, so without it a source that vanished from F1800W but
+    survived in F770W is a difference in row counts and nothing else.
+    """
+    import logging
+
+    import numpy as np
+
+    from mophongo.templates import Template, Templates
+
+    ny = nx = 40
+    image = np.zeros((ny, nx), dtype=float)
+    segmap = np.zeros((ny, nx), dtype=np.int32)
+    positions = [(10.0, 20.0), (30.0, 20.0)]
+    for label, (x, y) in enumerate(positions, start=1):
+        xi, yi = int(x), int(y)
+        segmap[yi - 2:yi + 3, xi - 2:xi + 3] = label
+        image[yi - 2:yi + 3, xi - 2:xi + 3] = 1.0
+
+    tmpls = Templates()
+    tmpls.extract_templates(image, segmap, positions)
+    kept_before = list(tmpls.templates)
+    assert len(kept_before) == 2
+
+    # this band sees the left source only
+    weight = np.ones((ny, nx), dtype=float)
+    weight[:, nx // 2:] = 0.0
+
+    with caplog.at_level(logging.INFO, logger="mophongo.templates"):
+        kept = tmpls.prune_outside_weight(weight)
+
+    assert [int(t.id) for t in kept] == [1]
+    assert "FLAG_OUTSIDE_WEIGHT" in caplog.text
+    # the dropped object still exists for the caller that held it, and says why
+    dropped = [t for t in kept_before if int(t.id) == 2][0]
+    assert dropped.flag & Template.FLAG_OUTSIDE_WEIGHT
+    assert not kept[0].flag & Template.FLAG_OUTSIDE_WEIGHT

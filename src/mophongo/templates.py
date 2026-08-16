@@ -411,7 +411,14 @@ class Template(Cutout2D):
     FLAG_CONVOLVED = 0x02  # 0010: Template has been convolved
     FLAG_SUM_ZERO = 0x04  # 0100: Template sum is zero
     FLAG_HAS_NAN = 0x08  # 1000: Template contains NaN values
-    FLAG_OUTSIDE_WEIGHT = 0x10  # 1 0000: Template is outside weight map
+    #: No support on the weight map of the band being fitted: the template's
+    #: weighted L2 norm is below a relative floor, so the band cannot measure
+    #: this source at all. Set by :meth:`Templates.prune_outside_weight`, which
+    #: then drops the template from that band's fit -- so it appears on the
+    #: hi-res template, never on a row of that band's outputs. Per band, unlike
+    #: :data:`FLAG_NO_COVERAGE`, which is a property of the detection image and
+    #: is therefore the same for every band.
+    FLAG_OUTSIDE_WEIGHT = 0x10
     FLAG_SHIFTED = 0x20  # 10 0000: Template has been shifted
     FLAG_DEBLENDED = 0x40  # catalog ``is_deblended`` provenance flag
     FLAG_SATURATED = 0x80  # catalog ``FLAG_SATURATED_<FILTER>`` provenance
@@ -1568,11 +1575,30 @@ class Templates:
             norms.append(wnorm)
 
         atol = rtol * np.median(norms)
-        keep = [t for t in self._templates if t.wnorm > atol]
+        keep, dropped = [], []
+        for tmpl in self._templates:
+            if tmpl.wnorm > atol:
+                keep.append(tmpl)
+            else:
+                # Flag before dropping. The template objects are shared with
+                # the hi-res set (``_convolved_templates`` copies the list, not
+                # its entries), so the bit stays visible there after this list
+                # loses them -- which is the only trace a pruned source leaves,
+                # since it has no row in the outputs of this band.
+                tmpl.flag |= Template.FLAG_OUTSIDE_WEIGHT
+                dropped.append(tmpl)
 
-        dropped = len(self._templates) - len(keep)
         if dropped:
-            logger.info("pruned %d templates with low L2 norm on the weight map", dropped)
+            logger.info(
+                "pruned %d template(s) with no support on this band's weight "
+                "map (weighted L2 norm below %.3g); flagged FLAG_OUTSIDE_WEIGHT",
+                len(dropped), atol,
+            )
+            logger.debug(
+                "  pruned ids: %s",
+                ", ".join(str(int(t.id)) for t in dropped[:50])
+                + (" ..." if len(dropped) > 50 else ""),
+            )
         self._templates = keep
         return self._templates
 

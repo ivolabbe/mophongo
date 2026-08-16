@@ -801,9 +801,9 @@ def test_write_outputs_puts_scene_plots_in_scenes_subdir(tmp_path):
     )
     # no per-scene PNG left at the old flat location
     assert not [p for p in on.glob("t_scene_*.png") if p.stem.split("_")[-1].isdigit()]
-    # the scene catalog and the full-field scene map stay in out_dir
+    # the scene catalog and the full-field scene figure stay in out_dir
     assert (on / "t_scene_catalog.csv").exists()
-    assert (on / "t_scene_map.png").exists()
+    assert (on / "t_scenes.png").exists()
 
     off = tmp_path / "off"
     fresh_pipe(off, False).write_outputs()
@@ -1403,3 +1403,91 @@ def test_aperture_sum_follows_the_fitted_shift():
 
     assert followed > off                       # following recovers EE
     np.testing.assert_allclose(followed, centered, rtol=2e-3)
+
+
+def test_refit_scene_freezes_membership_and_restores_state(tmp_path):
+    """A scene can be re-extracted and re-solved without disturbing the run.
+
+    The A/B this exists for: same sources, same pixels, same weights, one
+    parameter changed. And ``_convolved_templates`` is not idempotent -- on the
+    upsample path it rebinds ``images[ifilt]`` and appends to
+    ``fit_bin_factors`` -- so the pipeline state it touches must come back
+    exactly as it was, or a second experiment silently fits an already
+    upsampled image.
+    """
+    from dataclasses import replace as dc_replace
+
+    import pytest
+    from astropy.io import fits
+    from mophongo.fit import FitConfig
+
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=12, nsrc=12, size=101, ndilate=2, peak_snr=2.0
+    )
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+    run_cfg = pipeline.RunConfig(
+        name="t", out_dir=str(tmp_path), sci_hi="hi.fits", segmap="seg.fits",
+        catalog="cat.fits", sci_lo="lo.fits", wht_lo="wht.fits",
+        csv_hi="hi.csv", csv_lo="lo.csv",
+    )
+
+    def fresh_pipe():
+        pipe = pipeline.Pipeline(
+            [im.copy() for im in images], segmap, catalog=catalog,
+            weights=[w.copy() for w in wht], kernels=[None, kernel], psfs=psfs,
+            config=FitConfig(fit_astrometry_niter=0),
+        )
+        pipe.run_config = run_cfg
+        pipe.out_dir = tmp_path
+        return pipe
+
+    pipe1 = fresh_pipe()
+    pipe1.run()
+    scene_id = int(pipe1.scene_ids()[0])
+    stem = tmp_path / "t"
+    fits.writeto(f"{stem}_residual.fits", pipe1.residuals[0], overwrite=True)
+    pipe1.table.write(f"{stem}_fit_table.fits", overwrite=True)
+    # id_scene lives here, not in the fit table: this is what lets a restored
+    # fit freeze the membership the run chose
+    pipe1._template_fit_table().write(f"{stem}_templates.fits", overwrite=True)
+    pipe1.write_stamps()
+
+    pipe = fresh_pipe()
+    pipe.load_fit()
+    recorded = sorted(int(i) for i in
+                      pipe.template_table["id"][pipe.template_table["id_scene"] == scene_id])
+
+    before = {
+        "images": [id(im) for im in pipe.images],
+        "bins": list(pipe.fit_bin_factors),
+    }
+
+    res = pipe.refit_scene(scene_id, extend_mode="none")
+
+    # state the refit borrowed is put back, object for object
+    assert [id(im) for im in pipe.images] == before["images"]
+    assert list(pipe.fit_bin_factors) == before["bins"]
+
+    # membership is frozen to what the run recorded
+    assert sorted(int(i) for i in res.ids) == recorded
+    assert {int(t.id) for t in res.variant.templates} == set(recorded)
+
+    # the change is recorded, and both sides were solved through one path
+    assert "extend_mode" in res.changed
+    assert res.baseline is not None
+    tab = res.table()
+    assert set(tab.colnames) >= {"id", "flux", "err", "flux_base", "dflux_sigma"}
+    assert len(tab) == len(recorded)
+    assert np.isfinite(res.chi2) and np.isfinite(res.dchi2)
+
+    # with nothing changed there is no baseline to compare against
+    same = pipe.refit_scene(scene_id)
+    assert same.changed == {} and same.baseline is None and same.dchi2 == 0.0
+
+    # a full config replacement is the other way in; the two are exclusive
+    cfg = dc_replace(pipe.config, snr_thresh_astrom=99.0)
+    assert pipe.refit_scene(scene_id, config=cfg).changed
+    with pytest.raises(ValueError, match="either config="):
+        pipe.refit_scene(scene_id, config=cfg, extend_mode="none")
+    with pytest.raises(ValueError, match="unknown FitConfig field"):
+        pipe.refit_scene(scene_id, not_a_field=1)

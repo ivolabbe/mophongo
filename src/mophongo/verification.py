@@ -1776,6 +1776,112 @@ def scene_label_map(
     return lut[labels]
 
 
+def _scene_colors(n_scenes: int, alpha: float = 0.42) -> np.ndarray:
+    """Per-scene RGBA, index 0 transparent for "no scene".
+
+    One shuffled hue ramp from a fixed seed, so the map panel, the blob panel
+    and any later figure give a scene the same colour.
+    """
+    import matplotlib.colors as mcolors
+
+    n_colors = max(1, int(n_scenes))
+    colors = np.zeros((n_colors + 1, 4), dtype=float)
+    colors[0] = (1.0, 1.0, 1.0, 0.0)
+    hue = np.linspace(0.0, 1.0, n_colors, endpoint=False)
+    np.random.default_rng(12345).shuffle(hue)
+    for idx, h in enumerate(hue, start=1):
+        rgb = mcolors.hsv_to_rgb((float(h), 0.58, 0.98))
+        colors[idx] = (float(rgb[0]), float(rgb[1]), float(rgb[2]), float(alpha))
+    return colors
+
+
+def _draw_scene_map(ax, image, scene_map, colors, scenes, step, max_boxes) -> None:
+    """Segmentation painted by fitted scene, over the detection image."""
+    from matplotlib.colors import ListedColormap
+
+    finite = np.isfinite(image)
+    med = float(np.nanmedian(image[finite])) if np.any(finite) else 0.0
+    sig = float(np.nanstd(image[finite])) if np.any(finite) else 1.0
+    if not np.isfinite(sig) or sig <= 0:
+        sig = 1.0
+    ax.imshow(image, origin="lower", cmap="gray",
+              vmin=med - 1.0 * sig, vmax=med + 8.0 * sig)
+    ax.imshow(
+        np.ma.masked_where(scene_map == 0, scene_map),
+        origin="lower",
+        cmap=ListedColormap(colors),
+        interpolation="nearest",
+        vmin=0,
+        vmax=max(1, len(scenes)),
+    )
+    if len(scenes) <= max_boxes:
+        for scene_index, scene in enumerate(scenes, start=1):
+            if getattr(scene, "bbox", None) is None:
+                continue
+            y0, y1, x0, x1 = (b / step for b in scene.bbox)
+            ax.plot([x0, x1, x1, x0, x0], [y0, y0, y1, y1, y0],
+                    color=colors[scene_index], linewidth=0.8, alpha=0.65)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+
+def save_scene_partition(
+    image: np.ndarray,
+    segmap: np.ndarray,
+    scenes: Sequence[Any],
+    filename: str | Path,
+    *,
+    alpha: float = 0.42,
+    max_side: int = 4000,
+    max_boxes: int = 250,
+    pad_pix: float = 12.0,
+    min_radius_pix: float = 8.0,
+    label_min_pix: float = 60.0,
+    figsize: tuple[float, float] = (19.0, 9.0),
+) -> None:
+    """The scene partition as one figure: painted segments beside plain blobs.
+
+    The two panels answer different questions and are worth seeing together.
+    On the left, every segment carries the colour of the scene that fitted it,
+    over the detection image -- which source went where, at the cost of reading
+    the mosaic and decimating it. On the right, each scene is the hull of its
+    templates and nothing else -- where the scenes are, how big they got, and
+    which one is number 87 -- pure vector, no raster, no decimation.
+
+    Colours come from :func:`_scene_colors`, so a scene is the same colour in
+    both panels and the eye can carry one across.
+
+    Args and defaults are those of :func:`save_scene_overview` and
+    :func:`save_scene_blobs`, which remain for the panels on their own.
+    """
+    import matplotlib.pyplot as plt
+
+    step = max(1, int(np.ceil(max(np.shape(segmap)) / float(max_side))))
+    scene_map = scene_label_map(segmap, scenes, step=step)
+    display = np.asarray(image)[::step, ::step].astype(float)
+    colors = _scene_colors(len(scenes), alpha)
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    _draw_scene_map(axes[0], display, scene_map, colors, scenes, step, max_boxes)
+    left = f"segments by scene ({len(scenes)} fitted)"
+    if step > 1:
+        left += f", displayed 1:{step}"
+    axes[0].set_title(left)
+
+    n_labelled = _draw_scene_blobs(axes[1], scenes, np.shape(image),
+                                   pad_pix=pad_pix, min_radius_pix=min_radius_pix,
+                                   label_min_pix=label_min_pix)
+    axes[1].set_title(f"scene extents ({n_labelled} labelled)")
+
+    fig.suptitle(f"Scene partition: {len(scenes)} scenes", fontsize=13)
+    fig.tight_layout()
+    dpi = _diagnostic_pixel_sampling_dpi(
+        [display], figsize=figsize, nrows=1, ncols=2, min_dpi=180, max_dpi=900,
+    )
+    fig.savefig(filename, dpi=dpi, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
 def save_scene_overview(
     image: np.ndarray,
     segmap: np.ndarray,
@@ -1815,47 +1921,15 @@ def save_scene_overview(
     if not np.isfinite(sig) or sig <= 0:
         sig = 1.0
 
-    rng = np.random.default_rng(12345)
-    n_colors = max(1, len(scenes))
-    colors = np.zeros((n_colors + 1, 4), dtype=float)
-    colors[0] = (1.0, 1.0, 1.0, 0.0)
-    hue = np.linspace(0.0, 1.0, n_colors, endpoint=False)
-    rng.shuffle(hue)
-    import matplotlib.colors as mcolors
-
-    for idx, h in enumerate(hue, start=1):
-        rgb = mcolors.hsv_to_rgb((float(h), 0.58, 0.98))
-        colors[idx] = (float(rgb[0]), float(rgb[1]), float(rgb[2]), float(alpha))
+    colors = _scene_colors(len(scenes), alpha)
 
     figsize = (14, 7)
     fig, ax = plt.subplots(figsize=figsize)
-    ax.imshow(image, origin="lower", cmap="gray", vmin=med - 1.0 * sig, vmax=med + 8.0 * sig)
-    ax.imshow(
-        np.ma.masked_where(scene_map == 0, scene_map),
-        origin="lower",
-        cmap=ListedColormap(colors),
-        interpolation="nearest",
-        vmin=0,
-        vmax=n_colors,
-    )
-    if len(scenes) <= max_boxes:
-        for scene_index, scene in enumerate(scenes, start=1):
-            if getattr(scene, "bbox", None) is None:
-                continue
-            y0, y1, x0, x1 = (b / step for b in scene.bbox)
-            ax.plot(
-                [x0, x1, x1, x0, x0],
-                [y0, y0, y1, y1, y0],
-                color=colors[scene_index],
-                linewidth=0.8,
-                alpha=0.65,
-            )
+    _draw_scene_map(ax, image, scene_map, colors, scenes, step, max_boxes)
     title = f"Scene overview ({len(scenes)} fitted scenes)"
     if step > 1:
         title += f", displayed 1:{step}"
     ax.set_title(title)
-    ax.set_xticks([])
-    ax.set_yticks([])
     overview_dpi = _diagnostic_pixel_sampling_dpi(
         [image],
         figsize=figsize,
@@ -1866,6 +1940,90 @@ def save_scene_overview(
     )
     fig.savefig(filename, dpi=overview_dpi, bbox_inches="tight")
     plt.close(fig)
+
+
+def _draw_scene_blobs(ax, scenes, shape, *, pad_pix=12.0, min_radius_pix=8.0,
+                      label_min_pix=60.0) -> int:
+    """Each scene as the hull of its templates. Returns how many got labels.
+
+    Pure vector: no raster, no decimation, no dependence on field size.
+    """
+    import matplotlib.colors as mcolors
+    from matplotlib.patches import Circle, Polygon
+
+    ny, nx = (int(v) for v in shape)
+    rng = np.random.default_rng(12345)
+    hue = np.linspace(0.0, 1.0, max(1, len(scenes)), endpoint=False)
+    rng.shuffle(hue)
+
+    # Geometry first, so the drawing order can be set by size.
+    blobs = []
+    for index, scene in enumerate(scenes):
+        pts = np.asarray(
+            [t.position_original for t in getattr(scene, "templates", [])],
+            dtype=float,
+        )
+        if pts.size == 0:
+            continue
+        centre = pts.mean(axis=0)
+        span = float(np.ptp(pts, axis=0).max()) if len(pts) > 1 else 0.0
+        blobs.append((span, index, scene, pts, centre))
+
+    # Largest first: scenes overlap, and a compact scene inside a sprawling
+    # one has to be drawn last or it is buried by it.
+    blobs.sort(key=lambda b: -b[0])
+
+    ax.set_facecolor("0.08")
+    n_labelled = 0
+    for span, index, scene, pts, centre in blobs:
+        colour = mcolors.hsv_to_rgb((float(hue[index % len(hue)]), 0.55, 1.0))
+        # A hull over three or four sources is a sliver or a thin triangle,
+        # which at field scale reads as noise rather than as a scene. Below a
+        # few times the pad, draw the circle that encloses the same sources:
+        # the point here is where a scene is and roughly how big, and a blob
+        # says that better than an exact outline nothing can resolve.
+        radius = max(min_radius_pix, span / 2.0 + pad_pix)
+        patch = None
+        if span > 4.0 * pad_pix and len(pts) >= 3:
+            try:
+                from scipy.spatial import ConvexHull
+
+                hull = ConvexHull(pts)
+                verts = pts[hull.vertices]
+                # grow about the centroid so the outline is not flush with the
+                # outermost source, which reads as a clipped scene
+                grown = verts + pad_pix * _unit_outward(verts, centre)
+                patch = Polygon(grown, closed=True)
+            except Exception:  # noqa: BLE001 - collinear or degenerate
+                patch = None
+        if patch is None:
+            patch = Circle(centre, radius)
+            size_pix = 2.0 * radius
+        else:
+            size_pix = span
+
+        patch.set_facecolor((*colour, 0.30))
+        patch.set_edgecolor((*colour, 0.9))
+        patch.set_linewidth(0.7)
+        ax.add_patch(patch)
+
+        # Label only what is big enough to hold a number. On a full field the
+        # small scenes are the overwhelming majority, and numbering them all
+        # turns the figure into a smear of grey digits.
+        if size_pix >= label_min_pix:
+            ax.text(
+                centre[0], centre[1], str(getattr(scene, "id", index)),
+                color="0.75", fontsize=5.5, ha="center", va="center",
+                zorder=5,
+            )
+            n_labelled += 1
+
+    ax.set_xlim(0, nx)
+    ax.set_ylim(0, ny)
+    ax.set_aspect("equal")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    return n_labelled
 
 
 def save_scene_blobs(
@@ -1933,56 +2091,9 @@ def save_scene_blobs(
     blobs.sort(key=lambda b: -b[0])
 
     fig, ax = plt.subplots(figsize=figsize)
-    ax.set_facecolor("0.08")
-    n_labelled = 0
-    for span, index, scene, pts, centre in blobs:
-        colour = mcolors.hsv_to_rgb((float(hue[index % len(hue)]), 0.55, 1.0))
-        # A hull over three or four sources is a sliver or a thin triangle,
-        # which at field scale reads as noise rather than as a scene. Below a
-        # few times the pad, draw the circle that encloses the same sources:
-        # the point here is where a scene is and roughly how big, and a blob
-        # says that better than an exact outline nothing can resolve.
-        radius = max(min_radius_pix, span / 2.0 + pad_pix)
-        patch = None
-        if span > 4.0 * pad_pix and len(pts) >= 3:
-            try:
-                from scipy.spatial import ConvexHull
-
-                hull = ConvexHull(pts)
-                verts = pts[hull.vertices]
-                # grow about the centroid so the outline is not flush with the
-                # outermost source, which reads as a clipped scene
-                grown = verts + pad_pix * _unit_outward(verts, centre)
-                patch = Polygon(grown, closed=True)
-            except Exception:  # noqa: BLE001 - collinear or degenerate
-                patch = None
-        if patch is None:
-            patch = Circle(centre, radius)
-            size_pix = 2.0 * radius
-        else:
-            size_pix = span
-
-        patch.set_facecolor((*colour, 0.30))
-        patch.set_edgecolor((*colour, 0.9))
-        patch.set_linewidth(0.7)
-        ax.add_patch(patch)
-
-        # Label only what is big enough to hold a number. On a full field the
-        # small scenes are the overwhelming majority, and numbering them all
-        # turns the figure into a smear of grey digits.
-        if size_pix >= label_min_pix:
-            ax.text(
-                centre[0], centre[1], str(getattr(scene, "id", index)),
-                color="0.75", fontsize=5.5, ha="center", va="center",
-                zorder=5,
-            )
-            n_labelled += 1
-
-    ax.set_xlim(0, nx)
-    ax.set_ylim(0, ny)
-    ax.set_aspect("equal")
-    ax.set_xticks([])
-    ax.set_yticks([])
+    n_labelled = _draw_scene_blobs(ax, scenes, shape, pad_pix=pad_pix,
+                                   min_radius_pix=min_radius_pix,
+                                   label_min_pix=label_min_pix)
     ax.set_title(
         f"Scene partition: {len(scenes)} scenes, {n_labelled} labelled"
     )

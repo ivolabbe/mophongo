@@ -778,6 +778,173 @@ def _fptv_panel(
     return np.repeat(np.repeat(out, os, axis=0), os, axis=1)
 
 
+@dataclass
+class SceneRefit:
+    """One scene solved once or twice, and the comparison between the two.
+
+    Produced by :meth:`Pipeline.refit_scene`. ``baseline`` is ``None`` when
+    nothing was changed (or ``baseline=False``), in which case the deltas are
+    against the scene's own solve and therefore zero.
+    """
+
+    id_scene: int
+    ids: np.ndarray
+    changed: dict[str, tuple]
+    variant: Any
+    baseline: Any
+    pipeline: Any
+    ifilt: int = 1
+
+    def _chi2(self, scene) -> float:
+        """Weighted chi2 over the scene's bounding box.
+
+        The one scalar worth comparing: same pixels, same weights, both sides.
+        """
+        from .templates import _slices_from_bbox
+
+        # Scene.residual() and .model_image() are already bbox-sized; only the
+        # full-frame arrays need slicing.
+        sl = _slices_from_bbox(scene.bbox)
+        w = scene.weights[sl]
+        r = scene.residual()
+        good = np.isfinite(r) & np.isfinite(w) & (w > 0)
+        return float(np.sum(w[good] * r[good] ** 2))
+
+    @property
+    def chi2(self) -> float:
+        return self._chi2(self.variant)
+
+    @property
+    def dchi2(self) -> float:
+        """Variant minus baseline; negative means the change helped."""
+        if self.baseline is None:
+            return 0.0
+        return self._chi2(self.variant) - self._chi2(self.baseline)
+
+    def table(self):
+        """Per-source fluxes of both solves, with the fractional change."""
+        from astropy.table import Table
+
+        var = {int(t.id): t for t in self.variant.templates}
+        rows = {"id": [], "flux": [], "err": []}
+        if self.baseline is not None:
+            rows |= {"flux_base": [], "err_base": [], "dflux_sigma": []}
+            base = {int(t.id): t for t in self.baseline.templates}
+        for sid in sorted(var):
+            t = var[sid]
+            rows["id"].append(sid)
+            rows["flux"].append(float(t.flux))
+            rows["err"].append(float(t.err))
+            if self.baseline is not None:
+                b = base.get(sid)
+                rows["flux_base"].append(float(b.flux) if b else np.nan)
+                rows["err_base"].append(float(b.err) if b else np.nan)
+                # in units of the baseline error: "did this move by more than
+                # the fit claims it knows the flux to"
+                denom = float(b.err) if b and b.err else np.nan
+                rows["dflux_sigma"].append((float(t.flux) - float(b.flux)) / denom
+                                           if denom and np.isfinite(denom) else np.nan)
+        return Table(rows)
+
+    @property
+    def leakage(self) -> float:
+        """Largest coupling between this scene and a source outside it.
+
+        Freezing membership is the control for an A/B, but it assumes the
+        frozen set is still separable from its neighbours. This measures that
+        assumption the way ``generate_scenes`` defines it -- the relative flux
+        one source's template can absorb from another -- so a value above
+        ``FitConfig.scene_coupling_thresh`` says the partition would have
+        changed and the comparison has stopped being clean.
+
+        Uses the restored fit's templates for the outsiders, which is what a
+        rerun would have grouped against. ``nan`` when no restored template
+        overlaps the scene.
+        """
+        from .scene_fitter import build_normal
+
+        outside = [t for t in (getattr(self.pipeline, "templates", None) or [])
+                   if int(t.id) not in set(int(i) for i in self.ids)
+                   and _bbox_overlaps(getattr(t, "bbox_original", None), self.variant.bbox)]
+        if not outside:
+            return float("nan")
+        members = list(self.variant.templates)
+        ata, _, _ = build_normal(members + outside, self.variant.image,
+                                 self.variant.weights)
+        ata = ata.tocsr()
+        flux = np.array([float(t.flux) for t in members + outside])
+        diag = np.abs(ata.diagonal())
+        n_in = len(members)
+        worst = 0.0
+        for i in range(n_in):
+            for j in range(n_in, len(flux)):
+                aij = abs(ata[i, j])
+                if not aij:
+                    continue
+                fi, fj = abs(flux[i]), abs(flux[j])
+                if diag[i] * fi > 0:
+                    worst = max(worst, aij * fj / (diag[i] * fi))
+                if diag[j] * fj > 0:
+                    worst = max(worst, aij * fi / (diag[j] * fj))
+        return float(worst)
+
+    def plot(self, path: str | Path | None = None):
+        """Data, both models and both residuals, on one stretch."""
+        import matplotlib.pyplot as plt
+
+        scenes = [("variant", self.variant)]
+        if self.baseline is not None:
+            scenes.insert(0, ("baseline", self.baseline))
+        from .templates import _slices_from_bbox
+
+        sl = _slices_from_bbox(self.variant.bbox)
+        data = np.asarray(self.variant.image)[sl]
+        vmax = float(np.nanpercentile(data, 99.5)) or 1.0
+        kw = dict(origin="lower", vmin=-0.1 * vmax, vmax=vmax, cmap="gray_r")
+
+        ncol = 1 + 2 * len(scenes)
+        fig, axes = plt.subplots(1, ncol, figsize=(3.1 * ncol, 3.4))
+        axes[0].imshow(data, **kw)
+        axes[0].set_title(f"scene {self.id_scene}  ({len(self.ids)} src)")
+        for k, (label, scene) in enumerate(scenes):
+            model = np.asarray(scene.model_image())
+            resid = np.asarray(scene.residual())
+            axes[1 + 2 * k].imshow(model, **kw)
+            axes[1 + 2 * k].set_title(f"model {label}")
+            axes[2 + 2 * k].imshow(resid, **kw)
+            axes[2 + 2 * k].set_title(f"resid {label}  chi2={self._chi2(scene):.4g}")
+        for ax in axes:
+            ax.set_xticks([]); ax.set_yticks([])
+        if self.changed:
+            fig.suptitle(", ".join(f"{k}: {a!r} -> {b!r}"
+                                   for k, (a, b) in self.changed.items()), fontsize=9)
+        fig.tight_layout()
+        if path is not None:
+            fig.savefig(path, dpi=130, bbox_inches="tight")
+        return fig
+
+
+def _config_values_equal(a, b) -> bool:
+    """Whether two config values are the same, counting NaN as itself.
+
+    Several ``FitConfig`` defaults are NaN sentinels, and ``nan != nan`` would
+    report every one of them as a change on every refit.
+    """
+    if a is b:
+        return True
+    try:
+        return bool(np.array_equal(a, b, equal_nan=True))
+    except TypeError:      # non-numeric (strings, dicts, None)
+        return bool(a == b)
+
+
+def _bbox_overlaps(a, b) -> bool:
+    """Whether two ``(y0, y1, x0, x1)`` boxes intersect; ``None`` never does."""
+    if a is None or b is None:
+        return False
+    return not (a[1] <= b[0] or b[1] <= a[0] or a[3] <= b[2] or b[3] <= a[2])
+
+
 class Pipeline:
     """Photometry pipeline orchestrator.
 
@@ -960,6 +1127,168 @@ class Pipeline:
         """Scenes of the (first) fitted band, once :meth:`run` has completed."""
         return self.all_scenes[0] if getattr(self, "all_scenes", None) else None
 
+    def scene_ids(self, ifilt: int = 1) -> np.ndarray:
+        """Scene labels present in a loaded fit, largest scene first."""
+        table = self._scene_membership_table()
+        labels, counts = np.unique(np.asarray(table["id_scene"], int), return_counts=True)
+        return labels[np.argsort(-counts)]
+
+    def _scene_membership_table(self):
+        """``id``/``id_scene`` for this run, however it is currently held.
+
+        Live scenes when the fit is still in memory, otherwise the per-template
+        table :meth:`load_outputs` reads -- scene objects are not persisted, but
+        their membership is, which is the whole reason a refit can freeze it.
+        """
+        scenes = self.scenes
+        if scenes:
+            return Table({
+                "id": [int(t.id) for s in scenes for t in s.templates],
+                "id_scene": [int(s.id) for s in scenes for t in s.templates],
+            })
+        for name in ("template_table", "table"):
+            tab = getattr(self, name, None)
+            if tab is not None and "id_scene" in tab.colnames:
+                return tab
+        raise RuntimeError(
+            "no scene membership available: run() or load_fit() first, and for "
+            "a restored fit make sure <name>_templates.fits is beside the fit "
+            "table (it carries id_scene; the fit table does not)"
+        )
+
+    def refit_scene(
+        self,
+        id_scene: int,
+        *,
+        ifilt: int = 1,
+        config: "_FitConfig | None" = None,
+        baseline: bool = True,
+        **overrides,
+    ) -> "SceneRefit":
+        """Re-extract and re-solve one scene, optionally against a baseline.
+
+        The point is an A/B on exactly the same sources: membership is frozen
+        to the ``id_scene`` the run recorded, so the source set, the segmap,
+        the band pixels and the weights are identical on both sides and the
+        only thing that varies is what you changed. Everything downstream of
+        hi-res extraction is fair game -- ``extend_mode`` and the build-scheme
+        parameters, the solver and astrometry settings -- because both sides
+        are rebuilt through the same path the run used
+        (:meth:`_prepare_hi_templates` then :meth:`_convolved_templates`).
+
+        Extraction of a subset is exact rather than approximate:
+        ``extract_templates`` is positions-driven, each cutout is that source's
+        own segment bbox, and the build schemes are per-template leaf
+        functions. Ten sources extracted alone are the same pixels as those ten
+        extracted alongside a hundred thousand others.
+
+        Args:
+            id_scene: scene label from the restored fit.
+            ifilt: fitted image index (1-based).
+            config: complete replacement :class:`FitConfig`.
+            baseline: also solve with the run's own config, for comparison.
+                Always re-derived here rather than read from the fit table, so
+                both sides have been resampled the same number of times.
+            **overrides: individual ``FitConfig`` fields, applied to the run's
+                config with :func:`dataclasses.replace`.
+
+        Returns:
+            :class:`SceneRefit` holding both scenes, the flux table, chi2 over
+            the scene bbox, and the coupling to sources outside the frozen set.
+
+        Two caveats this cannot remove. Freezing membership is the control for
+        an A/B, but it is not what a full rerun would do: a change that widens
+        the templates could merge or split scenes, and ``leakage`` is the
+        measurement that says when that has started to matter. And a
+        scene-level improvement is a screening result, not a field-level one.
+        """
+        if getattr(self, "run_config", None) is None:
+            raise RuntimeError("refit_scene requires a config-driven pipeline")
+        if self.images is None:
+            raise RuntimeError("call load_fit() (or load_data()) first")
+
+        base_cfg = self.config
+        if config is not None and overrides:
+            raise ValueError("pass either config= or individual overrides, not both")
+        if config is not None:
+            variant_cfg = config
+        elif overrides:
+            known = {f.name for f in fields(base_cfg)}
+            unknown = set(overrides) - known
+            if unknown:
+                raise ValueError(
+                    f"unknown FitConfig field(s): {sorted(unknown)}; "
+                    f"known fields include {sorted(known)[:8]} ..."
+                )
+            variant_cfg = replace(base_cfg, **overrides)
+        else:
+            variant_cfg = base_cfg
+
+        table = self._scene_membership_table()
+        ids = np.asarray(table["id"], int)[np.asarray(table["id_scene"], int) == int(id_scene)]
+        if not len(ids):
+            raise ValueError(f"no sources with id_scene == {id_scene}")
+        logger.info("scene %d: %d source(s) frozen from the recorded fit",
+                    id_scene, len(ids))
+
+        changed = {f.name: (getattr(base_cfg, f.name), getattr(variant_cfg, f.name))
+                   for f in fields(base_cfg)
+                   if not _config_values_equal(getattr(base_cfg, f.name),
+                                               getattr(variant_cfg, f.name))}
+
+        var_scene = self._solve_frozen_scene(id_scene, ids, variant_cfg, ifilt)
+        base_scene = (self._solve_frozen_scene(id_scene, ids, base_cfg, ifilt)
+                      if baseline and changed else None)
+        return SceneRefit(id_scene=int(id_scene), ids=ids, changed=changed,
+                          variant=var_scene, baseline=base_scene, pipeline=self,
+                          ifilt=ifilt)
+
+    def _solve_frozen_scene(self, id_scene: int, ids: np.ndarray,
+                            config: "_FitConfig", ifilt: int):
+        """Extract, convolve and solve one frozen source set. Restores state.
+
+        ``_convolved_templates`` is not idempotent: on the upsample path it
+        rebinds ``images[ifilt]`` and ``wcs[ifilt]`` to their reference-grid
+        versions and appends to ``fit_bin_factors``. Calling it twice in a
+        session would upsample an already-upsampled image, silently and
+        wrongly, so everything it touches is snapshotted and put back.
+        """
+        from .scene import Scene, _bbox_union
+        from .scene_fitter import SceneFitter
+
+        snapshot = {
+            "images": list(self.images),
+            "wcs": list(self.wcs) if self.wcs is not None else None,
+            "weights": list(self.weights) if self.weights is not None else None,
+            "fit_bin_factors": list(getattr(self, "fit_bin_factors", [])),
+            "tmpls": getattr(self, "tmpls", None),
+            "templates_extracted": getattr(self, "templates_extracted", None),
+            "templates_extended": getattr(self, "templates_extended", None),
+            "extend_mode": getattr(self, "extend_mode", None),
+        }
+        try:
+            cat = self.catalog[np.isin(np.asarray(self.catalog["id"], int), ids)]
+            self._prepare_hi_templates(cat, config)
+            templates, weights_i = self._convolved_templates(ifilt, config)
+            scene = Scene(id=int(id_scene), templates=templates,
+                          fitter=SceneFitter(), bbox=_bbox_union(templates))
+            scene.set_band(self.images[ifilt], weights_i, config=config)
+            scene.solve(config=config)
+            # the band arrays the scene keeps are the ones it was solved
+            # against, which on the upsample path are NOT the restored ones
+            return scene
+        finally:
+            self.images = snapshot["images"]
+            if snapshot["wcs"] is not None:
+                self.wcs = snapshot["wcs"]
+            if snapshot["weights"] is not None:
+                self.weights = snapshot["weights"]
+            self.fit_bin_factors = snapshot["fit_bin_factors"]
+            for key in ("tmpls", "templates_extracted", "templates_extended",
+                        "extend_mode"):
+                if snapshot[key] is not None:
+                    setattr(self, key, snapshot[key])
+
     # -- shared helpers ----------------------------------------------------
     def _blur_fwhm(self) -> float | None:
         blur = self.run_config.psf_blur_fwhm
@@ -1037,6 +1366,33 @@ class Pipeline:
                     have.add(int(token.group(1)))
         return [d for d in want if int(round(d)) not in have]
 
+    def _existing_grid_fov(self, pattern: str) -> float | None:
+        """Largest field of view already on disk for ``pattern``, if any.
+
+        Neither the pattern nor ``psf_fov_arcsec`` is required to name a
+        field of view. When one isn't given, a missing epoch should still
+        match whatever this band's grids already use rather than falling
+        back to the backend default -- otherwise one config can quietly
+        produce a mixed FOV4/FOV6 set. First-ever build for a pattern has
+        nothing to match, so this returns ``None`` and the backend default
+        applies; :meth:`_check_psf_size_fits_grids` warns afterwards if the
+        result is too small for ``psf_size``.
+        """
+        from .jwst_psf import fov_agnostic_pattern
+
+        psf_dir = Path(self.run_config.psf_dir)
+        if not psf_dir.is_dir():
+            return None
+        rx = re.compile(fov_agnostic_pattern(pattern))
+        fovs = [
+            float(m.group(1))
+            for path in psf_dir.glob("*.fits")
+            if rx.search(path.name)
+            for m in [re.search(r"_FOV(\d+)", path.name)]
+            if m
+        ]
+        return max(fovs) if fovs else None
+
     def _load_epsf(self, dpsf, pattern: str, csv: str, band: str) -> None:
         """Load the ePSF grids for one band, building the epochs that are absent.
 
@@ -1054,6 +1410,8 @@ class Pipeline:
         cfg = self.run_config
         kw = _psf_factory_kwargs(pattern)
         fov = kw.get("fov_arcsec", cfg.psf_fov_arcsec)
+        if fov is None:
+            fov = self._existing_grid_fov(pattern)
         missing = self._missing_psf_dates(pattern, csv)
         mode = str(getattr(cfg, "psf_provenance", "warn")).lower()
 
@@ -1079,7 +1437,8 @@ class Pipeline:
             )
             Path(cfg.psf_dir).mkdir(parents=True, exist_ok=True)
             # An _FOV token in the pattern carries its own field of view;
-            # otherwise the config's psf_fov_arcsec applies.
+            # otherwise psf_fov_arcsec applies, then the FOV already on disk
+            # (`fov`, resolved above), then the backend default.
             kw.pop("fov_arcsec", None)
             # One call per epoch: a literal MJD as date_mode selects exactly
             # that date (psf_factory.dates_from_csv), so nothing already on
@@ -1421,7 +1780,8 @@ class Pipeline:
         The repair only touches saturated cores and flag columns, so the
         cache stores diffs, not mosaics: a PATCHES bintable of changed
         pixels (sci/wht/segmap values) and a FLAGS bintable of the
-        catalog's ``FLAG_SATURATED_*`` columns by id.
+        catalog's ``FLAG_SATURATED_*`` columns, holding only the ids that
+        carry a nonzero flag.
 
         The patch table is also left on the instance as ``_repair_patches``,
         so :meth:`load_data` can replay it onto a fresh memory map instead of
@@ -1460,9 +1820,15 @@ class Pipeline:
         cat = rep["catalog"]
         self._repair_patches = patches
         flag_cols = [c for c in cat.colnames if c.startswith("FLAG_SATURATED_")]
-        flags = Table({"id": np.asarray(cat["id"], np.int64)})
+        # Only the flagged ids. A field flags a few hundred segments out of a
+        # few hundred thousand sources, and the loader rebuilds each column
+        # from zero, so the unflagged rows carry no information.
+        keep = np.zeros(len(cat), dtype=bool)
         for c in flag_cols:
-            flags[c] = np.asarray(cat[c])
+            keep |= np.asarray(cat[c]) != 0
+        flags = Table({"id": np.asarray(cat["id"], np.int64)[keep]})
+        for c in flag_cols:
+            flags[c] = np.asarray(cat[c])[keep]
         hdr = fits.Header()
         for key, value in prov.items():
             hdr[f"HIERARCH REPAIR {key.upper()}"] = value
@@ -1521,15 +1887,15 @@ class Pipeline:
         yy, xx = np.asarray(patches["y"]), np.asarray(patches["x"])
         wht[yy, xx] = np.asarray(patches["wht"], wht.dtype)
         by_id = {int(i): k for k, i in enumerate(cat["id"])}
+        rows = np.array([by_id.get(int(i), -1) for i in flags["id"]], dtype=np.int64)
+        hit = rows >= 0
         for col in flags.colnames:
             if col == "id":
                 continue
-            if col not in cat.colnames:
-                cat[col] = np.zeros(len(cat), dtype=np.asarray(flags[col]).dtype)
-            for fid, val in zip(flags["id"], flags[col]):
-                row = by_id.get(int(fid))
-                if row is not None:
-                    cat[col][row] = val
+            # rebuilt from zero, not merged: the cache lists only flagged ids,
+            # so an unlisted id means "not flagged" rather than "unknown"
+            cat[col] = np.zeros(len(cat), dtype=np.asarray(flags[col]).dtype)
+            cat[col][rows[hit]] = np.asarray(flags[col])[hit]
         n_flagged = int(np.sum(np.any(np.column_stack(
             [np.asarray(flags[c]) != 0 for c in flags.colnames if c != "id"]
         ), axis=1))) if len(flags.colnames) > 1 else 0
@@ -2328,14 +2694,22 @@ class Pipeline:
         gain = arrow_frac * span / ref_ang if ref_ang > 0 else 1.0
 
         fig, ax = plt.subplots(figsize=(9, 8))
+        # Arrows carry a common magnification, so length alone cannot be read
+        # off the plot: colour them by their true magnitude and give the bar
+        # the units. The key below still sets the length scale; together they
+        # say both "how long is an arrow" and "how big is this one".
+        mag = np.hypot(dxy[:, 0], dxy[:, 1])
         q = ax.quiver(
-            ra, dec, dra * gain, ddec * gain,
+            ra, dec, dra * gain, ddec * gain, mag,
             angles="xy", scale_units="xy", scale=1,
-            color="tab:red", width=0.003, headwidth=4, headlength=5,
+            cmap="viridis", width=0.003, headwidth=4, headlength=5,
         )
+        pscale_cb = self._pixel_scale_arcsec(wcs)
+        cbar = fig.colorbar(q, ax=ax, fraction=0.046, pad=0.02)
+        cbar.set_label("|shift| (pix)" + (f'   [1 pix = {pscale_cb:.3f}"]'
+                                          if pscale_cb else ""))
         for sid, rl, dl in zip(ids, np.atleast_1d(ra_lab), np.atleast_1d(dec_lab)):
             ax.text(rl, dl, str(sid), color="0.7", fontsize=7, ha="left", va="bottom")
-        mag = np.hypot(dxy[:, 0], dxy[:, 1])
         if ref_ang > 0:
             ref_pix = float(np.percentile(mag, 90))
             pscale = self._pixel_scale_arcsec(wcs)
@@ -2449,20 +2823,18 @@ class Pipeline:
         )
 
         # Two full-field views of the partition, answering different
-        # questions. The map paints every segment with the colour of the scene
-        # that fitted it, so it says which source went where; it reads the
-        # mosaic and the segmap to do it. The blobs draw each scene as the
-        # hull of its templates with its id, so it says where the scenes are
-        # and how big they got -- pure vector, no raster, no decimation.
+        # questions, side by side in one figure and sharing one colour per
+        # scene. The left panel paints every segment with the colour of the
+        # scene that fitted it, so it says which source went where; it reads
+        # the mosaic and the segmap to do it. The right draws each scene as
+        # the hull of its templates with its id, so it says where the scenes
+        # are and how big they got -- pure vector, no raster, no decimation.
         if cfg.scene_plots and self.scenes:
-            from .verification import save_scene_blobs, save_scene_overview
+            from .verification import save_scene_partition
 
-            save_scene_overview(
+            save_scene_partition(
                 self.images[0], self.segmap, self.scenes,
-                f"{stem}_scene_map.png",
-            )
-            save_scene_blobs(
-                self.scenes, self.images[0].shape, f"{stem}_scene_blobs.png",
+                f"{stem}_scenes.png",
             )
 
         # shift field: only exists when astrometry was actually solved

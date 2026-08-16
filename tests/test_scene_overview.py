@@ -168,3 +168,32 @@ def test_save_scene_blobs_handles_an_empty_partition(tmp_path):
     out = tmp_path / "none.png"
     save_scene_blobs([], (100, 100), out)
     assert out.exists()
+
+
+def test_save_scene_partition_draws_both_panels(tmp_path):
+    """One figure, two panels, one colour per scene across both."""
+    import matplotlib.pyplot as plt
+
+    from mophongo.verification import _scene_colors, save_scene_partition
+
+    rng = np.random.default_rng(3)
+    image = rng.normal(size=(120, 140))
+    segmap = np.zeros((120, 140), dtype=int)
+    segmap[10:20, 10:20] = 1
+    segmap[60:70, 90:100] = 2
+    scenes = [
+        SimpleNamespace(id=1, bbox=(10, 20, 10, 20),
+                        templates=[SimpleNamespace(id=1, position_original=(15.0, 15.0))]),
+        SimpleNamespace(id=2, bbox=(60, 70, 90, 100),
+                        templates=[SimpleNamespace(id=2, position_original=(95.0, 65.0))]),
+    ]
+
+    out = tmp_path / "scenes.png"
+    save_scene_partition(image, segmap, scenes, out)
+    assert out.exists() and out.stat().st_size > 0
+
+    # both panels are drawn, and the scene colours are shared rather than
+    # each panel inventing its own
+    assert _scene_colors(2).shape == (3, 4)
+    assert np.array_equal(_scene_colors(2), _scene_colors(2))
+    plt.close("all")

@@ -2150,6 +2150,24 @@ class Pipeline:
             iy = np.clip((np.asarray(cat["y"]) / k).astype(int), 0, wht_lo.shape[0] - 1)
             cat = cat[wht_lo[iy, ix] > 0]
             logger.info("%d sources inside the lo-res footprint", len(cat))
+            # And inside the *detection* footprint. A combined catalog and
+            # segmap can name sources another band saw and this one did not:
+            # the segment is there, the data are not, and a template built on
+            # blank pixels fits nothing while absorbing its neighbours' flux.
+            # extract_templates makes the same test per source; doing it here
+            # too keeps them out of the catalog the fit reports on.
+            if wht_hi_repaired is not None and np.any(wht_hi_repaired > 0):
+                jx = np.clip(np.asarray(cat["x"]).astype(int), 0,
+                             wht_hi_repaired.shape[1] - 1)
+                jy = np.clip(np.asarray(cat["y"]).astype(int), 0,
+                             wht_hi_repaired.shape[0] - 1)
+                covered = np.asarray(wht_hi_repaired[jy, jx]) > 0
+                if not covered.all():
+                    logger.info(
+                        "%d source(s) dropped: no detection-band coverage",
+                        int((~covered).sum()),
+                    )
+                    cat = cat[covered]
 
         if geom is not None:
             import astropy.units as u
@@ -4313,13 +4331,19 @@ class Pipeline:
             extend_mode = self._resolve_extend_mode(config)
             self.extend_mode = extend_mode
             self.tmpls = Templates()
+            scheme_kw = self._extend_scheme_kwargs(extend_mode, config)
+            # every mode gets the detection weight, not just the schemes that
+            # build with it: it is what says which segments the detection
+            # image actually covers (see extract_templates)
+            if self.weights is not None and len(self.weights):
+                scheme_kw.setdefault("detection_weight", self.weights[0])
             self.tmpls.extract_templates(
                 images[0],
                 segmap,
                 list(zip(cat["x"], cat["y"])),
                 wcs=wcs[0] if wcs is not None else None,
                 dilate_segmap=config.template_dilate_segmap,
-                **self._extend_scheme_kwargs(extend_mode, config),
+                **scheme_kw,
             )
             if "is_deblended" in cat.colnames:
                 is_deblended_by_id = {

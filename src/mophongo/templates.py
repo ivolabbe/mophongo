@@ -1753,6 +1753,17 @@ class Templates:
         seg_labels = segm.labels
         seg_bbox = segm.bbox
         sized: list[tuple[Tuple[float, float], int, int, int]] = []
+        det_w = np.asarray(detection_weight) if detection_weight is not None else None
+        if det_w is not None and not np.any(det_w > 0):
+            # A map that is zero everywhere carries no coverage information;
+            # reading it as "nothing is covered" would return no templates at
+            # all, which is never what a caller means by passing a placeholder.
+            logger.warning(
+                "detection_weight is zero everywhere; ignoring it for the "
+                "coverage test (every source kept)"
+            )
+            det_w = None
+        n_uncovered = 0
         for pos in positions:
             # silently skip invalid positions
             if not np.isfinite(pos).all():
@@ -1763,6 +1774,17 @@ class Templates:
             label = segm.data[y, x]
             if label == 0:
                 continue
+            # A combined detection catalog and segmap can reach past the
+            # detection image's own coverage -- another band saw the source,
+            # this one did not. The segment is there, the data are not, and a
+            # template built from blank pixels is noise given a shape: it
+            # fits nothing, absorbs its neighbours' flux, and if it lands
+            # above the anchor cuts it drags the scene's astrometry with it.
+            # Zero weight is the honest test for that; the pixels themselves
+            # are usually zero too, but so is a genuinely empty sky pixel.
+            if det_w is not None and not (det_w[y, x] > 0):
+                n_uncovered += 1
+                continue
 
             bbox = seg_bbox[int(np.searchsorted(seg_labels, label))]
 
@@ -1771,6 +1793,12 @@ class Templates:
             height = max(y - bbox.iymin, bbox.iymax - y, min_size // 2) * 2
             width = max(x - bbox.ixmin, bbox.ixmax - x, min_size // 2) * 2
             sized.append((pos, int(label), height, width))
+
+        if n_uncovered:
+            logger.info(
+                "skipped %d source(s) with no detection-band coverage "
+                "(weight <= 0 at the source position)", n_uncovered,
+            )
 
         if build_mode == "wren":
             roi_step = 8

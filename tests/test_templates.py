@@ -21,3 +21,52 @@ def test_as_label_array_accepts_float_segmaps():
 
     with pytest.raises(ValueError, match="non-integer"):
         as_label_array(np.array([[0.0, 0.5]]))
+
+
+def test_uncovered_sources_get_no_template(caplog):
+    """A segment the detection image does not cover must not become a template.
+
+    Combined catalogs and segmaps reach past one band's coverage: another band
+    saw the source, this one did not. The segment is there and the data are
+    not, so a template built there is noise given a shape -- it fits nothing,
+    absorbs its neighbours' flux, and if it clears the anchor cuts it drags the
+    scene's astrometry with it.
+    """
+    import logging
+
+    import numpy as np
+
+    from mophongo.templates import Templates
+
+    ny = nx = 60
+    image = np.zeros((ny, nx), dtype=float)
+    segmap = np.zeros((ny, nx), dtype=np.int32)
+    positions = [(15.0, 30.0), (45.0, 30.0)]
+    for label, (x, y) in enumerate(positions, start=1):
+        xi, yi = int(x), int(y)
+        segmap[yi - 3:yi + 4, xi - 3:xi + 4] = label
+        image[yi - 3:yi + 4, xi - 3:xi + 4] = 1.0
+
+    # the right half has no exposure
+    weight = np.ones((ny, nx), dtype=float)
+    weight[:, nx // 2:] = 0.0
+
+    tmpls = Templates()
+    with caplog.at_level(logging.INFO, logger="mophongo.templates"):
+        out = tmpls.extract_templates(image, segmap, positions,
+                                      detection_weight=weight)
+    assert [int(t.id) for t in out] == [1], "the uncovered source must be dropped"
+    assert "no detection-band coverage" in caplog.text
+
+    # without a weight map nothing is dropped: the caller said nothing about
+    # coverage, so the old behaviour stands
+    assert len(Templates().extract_templates(image, segmap, positions)) == 2
+
+    # a placeholder map of zeros carries no information and is ignored, rather
+    # than silently returning nothing
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="mophongo.templates"):
+        both = Templates().extract_templates(image, segmap, positions,
+                                             detection_weight=np.zeros((ny, nx)))
+    assert len(both) == 2
+    assert "zero everywhere" in caplog.text

@@ -429,11 +429,12 @@ def get_bg_and_ivar(
     # variance; treat a 20% band as "consistent" (drizzle correlation and
     # normalisation conventions both land inside it when the map is honest)
     if 0.8 <= float(sigma_true) <= 1.2:
-        verdict = "consistent with the weight image"
+        verdict = "CONSISTENT"
     else:
         verdict = (
-            "INCONSISTENT with the weight image (its claimed noise is off "
-            f"by x{float(sigma_true):.4g})"
+            f"INCONSISTENT: true noise is {float(sigma_true):.4g}x the "
+            f"weight map's claim, so its values are "
+            f"{float(sigma_true) ** 2:.4g}x too high"
         )
     # Median weight for the log line only. Boolean-indexing the full mask
     # copies the mosaic, and np.median partitions a second copy of that, so
@@ -444,12 +445,14 @@ def get_bg_and_ivar(
     vsub = valid[sub]
     med_w = float(np.median(w[sub][vsub])) if np.any(vsub) else np.nan
     logger.info(
-        "weight calibration%s: correction factor to wht = %.4g (ivar x %.4g), "
-        "sigma_true=%.4g -> %s; measured on %dx%d blocks; "
-        "median wht %.4g -> ivar %.4g; median background %.4g",
+        "weight calibration%s: %s; wht x %.4g -> ivar "
+        "(median %.4g -> %.4g, sigma %.4g); sigma_true=%.4g on %dx%d blocks, "
+        "median background %.4g",
         f" [{label}]" if label else "",
-        float(scale), float(scale), float(sigma_true), verdict, step, step,
+        verdict, float(scale),
         med_w, med_w * float(scale),
+        1.0 / np.sqrt(med_w * float(scale)) if med_w * float(scale) > 0 else np.nan,
+        float(sigma_true), step, step,
         float(np.median(bg_img_bin[bgmask])) if np.any(bgmask) else np.nan,
     )
 

@@ -528,7 +528,7 @@ page.
 | `fit_astrometry_joint` | `bool` | `True` | Fit shifts jointly with fluxes inside each scene; if `False`, shifts come from the separate {class}`mophongo.astrometry.AstroCorrect` step. |
 | `reg_astrom` | `float` | `1e-4` | Ridge on the shift block, relative to its diagonal scale. |
 | `snr_thresh_astrom` | `float` | `15.0` | Minimum SNR proxy $b_i/\sqrt{A_{ii}}$ for a bright astrometric anchor; `0` keeps all. |
-| `astrom_isolation_thresh` | `float` | `0.7` | Minimum flux dominance (0–1) within its own footprint for a template to anchor astrometry; `0.0` disables the cut. |
+| `astrom_isolation_thresh` | `float` | `0.6` | Minimum flux dominance (0–1) within its own footprint for a template to anchor astrometry; `0.0` disables the cut. |
 | `astrom_leverage_cap` | `float \| None` | `0.9` | Cap each anchor's leverage at this quantile of the scene's anchor information. Bounds how much one bright source can move the shift field; `None` leaves the weights alone. |
 | `astrom_exclude_stars` | `bool` | `False` | Exclude `is_star` templates from the shift fit. Off by default: unsaturated stars are the best anchors, and saturated ones already sit in singleton scenes. |
 | `astrom_model` | `str` | `"gp"` | Model for the separate (non-joint) astrometry step: `"poly"` or `"gp"`; any other value raises `ValueError`. |

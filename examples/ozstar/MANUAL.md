@@ -66,7 +66,7 @@ field's staged inputs are about 15 GB.
 ### 2.2 Certificate
 
 ```bash
-../../scratch/canfar/canfar-cert.sh      # prompts for the CADC password
+~/bin/remote/canfar-cert.sh              # prompts for the CADC password
 $P submit.py cert                        # copies it to OzStar
 ```
 
@@ -206,24 +206,41 @@ stamps:
 ```bash
 $P campaign.py --dry-run                        # the plan
 $P campaign.py                                  # trial patches, every config
-$P campaign.py --r-trial 0 --suffix _v1.0b      # the full-field release
-./release_v1.0b.sh                              # the same, arguments filled in
+$P campaign.py --fields uds --bands f770w       # one band of one field
+$P campaign.py --r-trial 0 --note "n3.0 UDS"    # the full-field release
+./release.sh                                    # the same, arguments filled in
 ```
 
-One command rewrites all 17 configs, uploads them, builds the environment,
-submits one staging job per field and one fit per config, and wires the
-dependencies. It returns immediately: everything afterwards is SLURM's.
+One command rewrites all 17 configs, uploads them, builds the environment, and
+submits the work in the same three phases `../canfar/campaign.py` uses — `psf`,
+`repair`, `run` — with the same step names and flags, so a campaign reads the
+same way on either platform.
 
-Two orderings are encoded and worth knowing:
+Only `psf` blocks. It cannot be a SLURM job: the build resolves each exposure's
+wavefront by querying MAST, and compute nodes have no route to it, so it is a
+detached login-node process the laptop polls. Everything after it is submitted
+with `--dependency=afterok` and returns immediately: staging per field, then
+that field's repair, then its band fits.
 
-- each field's fits wait on that field's staging with `afterok`. A failed stage
-  therefore leaves its fits queued as `DependencyNeverSatisfied` until SLURM
-  cancels them, which is what you want and looks like jobs vanishing if you do
-  not expect it;
-- a field whose PSF grids do not exist yet sends one band ahead of the rest,
-  because with no grid matching the config pattern the pipeline builds one, and
-  several bands of a field would otherwise build the same grids concurrently
-  into a single `psf_dir`.
+Three things are encoded and worth knowing:
+
+- each field's repair waits on that field's staging with `afterok`, and its fits
+  on the repair. A failed stage therefore leaves everything behind it queued as
+  `DependencyNeverSatisfied` until SLURM cancels them, which is what you want
+  and looks like jobs vanishing if you do not expect it;
+- with both preparation phases skipped, a field whose PSF grids do not exist yet
+  sends one band ahead of the rest, because with no grid matching the config
+  pattern the pipeline builds one, and several bands of a field would otherwise
+  build the same grids concurrently into a single `psf_dir`;
+- the source is pulled once for the whole campaign and checked against `--ref`,
+  so every job runs one version of the code. The check refuses to submit when
+  the clone on `/fred` is not that ref — including when the difference is a
+  local commit you never pushed, since the cluster pulls GitHub. `--force-stale`
+  overrides.
+
+Each campaign writes `$OZSTAR_RUN/README.md` before submitting: the mophongo
+commit, the release version each field is pinned to, your `--note`, and what
+changed against the previous run directory.
 
 To stop everything:
 
@@ -252,6 +269,8 @@ $P submit.py sync          # git pull; the venv and running jobs are untouched
 | Job dies with no Python traceback | out of memory. Resubmit with `--mem 96` or more; the nodes hold 191-256 GB |
 | `stpsf` cannot find its data | `STPSF_PATH`. Compute nodes have no internet, so it must already be on `/fred` |
 | Fit dies in 30 s with `NameResolutionError: Failed to resolve 'mast.stsci.edu'` | it tried to build a PSF grid, and stpsf resolves each exposure's OPD by querying MAST. Build the grids first: `submit.py push --psf` and/or `submit.py psf <configs>` (Part 2.4) |
+| `refusing to run: /fred has [...], main is ...` | the clone was never moved to that ref, or the difference is a local commit you did not push. `submit.py sync`, or `git push`, then resubmit. `--force-stale` submits anyway |
+| `PSF build log has not grown for N min` | the detached login-node build died. Read the log path it names; a first build against an empty `$STPSF_PATH` is the usual cause |
 | `No such file or directory` for an input | the staging job has not finished, or the config was not re-pushed after `ozify.py` |
 
 ## Reference

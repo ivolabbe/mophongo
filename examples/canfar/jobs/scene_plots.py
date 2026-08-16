@@ -10,9 +10,10 @@ are left exactly as the run left them.
 
 ``load_fit`` deliberately does not restore ``all_scenes``; scene objects are
 not persisted. Membership does survive, as ``id_scene`` on each template, so
-the scenes are regrouped from that here. Only the fields :meth:`Scene.plot`
-reads are populated - id, members, bounding box, and the band's image and
-weights - because nothing is solved.
+the scenes are regrouped from that here, and only the fields
+:meth:`Scene.plot` reads are populated - id, members, bounding box, the band's
+image and weights, and the solved fluxes that :func:`solution_from` carries
+over from the templates.
 
 Usage::
 
@@ -24,18 +25,40 @@ import logging
 import sys
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from mophongo.pipeline import Pipeline  # noqa: E402
 from mophongo.scene import Scene, SceneFitter, _bbox_union  # noqa: E402
+from mophongo.verification import save_scene_blobs, save_scene_overview  # noqa: E402
 
 logger = logging.getLogger("scene_plots")
 
 IFILT = 1
+
+
+def solution_from(templates: list) -> SimpleNamespace:
+    """The scene's solved state, rebuilt from the templates ``load_fit`` restored.
+
+    ``Scene.model_image`` raises ``RuntimeError("No solution available")`` when
+    ``solution`` is None, and a regrouped scene has never been solved, so
+    without this every figure is skipped and the run reports "wrote 0 of N".
+    That guard is the only thing on this path that reads ``solution``: the
+    model is accumulated from ``t.flux`` and ``t.data``, both of which the load
+    restores. Carrying the per-source fluxes across satisfies it with the same
+    numbers the fit produced rather than by weakening the check.
+    """
+    return SimpleNamespace(
+        flux=np.array([float(t.flux) for t in templates]),
+        err=np.array([float(getattr(t, "err", np.nan)) for t in templates]),
+        shifts=None,
+        info={"source": "load_fit"},
+    )
 
 
 def rebuild_scenes(pipe: Pipeline, ifilt: int = IFILT) -> list[Scene]:
@@ -60,7 +83,8 @@ def rebuild_scenes(pipe: Pipeline, ifilt: int = IFILT) -> list[Scene]:
 
     scenes = [
         Scene(id=sid, templates=ts, fitter=SceneFitter(), bbox=_bbox_union(ts),
-              image=image, weights=weights, config=pipe.config)
+              image=image, weights=weights, config=pipe.config,
+              solution=solution_from(ts))
         for sid, ts in sorted(groups.items())
     ]
     sizes = sorted(len(s.templates) for s in scenes)
@@ -102,6 +126,24 @@ def main(argv: list[str]) -> None:
             drawn += 1
 
         logger.info("wrote %d of %d scene figures to %s", drawn, len(scenes), scene_dir)
+
+        # The two full-field views of the partition that write_outputs draws,
+        # from the same helpers and under the same names, so a recovered band
+        # carries the same products as one that finished on its own. Both need
+        # only the mosaic, the segmap and the regrouped scenes, all of which
+        # the load restores, so these are the real figures rather than
+        # approximations of them.
+        #
+        # The scene catalog and the shift field are deliberately not rebuilt.
+        # Both carry per-scene astrometry - dx, dy, astrom_niter, flag_astrom -
+        # recorded during the solve and not persisted, so anything written here
+        # would be a plausible-looking file with invented columns. A missing
+        # product is better than a wrong one.
+        stem = str(Path(pipe.out_dir) / name)
+        save_scene_overview(pipe.images[0], pipe.segmap, scenes,
+                            f"{stem}_scene_map.png")
+        save_scene_blobs(scenes, pipe.images[0].shape, f"{stem}_scene_blobs.png")
+        logger.info("wrote %s_scene_map.png and %s_scene_blobs.png", name, name)
 
 
 if __name__ == "__main__":

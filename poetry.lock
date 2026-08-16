@@ -5606,25 +5606,6 @@ files = [
 ]
 
 [[package]]
-name = "webbpsf"
-version = "2.0.0"
-description = "Creates simulated point spread functions for the James Webb Space Telescope"
-optional = false
-python-versions = ">=3.10"
-groups = ["dev"]
-files = [
-    {file = "webbpsf-2.0.0-py3-none-any.whl", hash = "sha256:fd687fa1f5f65042789ebbdd6d5499c009d6532d83485f4346cb8909677f3b87"},
-    {file = "webbpsf-2.0.0.tar.gz", hash = "sha256:dc0944fc7c119a253f17508817cdfecee86ee1d8b4d0034d8ea5f249c9b28fa9"},
-]
-
-[package.dependencies]
-stpsf = ">=1.5.2"
-
-[package.extras]
-docs = ["nbsphinx", "sphinx", "sphinx-astropy", "sphinx-automodapi", "sphinx-issues", "stsci_rtd_theme", "tomli ; python_version < \"3.11\""]
-test = ["pytest", "pytest-astropy"]
-
-[[package]]
 name = "webencodings"
 version = "0.5.1"
 description = "Character encoding aliases for legacy web content"
@@ -5833,4 +5814,4 @@ docs = ["furo", "myst-parser", "sphinx", "sphinx-copybutton"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.13"
-content-hash = "6b7e0bb4238ae319796b4b80ffceb6e7e900ca6b3ae493223a8215840def6ca3"
+content-hash = "04e20af57c6b8d2565940ce26386ef9f2957b806d02905c191eeb3535b85eda0"

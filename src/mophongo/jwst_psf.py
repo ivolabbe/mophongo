@@ -448,8 +448,13 @@ def fov_agnostic_pattern(pattern: str) -> str:
 
     The relaxation is deliberately loose, and can match a grid built at another
     field of view with the same GRID/OS layout. That is the ambiguity the token
-    exists to remove, so new configs should name the FOV they want; this is for
-    reading what is already on disk.
+    exists to remove, so a config that cares about a specific FOV should name
+    it. One that doesn't isn't required to: for reading, this pattern matches
+    whatever is already on disk; for building a missing epoch,
+    :meth:`Pipeline._existing_grid_fov` picks the largest FOV already present
+    for the pattern instead of falling back to the backend default, and
+    :meth:`Pipeline._check_psf_size_fits_grids` warns if that is still smaller
+    than ``psf_size``.
     """
     text = str(pattern)
     if "_FOV" in text or "_GRID" not in text:

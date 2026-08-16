@@ -75,7 +75,7 @@ same thing done by hand.
 A CADC proxy certificate, valid 10 days:
 
 ```bash
-../../scratch/canfar/canfar-cert.sh          # prompts for the CADC password
+~/bin/remote/canfar-cert.sh                  # prompts for the CADC password
 ```
 
 `skaha` and the `vos` tools live in `~/.venvs/canfar`. Everything below runs
@@ -207,11 +207,14 @@ refuses a run tree there.
 - Job `args` are whitespace-split into a YAML sequence server side and quotes
   cause a 500, so the command must be a single token. Parameters go through
   environment variables (`RUN`, `CFG`) instead.
-- Runs request 4 cores and 48 GB by default. Measured CPU use is about 0.2 of
-  a core — the runs wait on `/arc` and the fitting path has no thread pool — so
-  the extra cores are headroom rather than throughput, and a bigger request
-  takes longer to schedule when the platform is busy. `--cores` and `--ram`
-  override; up to 16 cores and 192 GB are available.
+- Runs request 16 cores and 96 GB by default, which is the platform maximum in
+  cores and half of it in memory. Measured CPU use is about 0.2 of a core — the
+  runs wait on `/arc` and the fitting path has no thread pool — so the cores are
+  headroom rather than throughput. A skaha session is a Kubernetes pod rather
+  than a share of a node, so unlike on OzStar the size of the request does not
+  change how many jobs land together; it only lengthens the queue when the
+  platform is busy. `--cores` and `--ram` override; up to 16 cores and 192 GB
+  are available.
 - Outputs are large. A 3 arcmin patch of UDS writes 8.4 GB, of which 4.2 GB is
   `stamps.fits` and 3.5 GB the residual; a full field scales with the source
   count, which is roughly 8x. Set `save_stamps` or `scene_plots` false in the
@@ -273,10 +276,15 @@ refuses a run tree there.
   | f1000w | 47.9 GB | 142,299 | 11.7 GB |
 
   The heavy bands reach 46-48 GB *before* writing 11 GB of stamps, so a 48 GB
-  request dies in the output stage with no traceback. `ram_for` therefore asks
-  for 64 GB, and 82 for EGS. Larger requests do schedule, but 48 GB and up have
-  queued for hours when the platform is busy, so raising the request everywhere
-  costs wall clock.
+  request dies in the output stage with no traceback. 64 was not enough either:
+  three bands of the 2026-08-16 campaign — `cosmos_f770w`, `cosmos_f1280w` and
+  `egs_f2100w` — stopped partway through their scene figures, having written
+  their fit tables and residuals. `ram_for` therefore asks for 96 GB
+  everywhere. EGS lost its 82 GB special case: it was given more on the
+  argument that its 1221 Mpx detection grid needed it, but OzStar measured EGS
+  at 29-59 GB, below the other fields. Larger requests do schedule, but 48 GB
+  and up have queued for hours when the platform is busy, so the headroom costs
+  wall clock.
 - `scene_plots` is the other half of that budget. Rendering Lupton RGB
   composites for several hundred scenes, on top of everything the fit still
   holds, killed all ten cosmos/uds bands of the first full-field campaign

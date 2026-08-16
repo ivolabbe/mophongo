@@ -67,7 +67,7 @@ class FitConfig:
     # --- astrometry options -------------------------------------------------
     reg_astrom: float = 1e-4
     snr_thresh_astrom: float = 15.0  # 0 → keep all sources
-    astrom_isolation_thresh: float = 0.7  # min flux dominance to include in astrometry (0–1); 0.0 = no cut
+    astrom_isolation_thresh: float = 0.6  # min flux dominance to include in astrometry (0–1); 0.0 = no cut
     # Exclude sources flagged is_star from the astrometric shift fit. Off by
     # default: unsaturated stars are the best astrometric anchors, and
     # saturated ones are already isolated into their own scenes.

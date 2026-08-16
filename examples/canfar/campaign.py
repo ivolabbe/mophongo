@@ -7,6 +7,7 @@ each stage by hand::
 
     python campaign.py                       # every config in ../minerva
     python campaign.py --fields uds cosmos   # only those fields
+    python campaign.py --bands f770w         # only that band
     python campaign.py --from stage          # inputs already pushed and built
     python campaign.py --from arcify --skip stage   # inputs already decompressed
     python campaign.py --skip psf repair     # grids and repair caches in place
@@ -106,12 +107,14 @@ def run_step(args: list[str], dry: bool) -> None:
 BAND_CONFIG = re.compile(r"^[a-z0-9]+_f\d+w$")
 
 
-def configs_for(fields: list[str] | None) -> list[Path]:
-    """The local MINERVA per-band configs to run, optionally by field."""
+def configs_for(fields: list[str] | None, bands: list[str] | None) -> list[Path]:
+    """The local MINERVA per-band configs to run."""
     found = [p for p in sorted((HERE.parent / "minerva").glob("*.json"))
              if BAND_CONFIG.match(p.stem)]
     if fields:
         found = [p for p in found if p.stem.split("_")[0] in fields]
+    if bands:
+        found = [p for p in found if p.stem.split("_")[1] in bands]
     if not found:
         raise SystemExit("no configs matched")
     return found
@@ -253,16 +256,19 @@ def write_run_readme(names: list[str], cfgs: list[Path], note: str,
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--fields", nargs="+", help="restrict to these fields, e.g. uds cosmos")
+    ap.add_argument("--fields", nargs="+", help="restrict to these, e.g. uds cosmos")
+    ap.add_argument("--bands", nargs="+", help="restrict to these, e.g. f770w")
     ap.add_argument("--from", dest="start", choices=STEPS, default="push",
                     help="skip everything before this step")
     ap.add_argument("--skip", nargs="+", choices=STEPS, default=[],
                     help="drop these steps from the middle of the chain, e.g. "
                          "--skip stage when the inputs are already decompressed")
-    ap.add_argument("--ram", type=int, default=None,
-                    help="override the per-field default (64 GB, EGS 82)")
+    # --mem is the OzStar spelling of the same knob, accepted so a campaign
+    # reads the same on either platform
+    ap.add_argument("--ram", "--mem", dest="ram", type=int, default=None,
+                    help="override the default of 96 GB")
     ap.add_argument("--cores", type=int, default=None,
-                    help="override; 4 by default, for a full field or a patch alike")
+                    help="override; 16 by default, for a full field or a patch alike")
     ap.add_argument("--r-trial", type=float, default=None,
                     help="override the trial radius in arcmin; 0 runs the full field")
     ap.add_argument("--suffix", default="",
@@ -277,7 +283,7 @@ def main() -> None:
     args = ap.parse_args()
 
     todo = [s for s in STEPS[STEPS.index(args.start):] if s not in args.skip]
-    cfgs = configs_for(args.fields)
+    cfgs = configs_for(args.fields, args.bands)
     names = [c.stem + args.suffix for c in cfgs]
     log.info("campaign over %d config(s): %s", len(names), ", ".join(names))
     write_run_readme(names, cfgs, args.note, args.dry_run)

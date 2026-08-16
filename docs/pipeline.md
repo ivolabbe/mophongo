@@ -521,7 +521,7 @@ Astrometry:
   shift solve.
 - `snr_thresh_astrom` (*float*, default `15.0`) — minimum SNR for a source
   to constrain astrometry; `0` keeps all sources.
-- `astrom_isolation_thresh` (*float*, default `0.7`) — minimum flux
+- `astrom_isolation_thresh` (*float*, default `0.6`) — minimum flux
   dominance (0–1) for inclusion in the astrometric fit; `0.0` applies no
   cut.
 - `astrom_exclude_stars` (*bool*, default `False`) — exclude sources flagged

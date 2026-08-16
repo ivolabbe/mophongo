@@ -470,31 +470,41 @@ def tidy(text: str, lines: int = 40) -> str:
 def cores_for(name: str, override: int | None) -> int:
     """Cores to request for one config.
 
-    Eight, for everything, matching ``examples/ozstar``. Measured utilisation
-    of the fit itself is about 0.2 of a core -- it waits on ``/arc`` and the
-    fitting path has no thread pool -- so most of this is headroom rather than
-    throughput. What it buys is threaded BLAS in the dense scene solves and
-    room for the ePSF work, without asking for the platform maximum and
-    queueing behind it.
+    Sixteen, the platform maximum that ``/skaha/v1/context`` offers. Measured
+    utilisation of the fit itself is about 0.2 of a core -- it waits on
+    ``/arc`` and the fitting path has no thread pool -- so this is headroom for
+    threaded BLAS in the dense scene solves rather than throughput.
+
+    Asking for the maximum costs less here than it does on OzStar. A skaha
+    session is a Kubernetes pod, not a share of a node, so the request cannot
+    change how many jobs land together the way ``examples/ozstar`` describes;
+    the only price is a longer queue when the platform is busy.
     """
-    return 8 if override is None else override
+    return 16 if override is None else override
 
 
 #: GB per field, for fields that need more than DEFAULT_RAM.
-FIELD_RAM = {"egs": 82}
-DEFAULT_RAM = 64
+FIELD_RAM: dict[str, int] = {}
+DEFAULT_RAM = 96
 
 
 def ram_for(name: str, override: int | None) -> int:
     """GB to request for one config.
 
-    64 as standard: a full-field run peaks near 46 GB during the fit, and the
-    output stage adds to that afterwards - the stamps file alone was 10.1 GB of
-    template pixels on COSMOS - so 48 left no room and every band died writing
-    its diagnostics.
+    96 for every field. The fit peak is not what sets this: a full field peaks
+    near 46 GB fitting, and the output stage climbs past that afterwards - one
+    COSMOS band was still at 49.4 GB partway through its scene figures, on top
+    of the 10 GB of template pixels the stamps file holds.
 
-    EGS gets 82. Its detection grid is 1221 Mpx against UDS's 876, and it
-    reached 49.4 GB before the writes had even started.
+    64 was not enough. Three of the seventeen bands of the 2026-08-16 campaign
+    stopped mid scene-figure loop with no traceback, which is what exceeding
+    the request looks like from the log. ``cosmos_f770w`` is the clear case: it
+    measured 67.5 GB on OzStar, above the 64 it was given here.
+
+    EGS no longer gets a special case. It had 82 on the argument that its
+    1221 Mpx detection grid needed more than UDS's 876, but OzStar later
+    measured EGS at 29-59 GB, below the other fields, and ``egs_f2100w`` died
+    here holding that 82 anyway.
     """
     if override is not None:
         return override
@@ -575,7 +585,7 @@ def do_run(args: argparse.Namespace) -> None:
         print(f"--- {sid} [{status}]\n{tidy(text)}")
         if status == "Failed" and "RUN_DONE" not in text:
             print("  note: a failure with no traceback is usually the container "
-                  "being OOM-killed. A full-field run needs --ram 48; a run "
+                  "being OOM-killed. A full-field run needs --ram 96; a run "
                   'with a "trial" patch reads only that patch and needs far '
                   "less.")
 
@@ -737,13 +747,13 @@ def main() -> None:
                         "field's shared PSF grids and repair cache and stops, "
                         "so the bands that follow start warm")
     p.add_argument("--cores", type=int, default=None,
-                   help="override; 8 by default, for a full field or a patch alike")
-    # Per field: 64 GB standard, 82 for EGS (see ram_for). An under-sized
-    # request is OOM-killed with no traceback, which reads as a silent failure
-    # rather than an error, and the headroom costs nothing - the quota's 32 GB
-    # is a default, not a cap, and the nodes report hundreds of GB.
+                   help="override; 16 by default, for a full field or a patch alike")
+    # 96 GB for every field (see ram_for). An under-sized request is
+    # OOM-killed with no traceback, which reads as a silent failure rather than
+    # an error, and the headroom costs nothing - the quota's 32 GB is a
+    # default, not a cap, and a session may ask for up to 192.
     p.add_argument("--ram", type=int, default=None,
-                   help="override the per-field default (64 GB, EGS 82)")
+                   help="override the default of 96 GB")
     p.add_argument("--no-wait", action="store_true")
     p.add_argument("--ref", default="main",
                    help="git ref the arc source must match (default: main)")
@@ -755,7 +765,7 @@ def main() -> None:
     p.add_argument("names", nargs="+")
     p.add_argument("--cores", type=int, default=None)
     p.add_argument("--ram", type=int, default=None,
-                   help="override the per-field default (64 GB, EGS 82)")
+                   help="override the default of 96 GB")
     p.add_argument("--no-wait", action="store_true")
     p.add_argument("--ref", default="main",
                    help="git ref the arc source must match (default: main)")
@@ -789,7 +799,7 @@ def main() -> None:
 
     args = ap.parse_args()
     if not (Path.home() / ".ssl/cadcproxy.pem").exists():
-        sys.exit("no CADC certificate; run scratch/canfar/canfar-cert.sh first")
+        sys.exit("no CADC certificate; run ~/bin/remote/canfar-cert.sh first")
     args.func(args)
 
 

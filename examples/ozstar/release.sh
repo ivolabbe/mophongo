@@ -19,9 +19,9 @@
 #   ./release.sh --skip-stage          # inputs already on /fred
 #   ./release.sh --dry-run             # print the plan
 #
-# Any other argument is passed through to campaign.py. Memory is per field
-# (submit.MEM_GB_BY_FIELD): 72 GB for UDS and COSMOS, 96 GB for EGS, whose
-# detection grid is about 1.4x UDS's. Setting MEM overrides all of them.
+# Any other argument is passed through to campaign.py -- `--skip psf` when the
+# grids are already on /fred, `--note` to say what this attempt changes. Memory
+# is 96 GB for every field (submit.DEFAULT_MEM_GB); setting MEM overrides it.
 #
 # Measured on the v1.0b UDS bands: 53.3, 55.6, 57.4 GB peak RSS, so 72 runs at
 # about 80% with 15 GB spare. A run that exceeds its request is killed with no
@@ -31,7 +31,7 @@
 # Watch it with:  python submit.py status
 set -euo pipefail
 
-CORES=${CORES:-8}
+CORES=${CORES:-32}
 MEM=${MEM:-}          # empty = campaign.py's per-field defaults
 WALLTIME=${WALLTIME:-24:00:00}
 # ozify.py needs the vos client, which lives in this venv rather than on PATH.
@@ -41,7 +41,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 : "${OZSTAR_USER:?set OZSTAR_USER to your cluster username}"
 [[ -s $HOME/.ssl/cadcproxy.pem ]] || {
-    echo "no CADC certificate; run ../../scratch/canfar/canfar-cert.sh" >&2
+    echo "no CADC certificate; run ~/bin/remote/canfar-cert.sh" >&2
     exit 1
 }
 

@@ -57,7 +57,7 @@ staged inputs are about 15 GB.
 
 ```bash
 export OZSTAR_USER=<your cluster username>     # ssh key access to nt.swin.edu.au
-../../scratch/canfar/canfar-cert.sh            # CADC proxy certificate, 10 days
+~/bin/remote/canfar-cert.sh                    # CADC proxy certificate, 10 days
 ```
 
 `ozify.py` needs the `vos` client locally, which lives in `~/.venvs/canfar`:
@@ -71,19 +71,46 @@ P=~/.venvs/canfar/bin/python
 ```bash
 OZSTAR_RUN=run3 ./release.sh --skip-stage   # the full-field release
 $P campaign.py --fields uds                 # one field
+$P campaign.py --bands f770w                # one band of every field
+$P campaign.py --skip psf repair            # grids and caches already in place
 $P campaign.py --dry-run                    # print the plan, submit nothing
 ```
 
 It rewrites the configs, uploads them, builds the environment, and submits the
-work as one dependency graph: a staging job per field (unless the inputs are
-already on `/fred`), then one saturation-repair job per field, then that field's
-band fits chained behind it with `--dependency=afterok`. The repair is shared
-because it depends on the detection band alone, so one job per field fills the
-cache the bands then reload. `release.sh` is the release recipe with the
-arguments filled in; set `$OZSTAR_RUN` to choose which run directory it lands
-in.
+work in three phases:
+
+1. **`psf`** — every ePSF grid the configs name, built on the login node and
+   *waited on*. Skipped when they are already on `/fred`, which is the usual
+   case once a release has been fitted once.
+2. **`repair`** — one saturation-repair job per field, each behind that field's
+   staging. The repair depends on the detection band alone, so one job fills the
+   cache every band of the field then reloads.
+3. **`run`** — that field's band fits, chained behind its repair with
+   `--dependency=afterok`.
+
+Only the first phase blocks, and only because it cannot be a SLURM job: the
+build queries MAST for each exposure's OPD and compute nodes have no route to
+it, so nothing can be made to depend on it. Phases 2 and 3 go up as one
+dependency graph and the laptop is free.
+
+The step names and the flags are the same as `../canfar/campaign.py`, so one
+campaign reads the same way on either platform; what differs is that CANFAR has
+to block between all three phases, having no dependencies at all.
+
+`release.sh` is the release recipe with the arguments filled in; set
+`$OZSTAR_RUN` to choose which run directory it lands in. Each campaign writes
+`$OZSTAR_RUN/README.md` before submitting anything — the mophongo commit, the
+release versions each field is pinned to, whatever you pass as `--note`, and
+what changed against the previous run.
 
 Then watch with `submit.py status` / `logs` / `fetch`.
+
+The source is pulled once, before the first job is submitted, and checked
+against `--ref` (default `main`). A campaign has to run one version of the code
+rather than whatever `main` happened to be at each dispatch, and the check
+catches the case the pull cannot fix: a commit that was never pushed is absent
+from the run while every output looks entirely normal. `--force-stale` submits
+anyway.
 
 ## Step by step
 
@@ -94,6 +121,7 @@ $P submit.py cert                              # certificate -> OzStar
 $P submit.py setup                             # clone mophongo, build the venvs
 $P ozify.py ../minerva/uds_f770w.json          # rewrite paths, list the inputs
 $P submit.py push uds_f770w                    # upload config and job scripts
+$P submit.py psf  uds_f770w                    # login-node grid build; waits
 $P submit.py stage uds_f770w                   # datamover job: arc -> /fred/data
 $P submit.py run   uds_f770w --after <jobid>   # the fit
 $P submit.py fetch uds_f770w                   # bring the small outputs home
@@ -155,6 +183,14 @@ Copying is much cheaper than rebuilding when the grids are already local, so
 `push --psf` first and let `psf` fill the gaps. Do not run the two at once:
 scp writes straight to the destination name, the build skips a filename that
 exists, and a half-written grid then reaches a fit as a truncated FITS.
+
+`campaign.py` does both in order when given `--push-psf`, and otherwise runs
+only the build. Either way it first lists `$OZSTAR_BASE/PSF` and skips the step
+when every family the configs name is already there. `psf` blocks until the
+build writes `PSF_BUILD_DONE`, judging liveness by the log growing rather than
+by the process existing — `nt.swin.edu.au` round-robins over four login nodes,
+so a second ssh usually lands somewhere the build's pid means nothing.
+`--no-wait` returns as soon as it is detached.
 
 Once `$OZSTAR_BASE/PSF` is populated the fits need no network at all, which is
 the point — the grids sit above the run directory and every later run reads
@@ -218,8 +254,29 @@ space, so the job opens read permission at the end.
 
 ## Resources
 
-Eight cores per fit, and memory per *field*: 72 GB for UDS and COSMOS, 96 GB
-for EGS (`submit.MEM_GB_BY_FIELD`). `--cores` and `--mem` override.
+Thirty-two cores and 96 GB per fit, for every field. `--cores` and `--mem`
+override, and `submit.MEM_GB_BY_FIELD` still exists for a per-field exception
+if one is ever needed.
+
+Measured CPU is ~6% of 16 cores, so the cores are not doing arithmetic. What
+the request buys is a **share of one milan node** (64 cores, 250 GB), and
+whichever of cores or memory binds first decides how many fits land on it:
+
+| request | binds on | fits per node | measured |
+|---|---|---|---|
+| 16 cores / 96 GB | memory | 2 | 41–69 min (v1.0b) |
+| 8 cores / 72 GB | memory | 3 | 1h27–1h35 (run3) |
+| 32 cores / 96 GB | either | 2 | current default (run4) |
+
+Three memory-bound fits sharing one node's bandwidth is the slow case, and
+halving the cores nearly doubled the wall clock without the CPU number moving.
+The default now uses both levers: 32 cores and 96 GB each bind at two fits per
+node, and the memory one also buys OOM headroom — `cosmos_f770w` peaked at
+67.5 GB, which is 94% of the old 72 GB request, and a run that exceeds its
+request is killed with no Python traceback.
+
+EGS turned out to need *less* memory than the others (29–59 GB), not more as
+its 1.4x detection grid suggested, so it no longer carries a special case.
 
 Measured on the v1.0b campaign (UDS bands at 16 cores / 96 GB; the defaults
 above came from these numbers):

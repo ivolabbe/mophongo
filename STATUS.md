@@ -3,6 +3,94 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] The OzStar campaign takes the CANFAR shape (2026-08-16). The two
+  platforms now expose the same steps, filters and flags, so one campaign
+  reads the same way on either; what stays different is who enforces the order
+  between phases, which is SLURM here and the laptop there.
+  * `examples/ozstar/campaign.py` steps are
+    `ozify push setup seed psf stage repair run`. `prep` was renamed `repair`
+    to match CANFAR and the pipeline step it actually runs, with `prep`
+    accepted as an alias by `--from`/`--skip`. `--bands`, `--note`, `--ref`,
+    `--force-stale`, `--push-psf` and a `--ram` spelling of `--mem` are new;
+    `--prep-time` is now `--repair-time` (old spelling still accepted).
+    `--branch` and `--ref` are one flag: the ref `setup` clones and the ref the
+    jobs are checked against have to agree, and two flags that could disagree
+    would mean refusing to submit the branch just cloned.
+  * `psf` is a campaign phase rather than something done beforehand. It lists
+    `$OZSTAR_BASE/PSF`, skips when every family the configs name is present,
+    and otherwise starts the login-node build and blocks on it. It is the one
+    phase that must block: the build queries MAST for each exposure's OPD, so
+    it cannot be a SLURM job and nothing can depend on it.
+    `submit.wait_for_psf_build` polls for `PSF_BUILD_DONE` and judges liveness
+    by the log growing, since `nt.swin.edu.au` round-robins over four login
+    nodes and the build's pid means nothing on the others.
+  * The grid check gained `pattern_lo` and the fov-agnostic `_GRID` rewrite
+    that `mophongo.jwst_psf.fov_agnostic_pattern` does, which the OzStar copy
+    was missing; `has_grids(..., shared_only=True)` keeps the old hi+halo
+    question for the leader fallback.
+  * `submit.check_src_current` refuses to submit against a clone that is not
+    at `--ref`. The cluster pulls GitHub, so an unpushed local commit is simply
+    absent from the run while every output looks normal. The campaign pulls
+    once up front and passes `sync=False` to each dispatch, so a commit landing
+    mid-submission can no longer split a campaign across two versions.
+  * Each campaign writes `$OZSTAR_RUN/README.md` before submitting: mophongo
+    commit, the release versions each field is pinned to (via
+    `arcify.config_versions`), `--note`, and a diff against the previous run
+    directory.
+  * `examples/canfar/campaign.py` gained `--bands` and a `--mem` spelling of
+    `--ram` for the same symmetry.
+- [x] `FitConfig.astrom_isolation_thresh` default 0.7 -> 0.6 (2026-08-16).
+  The cut is a floor on a source's own flux dominance within its footprint
+  before it may anchor a scene's shift, and at 0.7 it was leaving scenes with
+  few enough anchors that a single bright member set the shift on its own.
+  Loosening it admits mildly blended sources as anchors; the cross-anchor
+  terms in `assemble_scene_system_AB` are what handle their blending, so the
+  cut is protecting against the anchor's *own* contamination rather than
+  against overlap per se. Docs (`docs/pipeline.md`, `docs/fitting.md`)
+  updated. `examples/run_uds_770_wren.py` still passes 0.7 explicitly, which
+  is the wren fork value and stays as it is.
+- [x] The remote-access shell toolkit left the repo (2026-08-15).
+  `canfar-cert.sh`, `canfar-common.sh`, `canfar-mount.sh`, `canfar-umount.sh`,
+  `canfar-sync.sh`, `canfar.conf` and `ozstar-mount.sh` now live in
+  `~/bin/remote/`. They mount `/arc` and `/fred/oz030` over sshfs and fetch the
+  CADC certificate, which is machine setup rather than mophongo: four
+  `com.ivo.*-mount` LaunchAgents run them at login, and a `RunAtLoad` path
+  pointing into a gitignored `scratch/` of a repo being prepared for release
+  is the wrong thing to depend on. `scratch/canfar/` keeps what is mophongo's:
+  `jobs/`, `README.md`, `RUNNING_ON_CANFAR.md`.
+  * `runroot.canfar_user()` reads `$CANFAR_CONF`, defaulting to
+    `~/bin/remote/canfar.conf`, and no longer takes a `repo` argument. It had
+    no callers, so the signature change is contained.
+  * The cert-script references in `examples/canfar` and `examples/ozstar`
+    (READMEs, `MANUAL.md`, `release.sh`, and the `SystemExit` messages in
+    `submit.py`, `arcify.py`, `ozify.py`) name `~/bin/remote/canfar-cert.sh`
+    instead of a repo-relative path.
+  * Both mount scripts drop `ServerAliveCountMax` from 10 to 3. FUSE-T serves
+    these mounts to macOS as a loopback NFS server, so when the ssh link dies
+    the NFS client declares the volume down after
+    `vfs.generic.nfs.client.initialdowndelay` and `NetAuthAgent` raises
+    "Server connections interrupted". 45s of keepalive fits inside that
+    window; 150s did not.
+- [x] The repair cache stores the flagged ids, not the whole catalog
+  (2026-08-15). `Pipeline._save_repair_cache` wrote a FLAGS row for every
+  source, so COSMOS run3 held 294126 rows of which 596 were nonzero, and
+  every band's reload walked all of them in a python `zip` loop, once per
+  flag column. It now keeps only the rows a flag column marks, and
+  `_load_repair_cache` maps the ids through one vectorised assignment.
+  * Behaviour is unchanged: the loader already zero-filled a missing column,
+    and now rebuilds each column from zero rather than merging, so an id the
+    cache omits reads as "not flagged" exactly as before. An id absent from
+    this band's catalog is still skipped.
+  * The write log line stops disagreeing with the reload line -- both now
+    report the flagged count.
+  * Old dense caches still load correctly; the format is a superset.
+  * `webbpsf` is gone from the dev group. It has not been imported since the
+    move to `stpsf`, nothing sets `WEBBPSF_PATH`, and webbpsf 2.x is only a
+    deprecation shim over stpsf. Removed with `poetry remove --group dev`.
+  * `poetry run pytest tests/test_pipeline_config.py tests/test_pipeline.py
+    tests/test_repair.py tests/test_repair_saturated_catalog.py
+    tests/test_pipeline_provenance.py tests/test_scene_saturated.py`:
+    111 passed, including a new round-trip test.
 - [x] ePSF completeness is a question about dates (2026-08-15).
   `Pipeline._missing_psf_dates` returns `dates_from_csv(csv, psf_date_mode)`
   minus the `_MJD` tokens of the files matching the pattern, and `_load_epsf`

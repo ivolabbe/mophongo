@@ -404,6 +404,64 @@ def test_repair_cache_degrades_on_an_unreadable_file(tmp_path):
     assert pipe._load_repair_cache(empty, prov, sci, sci, seg, cat) is None
 
 
+def test_repair_cache_stores_only_the_flagged_rows(tmp_path):
+    """FLAGS carries the flagged ids, not every id in the catalog.
+
+    A field flags a few hundred segments out of a few hundred thousand
+    sources, so storing every id made the table almost entirely zeros and
+    put a per-row python loop on the reload path of every band.
+    """
+    import numpy as np
+    from astropy.io import fits
+    from astropy.table import Table
+
+    pipe = Pipeline.from_config(_write_config(tmp_path))
+    n = 500
+    sci0 = np.zeros((4, 4), np.float32)
+    wht0 = np.ones((4, 4), np.float32)
+    seg0 = np.zeros((4, 4), np.int32)
+
+    cat = Table({"id": np.arange(1, n + 1, dtype=np.int64)})
+    cat["FLAG_SATURATED_TMPL"] = np.zeros(n, np.int32)
+    cat["FLAG_SATURATED_TMPL"][[3, 17, 400]] = [1, 2, 1]
+
+    rep = {
+        "sci": sci0.copy(), "wht": wht0.copy(),
+        "segmap": seg0.copy(), "catalog": cat,
+    }
+    rep["sci"][1, 2] = 5.0                     # one repaired pixel
+    rep["segmap"][1, 2] = 7
+
+    path = tmp_path / "repair_cache.fits"
+    prov = {"sci_hi": "x"}
+    pipe._save_repair_cache(path, prov, sci0, wht0, seg0, rep, cat)
+
+    with fits.open(path) as hdul:
+        assert len(hdul["FLAGS"].data) == 3     # the flagged ids, not n
+        assert len(hdul["PATCHES"].data) == 1
+
+    # a fresh catalog with no flag column at all, as a new band builds it
+    fresh = Table({"id": np.arange(1, n + 1, dtype=np.int64)})
+    sci, seg = sci0.copy(), seg0.copy()
+    out = pipe._load_repair_cache(path, prov, sci, wht0, seg, fresh)
+    assert out is not None
+    assert np.array_equal(
+        np.asarray(out[2]["FLAG_SATURATED_TMPL"]),
+        np.asarray(cat["FLAG_SATURATED_TMPL"]),
+    )
+    assert out[0][1, 2] == 5.0 and out[3][1, 2] == 7
+    assert out[1][1, 2] == wht0[1, 2]
+
+    # a cache listing an id this catalog does not have is skipped, not fatal
+    short = Table({"id": np.arange(1, 20, dtype=np.int64)})
+    out = pipe._load_repair_cache(path, prov, sci0.copy(), wht0,
+                                  seg0.copy(), short)
+    assert out is not None
+    flags = np.asarray(out[2]["FLAG_SATURATED_TMPL"])
+    assert flags[3] == 1 and flags[17] == 2     # id 401 dropped silently
+    assert flags.sum() == 3
+
+
 def test_prep_and_repair_steps_are_registered_and_stop_before_the_fit(tmp_path):
     """``prep`` is psfs + repair; ``repair`` is the second half alone.
 

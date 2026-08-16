@@ -62,18 +62,25 @@ def run_number() -> int:
     return int(raw)
 
 
-def canfar_user(repo: Path) -> str:
-    """CADC username, from ``$CANFAR_USER`` or ``scratch/canfar/canfar.conf``."""
+#: Where the shell toolkit keeps its config. Those scripts (``canfar-cert.sh``,
+#: ``canfar-mount.sh`` and friends) set up sshfs mounts and CADC certificates,
+#: which are machine infrastructure rather than part of mophongo, so they live
+#: outside the repo. ``$CANFAR_CONF`` points at a different copy.
+DEFAULT_CONF = Path.home() / "bin" / "remote" / "canfar.conf"
+
+
+def canfar_user() -> str:
+    """CADC username, from ``$CANFAR_USER`` or the toolkit's ``canfar.conf``."""
     user = os.environ.get("CANFAR_USER")
     if user:
         return user
-    conf = repo / "scratch" / "canfar" / "canfar.conf"
+    conf = Path(os.environ.get("CANFAR_CONF") or DEFAULT_CONF)
     if conf.exists():
         match = re.search(r'^\s*CANFAR_USER\s*=\s*"?([^"\s]+)', conf.read_text(), re.M)
         if match and match.group(1) != "your_cadc_username":
             return match.group(1)
     raise SystemExit(
-        "set CANFAR_USER to your CADC username, or fill in scratch/canfar/canfar.conf"
+        f"set CANFAR_USER to your CADC username, or fill in {conf}"
     )
 
 

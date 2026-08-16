@@ -7,7 +7,7 @@ on arc itself. Only the mophongo source and the job scripts have to be uploaded.
 
 `push` also ships the STPSF PSF grids (about 290 MB) as a convenience, since
 they already exist locally. That is an optimisation, not a requirement:
-`psf_autobuild` is on by default, so a run with an empty `psf_dir` generates the
+`psf.autobuild` is on by default, so a run with an empty `psf.dir` generates the
 grids from the exposure lists on arc and caches them there. Uploading just skips
 a slow first run.
 
@@ -142,10 +142,25 @@ It also repoints `psf_dir` at the uploaded grids, `out_dir` at
 `run<N>/<field>/<name>`, and `repair_cache_path` at a per-field cache one level
 above that.
 
+### Checking for a newer release
+
+```bash
+$P campaign.py --check-versions --dry-run      # as a pre-flight
+$P arcify.py ../minerva/*.json --check-versions
+```
+
+Lists the release directories on arc, reads back the version each config is
+pinned to from its own paths, and reports the pairs that are behind. It rewrites
+nothing, and on `campaign.py` it warns and carries on rather than refusing:
+moving onto a new release changes the photometry, so it belongs to a new run
+number with a note saying why — a deliberate act, not something a launch should
+do, or block on, because a directory appeared upstream. `../ozstar` takes the
+same flags and answers the same way.
+
 ## PSF grids: one per epoch
 
 `PSFFactory.date_mode` defaults to `"all"` — one grid per unique integer MJD in
-the exposure list — and the MINERVA configs state `psf_date_mode` explicitly
+the exposure list — and the MINERVA configs state `psf.date_mode` explicitly
 rather than relying on it. This matters because the grids are MJD-tagged and
 looked up by nearest date: the old default, `"modal"`, returned the centre of
 the densest five-day window, i.e. a *single* date. Bands whose exposures span up

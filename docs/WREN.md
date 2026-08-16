@@ -21,11 +21,11 @@ eb6b922 Fix aperture correction: use post-conv template total instead of pre-con
 
 **File:** `src/mophongo/scene_fitter.py` (+6 −7)
 
-**Problem.** `reg_astrom` (default `1e-4`) was being applied directly to the flux
+**Problem.** `astrom_reg` (default `1e-4`) was being applied directly to the flux
 block diagonal of `ATA`. For F1800W drizzled data `ATA[i,i] ≈ 1.33e-4`, so the
 regularizer was the *same order* as the diagonal — causing **~43% flux suppression**.
 
-**Fix.** Reserve `reg_astrom` for the *shift block only*. The flux block uses an
+**Fix.** Reserve `astrom_reg` for the *shift block only*. The flux block uses an
 adaptive regularizer scaled to ATA's magnitude:
 ```python
 flux_reg = 1e-6 * np.median(A.diagonal())
@@ -39,7 +39,7 @@ Areg = A + sp.eye(A.shape[0], format="csr") * flux_reg
 **Key diff:**
 ```python
 # OLD
-reg = getattr(config, "reg_astrom", 0)
+reg = getattr(config, "astrom_reg", 0)
 if reg <= 0:
     reg = 1e-6 * np.median(A.diagonal())
 Areg = A + sp.eye(A.shape[0], format="csr") * reg
@@ -157,14 +157,14 @@ def _astrom_isolation_mask(A, b, thresh):
 ### 4d. `generate_scenes` excludes stars from bright mask (so star-dominated scenes get merged into neighbours)
 ```python
 not_star = ~np.array([t.is_star for t in templates], dtype=bool)
-bright_mask = np.asarray(snr_proxy > snr_thresh_astrom, dtype=bool) & not_star
+bright_mask = np.asarray(snr_proxy > astrom_minimum_snr, dtype=bool) & not_star
 ```
 
 ### 4e. `Scene.solve` triple-cut bright mask + `has_shifts` guard
 ```python
 not_star = ~np.array([t.is_star for t in self.templates], dtype=bool)
 isolated = _astrom_isolation_mask(A, b, cfg.astrom_isolation_thresh)
-self.is_bright = (snr_proxy > cfg.snr_thresh_astrom) & not_star & isolated
+self.is_bright = (snr_proxy > cfg.astrom_minimum_snr) & not_star & isolated
 ```
 Wraps the entire shift-application block in `if self.shifts is not None and len(self.shifts) > 0:`,
 falling through to a warning for pathological all-blended scenes (with a TODO

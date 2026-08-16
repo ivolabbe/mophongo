@@ -4,8 +4,8 @@ MIRI band from whatever is staged under ``MINERVA/data``.
 The configs follow ``uds_770_dr0.json``: F444W template on the 40 mas NIRCam
 grid, the release segmap and SUPER catalog, and one 80 mas MIRI band as the
 low-resolution image to fit. Everything that can be read off the staged files
-is read off them -- frame counts from the WCS tables, the trial-patch centre
-from the weight map -- so the generator does not carry hand-copied numbers.
+is read off them -- the trial-patch centre from the weight map -- so the
+generator does not carry hand-copied numbers.
 
 Usage (from ``examples/``)::
 
@@ -118,12 +118,6 @@ def _find_release(root: Path, prefer: str, pattern: str, what: str,
     if exclude:
         hits = [h for h in hits if exclude not in str(h)]
     return _one([h for h in hits if prefer in str(h)] or hits, what)
-
-
-def n_frames(csv: Path) -> int:
-    """Number of exposures in a grizli/MINERVA ``_wcs.csv`` frame table."""
-    with open(csv) as fh:
-        return sum(1 for _ in fh) - 1
 
 
 # Coverage fractions accepted for the trial box, tried in order. The last two
@@ -284,28 +278,30 @@ def band_configs(rel: Release) -> list[dict]:
                 "sci_lo": str(sci_lo),
                 "wht_lo": str(wht_lo),
                 "csv_lo": str(csv_lo),
-                "expect_frames": [n_frames(csv_hi), n_frames(csv_lo)],
-                "psf_dir": str(PSF_DIR),
-                "pattern_hi": rf"{rel.local}_NRC.._F444W_MJD\d+_GRID25_OS4",
-                "pattern_lo": rf"{rel.local}_MIRI_{band.upper()}_MJD\d+_GRID9_OS4",
                 "filter_lo": band,
-                # 4.0 for every band: psf_size sets the hi-res support too,
-                # and the F444W grids are only 4.09 arcsec across, so a larger
-                # stamp would measure the grid edge (see TODO.md). The reddest
-                # MIRI bands want more, once the NIRCam grids are regenerated
-                # at a larger FOV.
-                "psf_size": 4.0,
-                # Stated explicitly rather than left to the default: these
-                # exposure lists span up to four years across a dozen or more
-                # epochs, the grids are MJD-tagged and looked up by nearest
-                # date, and any mode that collapses the list ("modal" returns
-                # a single date) throws that resolution away invisibly.
-                "psf_date_mode": "all",
-                # "warn" until the rebuild cost is affordable, then
-                # "rebuild" (TODO.md). Never leave it "off": a grid built
-                # another way is a silent photometric difference.
-                "psf_provenance": "warn",
-                "psf_blur_fwhm": "default",
+                "psf": {
+                    "dir": str(PSF_DIR),
+                    "pattern_hi": rf"{rel.local}_NRC.._F444W_MJD\d+_GRID25_OS4",
+                    "pattern_lo": rf"{rel.local}_MIRI_{band.upper()}_MJD\d+_GRID9_OS4",
+                    # 4.0 for every band: size sets the hi-res support too,
+                    # and the F444W grids are only 4.09 arcsec across, so a
+                    # larger stamp would measure the grid edge (see TODO.md).
+                    # The reddest MIRI bands want more, once the NIRCam grids
+                    # are regenerated at a larger FOV.
+                    "size": 4.0,
+                    # Stated explicitly rather than left to the default: these
+                    # exposure lists span up to four years across a dozen or
+                    # more epochs, the grids are MJD-tagged and looked up by
+                    # nearest date, and any mode that collapses the list
+                    # ("modal" returns a single date) throws that resolution
+                    # away invisibly.
+                    "date_mode": "all",
+                    # "warn" until the rebuild cost is affordable, then
+                    # "rebuild" (TODO.md). Never leave it "off": a grid built
+                    # another way is a silent photometric difference.
+                    "provenance": "warn",
+                    "blur_fwhm": "default",
+                },
                 "footprint_filter": True,
                 # In-memory saturation repair at load time: fill the wht=0
                 # cores in the F444W template image with the fitted PSF,
@@ -329,7 +325,7 @@ def band_configs(rel: Release) -> list[dict]:
                 "bg_filter_sigma": 64.0,
                 "fit": {
                     "fit_astrometry_joint": True,
-                    "scene_minimum_bright": 5,
+                    "scene_minimum_anchors": 5,
                     # larger scenes before the local threshold bisection kicks
                     # in, and no long-range gluing of underfilled scenes
                     # (radius in 40 mas reference pixels; 1000 px = 40").
@@ -355,9 +351,8 @@ HEADER = """\
 # F444W background-subtracted mosaic as the template image, the release segmap
 # and SUPER catalog, one 80 mas MIRI band fitted.
 #
-# expect_frames are the row counts of the two WCS tables; trial.center is the
-# deepest fully covered {r} arcmin patch of the MIRI weight map. Set
-# "trial" to null for a full-field run.
+# trial.center is the deepest fully covered {r} arcmin patch of the MIRI
+# weight map. Set "trial" to null for a full-field run.
 #
 # Run from examples/minerva/:  python -m mophongo.pipeline {name}.json
 """

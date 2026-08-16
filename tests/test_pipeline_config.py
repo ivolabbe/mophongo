@@ -34,10 +34,10 @@ def _write_config(tmp_path, extra=None):
 def test_config_roundtrip_with_comments(tmp_path):
     trial = {"center": [34.4, -5.26], "radius": 0.5}
     cfg = RunConfig.from_json(
-        _write_config(tmp_path, {"psf_size": None, "trial": trial})
+        _write_config(tmp_path, {"psf": {"size": None}, "trial": trial})
     )
     assert cfg.name == "test_run"
-    assert cfg.psf_size is None
+    assert cfg.psf.size is None
     assert cfg.trial_geometry() == ((34.4, -5.26), 0.5, 60.0)
     out = tmp_path / "echo.json"
     cfg.to_json(out)
@@ -49,6 +49,30 @@ def test_retired_trial_keys_raise(tmp_path):
     for extra in ({"r_trial": 0.5}, {"trial_center": [34.4, -5.26]}):
         with pytest.raises(ValueError, match="replaced by a single `trial`"):
             RunConfig.from_json(_write_config(tmp_path, extra))
+
+
+def test_retired_psf_keys_raise(tmp_path):
+    """The flat psf_* keys moved into `psf`, and expect_frames is gone."""
+    for extra in ({"psf_dir": "PSF"}, {"psf_size": 4.0},
+                  {"expect_frames": [297, 229]}):
+        with pytest.raises(ValueError, match='"psf" block|expect_frames'):
+            RunConfig.from_json(_write_config(tmp_path, extra))
+
+
+def test_psf_block_parses_and_round_trips(tmp_path):
+    """A `psf` object becomes a PsfConfig and survives to_json/from_json."""
+    from mophongo.pipeline import PsfConfig
+
+    psf = {"dir": "PSF", "pattern_hi": "A", "size": None, "workers": 4}
+    cfg = RunConfig.from_json(_write_config(tmp_path, {"psf": psf}))
+    assert isinstance(cfg.psf, PsfConfig)
+    assert (cfg.psf.dir, cfg.psf.size, cfg.psf.workers) == ("PSF", None, 4)
+    assert cfg.psf.date_mode == "all"  # defaults fill the rest
+    out = tmp_path / "echo.json"
+    cfg.to_json(out)
+    assert RunConfig.from_json(out) == cfg
+    with pytest.raises(ValueError, match="unknown psf config keys"):
+        RunConfig.from_json(_write_config(tmp_path, {"psf": {"psf_dir": "PSF"}}))
 
 
 def test_trial_geometry_validates():
@@ -78,12 +102,12 @@ def test_blur_resolution_modes(tmp_path):
 
     assert pipe._blur_fwhm() == DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC["f770w"]
 
-    pipe.run_config.psf_blur_fwhm = 0.1
+    pipe.run_config.psf.blur_fwhm = 0.1
     assert pipe._blur_fwhm() == 0.1
-    pipe.run_config.psf_blur_fwhm = None
+    pipe.run_config.psf.blur_fwhm = None
     assert pipe._blur_fwhm() is None
     # unknown filter with "default" -> no broadening
-    pipe.run_config.psf_blur_fwhm = "default"
+    pipe.run_config.psf.blur_fwhm = "default"
     pipe.run_config.filter_lo = "f9999w"
     assert pipe._blur_fwhm() is None
 
@@ -107,9 +131,9 @@ def test_run_all_calls_steps_in_order(tmp_path, monkeypatch):
 
 
 def test_size_kw_native_vs_arcsec(tmp_path):
-    pipe = Pipeline.from_config(_write_config(tmp_path, {"psf_size": 4.0}))
+    pipe = Pipeline.from_config(_write_config(tmp_path, {"psf": {"size": 4.0}}))
     assert pipe._size_kw() == {"size": 4.0}
-    pipe.run_config.psf_size = None
+    pipe.run_config.psf.size = None
     assert pipe._size_kw() == {"size": None, "ee_fraction": None}
 
 
@@ -148,7 +172,7 @@ def test_save_config_writes_full_snapshot(tmp_path):
     from mophongo.fit import FitConfig
 
     pipe = Pipeline.from_config(
-        _write_config(tmp_path, {"fit": {"scene_minimum_bright": 3}})
+        _write_config(tmp_path, {"fit": {"scene_minimum_anchors": 3}})
     )
     out = pipe.save_config()
     assert out == pipe.f_config == pipe.out_dir / "test_run.json"
@@ -170,7 +194,7 @@ def test_save_config_writes_full_snapshot(tmp_path):
     }
     assert unused  # guard: the pruning groups exist in FitConfig
     assert set(cfg2.fit) == {f.name for f in dc_fields(FitConfig)} - unused
-    assert cfg2.fit["scene_minimum_bright"] == 3
+    assert cfg2.fit["scene_minimum_anchors"] == 3
     FitConfig(**cfg2.fit)
 
 
@@ -511,10 +535,10 @@ def _stdpsf(path, mjd=None):
                  detector="NRCA1", filt="F444W", overwrite=True)
 
 
-def _pipe_with(tmp_path, psf_dir, csv, **extra):
+def _pipe_with(tmp_path, psf_dir, csv, **psf_extra):
     return Pipeline.from_config(_write_config(tmp_path, {
-        "psf_dir": str(psf_dir), "psf_date_mode": "all",
-        "csv_hi": str(csv), **extra}))
+        "psf": {"dir": str(psf_dir), "date_mode": "all", **psf_extra},
+        "csv_hi": str(csv)}))
 
 
 def _csv(path, mjds):
@@ -553,7 +577,7 @@ def test_missing_psf_dates_is_the_set_difference(tmp_path):
     assert pipe._missing_psf_dates(PATTERN, str(csv)) == [60003.0]
 
     assert _pipe_with(tmp_path, psf_dir, csv,
-                      psf_provenance="off")._missing_psf_dates(PATTERN, str(csv)) == []
+                      provenance="off")._missing_psf_dates(PATTERN, str(csv)) == []
 
 
 def test_a_single_epoch_set_is_seen_as_incomplete(tmp_path):
@@ -625,12 +649,12 @@ def test_missing_epochs_without_autobuild_warn_or_raise(tmp_path, caplog):
             def load_jwst_stdpsf(**kw):
                 return None
 
-    warned = _pipe_with(tmp_path, psf_dir, csv, psf_autobuild=False)
+    warned = _pipe_with(tmp_path, psf_dir, csv, autobuild=False)
     with caplog.at_level(logging.WARNING):
         warned._load_epsf(_Dpsf(), PATTERN, str(csv), "hi")
     assert "MJD60001" in caplog.text
 
     strict = _pipe_with(tmp_path, psf_dir, csv,
-                        psf_autobuild=False, psf_provenance="error")
+                        autobuild=False, provenance="error")
     with pytest.raises(FileNotFoundError, match="MJD60001"):
         strict._load_epsf(_Dpsf(), PATTERN, str(csv), "hi")

@@ -237,7 +237,7 @@ Probe results:
 - classic retained 33 of 45;
 - lost fields included aperture, astrometry, scene, normalization, and solver
   settings; classic could even lose `extend_mode`, `reg_flux`, and
-  `reg_astrom`.
+  `astrom_reg`.
 
 **Impact.** `<out_dir>/<name>.json` is not a reproducible description of the
 executed run, contrary to `docs/pipeline.md:262-270`,

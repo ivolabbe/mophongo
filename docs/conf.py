@@ -31,6 +31,7 @@ include_patterns = [
     "catalog.md",
     "preprocessing.md",
     "simulation.md",
+    "precision.md",
     "api.rst",
     "api/**",
 ]

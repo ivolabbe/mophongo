@@ -73,6 +73,7 @@ OZSTAR_RUN=run3 ./release.sh --skip-stage   # the full-field release
 $P campaign.py --fields uds                 # one field
 $P campaign.py --bands f770w                # one band of every field
 $P campaign.py --skip psf repair            # grids and caches already in place
+$P campaign.py --check-versions             # say what arc has moved on to
 $P campaign.py --dry-run                    # print the plan, submit nothing
 ```
 
@@ -157,9 +158,29 @@ pipeline wants plain FITS, so `stage.sh` decompresses them; and MIRI frame
 tables ship as `*_f770_wcs.csv` while the filter parser expects `f770w`, so the
 staged copy carries the expected name.
 
+### Checking for a newer release
+
+```bash
+$P campaign.py --check-versions --dry-run     # as a pre-flight
+$P ozify.py ../minerva/*.json --check-versions
+```
+
+Lists the release directories on arc, reads back the version each config is
+pinned to from its own paths, and reports the pairs that are behind — the same
+flags `../canfar` takes, answered the same way. Note this runs on the laptop and
+needs only the CADC certificate: the datamover partition exists to *copy* inputs
+to `/fred`, not to see what is on arc.
+
+It rewrites nothing, and on `campaign.py` it warns and carries on rather than
+refusing. Moving onto a new release changes the photometry, so it belongs to a
+new run directory with a note saying why — a deliberate act, not something a
+launch should do, or block on, because a directory appeared upstream. On OzStar
+it also means re-staging: `/fred` holds a copy of each input, so a new release is
+new files rather than an in-place update.
+
 ## PSF grids must be built on the login node
 
-This is the one structural difference from CANFAR, where `psf_autobuild` just
+This is the one structural difference from CANFAR, where `psf.autobuild` just
 works inside a run. `PSFFactory` generates MJD-tagged grids, and for each
 exposure date `stpsf` resolves the wavefront OPD by querying MAST
 (`load_wss_opd_by_date` → `mast_wss_opds_around_date_query`). There is no
@@ -212,7 +233,7 @@ fails loudly per epoch and a re-run repairs it, but a first build against an
 empty `$STPSF_PATH` is safest done serially.
 
 The grids are one per epoch: `PSFFactory.date_mode` defaults to `"all"` (one
-per unique integer MJD) and the configs state `psf_date_mode` explicitly. The
+per unique integer MJD) and the configs state `psf.date_mode` explicitly. The
 old default, `"modal"`, gave a single date for an exposure list spanning years,
 which silently defeats the MJD-tagged lookup the grids exist for. See
 `../canfar/README.md` for the full account; it applies to both platforms.

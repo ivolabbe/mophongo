@@ -98,6 +98,8 @@ Key components:
 - `astrometry.py`, `jwst_psf.py`: astrometric corrections and JWST PSF
   utilities. Deblending uses `photutils.segmentation.deblend_sources`,
   re-exported from `mophongo/__init__.py`.
+- `astrom_robust.py`: robust weighting of a scene's astrometric anchors,
+  selected by `FitConfig.astrom_robust`.
 
 ## Module Boundaries
 
@@ -134,6 +136,12 @@ Guiding rules:
   `templates.py`, `fit.py`, `catalog.py` or `pipeline.py`. Dispatch lives in
   `Templates.extract_templates` and `Pipeline._extend_scheme_kwargs` so a
   scheme can be adapted or removed as a unit.
+- `astrom_robust.py` is a leaf for the same reason: it takes an anchor table
+  (implied shifts, information, basis rows) as plain arrays and returns
+  weights, with no imports from `scene.py`, `fit.py` or `templates.py`. The
+  measurement that produces the table lives in `scene.py`, which is where the
+  template geometry is. Keeping the statistics separable is what lets the
+  non-joint path in `astrometry.py` reuse them.
 
 Concrete rule: if module A needs information that module B owns, prefer passing
 the result through a flat structure B already exposes rather than importing A

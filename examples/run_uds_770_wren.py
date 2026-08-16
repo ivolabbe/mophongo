@@ -160,7 +160,7 @@ if locals().get("r_trial", 0) > 0:
 
 config = FitConfig(
     fit_astrometry_niter=2, 
-    scene_minimum_bright=5,
+    scene_minimum_anchors=5,
     scene_coupling_thresh=coupling_thresh,
     astrom_isolation_thresh=0.7,
     aperture_diam=aperture_diam,

@@ -119,7 +119,7 @@ bg_miri, ivar_miri = get_bg_and_ivar(sci_miri, wht_miri, bg_filter_sigma=64.0)
 config = FitConfig(
     fit_astrometry_niter=2,
     fit_astrometry_joint=True,
-    scene_minimum_bright=10,
+    scene_minimum_anchors=10,
     aperture_diam=0.5,
 )
 

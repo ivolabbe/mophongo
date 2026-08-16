@@ -2,6 +2,190 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] Give badly determined scenes the shift their neighbours define, in a
+  robust pass after all scenes are fit (2026-08-16). Interim for the global
+  field below, and worth having on its own.
+
+  Three ways a scene's shift comes out untrustworthy today, and none of them
+  is visible in the catalog as such:
+
+  * **Starved.** `merge_small_scenes` chases `scene_minimum_anchors` but
+    `max_size` and `max_merge_radius` win over it (`scene.py:326-343`), so a
+    scene that cannot merge without breaching them is left short of anchors.
+    It then either solves a shift from one or two anchors, or -- with none --
+    falls through to flux-only and its templates are never shifted at all
+    (`scene.py:1552`), which biases its fluxes by whatever the local field was.
+  * **Unconverged.** `flag_astrom = 1`: still moving when the pass budget ran
+    out, so the stored shift is the last iterate.
+  * **Internally inconsistent.** A high `astrom_floor`: the anchors disagree
+    with each other beyond their formal errors, so the fitted shift is better
+    determined on paper than in fact.
+
+  `flag_astrom` is `-1` only when no shift was fitted at all, so a scene that
+  solved from two anchors converges and reports `0` like any other.
+
+  Do **not** gate on the failure modes separately. Unconverged is not the same
+  as wrong: the linearized solve captures only part of a large offset per pass
+  (`fit.py:48-57`), so a scene still moving at the budget may be tracking a
+  genuinely large *real* shift, and overwriting it with its neighbours' would
+  destroy a correct measurement. The question that decides the fill is whether
+  a scene's shift disagrees with its neighbours by more than both can explain.
+  That one test covers all three modes and spares the slow-but-right scene.
+
+  Fold the internal inconsistency into the scene's error instead of gating on
+  it. `astrom_floor` is per-anchor scatter *about the fitted field*, hence
+  incoherent by construction -- a coherent error would have been absorbed into
+  the field -- so it averages down over the anchors:
+
+      sigma_eff^2 = sigma_shift^2 + astrom_floor^2 / astrom_neff
+
+  All three are already in the `SCENES` extension. `sigma_eff` is then both the
+  honest uncertainty on the scene's shift and the right inverse-variance weight
+  for it as a donor.
+
+  Then run :func:`mophongo.astrom_robust.robust_anchor_weights` one level up,
+  with scenes as the anchors. It takes plain arrays --
+  ``(eps, info, basis, chi2_red=..., min_anchors=5)`` -- so the scene table
+  maps straight onto it: `eps` the per-scene `(dx, dy)`, `info` `1/sigma_eff^2`,
+  `basis` the shift-field basis evaluated at the scene centroids, `chi2_red`
+  the scene `chi2_dof`. One call returns the fitted field (`coeff`, and `field`
+  evaluated at every scene), the rejections, a field-level `sys_floor` and
+  `n_eff`. At anchor level `coeff` is documented as diagnostic only because the
+  joint solve refits with the weights; at scene level there is no refit, so
+  `field` *is* the fill value. `AGENTS.md` keeps the module a leaf taking plain
+  arrays precisely so the non-joint path can reuse it -- this is that reuse.
+
+  A robust fit also covers what a plain nearest-N mean does not: a donor whose
+  own shift is wrong. The redescending Tukey step rejects it; an average has no
+  defense. `min_anchors=5` already defaults to the natural neighbour count.
+
+  Run it either per bad scene on its local donor set (order 0 = robust weighted
+  mean, order 1 where the donors support it) or globally at low order. Local is
+  safer on a mosaic, where one low-order polynomial across the whole field is
+  too rigid; if run locally, weight donors by `exp(-d^2 / 2 L^2)` with
+  `L = astrom_kwargs["gp"]["length_scale"]` so the fill is evaluated at the
+  recipient's position rather than at the donors' centroid. Guard on the
+  nearest donor: past roughly `2L` the fill is extrapolation, and leaving the
+  scene unshifted beats moving it by a field never measured near it.
+
+  Then apply the shift and re-solve that scene flux-only, exactly as
+  `_refine_scene_astrometry` closes out a normal scene -- otherwise the fluxes
+  belong to the unshifted templates. One pass is enough: the donors are frozen
+  by the time the fill runs, so there is nothing to iterate against.
+
+  Unlike a global field this costs no barrier. It runs over the finished scene
+  list, after every scene has been solved and dropped, so the per-scene
+  independence that `docs/SCALING_FIXED_MEMORY.md` depends on survives.
+
+  Needs a new column rather than a new `flag_astrom` value: a scene can be both
+  starved and unconverged, and `flag_astrom` is a `0`/`1`/`-1` sentinel whose
+  meaning is already documented and inherited per source as `flag_astrom_<i>`.
+  Add `flag_shift_source` (`0` measured, `1` inherited from neighbours, `2` no
+  shift available) and inherit it the same way. A borrowed shift must not read
+  as a measured one.
+
+  With a global basis at scene centroids this interim *is* a global polynomial
+  shift field, so it is a step toward the Schur-complement solve below rather
+  than scaffolding to throw away.
+
+- [ ] Fit one global astrometric shift field across all scenes, by summing
+  per-scene Schur complements (2026-08-16). The field the joint path fits
+  today is scene-local: `make_scene_basis` (`scene.py:480`) centers and scales
+  a Chebyshev basis on the scene's own bright members, so every scene gets an
+  independent order-0 offset and scene boundaries acquire a statistical
+  meaning they should not have. `astrom_model` is inert here -- the joint path
+  reads `astrom_kwargs["poly"]["order"]` directly (`scene.py:1475`) and never
+  branches on the model -- so a GP is reachable only through the non-joint
+  `AstroCorrect` path, which measures shifts from residual centroids rather
+  than from the fit itself.
+
+  A global field does not require solving every scene at once. Fluxes are
+  block-disjoint across scenes, so each scene's flux block can be eliminated
+  on its own and the reduced systems added:
+
+      S_s   = BB_s - AB_s^T A_s^-1 AB_s
+      rhs_s = bB_s - AB_s^T A_s^-1 b_s
+      (sum_s S_s + K^-1) beta = sum_s rhs_s
+
+  `beta` holds the global field's coefficients and `K^-1` the GP prior
+  precision (identity times `astrom_reg` recovers the polynomial case). This
+  is exactly the joint solution over all scenes and one shared field, not an
+  approximation of it. Fluxes come back per scene by back-substitution, which
+  is the flux-only solve that already closes out each scene.
+
+  Work involved:
+
+  * `make_scene_basis` must evaluate global features at absolute positions
+    instead of scene-local Chebyshev rows, or scenes are not in a common
+    coordinate system. Fixed RBF centers (or random Fourier features) at
+    `astrom_kwargs["gp"]["length_scale"]` spacing; the existing polynomial
+    stays available as a global basis with a single center and scale.
+  * `assemble_scene_system_AB` (`scene.py:818`) sizes the shift block from
+    `len(cheb_basis(0, 0, order))` (`scene.py:947`); it must take `p` directly.
+  * New per-scene reduction: `A_s^-1 AB_s`, one solve with `2p` right-hand
+    sides, then accumulate into the global system. Use a compactly supported
+    kernel, or drop centers beyond a few length scales of the scene, so each
+    scene touches only a handful of features and the accumulation stays banded
+    -- otherwise `p` is mosaic-wide and the per-scene cost is prohibitive.
+  * `SceneFitter.solve` regularizes the shift block with scalar `astrom_reg`;
+    a GP prior needs a matrix precision.
+  * `AstroCorrect.build_poly_predictor` (`scene.py:1516`) needs a kernel
+    counterpart to evaluate the field at faint members.
+  * `_shift_amplitude` recovers the order by inverting `n_terms(order)`
+    (`scene.py:1724`), and `scene_minimum_anchors` is derived from the same
+    order (`fit.py:218`). Both break under a non-polynomial basis.
+  * Wire `astrom_model` into the joint path so 'gp' selects the kernel basis
+    rather than being silently ignored.
+
+  The structural cost is the loop nesting. Today the astrometric iteration is
+  entirely inside one scene -- `for scn in scenes: _refine_scene_astrometry(...)`
+  at `pipeline.py:5128` runs a scene's passes, its convergence test and its
+  closing flux solve as one self-contained unit, and the comment at
+  `pipeline.py:5110` records that the barrier was removed on purpose so a
+  scene can go to a worker process. A global field inverts that: assemble and
+  reduce all scenes, solve `beta`, apply to all scenes, test convergence,
+  repeat. Each pass is still parallel across scenes, but there is a sync point
+  per pass, and templates must stay resident across passes instead of being
+  dropped as each scene finishes -- which is the streaming property
+  `docs/SCALING_FIXED_MEMORY.md` depends on. Convergence also becomes global:
+  `Scene.astrom_converged` and `astrom_niter` stop meaning anything per scene,
+  and every scene pays the worst scene's pass count. Partly self-correcting,
+  since a sparse scene inherits its shift from its neighbours instead of
+  grinding out its own, but the memory argument does not recover.
+
+  A cheaper variant reaches the same fixed point by block coordinate descent:
+  pool the per-anchor implied shifts and Fisher information that
+  `measure_anchor_shifts` (`scene.py:593`) already computes from the flux-only
+  residual, fit the field to that global table, then apply and re-solve. The
+  anchor table is a diagonal approximation to `S_s` -- per-anchor 3x3 systems,
+  neighbour-conditioned but without the full scene coupling -- so it converges
+  to the joint answer without matching it pass for pass. It carries the same
+  barrier, so the only thing it buys is avoiding the Schur reduction. Worth
+  measuring before committing to either; `chi2_red` should gate entry to the
+  table in both, or one wrong template pollutes the field out to a length
+  scale.
+
+  Both variants still linearize `T(x + d) ~ T + d . grad T`, so the outer
+  `fit_astrometry_niter` loop stays.
+
+- [ ] Accumulate the shift coefficients across astrometric passes
+  (2026-08-16). `Scene.solve` overwrites `self.shifts` on every pass
+  (`scene.py:1512`), so a scene that took two passes keeps only the second,
+  and the `SCENES` extension inherits that. The total offset survives only as
+  the per-template `dx`, `dy`, which is why `_scene_shift_samples` refits
+  rather than evaluating the stored field. Accumulating would make the stored
+  coefficients the whole solution and let the catalog's `dx`, `dy` come from
+  it directly. Check first whether `make_scene_basis` returns the same
+  `(x0, y0, Sx, Sy)` on every pass -- it is built from `position_original`,
+  which does not move, so the coefficients should be addable, but the damping
+  factor has to go in on the way.
+
+- [ ] Point the MINERVA configs at their FITSMap roots (2026-08-16).
+  `RunConfig.minerva_viewer` takes a full URL and no longer guesses, so a
+  config that leaves it unset now writes no `minerva_link` column at all.
+  COSMOS serves from `/cosmos` and UDS from `/uds/DR0`; the 17 configs under
+  `examples/minerva` need the value filled in to get their links back.
+
 - [ ] Add direct tests of the `PSFFactory` public entry points (2026-08-14,
   from the Aperpy clean-implementation audit): `build()` called on its own
   rather than through `from_csv()`, and `filename()` across OS1/2/4/8 -- it
@@ -26,7 +210,7 @@ This file tracks future desired features, checks, and investigations.
   detectors, all four MIRI bands), plus COSMOS's 22+22 NIRCam and 16 F770W
   epochs -- at FOV4/FOV8 against FOV6/FOV11 elsewhere; EGS is already uniform.
   Nothing is wrong today: the epochs of a family are disjoint, so no MJD is
-  served by two grids, and the fit crops to `psf_size` either way (a 101-px
+  served by two grids, and the fit crops to `psf.size` either way (a 101-px
   build agrees with a 65-px one to 1.1e-4 of peak over the shared region).
   Rebuild them at the default so the set is one thing rather than two. The 124
   FOV30 halo grids stay as they are.
@@ -63,9 +247,9 @@ This file tracks future desired features, checks, and investigations.
   (2026-08-13). `PSFFactory(workers=N)` now fans out over `(detector, date)`,
   which is safe because each job writes a uniquely named file, and the OPD
   fetches are pre-warmed serially so the pool does not race MAST. What is
-  still serial is bands of a *field*: they all derive the same `pattern_hi`,
+  still serial is bands of a *field*: they all derive the same `psf.pattern_hi`,
   so `uds_f770w` and `uds_f1000w` build identical F444W filenames into one
-  `psf_dir` and would tear each other's files. Prep sidesteps it by building
+  `psf.dir` and would tear each other's files. Prep sidesteps it by building
   one band per field first. Doing better means a lock or a claim file per
   target path, at which point every band could build concurrently and prep
   would only need to exist for the repair.
@@ -78,7 +262,7 @@ This file tracks future desired features, checks, and investigations.
     already takes about 1.6 cores. Memory is a non-issue. Extrapolating, the
     ~416-grid release is about 4 hours serial and 2 hours on four workers --
     both well under the 9 hours estimated before measuring.
-  * `psf_workers` defaults to 1 everywhere. 4 is the number to set: it matches
+  * `psf.workers` defaults to 1 everywhere. 4 is the number to set: it matches
     a CANFAR container's `cores_for` of 4, and is modest enough for an OzStar
     login node, where the build runs `nice`d on a shared machine. 16 is wrong
     on both -- 4x oversubscription on CANFAR, antisocial on a login node.
@@ -92,7 +276,7 @@ This file tracks future desired features, checks, and investigations.
   `_load_epsf` used to autobuild only when *nothing* matched the pattern, so
   those bands could never gain the missing dates on their own.
   `Pipeline._missing_psf_dates` now asks the only question that matters:
-  `dates_from_csv(csv, psf_date_mode)` minus the `_MJD` tokens on disk. What
+  `dates_from_csv(csv, psf.date_mode)` minus the `_MJD` tokens on disk. What
   is missing is built, one factory call per epoch, and what is there is left
   alone. A band holding 99 of 100 epochs costs one grid.
   * This also retires the provenance experiment. Grids carry no
@@ -150,7 +334,7 @@ This file tracks future desired features, checks, and investigations.
   verified by invoking them, not by tests. `has_shared_grids` is the one
   worth a real test: it is pure given a name list, so it needs no network,
   and getting it wrong either serialises a field for hours or lets several
-  bands race on one `psf_dir`.
+  bands race on one `psf.dir`.
 
 - [ ] `AlignedCutout.downsample`/`upsample` pass `self.wcs` (this cutout's
   WCS) as the parent WCS of a new cutout built on a full-shape dummy, the
@@ -214,23 +398,112 @@ This file tracks future desired features, checks, and investigations.
   content vs fit-time templates disagree for those sources. Not touched by
   the 2026-08-12 convolution change; inspect write path.
 
-- [ ] Robust astrometry option: IRLS across scene anchors. Extended sources
-  with asymmetric colour gradients produce a residual dipole formally
-  identical to a shift, so no per-source test on residual size or shape
-  separates them; they pull the scene's shift field the wrong way. The
-  discriminator is coherence: a real offset is smooth in position (the
-  premise of the GP/poly field), while morphology-driven pseudo-shifts are
-  random per source. So reweight on *disagreement with the neighbours*, not
-  on residual size. Per pass: solve, compute each anchor's implied shift
-  `dx_i = -<Gx,w,r> / (a_i <Gx,w,Gx>)`, take the robust scatter of `dx_i`
-  about the fitted field, apply a Tukey/Huber weight to that anchor's
-  contribution to `AB`/`BB`/`bB`, re-solve. A genuinely offset region keeps
-  full weight because its neighbours agree with it; one galaxy disagreeing
-  with twenty anchors gets cut. Costs one extra assembly per pass. This is
-  the case `astrom_leverage_cap` (2026-08-12) cannot cover: the cap bounds
-  the influence of the brightest anchors without knowing which one is
-  wrong, and does nothing in a scene where the offender is the only bright
-  member.
+- [x] Robust astrometry option: IRLS across scene anchors. Implemented
+  2026-08-16 as `FitConfig.astrom_robust` and `mophongo.astrom_robust`; see
+  STATUS.md. Three things the original note got wrong, worth keeping:
+  * "no per-source test on residual size or shape separates them" is only
+    half right. Residual *size* does not separate them; residual size **after
+    the anchor's own displacement is projected out** does, because a pure
+    displacement lives entirely in the span of the two gradient columns.
+    That is `chi2_red` from `scene.measure_anchor_shifts`, and it is the
+    second of the two weighting layers.
+  * "Costs one extra assembly per pass" -- it costs none. Eliminating the
+    fluxes gives `(B'WB - B'WA(A'WA)^-1 A'WB) beta = B'W r0`, so the shift
+    block is driven by the *flux-only* residual and the weights can be
+    measured before the joint system is assembled. One extra flux-only solve,
+    no loop around the joint one.
+  * A plain IRLS as described would not have worked: started from the
+    information-weighted least-squares fit, the reweighting masks, because
+    the dominant anchor *is* that fit and the honest anchors carry the large
+    residuals. It needs a leverage-blind high-breakdown start first.
+
+- [ ] `astrom_robust` stays off by default until it is shown to help on real
+  scenes. First real-data test (2026-08-16, COSMOS F770W scene 16, refit
+  through `Pipeline.refit_scene`, 236 templates both sides) says it hurt:
+
+      run       (-0.017, +0.002) px, 1 pass
+      baseline  (+0.221, -0.088) px, 2 passes, converged
+      robust    (+0.879, -0.870) px, 3 passes, converged
+      chi2 182175 -> 295274   (dchi2 +113099)
+      11 anchors, 0 rejected, systematic floor 0.61 px
+      flux: median +0.000 sigma, one source 48 sigma
+
+  The mechanism is the one measured synthetically: 11 anchors scattering
+  0.61 px about the field is broad disagreement, not one liar, so the floor
+  absorbs it, flattens the weights and rejects nothing -- diluting information
+  rather than protecting against an outlier. 0.61 px is also six times
+  `astrom_shift_tol`, so this scene's anchors do not agree at the level the
+  loop is trying to converge to, which is worth understanding on its own.
+
+  An earlier version of this measurement was void: the band weight was on the
+  wrong grid (see STATUS), which corrupted the baseline astrometry to
+  (+0.03, -0.92) px and pruned 48 covered templates.
+
+  What the test cannot settle: one scene with 11 anchors is not a sample, and
+  24 of the run's 260 sources are unavailable to any refit (`ff3b8d4` version
+  skew). Needs a clean run on current code, several scenes, and at least one
+  scene of the shape the scheme is for -- one dominant bright anchor against
+  several agreeing ones.
+
+- [ ] Reduce the shrinkage bias on a blended anchor's implied shift.
+  `measure_anchor_shifts` fits each anchor conditionally on its neighbourhood
+  -- a flux column per overlapping template, a free displacement per
+  overlapping anchor -- but the local system still stops at one level of
+  overlap and uses the union footprint in place of the global flux
+  constraint. What survives is a *shrinkage toward zero*: at 4 px separation
+  (1.6 sigma) with dominance 0.65, blended anchors read 0.12-0.145 px against
+  a true 0.20, in both axes, whatever the pair's orientation.
+  Shrinkage being coherent is what makes it dangerous, and it is why
+  `astrom_isolation_thresh` cannot be retired in favour of the robust pass
+  (2026-08-16 measurement, see STATUS.md): every blended anchor is biased the
+  same way, so they agree with each other, and robust weighting is majority
+  rule. With 6 blended against 3 clean anchors the fit follows the blended
+  ones and the systematic floor moves weight further toward them (share
+  0.627 -> 0.690); beta error 0.052 -> 0.086 px with the robust pass on,
+  against 0.0017 px when the cut excludes them. Extending the local system to
+  two levels of overlap is the direct attack; the bias is a bias, not a
+  variance, so no amount of information weighting removes it.
+
+- [ ] Veto a scene's shift when its only anchor cannot be trusted. Robust
+  weighting cannot reach this case: with one anchor the weight is a global
+  scale, and a global scale cannot move where the field lands, so a scene
+  whose sole bright member is a colour-gradient galaxy still gets that
+  galaxy's pseudo-shift. The information is available -- `chi2_red` from
+  `scene.measure_anchor_shifts` is per-anchor and needs no neighbours -- but
+  it has to drive a decision rather than a weight: either fit no shift for
+  that scene, or shrink it toward a field-level prior taken from the
+  neighbouring scenes. The second is the better answer and needs cross-scene
+  state that `Scene.solve` does not currently have.
+
+- [ ] The `lev_w` two-power split is inconsistent under the flux
+  marginalization. `BB` scales as `sqrt(c_i c_j)` and the RHS correction
+  `AB' A^-1 b` as `c_i`, both correct, but the LHS correction `AB' A^-1 AB`
+  then scales as `c_i c_j` where the information it corrects scales as
+  `sqrt(c_i c_j)`. One `AB` matrix cannot satisfy both requirements. Measured
+  (2026-08-16, `scratch/astrom_robust/lev_sweep.py`): beta departs from a genuine
+  downweight by ~10% of the capped anchor's contribution at the shipped
+  `astrom_leverage_cap=0.9`, rising to ~36% at `c=0.5`, when a neighbour sits
+  about one FWHM from the anchor. Zero when nothing overlaps, zero at
+  `c_i = 0`, and bounded by the flux-shift degeneracy fraction as `c -> 0`.
+  The fix is two `AB` matrices (`sqrt(c_i)` for the LHS, `c_i` for the RHS)
+  and explicit Schur elimination in `SceneFitter._solve_flux_and_shifts`
+  instead of the single `K = sp.bmat(...)` solve -- roughly `nB + 2` sparse
+  back-solves, so not obviously more expensive. Worth doing if soft weights
+  are ever pushed well below 0.9; hard rejection is exact and sidesteps it.
+
+- [ ] `alpha0` for the derivative columns is the diagonal-only flux `b/d`, so
+  for a blended anchor it reads high by whatever leaks into its footprint and
+  the fitted shift comes back low in proportion. Measured 2026-08-16
+  (`scratch/astrom_robust/verify_claims.py`): 2.7% seed error, 2.5% shift
+  error, flat in shift magnitude. Feeding the joint solve's own fluxes back
+  and re-solving gives 0.02%, at the cost of a second joint solve. The
+  flux-only solve is *not* the fix -- it is worse above ~0.1 px (10.7% at
+  0.5 px), because the unmodelled dipole gets absorbed into the blended
+  neighbour's flux. Kept rather than dropped because it bites in two places
+  the damped iteration does not cover: a run with `fit_astrometry_niter=1`
+  takes the full 2.5%, and the error varies per anchor with contamination, so
+  it mis-weights anchors against each other by ~5% in information. Otherwise
+  low priority -- it is 2.5% of the *step*, and the fixed point is unaffected.
 
 - [ ] Scene shift iteration does not converge on r < 3' patches (found in
   verification v9, 2026-08-13; see `examples/minerva/verification/v9/README.md`
@@ -248,8 +521,12 @@ This file tracks future desired features, checks, and investigations.
   1061-template scene — so the cap is not the trigger. Candidates: make the
   size cap bind, scale `length_scale` with the scene, or raise
   `fit_astrometry_niter` / lower `astrom_damping` (currently 5 and 0.8).
-  Check the IRLS item above first: a walk driven by a few high-leverage
-  extended anchors would be cured by the same reweighting.
+  Try `astrom_robust=True` first (2026-08-16): a walk driven by a few
+  high-leverage extended anchors is exactly what it cures, and the
+  per-anchor table it logs (implied shift, information, misfit, weight) says
+  whether that is the cause before anything else is changed. Note the seed
+  bias measured below is *not* a candidate -- it under-estimates each step by
+  a fixed 2.5%, which slows convergence rather than driving a walk.
   `scene_max_merge_radius` (2026-08-13) is now the direct instrument for the
   scale-mismatch hypothesis: it bounds the scene's longer side rather than its
   template count, which is the quantity the GP length scale should be compared
@@ -448,7 +725,7 @@ This file tracks future desired features, checks, and investigations.
   the mean over that asymmetric tail inflates (F1800W raw-aperture mean +0.48,
   median +0.25, and +0.02 at SNR > 25). At SNR > 25 all four bands agree with
   IDL to 1-3%. `make_compare_idl_python.py` now quotes medians and adds an
-  SNR > 25 line. Still open, moved to its own items: `psf_size` = 4" at 18 um,
+  SNR > 25 line. Still open, moved to its own items: `psf.size` = 4" at 18 um,
   and whether the generated configs should keep 800/1000 (photometry is
   insensitive; solve time was not).
 - [ ] Confirm the photometric aperture for F560W, F1000W and F2100W. The
@@ -463,7 +740,7 @@ This file tracks future desired features, checks, and investigations.
   `DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC["f2100w"] = 0.30"` is an extrapolation
   along the F1280W-F1800W trend. Repeat the star test in COSMOS or EGS.
 - [ ] The generated MINERVA configs (`examples/make_minerva_configs.py`) fix
-  `psf_size` at 4.0" for every MIRI band because the same value sets the
+  `psf.size` at 4.0" for every MIRI band because the same value sets the
   hi-res support and the F444W grids are only 4.09" across. At F1800W/F2100W
   the MIRI PSF FWHM is ~0.6-0.7", so 4" is only ~6 FWHM and the wings are cut
   well inside where they still carry flux. Regenerate the NIRCam grids at a
@@ -507,10 +784,10 @@ This file tracks future desired features, checks, and investigations.
   would double-count.
 - [ ] The F444W PSF grids have a 4.09" FOV against F770W's 8.10", so the
   *detection* PSF model is the more truncated one: 4.3% of F444W light is
-  outside the model entirely versus 1.5% for F770W. Enlarging `psf_size` past
+  outside the model entirely versus 1.5% for F770W. Enlarging `psf.size` past
   ~4" for F444W measures the grid edge rather than the PSF. Regenerate the
   NIRCam grids at a larger FOV if the hi-side wings start to matter.
-- [ ] Decouple PSF support from kernel support. `psf_size` currently sets
+- [ ] Decouple PSF support from kernel support. `psf.size` currently sets
   both, so shrinking the stamp to save time also renormalizes the PSFs the
   kernel is derived from, which biases the kernel core by `S_hi/S_lo`:
   +6.3% at 2", +3.1% at the 4" default, -0.7% on the full parent grid
@@ -554,7 +831,7 @@ This file tracks future desired features, checks, and investigations.
   `CHECKLIST.md`; the mechanism is live here and recorded nowhere else).
 - [ ] The flux-block ridge biases faint sources low: -33% at
   `d_i/median = 1e-6` (also from wren's `CHECKLIST.md`). **Confirmed still
-  live** (2026-08-10): the `flux-bug` fix removed `reg_astrom=1e-4` leaking
+  live** (2026-08-10): the `flux-bug` fix removed `astrom_reg=1e-4` leaking
   into the photometric normal matrix, a different and larger term. What
   remains at `scene_fitter.py:178-181` is `lam_A = 1e-6 * median(diag(A))`,
   one absolute value per scene added *before* whitening, which is exactly the
@@ -678,7 +955,7 @@ This file tracks future desired features, checks, and investigations.
   F1800W) collapses to one constant 0.030 +/- 0.005 after dividing by median
   SNR and PSF area (`docs/SCENE_PARTITION.md`) — a noise-relative,
   area-normalized coupling score would remove the per-band tuning without any
-  new machinery. Template support (`psf_size`, currently null = 8" stamps) is
+  new machinery. Template support (`psf.size`, currently null = 8" stamps) is
   the real lever for scene size: wren's 3" stamps ran the full field at a
   fixed 1e-3.
 - [ ] `PSFSZ<i>` and `RCIRC<i>` in `cat.meta` are half their true value in
@@ -825,7 +1102,7 @@ This file tracks future desired features, checks, and investigations.
   measured spurious order-1 field (0.05 px rms, 0.16 px peak on a synthetic
   blend) is the right order of magnitude for the smaller offsets here.
   Ruled out before that fix: iteration count (converges to a stationary
-  biased point), faint templates in the shift blocks (`snr_thresh_astrom=15`
+  biased point), faint templates in the shift blocks (`astrom_minimum_snr=15`
   identical), cross-scene contamination (clean-data chi2 scan identical),
   kernel regions, and local mock painting errors. One case is a blend flux
   swap (ids 503/614); the others are dominated by a single bright extended

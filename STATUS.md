@@ -3,6 +3,303 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] `FitConfig.astrom_robust` defaults to `True` (2026-08-16). The failure it
+  prevents is one-sided: anchor leverage grows as flux squared, so a single
+  bright extended source with an asymmetric colour gradient produces a
+  residual dipole indistinguishable from a shift and drags its scene's field.
+  The estimator costs a few percent of efficiency on clean anchors, which is
+  the cheaper of the two errors. Still gated on `scene_minimum_anchors`, so
+  scenes too small to judge fall back to `astrom_leverage_cap` as before, and
+  `astrom_isolation_thresh` is still needed ahead of it -- a blended anchor's
+  implied shift is shrunk coherently, so blended anchors agree with each other
+  and majority rule follows them. `astrom_robust=False` recovers the old
+  behavior, and `SCENES` carries `astrom_robust`/`astrom_nreject`/`astrom_neff`
+  for the A/B comparison. Docs updated in `docs/fitting.md`, `docs/pipeline.md`.
+
+- [x] `FitConfig.astrom_model` defaults to `"poly"` (2026-08-16). It was
+  `"gp"`, which never described what the default run does: the joint path is
+  on by default and takes its basis order straight from
+  `astrom_kwargs["poly"]["order"]` (`scene.py:1475`) without branching on the
+  model, so `"gp"` was reachable only by also setting
+  `fit_astrometry_joint=False`. A provenance dump therefore reported a model
+  the run had not used. No behavior change -- the joint path reads the same
+  order either way -- only the recorded and non-joint defaults now agree.
+  Docstrings in `fit.py` and the tables in `docs/fitting.md` and
+  `docs/pipeline.md` say which path reads the field. Making the joint path
+  honor `"gp"` needs a global cross-scene field; the design is in `TODO.md`.
+
+- [x] Scene catalogs say how well the shift was measured, not just what it was
+  (2026-08-16). `dx`/`dy` alone cannot be read: a 0.2 px shift means nothing
+  until you know whether it was measured to 0.02 px or to 0.5 px.
+  * `SceneFitter._shift_covariance` recovers the shift block's covariance,
+    which `_solve_flux_and_shifts` was computing (the Cholesky of `BB`) and
+    discarding. In whitened variables the shift block of the joint inverse is
+    `(I - AB_w' A_w^-1 AB_w)^-1`, i.e. after the fluxes absorb what they can;
+    unwhitened by `Linv' cov Linv`. Costs one sparse factorization plus `nB`
+    back-solves, and `nB` is 2 at order 0. Taking `BB^-1` instead would be
+    free but wrong by the flux-shift degeneracy, measured at tens of percent
+    when a neighbour sits about a FWHM from an anchor.
+  * `Scene.shift_error()` evaluates it at the basis origin, averaged over the
+    axes -> `sigma_shift`. It is the *last pass's* number: passes re-measure
+    the same pixels, so at convergence the accumulated shift is determined
+    about as well as any one pass determines it. Tests pin that it scales
+    linearly with the noise and brackets the true error (7 of 8 realizations
+    inside 3 sigma).
+  * `Scene.chi2_dof()` -> `chi2_dof`, reduced chi-square over the scene bbox
+    against the residual with *every* scene's model subtracted (`Scene.residual`
+    keeps the neighbours' light and would charge it to this scene), with one
+    free parameter per template plus the shift coefficients. Sorting on it is
+    the direct way to find the scenes worth looking at.
+  * `Scene.shift_scatter()` -> `shift_rms`, the spread of applied shifts about
+    their mean. At order 0 every template gets the same offset, so non-zero
+    means the field moved between passes -- the scene walked rather than
+    settled, which is a direct detector for the non-convergence in TODO.
+  * `is_bright` -> `n_anchor` in the CSV and `n_bright` -> `n_anchor` in the
+    SCENES extension: the count is templates passing the *anchor* cuts (SNR,
+    isolation, star exclusion), and isolation is not brightness. It is the
+    count before robust rejection; `astrom_neff` is after. `verification.py`
+    and `examples/compare_dr0_dr0.1.py` follow.
+- [x] Refit validated against the run on COSMOS F770W scene 1313 (2026-08-16):
+  107 of 107 templates rebuilt and the baseline within 0.035 px of the run's
+  own shift, so the frozen-membership refit path reproduces a normal scene.
+  Scene 16's 24-source shortfall is the `ff3b8d4` version skew, not a refit
+  defect. The robust pass declined 1313 (6 anchors, `n_eff` 4.9 below the
+  `scene_minimum_anchors` gate of 5) and was then an exact no-op: `dchi2` 0,
+  zero flux change on all 107 sources. Note the interaction -- a scene with
+  exactly `scene_minimum_anchors` anchors nearly always declines, because any
+  real disagreement pulls `n_eff` below the count.
+- [x] An upsampled band keeps its weight on the same grid as its image
+  (2026-08-16). `_convolved_templates` upsampled `images[ifilt]` onto the
+  reference grid and set `wcs[ifilt] = wcs[0]`, but the upsampled weight only
+  ever lived in a local: the instance was left holding a reference-grid image
+  beside a native-grid weight, and the collapsed WCS hid it, because the next
+  call computes `k = 1` and upsamples neither. `load_fit`'s replay of the same
+  transform had the same omission.
+  * A second pass over one band -- exactly what `_solve_frozen_scene` does --
+    then sliced an 80 mas weight map with 40 mas coordinates. Numpy clips
+    out-of-range slices rather than raising, so the read silently returned the
+    wrong region of sky.
+  * Symptoms on COSMOS F770W scene 16: 48 templates over covered sky pruned as
+    uncovered (236 -> 188), the scene residual masked over valid pixels with
+    the mask tracing a footprint offset from the data, and the fitted shift
+    corrupted to (+0.03, -0.92) px against the run's (-0.02, +0.00). After the
+    fix all 236 available templates survive, and the baseline lands at
+    (+0.22, -0.09) px. Found from the residual figure, not from a test.
+  * Both call sites now write the upsampled weight back, and
+    `_convolved_templates` raises when the weight and image shapes disagree
+    rather than trusting the pairing. Tests
+    `test_upsampled_band_keeps_its_weight_on_the_same_grid` and
+    `test_convolved_templates_rejects_a_weight_on_the_wrong_grid`.
+  * Every refit measurement taken before this is void.
+- [x] PSF settings moved into a `psf` config block, `expect_frames` removed
+  (2026-08-16). `RunConfig` carried ten flat `psf_*`/`pattern_*` keys; they
+  are now a nested `PsfConfig` (`dir`, `pattern_hi`, `pattern_lo`, `size`,
+  `autobuild`, `provenance`, `workers`, `fov_arcsec`, `date_mode`,
+  `blur_fwhm`), reached as `cfg.psf.<field>` and written as a JSON object the
+  way `fit` already was. The redundant `psf_` prefix is dropped inside the
+  block. `filter_lo` stays top-level: it names the band for figure labels as
+  well as for the blur lookup. A JSON dict is coerced by `__post_init__`,
+  unknown keys inside the block raise, and `from_json` raises on the old flat
+  keys naming their replacements rather than ignoring them.
+  * `expect_frames` is gone. It asserted the row counts of the same two WCS
+    csvs the run reads, so it could only fire when the exposure list changed
+    -- which is when a run wants the new frames, not a raise. The stale
+    COSMOS value (518 against the 288 frames now in the table) is what it
+    produced in practice. `_ensure_dpsfs` logs the two counts instead.
+  * Migrated: the five hand-written `examples/*.json`, the 18 generated
+    `examples/minerva/*.json`, `make_minerva_configs.py` (which no longer
+    counts csv rows), the ozstar/canfar `build_psfs.py`, `campaign.py`,
+    `ozify.py` and `arcify.py`, and the docs (`pipeline.md` gained a
+    "The `psf` block" reference section; `quickstart.md`, `psf.md`,
+    `repair.md`, `campaigns.md`, `psf_maps.md` and `TODO.md` follow the new
+    spelling). Full suite: 473 passed.
+  * `docs/conf.py` include_patterns gained `precision.md`, which was already
+    in the index toctree and had been warning on every build. `campaigns.md`
+    went the other way: it documents the MINERVA run campaigns, not mophongo,
+    so it is out of the index toctree and out of the build (the file stays in
+    `docs/` alongside `examples/ozstar` and `examples/canfar`, which live in
+    the repo for convenience and will move out later).
+- [x] `docs/quickstart.md` installation section now starts from the GitHub
+  checkout (clone -> `poetry install` / `pip install -e .`) and states how to
+  reach the `mophongo` console script (`poetry run`, `eval $(poetry env
+  activate)`, or sourcing `.venv/bin/activate`), since Poetry 2.x's
+  `poetry env activate` only prints the command instead of running it.
+- [x] `_solve_frozen_scene` refuses to rebuild a scene it cannot rebuild whole
+  (2026-08-16). Extraction is positions-driven, so a frozen source id that is
+  not a row of `self.catalog` contributes nothing: the scene came back short,
+  or -- when nothing matched -- empty, and the failure surfaced far downstream
+  as `ValueError: No templates to convolve`. It now raises where the mismatch
+  happens, naming the counts and the first missing ids. The usual cause is a
+  config whose footprint or trial cut differs from the run's, which is easy to
+  arrange when two configs share one `out_dir`: `examples/minerva`
+  `cosmos_f770w.json` (3' trial) and `cosmos_f770w_full.json` (full field)
+  both write to `cosmos_f770w/` under the name `cosmos_f770w`, so whichever
+  ran last owns the outputs and reloading with the other one silently
+  describes a different source set.
+- [x] A refit is refined exactly as the run refined it, and a scene's reported
+  shift is the shift it was actually given (2026-08-16).
+  * `Pipeline._refine_scene_astrometry` is new and shared: up to
+    `fit_astrometry_niter` solve/apply passes at `astrom_damping`, stopping at
+    `astrom_shift_tol`, then the closing flux-only solve. `run()` and
+    `_solve_frozen_scene` both go through it, where `_solve_frozen_scene` used
+    to take a single `scene.solve()`. A one-pass refit is not comparable with
+    anything the run wrote -- the scene catalog and scene figures report the
+    accumulated shift after the loop -- so a refit read as a large
+    disagreement when it was only an unfinished one. `run()`'s inline loop is
+    gone rather than duplicated, which is what let the two drift.
+  * `Scene.mean_shift()` is the scene's one reported shift: the plain mean of
+    `Template.shifted` over its members, at the centroid of those members.
+    The scene catalog's `dx`/`dy` and the annotation on the scene figure's
+    model panel both use it. Previously both refit a Chebyshev field of the
+    scene's order to the accumulated shifts and evaluated it at the centre.
+    That is an approximation of something already known exactly: accumulated
+    shifts are a sum of damped increments, each fitted at whatever the
+    previous pass left behind, so at order >= 1 the total is not in general
+    representable by the functional form of any single pass. The two can
+    differ by ~0.1 px. `_scene_shift_samples` keeps the field fit, which is
+    the right tool for the shift-field figure's spatial structure.
+- [x] `Templates.prune_outside_weight` no longer depends on the set it is
+  handed (2026-08-16). The drop threshold was `rtol * median(wnorm)` over the
+  templates being pruned, so a template's verdict depended on the company it
+  kept. Found through `Pipeline.refit_scene`: refitting scene 16 of the COSMOS
+  F770W run rebuilt 184 templates where the run recorded 260. The scene's
+  members are brighter than the field median, so pruning them on their own
+  raised the threshold and took 76 faint edge members with it -- and
+  `refit_scene`'s whole premise is that extracting a subset gives the same
+  pixels as extracting it alongside everything else.
+  * The test is now per-template and dimensionless: the fraction of a
+    template's own squared flux landing on positive weight, against `rtol`.
+    That is what the docstring always claimed the function did.
+  * `rtol` default 1e-8 -> 0.0, since it now means a coverage fraction rather
+    than a fraction of a population median; the two are not comparable. 0.0 is
+    the documented rule exactly -- a single usable pixel keeps the template,
+    and the sum is identically zero when there is none, so no tolerance is
+    needed. An intermediate 1e-3 was tried first on the reasoning that it
+    excluded mosaic-edge slivers "permissively"; measured on COSMOS F770W
+    scene 16 it cut 56 of 236 templates, because an edge scene's members
+    genuinely do have under a thousandth of themselves on usable pixels.
+    Raising it is a real cut, not a numerical guard.
+  * Tests `test_prune_outside_weight_is_subset_invariant` and
+    `test_prune_outside_weight_drops_templates_off_the_weight_map`.
+  * Anything that re-solved a subset was affected, not just refits.
+- [x] The solved shift field survives the figure loop (2026-08-16). A band that
+  dies drawing scenes has already solved its astrometry, and until now that
+  solution died with it: only the per-template applied shifts were persisted,
+  in `<name>_templates.fits`. `write_outputs` now also writes a `SCENES`
+  extension of `<name>_fit_table.fits`, and writes it *before* the first
+  figure, which is the point -- the figure loop is where three of the
+  seventeen bands of the overnight campaign stopped.
+  * `Pipeline._scene_fit_table` records `shift_coeff`, `shift_order` and the
+    `(x0, y0, sx, sy)` normalisation, which are exactly the arguments of
+    `AstroCorrect.build_poly_predictor`, plus `astrom_damping`, the per-scene
+    astrometry counters and the robust-pass verdict. Read it with
+    `Table.read(f_fit_table, hdu="SCENES")`.
+  * The coefficients are stored rather than recovered because the two are not
+    the same field. `_scene_shift_samples` refits a polynomial to the applied
+    shifts of every template; the solution was fitted on the scene's anchors.
+    Close enough to plot an arrow, not close enough to rebuild from.
+  * Two limits of what that field *is*, both now stated in the docstring.
+    `Scene.solve` overwrites `shifts` on every astrometric pass
+    (`scene.py:1512`, driven by the loop at `pipeline.py:4847`), so a scene
+    with `astrom_niter` above 1 kept only the final pass -- the accumulated
+    offset lives in the per-template `dx`, `dy` instead. And the coefficients
+    are undamped: the applied shift is `astrom_damping` times the field
+    (default 0.8), which is why the factor is stored beside them rather than
+    left to whichever config is loaded later.
+  * Order is per scene, not per run -- a saturated scene is forced to order 0
+    so its fragments move rigidly -- so `shift_coeff` is padded with NaN to
+    the widest order present and cut back with `n_coeff`. `shift_order` is -1
+    for a scene that solved no shifts.
+  * `_scene_catalog.csv` is trimmed to `id, n_templates, is_bright, ra, dec,
+    dx, dy, flag_astrom, minerva_link`. It is the file for reading; the
+    counters it lost are in the extension, which is the file for machines.
+  * The read side is wired. `load_outputs` picks up the extension as
+    `Pipeline.scene_fit`, `restore_scene_fit(scenes)` puts the coefficients,
+    basis and counters back onto scenes regrouped from `id_scene`, and
+    `write_scene_catalog` is now a public method both `write_outputs` and
+    `examples/canfar/jobs/scene_plots.py` call, so the recovered file is the
+    same file. The replot re-emits `_scene_catalog.csv` and `_shift_field.png`
+    when the extension is there, and skips both with a warning when it is not
+    -- which is the case for anything written before today, run2's three
+    replotted bands included.
+  * `_scene_catalog.csv` is trimmed to `id, n_templates, is_bright, ra, dec,
+    dx, dy, flag_astrom, minerva_link`. It is the file for reading; the
+    counters it lost are in the extension, which is the file for machines.
+  * `RunConfig.minerva_viewer` takes a full FITSMap URL, resolved against
+    `FITSMAP_URL` when given as a bare `<field>/<release>`. The fields do not
+    agree on whether the release belongs in the path -- COSMOS serves from
+    `/cosmos`, UDS from `/uds/DR0` -- so the derived guess is gone: None or ""
+    drops the column rather than writing a link that does not resolve.
+  * Log lines name the band. `upsampling image 1 by factor 2` was the only
+    place a run log identified an image by index; `_band_label` makes it
+    `upsampling f770w (cosmos-...-f770w_drz_sci.fits) by factor 2`, and falls
+    back to the index for a pipeline driven without a run config.
+  * Cost: a bare `Table.read(<name>_fit_table.fits)` now warns that multiple
+    tables are present before returning the fit table, which is still HDU 1.
+    `load_outputs` passes `hdu=1`; external readers should too.
+  * `poetry run pytest`: 466 passed. `tests/test_scene_fit_table.py` (17)
+    covers the order inversion, NaN padding across mixed orders, the
+    unsolved-scene case, the damping factor, the restore path and its no-op on
+    an older run; two tests in `tests/test_pipeline.py` drive the real
+    `write_outputs`, one checking that the stored coefficients reproduce the
+    live scene predictor exactly and one covering the viewer-URL spellings
+    including both drop cases. A manual round trip confirmed the re-emitted
+    scene catalog is byte-identical to the one the run wrote.
+- [x] Docs restructured after a read-through of the RTD pages (2026-08-16).
+  Reference material that had been duplicated in the getting-started pages now
+  lives with the component it belongs to: the `RunConfig` fields and the
+  `pipeline.run()` / `Pipeline.__init__` arguments are in `docs/pipeline.md`
+  only, and the `matching_kernel()` parameter list moved to `docs/psf.md`.
+  `docs/quickstart.md` and the overview keep the examples and a pointer.
+  `docs/templates.md` gained the general statement behind the normalization
+  order -- a correction supplying support outside a segment must not be
+  applied over a neighbouring segment, because segmentation does not deblend
+  and the neighbour's own template already models those pixels -- and a new
+  *Encircled energy of a template* subsection: `EE_tmpl = EE_psf` for a point
+  source, `EE_tmpl < EE_psf` for an extended one after convolution, with the
+  deficit measurable as `EE_tmpl_hi / EE_tmpl_lo` (the `psfcor_<i>` column).
+  The `flux_<i>` entry in `docs/outputs.md` now states what the column is and
+  refers to those sections instead of restating the normalization.
+- [x] run2 on CANFAR is complete at 17 of 17 bands, and the replot that
+  recovers a dead one works for the first time (2026-08-16). Three bands of
+  the overnight campaign -- `cosmos_f770w`, `cosmos_f1280w`, `egs_f2100w` --
+  fitted and then stopped partway through their scene figures with no
+  traceback, having written 196, 577 and 37 of them. All three now carry the
+  full set, along with `_stamps.h5`, `_scene_map.png` and `_scene_blobs.png`.
+  * `examples/canfar/jobs/scene_plots.py` had never drawn a figure.
+    `Scene.model_image` raises `RuntimeError("No solution available")` when
+    `solution` is None, and a scene regrouped from `id_scene` has never been
+    solved, so the first attempt spent 2h12m to report "wrote 0 of N" three
+    times over. `solution_from()` now carries the loaded per-source fluxes
+    onto each rebuilt scene. That guard is the only thing on this path that
+    reads `solution` -- the model accumulates from `t.flux` and `t.data`,
+    both of which `load_fit` restores -- so the fit's own numbers satisfy it
+    rather than a weakened check. The script's docstring claimed it populated
+    everything `Scene.plot` reads "because nothing is solved", which was the
+    false premise; it now says otherwise.
+  * The script also draws the two full-field partition views, from the same
+    `save_scene_overview` and `save_scene_blobs` helpers and under the same
+    names `write_outputs` uses, so a recovered band is not missing products a
+    band that finished on its own has.
+  * `_scene_catalog.csv` and `_shift_field.png` are deliberately not rebuilt
+    and stay missing on those three. Both carry per-scene astrometry -- `dx`,
+    `dy`, `astrom_niter`, `flag_astrom` -- recorded during the solve and not
+    persisted, so anything written would be a plausible file with invented
+    columns.
+  * CANFAR defaults are 16 cores and 96 GB, from 8 and 64 (82 for EGS).
+    `FIELD_RAM` is empty: EGS had more on the argument that its 1221 Mpx
+    detection grid needed it, but OzStar measured EGS at 29-59 GB, below the
+    other fields, and `egs_f2100w` died holding 82 anyway. 16 cores costs
+    little here because a skaha session is a Kubernetes pod rather than a
+    share of a node, so the request cannot change co-tenancy the way it does
+    in `examples/ozstar`; it only lengthens the queue.
+  * What killed the three bands in the first place is still unknown. The
+    replot reruns completed at 96 GB, but on a different code path, so that is
+    not evidence memory was the cause. `free -g` inside a pod reports the
+    node's memory -- 755 GB in these logs -- not the pod's limit, so the job
+    banner is not a headroom measurement. `GET /session/<id>` distinguishes
+    `OOMKilled` from `Evicted`, and is worth reading before the record ages
+    out the next time a band dies silently.
 - [x] The OzStar campaign takes the CANFAR shape (2026-08-16). The two
   platforms now expose the same steps, filters and flags, so one campaign
   reads the same way on either; what stays different is who enforces the order
@@ -39,16 +336,165 @@ This file records completed implementations, validation runs, and the current wo
     directory.
   * `examples/canfar/campaign.py` gained `--bands` and a `--mem` spelling of
     `--ram` for the same symmetry.
-- [x] `FitConfig.astrom_isolation_thresh` default 0.7 -> 0.6 (2026-08-16).
-  The cut is a floor on a source's own flux dominance within its footprint
-  before it may anchor a scene's shift, and at 0.7 it was leaving scenes with
-  few enough anchors that a single bright member set the shift on its own.
-  Loosening it admits mildly blended sources as anchors; the cross-anchor
-  terms in `assemble_scene_system_AB` are what handle their blending, so the
-  cut is protecting against the anchor's *own* contamination rather than
-  against overlap per se. Docs (`docs/pipeline.md`, `docs/fitting.md`)
-  updated. `examples/run_uds_770_wren.py` still passes 0.7 explicitly, which
-  is the wren fork value and stays as it is.
+  * `ozify.py --check-versions` reports configs pinned to an older release than
+    arc now holds, reusing `arcify.check_release_versions` the way the rest of
+    the arc index is reused. It rewrites nothing, and it runs on the laptop:
+    listing arc needs only the CADC certificate, and the datamover partition
+    exists to copy inputs to `/fred` rather than to see them. The advice it
+    prints is the OzStar one - a new release means a new `$OZSTAR_RUN` *and* a
+    re-stage, since `/fred` holds a copy of each input. Both flags are now
+    documented in the two READMEs; neither was before.
+  * Both `campaign.py` take `--check-versions` as a pre-flight: it reports what
+    is behind, then carries on with the pinned versions rather than refusing.
+    Moving onto a new release changes the photometry, so it is a deliberate act
+    belonging to a new run with a note saying why - not something a launch
+    should do, or block on, because a directory appeared upstream. It runs
+    under `--dry-run` too, which is when the answer is most useful.
+  * Each campaign accepts the other platform's name for the config-rewrite
+    step, so `--from arcify` works on OzStar and `--from ozify` on CANFAR, and
+    the CANFAR campaign gained `--ref`/`--force-stale` (passed to every
+    `submit.py run` dispatch, so one campaign checks one ref). What is left
+    platform-specific is only what has no counterpart: the OzStar walltimes
+    (`--time`, `--repair-time`, `--stage-time`) and `--push-psf`.
+- [x] Robust astrometric anchor weighting, `FitConfig.astrom_robust`
+  (2026-08-16, branch `shift-robust`, off by default). The shift field is
+  fitted by least squares, so an anchor's pull scales as its Fisher
+  information `I_i = alpha_i^2 <grad T_i, w, grad T_i>` -- as the *square* of
+  its flux. One bright extended source with an asymmetric colour gradient
+  therefore carries a scene: its residual is a dipole aligned with the
+  template gradient, formally indistinguishable from a displacement.
+  * `astrom_robust.py` (new leaf module) takes an anchor table -- implied
+    shift, information, basis row, misfit -- and returns a per-anchor weight.
+    It is an MM-estimator: a leverage-blind high-breakdown start
+    (`_robust_start`), then redescending Tukey steps that put the information
+    back. Both halves are needed, and this was found by test rather than by
+    reasoning: the first implementation started from the
+    information-weighted least-squares fit with a Huber warm-up, and a
+    400x-leverage liar defeated it outright. Huber's weights decay only as
+    `1/u`, so a tenfold downweight still left the liar holding 83% of the vote
+    and the fit walked back onto it. See
+    `test_scene_astrometry_robust.py::test_a_dominant_liar_pulls_the_scene_and_robust_weighting_stops_it`.
+  * The weight has two parts. A **systematic floor** `s`, estimated by robust
+    moment matching on the anchors' scatter about the fitted field, makes an
+    anchor's weight saturate at `1/s^2` however bright it is -- which is what
+    `astrom_leverage_cap` approximates with a quantile, now set by the data
+    instead. And **Tukey rejection** on disagreement with the field, the only
+    discriminator for a morphology-driven pseudo-shift: a real offset is
+    smooth in position, a pseudo-shift is random per source.
+  * `scene.measure_anchor_shifts` produces the table: one 3x3 fit per anchor
+    on `(T_i, -grad_x T_i, -grad_y T_i)` against the **flux-only** residual,
+    giving the implied shift, its flux-marginalized information, and
+    `chi2_red` -- what is left once a displacement is projected out. That last
+    quantity discriminates a source that moved from one whose template is
+    wrong, and it is why "residual size does not discriminate" (TODO, since
+    revised) was only half true: residual size *after removing the shift*
+    does.
+  * Measuring against the flux-only residual is exact, not an approximation.
+    Eliminating the fluxes from the joint system gives
+    `(B'WB - B'WA(A'WA)^-1 A'WB) beta = B'W r0`, so the flux-only residual is
+    precisely what the shift block responds to. Verified to 1.7e-15 at orders
+    0 and 1, with and without noise. That is what removes the need for an IRLS
+    loop around the joint solve: the weights are known before the joint system
+    is assembled. Cost is one extra flux-only solve and one union-bbox
+    residual buffer per scene per pass.
+  * `assemble_scene_system_AB` gained `anchor_weights`, multiplied into the
+    existing `lev_w`, and drops zero-weight anchors from the derivative
+    columns entirely rather than carrying them at zero, where they would still
+    enlarge the dense buffers. Hard rejection is also the one exactly
+    consistent case of the `lev_w` two-power split (see TODO).
+  * Works at any polynomial order; order enters only through the basis width.
+    Gated on `max(scene_minimum_anchors, 2 * n_terms)` anchors -- the same
+    number `merge_small_scenes` merges scenes up to, so a scene built to
+    support the shift model is by construction big enough to be judged.
+  * Where it applies it **supersedes** `astrom_leverage_cap` for that scene,
+    rather than composing with it: both bound one anchor's pull, but the cap
+    does it blind (it clips whichever anchors carry the most information,
+    usually the best ones) while the floor sets the same ceiling from the
+    anchors' measured scatter. The cap stays on wherever the robust pass
+    declines.
+  * `scene_minimum_anchors` default 5 -> None, i.e. derived from the
+    astrometric order as `(order+1)(order+2)+1`: 3 at order 0, 7 at order 1.
+    A hand-set 5 did not track the order it was supposed to support. At the
+    shipped order 0 this lowers the merge floor from 5 to 3, so scenes merge
+    less; `docs/fitting.md` now quotes 0.10 fit pixels for the weakest
+    admissible scene's centroid rather than 0.08.
+  * `astrom_isolation_thresh` stays 0.7 -- see the separate entry below. The
+    robust pass does *not* make it redundant: the two cover different
+    failures, and a blended majority defeats robustness by construction.
+  * The per-anchor measurement is **conditional on the anchor's
+    neighbourhood**, not marginal. Written the marginal way first, it was
+    badly wrong for exactly the anchors the isolation cut admits, in two
+    separate ways, both found by measurement rather than by reasoning:
+    - *A neighbour's free flux.* The residual arrives with fluxes already
+      fitted, and a neighbour to one side absorbs part of a dipole by
+      adjusting its brightness. A bright anchor with a faint blended
+      neighbour read 0.095 px against a true 0.20 -- half its shift, in the
+      blend direction, with `chi2_red ~ 0` to show for it -- while its
+      isolated twin read 0.20 exactly. Fixed by a flux column for every
+      overlapping template, fitted over their union footprint: 0.105 ->
+      0.013 px.
+    - *A neighbouring anchor's free shift.* Two overlapping anchors leave
+      overlapping dipoles; holding one at zero split them badly. A pair at
+      6 px read 0.089 and 0.039 px against 0.20 -- both low, both agreeing
+      with each other, and both carrying more information than the honest
+      anchors they disagreed with, which is the configuration most likely to
+      capture a robust fit. With each overlapping anchor given its own free
+      displacement: 0.171 and 0.151.
+    The numerator `<G_i, w, r0>` was right in every version; it is the
+    information divided by that has to be marginalized over everything local
+    and free. What remains (neighbours of neighbours, the union footprint
+    standing in for the global flux constraint) is smaller than the anchor's
+    own reported uncertainty in every case tested -- the property that
+    matters, since a bias inside the error bar cannot make a blend look like
+    a liar. Tests
+    `test_a_blended_anchor_is_measured_conditionally_on_its_neighbour`,
+    `test_two_blended_anchors_are_measured_against_each_other`,
+    `test_an_unmodelled_neighbour_shift_shows_up_as_misfit`,
+    `test_a_degenerate_blend_reports_its_own_uncertainty`.
+  * `chi2_red` is evaluated as an explicit residual rather than by the
+    cancellation `q - s'theta`, which in a well-fitting scene left roundoff.
+    Since the misfit inflation is a *ratio* to the scene median, roundoff
+    ratios were being amplified into real downweights; `CHI2_FLOOR = 1e-2`
+    now stands the inflation down when a scene already fits orders of
+    magnitude inside its own noise.
+  * Nothing here can help a scene whose only bright member is the offender:
+    with one anchor the weight is a global scale, and a global scale cannot
+    move the field. Only a veto could. Recorded in TODO.
+  * Built for A/B: one flag, off by default, and `False` leaves every code
+    path it touches untouched. The diagnostics are written either way so a
+    pair of runs differs in values rather than in schema -- fit table gains
+    `astrom_weight_<i>` (per source, the weakest weight among its templates),
+    the scene catalog gains `astrom_robust`, `astrom_nreject`,
+    `astrom_floor` and `astrom_neff`, and the stamps table carries
+    `astrom_weight` per template so `load_fit` restores it.
+  * Tests: `tests/test_astrom_robust.py` (23, synthetic anchor tables at
+    orders 0/1/2) and `tests/test_scene_astrometry_robust.py` (25, scene and
+    pipeline level, noiseless and noisy, including the end-to-end A/B
+    check). Full suite 445 passed.
+- [x] `FitConfig.astrom_isolation_thresh` stays at 0.7, now on measured
+  grounds rather than inheritance (2026-08-16). It was loosened to 0.6 and
+  then 0.5 on the reasoning that the cross-anchor terms in
+  `assemble_scene_system_AB` already handle blending and that `astrom_robust`
+  would catch whatever leaked through. A threshold scan (4 blended pairs at
+  3/5/7/9 px separation, sigma = 2.5 px, plus 4 isolated anchors, 6 seeds)
+  says otherwise -- the robust pass flips from harmful to helpful between
+  0.55 and 0.60:
+
+  | threshold | anchors | robust off | robust on |
+  | --- | --- | --- | --- |
+  | 0.50 | 12.0 | 0.0344 | 0.0714 |
+  | 0.55 | 12.0 | 0.0344 | 0.0714 |
+  | 0.60 | 10.2 | 0.0207 | 0.0171 |
+  | 0.70 | 10.0 | 0.0177 | 0.0139 |
+  | 0.90 |  6.0 | 0.0019 | 0.0024 |
+
+  (median |beta error| in fit pixels.) The cut is in effect a separation cut
+  -- dominance 0.54 at 0.8 PSF sigma, 0.59 at 1.2, 0.66 at 1.6, 0.73 at 2.0,
+  0.97 at 3.6 -- so 0.6 admits blends down to ~1.2 sigma and 0.7 to ~2. Same
+  shape at 5x the noise. The scan cannot set the upper end, which is fixed by
+  anchor availability on a real field rather than by this synthetic; 0.7 is
+  the shipped value and the one `examples/run_uds_770_wren.py` already passes
+  explicitly.
 - [x] The remote-access shell toolkit left the repo (2026-08-15).
   `canfar-cert.sh`, `canfar-common.sh`, `canfar-mount.sh`, `canfar-umount.sh`,
   `canfar-sync.sh`, `canfar.conf` and `ozstar-mount.sh` now live in
@@ -689,10 +1135,10 @@ This file records completed implementations, validation runs, and the current wo
     bound. Four tests in `tests/test_scene_max_size.py`.
   * Defaults: `scene_max_size` 800 -> 1000. The shift-basis order was already
     0 in `FitConfig.astrom_kwargs`, but two fallbacks disagreed with it --
-    `__post_init__` assumed 1 when deriving `scene_minimum_bright` and
+    `__post_init__` assumed 1 when deriving `scene_minimum_anchors` and
     `AstroCorrect` assumed 2 for the polynomial field (its own docstring said
     "an unmodified FitConfig supplies order 0"). Both now read 0, so a config
-    that omits the `poly` key derives `scene_minimum_bright` 3 rather than 7.
+    that omits the `poly` key derives `scene_minimum_anchors` 3 rather than 7.
   Order 0 means nB = 2: one rigid (dx, dy) per scene. That matters for memory
   because `assemble_scene_system_AB` holds nB float64 planes over the bright
   anchors' bounding box, doubled when the leverage cap clips -- 0.61 GB for
@@ -1582,7 +2028,7 @@ This file records completed implementations, validation runs, and the current wo
     offset, 0.05 converges in 4 passes and 0.1 in 3, both recovering
     (1.487, -0.791). 0.1 px also sits just above the ~0.08 px statistical
     floor of the weakest scene the anchor cuts admit (5 anchors at
-    `snr_thresh_astrom` = 15) and well below PSF-matching centroid
+    `astrom_minimum_snr` = 15) and well below PSF-matching centroid
     systematics, which are a bias no tolerance iterates away.
   * `flag_astrom` = 0 now means solved-and-converged, not never-moved. A
     flux-only run, and scenes with too few bright anchors to carry a shift
@@ -1821,7 +2267,7 @@ This file records completed implementations, validation runs, and the current wo
   from `FLAG_SATURATED_*`, and `generate_scenes` now groups saturated
   templates by it: one scene per saturated star (fragments fit jointly),
   own scene per template for legacy 0/1 flags, still created after
-  `merge_small_scenes` so exempt from `scene_minimum_bright`.
+  `merge_small_scenes` so exempt from `scene_minimum_anchors`.
   `Scene.plot` gained `null_segments`: the pipeline nulls the saturated
   stars' segments in every other scene's diagnostic (they'd dominate the
   stretch) while their own scene shows them. Tests: `test_repair.py`
@@ -3229,7 +3675,7 @@ This file records completed implementations, validation runs, and the current wo
   saturated ones are already isolated into their own scenes). Isolation now
   also applies at merge time: `generate_scenes(isolation_thresh=...)` folds
   `_astrom_isolation_mask` into the bright mask counted by
-  `merge_small_scenes`, so `scene_minimum_bright` counts bright & isolated
+  `merge_small_scenes`, so `scene_minimum_anchors` counts bright & isolated
   (& star-policy) sources and merged scenes are guaranteed usable anchors —
   the solve-time "astrometry skipped" branch becomes unreachable in
   practice. The full-field normal matrix makes merge-time dominance
@@ -3359,7 +3805,7 @@ This file records completed implementations, validation runs, and the current wo
   breaking the F770W giant (thresh ~0.1-0.16) moves bright fluxes 1-3%;
   elongated scenes are internally misaligned because offsets vary on ~arcmin
   scales. `uds_770_dr0.1.json`: `r_trial` 0.5' -> 0.6' (2242 sources),
-  fit overrides back to `{fit_astrometry_joint, scene_minimum_bright: 5,
+  fit overrides back to `{fit_astrometry_joint, scene_minimum_anchors: 5,
   aperture_diam}`. `scratch/wren/compare/` regenerated by
   `scratch/wren/make_compare.py` at the 0.6' circle.
 - [x] flux-estimator note v3 (`scratch/wren/flux_estimator_comparison_v3.tex`,
@@ -3445,7 +3891,7 @@ This file records completed implementations, validation runs, and the current wo
   `n3.0_v1.2` ACS+WEBB chi-mean segmap, `n3.0_m3.1_v1.2.1` SUPER catalog (wMIRI).
   Settings mirror `cosmos_770_dr0.1.json` so the two same-generation runs are
   comparable (`psf_size` null, blur "default", `fit_astrometry_joint`,
-  `scene_minimum_bright` 10, `aperture_diam` 0.5, `r_trial` 0.5'); frame counts
+  `scene_minimum_anchors` 10, `aperture_diam` 0.5, `r_trial` 0.5'); frame counts
   297 (F444W) / 229 (F770W). Trial patch `[34.34914, -5.27462]`, the deepest fully
   F770W-covered 0.5' patch of the v3.0 mosaic (median wht 1.30e8, 2.0x the footprint
   median), near the DR0 patch `[34.4, -5.26]`.
@@ -3515,7 +3961,7 @@ This file records completed implementations, validation runs, and the current wo
   possible. New config is `examples/cosmos_770_dr0.1.json` + `run_770_dr0.1.py`,
   mirroring the DR0 run in every setting that transfers (LW noise-equalised detection to
   match DR0's `faper_f277w+f356w+f444w` catalog, `psf_size` null, blur "default",
-  `fit_astrometry_joint`, `scene_minimum_bright` 10, `aperture_diam` 0.5, `r_trial` 0.5').
+  `fit_astrometry_joint`, `scene_minimum_anchors` 10, `aperture_diam` 0.5, `r_trial` 0.5').
   Unpacking notes, the S3 provenance of the NIRCam mosaic, and the two local fixes are
   documented in `MINERVA/data/DR0.1/README.md`.
   Data prep: the delivery's `n3.0/` (NIRCam) directory is **empty**, so the F444W
@@ -3733,7 +4179,7 @@ This file records completed implementations, validation runs, and the current wo
   and ruled out, with diagnostic scripts in `scratch/dipole_rootcause/`:
   - iteration count: increments decay geometrically to a stationary point at
     the biased value (`scene_shift_introspection.py`, 8 passes);
-  - faint templates biasing the shift blocks: `snr_thresh_astrom=15` gives
+  - faint templates biasing the shift blocks: `astrom_minimum_snr=15` gives
     identical outliers;
   - cross-scene flux contamination: chi2 scan on cleaned data (all other
     scene models subtracted) shows the same preference
@@ -3843,7 +4289,7 @@ This file records completed implementations, validation runs, and the current wo
 - [x] Fixed alpha0 scaling and Cholesky whitening in scene solver
 - [x] Fixed scene-solver flux-only path and `fit_astrometry_niter=0` handling
 - [x] Documented scene-solver flux regularization bug in `FLUXBUG.md`
-- [x] Reran mock validation with explicit `reg_flux=0.0` and `reg_astrom=0.0`
+- [x] Reran mock validation with explicit `reg_flux=0.0` and `astrom_reg=0.0`
 - [x] Hardened scene-solver flux and astrometric regularization against non-finite diagonals
 - [x] Renamed photometric regularization config from `reg` to `reg_flux`
 - [x] Removed stale tests targeting retired SparseFitter and GlobalAstroFitter APIs

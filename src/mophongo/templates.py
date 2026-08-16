@@ -506,6 +506,12 @@ class Template(Cutout2D):
         # this is the intended shift from base_data to data
         self.to_shift = np.array([0.0, 0.0], dtype=float)  # impending shift
         self.shifted = np.array([0.0, 0.0], dtype=float)  # accumulated shift
+        # Weight this template carried as an astrometric anchor in the last
+        # solve, from `FitConfig.astrom_robust`; 1.0 when the robust pass is
+        # off, did not run, or found nothing to downweight, and 0.0 for a
+        # rejected anchor. Diagnostic only -- the fit reads it from the
+        # weights array, not from here.
+        self.astrom_weight: float = 1.0
 
     def __deepcopy__(self, memo: dict) -> "Template":
         """Deep copy that shares the parent-image WCS instead of duplicating it.
@@ -1548,36 +1554,68 @@ class Templates:
             tmpl.err_pred = pred[i]
         return pred
 
-    def prune_outside_weight(self, weight: np.ndarray, rtol: float = 1e-8) -> List[Template]:
+    def prune_outside_weight(self, weight: np.ndarray, rtol: float = 0.0) -> List[Template]:
         """Remove templates with no overlap with the provided ``weight`` map.
 
         A template is discarded if all pixels belonging to its segmentation
         footprint fall on non-positive weight values. The check is performed in
         the original image coordinates using ``tmpl.slices_original``.
 
+        The test is per-template: the fraction of a template's own squared flux
+        that lands on positive weight, against ``rtol``. It used to be
+        ``wnorm > rtol * median(wnorm)`` over the set being pruned, which made
+        the verdict depend on the *company a template keeps*. Pruning a
+        260-source scene of a COSMOS F770W run on its own dropped 76 templates
+        the full-field run had kept: the scene's members are brighter than the
+        field median, so the threshold rose with them and took the faint edge
+        members with it. Anything that re-solves a subset --
+        :meth:`~mophongo.pipeline.Pipeline.refit_scene` above all, whose whole
+        premise is that a subset extracts identically -- was silently working
+        on a different source set.
+
         Parameters
         ----------
         weight : np.ndarray
             Weight map aligned with ``self.original_shape``.
+        rtol : float
+            Minimum fraction of a template's squared flux that must fall on
+            positive weight for it to be kept. ``0.0``, the default, is the
+            documented rule exactly: a single usable pixel is enough, and only
+            a template with none at all is dropped. The sum is identically zero
+            in that case, so no tolerance is needed.
+
+            Raising it is a real cut, not a numerical guard, and it bites
+            hardest where sources are most marginal. A COSMOS F770W scene on
+            the mosaic edge lost 56 of 236 templates at ``1e-3``: those members
+            genuinely have under a thousandth of themselves on usable pixels,
+            and the fit gives them enormous errors, but they are the run's
+            sources and dropping them silently changes what a refit is
+            comparing. The old default of ``1e-8`` meant something else
+            entirely -- a fraction of the *set's median* weighted norm -- and
+            is not comparable to either.
 
         Returns
         -------
         list[Template]
             Remaining templates after pruning.
         """
-        norms = []
         for tmpl in self._templates:
             sl = tmpl.slices_original
             data = tmpl.data[tmpl.slices_cutout]
             w = weight[sl]
-            wnorm = float(np.sum(data * w * data))
-            tmpl.wnorm = wnorm
-            norms.append(wnorm)
+            tmpl.wnorm = float(np.sum(data * w * data))
+            # Self-normalized coverage: what fraction of this template sits on
+            # usable pixels. Dimensionless, and a property of the template and
+            # the weight map alone.
+            total = float(np.sum(data * data))
+            tmpl.wcover = (
+                float(np.sum(data * data * (w > 0))) / total if total > 0 else 0.0
+            )
 
-        atol = rtol * np.median(norms)
+        atol = float(rtol)
         keep, dropped = [], []
         for tmpl in self._templates:
-            if tmpl.wnorm > atol:
+            if tmpl.wcover > atol:
                 keep.append(tmpl)
             else:
                 # Flag before dropping. The template objects are shared with
@@ -1591,7 +1629,8 @@ class Templates:
         if dropped:
             logger.info(
                 "pruned %d template(s) with no support on this band's weight "
-                "map (weighted L2 norm below %.3g); flagged FLAG_OUTSIDE_WEIGHT",
+                "map (under %.3g of their own flux on positive weight); "
+                "flagged FLAG_OUTSIDE_WEIGHT",
                 len(dropped), atol,
             )
             logger.debug(

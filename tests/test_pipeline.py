@@ -689,7 +689,7 @@ def test_pipeline_prebuilt_native_templates_recover_scalar_fluxes():
             fit_astrometry_niter=0,
             fit_astrometry_joint=False,
             aperture_diam=None,
-            snr_thresh_astrom=0.0,
+            astrom_minimum_snr=0.0,
         ),
     )
 
@@ -838,8 +838,8 @@ def test_scene_results_do_not_depend_on_scene_order(monkeypatch):
     wcs.wcs.cdelt = [-1e-5, 1e-5]
     wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
     config = FitConfig(
-        fit_astrometry_niter=5, astrom_shift_tol=0.004, snr_thresh_astrom=5.0,
-        astrom_isolation_thresh=0.0, scene_minimum_bright=2,
+        fit_astrometry_niter=5, astrom_shift_tol=0.004, astrom_minimum_snr=5.0,
+        astrom_isolation_thresh=0.0, scene_minimum_anchors=2,
     )
 
     def fit():
@@ -979,7 +979,7 @@ def _shift_field_pipeline(tmp_path, order, nsrc=24, size=161, offset=(0.0, 0.0))
         fit_astrometry_niter=2,
         astrom_model="poly",
         astrom_kwargs={"poly": {"order": order}, "gp": {"length_scale": 400}},
-        snr_thresh_astrom=0.0,
+        astrom_minimum_snr=0.0,
         astrom_isolation_thresh=0.0,
     )
     pipe = pipeline.Pipeline(
@@ -1160,7 +1160,7 @@ def test_shift_field_arrow_points_from_template_to_measured(tmp_path):
         config=FitConfig(
             fit_astrometry_niter=8, astrom_model="poly",
             astrom_kwargs={"poly": {"order": 0}, "gp": {"length_scale": 400}},
-            snr_thresh_astrom=0.0, astrom_isolation_thresh=0.0,
+            astrom_minimum_snr=0.0, astrom_isolation_thresh=0.0,
         ),
     )
     pipe.run_config = pipeline.RunConfig(
@@ -1216,6 +1216,104 @@ def test_scene_catalog_carries_total_shift(tmp_path):
         assert not np.allclose(by_id[int(s.id)], last, atol=1e-3)
         checked += 1
     assert checked, "no scene had non-trivial applied shifts"
+
+
+def test_scenes_extension_reconstructs_the_anchor_solution(tmp_path):
+    """``write_outputs`` stores the solved shift field, exactly, in the fit table.
+
+    The catalog's dx, dy is the applied-shift field sampled at a scene centre,
+    which is a summary. The SCENES extension carries the coefficients the
+    anchors produced, so a later reconstruction evaluates the same field the
+    fit used rather than a refit of it -- and it is written before the figure
+    loop, which is where a band dies.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    from astropy.io import fits
+    from astropy.table import Table as _Table
+
+    from mophongo.astrometry import AstroCorrect
+
+    out = tmp_path / "scn"
+    out.mkdir()
+    pipe = _shift_field_pipeline(out, 0, offset=(0.6, -0.4))
+    fits.writeto(out / "hi.fits", np.asarray(pipe.images[0], np.float32), overwrite=True)
+    pipe.run_config.sci_hi = str(out / "hi.fits")
+    pipe.run_config.save_stamps = False
+    pipe.run_config.scene_plots = False
+    pipe.write_outputs()
+
+    path = out / "t_fit_table.fits"
+    with fits.open(path) as hdul:
+        assert "SCENES" in [h.name for h in hdul]
+    # the fit table itself is still the first table HDU
+    assert "id" in _Table.read(path, hdu=1).colnames
+
+    scenes = _Table.read(path, hdu="SCENES")
+    assert len(scenes) == len(pipe.scenes)
+
+    checked = 0
+    for row, s in zip(scenes, pipe.scenes):
+        if row["shift_order"] < 0:
+            assert s.shifts is None or len(s.shifts) < 2
+            continue
+        rebuilt = AstroCorrect.build_poly_predictor(
+            np.asarray(row["shift_coeff"][: row["n_coeff"]]),
+            row["shift_x0"], row["shift_y0"], int(row["shift_order"]),
+            row["shift_sx"], row["shift_sy"],
+        )
+        live = AstroCorrect.build_poly_predictor(
+            np.asarray(s.shifts, float), *s.shift_basis[1],
+            int(row["shift_order"]), *s.shift_basis[2],
+        )
+        xs = np.array([5.0, 40.0, 95.0])
+        ys = np.array([12.0, 55.0, 88.0])
+        np.testing.assert_allclose(np.array(rebuilt(xs, ys)),
+                                   np.array(live(xs, ys)), atol=0, rtol=0)
+        checked += 1
+    assert checked, "no scene solved shifts, so nothing was reconstructed"
+
+
+def test_scene_catalog_link_takes_the_viewer_root_from_the_config(tmp_path):
+    """Fields disagree on whether the release is in the FITSMap path.
+
+    COSMOS serves from ``/cosmos`` and UDS from ``/uds/DR0``, so the root is
+    config, not something the code can assemble from the field name.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    from astropy.io import fits
+    from astropy.table import Table as _Table
+
+    def _link(viewer):
+        out = tmp_path / f"v{abs(hash(viewer)) % 10000}"
+        out.mkdir()
+        pipe = _shift_field_pipeline(out, 0, offset=(0.1, 0.0))
+        fits.writeto(out / "hi.fits", np.asarray(pipe.images[0], np.float32),
+                     overwrite=True)
+        pipe.run_config.sci_hi = str(out / "hi.fits")
+        pipe.run_config.save_stamps = False
+        pipe.run_config.scene_plots = False
+        pipe.run_config.minerva_viewer = viewer
+        pipe.write_outputs()
+        cat = _Table.read(out / "t_scene_catalog.csv", format="ascii.csv")
+        return cat["minerva_link"][0] if "minerva_link" in cat.colnames else None
+
+    full = _link("https://minerva.colorado.edu/uds/DR0")
+    assert full.startswith("https://minerva.colorado.edu/uds/DR0/?ra=")
+
+    # a bare path is the pre-URL spelling and still resolves against FITSMAP_URL
+    bare = _link("cosmos")
+    assert bare.startswith("https://minerva.colorado.edu/cosmos/?ra=")
+
+    # a different host is honoured rather than rewritten
+    other = _link("https://example.org/maps/uds")
+    assert other.startswith("https://example.org/maps/uds/?ra=")
+
+    # unset drops the column: a guessed URL is worse than no URL, since the
+    # fields disagree on whether the release belongs in the path
+    assert _link(None) is None
+    assert _link("") is None
 
 
 def test_astrometry_passes_skip_converged_scenes(monkeypatch):
@@ -1485,7 +1583,7 @@ def test_refit_scene_freezes_membership_and_restores_state(tmp_path):
     assert same.changed == {} and same.baseline is None and same.dchi2 == 0.0
 
     # a full config replacement is the other way in; the two are exclusive
-    cfg = dc_replace(pipe.config, snr_thresh_astrom=99.0)
+    cfg = dc_replace(pipe.config, astrom_minimum_snr=99.0)
     assert pipe.refit_scene(scene_id, config=cfg).changed
     with pytest.raises(ValueError, match="either config="):
         pipe.refit_scene(scene_id, config=cfg, extend_mode="none")
@@ -1503,3 +1601,87 @@ def test_refit_scene_freezes_membership_and_restores_state(tmp_path):
     plt.close(fig)
     with pytest.raises(ValueError, match="no baseline solve"):
         same.plot_scene("baseline")
+
+
+def test_upsampled_band_keeps_its_weight_on_the_same_grid(tmp_path):
+    """Image and weight must stay on one grid across repeated band passes.
+
+    ``_convolved_templates`` upsamples the band onto the reference grid and
+    sets ``wcs[ifilt] = wcs[0]``. The upsampled weight used to stay in a local,
+    so afterwards the instance held a reference-grid image beside a native-grid
+    weight -- and the collapsed WCS hid it, because the next call computes
+    ``k = 1`` and upsamples neither. Slicing that weight with reference-grid
+    coordinates is not an error in numpy; it clips and returns the wrong
+    region, so templates over covered sky were pruned as uncovered and scene
+    residuals were masked over valid pixels.
+    """
+    from astropy.wcs import WCS
+
+    from mophongo.fit import FitConfig
+    from mophongo import utils as mutils
+
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=3, nsrc=12, size=120, ndilate=2, peak_snr=30.0
+    )
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+
+    def _wcs(scale):
+        w = WCS(naxis=2)
+        w.wcs.crpix = [1.0, 1.0]
+        w.wcs.crval = [150.0, 2.0]
+        w.wcs.cdelt = [-scale, scale]
+        w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+        return w
+
+    # band on a 2x coarser grid, so the upsample path runs
+    wcs_hi, wcs_lo = _wcs(1e-5), _wcs(2e-5)
+    lo = images[1][::2, ::2].copy()
+    wht_lo = wht[1][::2, ::2].copy()
+
+    pipe = pipeline.Pipeline(
+        [images[0], lo], segmap, catalog=catalog,
+        weights=[wht[0], wht_lo], kernels=[None, kernel], psfs=psfs,
+        wcs=[wcs_hi, wcs_lo], config=FitConfig(fit_astrometry_niter=0),
+    )
+    pipe.fit_bin_factors = []
+    pipe._prepare_hi_templates(pipe.catalog, pipe.config)
+    _, weights_i = pipe._convolved_templates(1, pipe.config)
+
+    assert weights_i.shape == pipe.images[1].shape
+    assert pipe.weights[1].shape == pipe.images[1].shape
+
+    # a second pass over the same band -- what a refit does -- must not now
+    # pair a native weight with an upsampled image
+    _, weights_again = pipe._convolved_templates(1, pipe.config)
+    assert weights_again.shape == pipe.images[1].shape
+
+
+def test_convolved_templates_rejects_a_weight_on_the_wrong_grid(tmp_path):
+    """The pairing is checked, not trusted."""
+    import pytest as _pytest
+    from astropy.wcs import WCS
+
+    from mophongo.fit import FitConfig
+    from mophongo import utils as mutils
+
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=3, nsrc=12, size=120, ndilate=2, peak_snr=30.0
+    )
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+    w = WCS(naxis=2)
+    w.wcs.crpix = [1.0, 1.0]
+    w.wcs.crval = [150.0, 2.0]
+    w.wcs.cdelt = [-1e-5, 1e-5]
+    w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+
+    pipe = pipeline.Pipeline(
+        [images[0], images[1]], segmap, catalog=catalog,
+        weights=[wht[0], wht[1]], kernels=[None, kernel], psfs=psfs,
+        wcs=[w, w], config=FitConfig(fit_astrometry_niter=0),
+    )
+    pipe.fit_bin_factors = []
+    pipe._prepare_hi_templates(pipe.catalog, pipe.config)
+    pipe.weights[1] = pipe.weights[1][::2, ::2].copy()  # wrong grid
+
+    with _pytest.raises(RuntimeError, match="same grid"):
+        pipe._convolved_templates(1, pipe.config)

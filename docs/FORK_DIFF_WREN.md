@@ -86,7 +86,7 @@ returns per-subpixel ivar equal to the native ivar, while ours returns `k²`
 times that. Fitted fluxes are invariant to a global weight scale, but
 `err_<i>` and `err_pred_<i>` in wren come out **2× larger**, and the scene
 `snr_proxy = b/sqrt(diag A)` scales as `√w`, so at the same
-`snr_thresh_astrom=15` wren flags **half** the SNR and therefore far fewer
+`astrom_minimum_snr=15` wren flags **half** the SNR and therefore far fewer
 `is_bright` templates. Different scene partition, different astrometry sample.
 
 **(b) no block projection in wren.** Ours re-integrates each convolved template

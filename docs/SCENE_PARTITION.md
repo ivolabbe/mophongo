@@ -12,12 +12,12 @@
    the threshold is raised only inside that component, the accepted local
    leakage is logged, and strong couplings elsewhere are never touched.
 2. **Merge small scenes.** `merge_small_scenes` merges scenes with fewer than
-   `scene_minimum_bright` bright members (SNR proxy above
-   `snr_thresh_astrom`) into their nearest scene by centroid, iterating until
+   `scene_minimum_anchors` bright members (SNR proxy above
+   `astrom_minimum_snr`) into their nearest scene by centroid, iterating until
    all scenes clear the floor. (Unchanged original; it has no cap, so merged
    scenes can exceed `scene_max_size` where bright sources are scarce.)
 
-Knobs: `scene_coupling_thresh` (floor), `scene_minimum_bright`, and the
+Knobs: `scene_coupling_thresh` (floor), `scene_minimum_anchors`, and the
 optional `scene_max_size`.
 
 ## Template support sets the coupling graph (the wren discrepancy)
@@ -49,7 +49,7 @@ fix that first.
 A session attempted to replace the per-band threshold with size-driven
 partitioning (`scene_max_size`). Sequence of designs, each fixing the
 previous one's failure on the UDS F770W dr0.1 trial patch (1549 templates,
-0.5' circle, 39 bright at `snr_thresh_astrom = 15`, `psf_size: null` 8"
+0.5' circle, 39 bright at `astrom_minimum_snr = 15`, `psf_size: null` 8"
 stamps):
 
 | design | failure |

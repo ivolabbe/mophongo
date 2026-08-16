@@ -55,17 +55,15 @@ copied through.
 ### Flux and error columns
 
 `flux_<i>`
-: Raw fitted template amplitude. Templates are normalized to unit sum and
-  convolved with unit-sum matching kernels, so this is the flux contained in
-  the modeled PSF support, without any correction for flux outside the finite
-  PSF stamp. Under the default `"psf_wings"` build scheme a template sums to
-  slightly less than one, because the wing flux that fell on a neighbouring
-  segment is dropped after the normalization and fitted by that neighbour's
-  own template; the amplitude is not rescaled for it (the blanked pixels
-  carry flux but almost no fitting weight — see `ee_tmpl` below). Each
-  amplitude is written to the catalog row carrying the template's `id`;
-  catalog deblend children are rows of their own, so a child keeps its own
-  flux instead of having it folded into its parent.
+: Raw fitted template amplitude: the flux inside the modeled PSF support,
+  with no correction for flux outside the finite PSF stamp. Templates and
+  matching kernels are unit-sum, which puts the amplitude on that scale; under
+  the default `"psf_wings"` scheme a template sums to slightly less than one
+  and the amplitude is not rescaled for it — the *Normalization order* section
+  of {doc}`templates` gives the reason. Each amplitude is written to the
+  catalog row carrying the template's `id`; catalog deblend children are rows
+  of their own, so a child keeps its own flux instead of having it folded into
+  its parent.
 
 `err_<i>`
 : 1-sigma uncertainty on `flux_<i>` from the solver:
@@ -93,7 +91,11 @@ copied through.
   low-resolution PSF stamp at that source's position. Templates whose
   `ee_psf_lo` is unset fall back to `throughput_<i>`. This is the number to
   use as a total flux; `flux_<i>` deliberately keeps the uncorrected amplitude
-  (see the shape-vs-throughput convention in {doc}`psf`).
+  (see the shape-vs-throughput convention in {doc}`psf`). The PSF encircled
+  energy is the right divisor for a point source; a source resolved at the
+  band's resolution loses a little more light past the same support, by the
+  factor `psfcor_<i>` below (*Encircled energy of a template* in
+  {doc}`templates`).
 
 `scene_<i>`
 : Id of the scene the source was fitted in, taken from the scene objects
@@ -117,6 +119,16 @@ copied through.
   converged solution. The run logs a warning naming the worst offenders, and
   `<name>_scene_catalog.csv` carries the same verdict per scene along with
   `astrom_niter` (passes used) and `astrom_step` (last increment, pixels).
+
+`astrom_weight_<i>`
+: The weight this source carried as an astrometric anchor, from
+  `FitConfig.astrom_robust`: `1.0` when the robust pass is off, declined the
+  scene, or found nothing to downweight, and `0.0` for a rejected anchor.
+  Non-anchors read `1.0` — they never had a vote to lose. Where a source has
+  several templates the weakest is taken, so the column answers "was any part
+  of this source thrown out of the shift fit". The column is written whether
+  or not the pass is enabled, so an A/B pair of runs differs in the values
+  rather than in the schema.
 
 ### Aperture columns
 
@@ -228,19 +240,72 @@ high-resolution science header. The matching model images are in
 ## Scene catalog
 
 `<name>_scene_catalog.csv` has one row per fitted scene ({doc}`fitting`):
-`id` (scene id), `n_templates`, `is_bright` (number of bright anchor sources),
-`ra`, `dec` of the scene center, the total astrometric shift `dx`, `dy` at
-that center in reference-grid pixels (NaN where the scene solved no
-astrometry), plus a URL column linking each position to an external sky
-viewer. `dx`, `dy` is the *accumulated* shift, the same quantity as the
-per-template table's `dx`, `dy` — `Scene.shifts` holds only the last
-iteration's increment and is never written.
+`id` (scene id), `n_templates`, `n_anchor` (sources that passed the
+astrometric anchor cuts — SNR, isolation, and optional star exclusion — so it
+counts more than brightness despite the older `is_bright` spelling), `ra`,
+`dec` of the scene center, the total astrometric shift `dx`, `dy` at that
+center in reference-grid pixels (NaN where the scene solved no astrometry),
+`sigma_shift`, `shift_rms`, `chi2_dof`, and a URL column linking each position
+to an external sky viewer.
+
+`dx`, `dy` is the mean shift actually applied to the scene's templates, at
+the centroid of those templates. It is not a field evaluation: accumulated
+shifts are a sum of damped increments, each fitted at whatever the previous
+pass left behind, so at order >= 1 the total is not in general representable
+by the functional form of any single pass. `Scene.shifts` holds only the last
+increment's coefficients and is never written here.
+
+`sigma_shift` is the formal 1-sigma on that shift, propagated from the shift
+block's covariance with the fluxes marginalized out, evaluated at the scene
+centre and averaged over the two axes. It is what gives `dx`, `dy` a scale: a
+0.2 px shift means nothing until you know whether it was measured to 0.02 px or
+to 0.5 px. It is the *last pass's* number -- passes re-measure the same pixels,
+so at convergence the accumulated shift is determined about as well as any one
+pass determines it. Read it as the scale on the total, not as an error that
+shrinks with the number of passes.
+
+`chi2_dof` is the reduced chi-square over the scene's bounding box, against the
+residual with *every* scene's model subtracted, with one free parameter per
+template plus the shift coefficients. Sorting on it is the direct way to find
+the scenes worth looking at.
+
+`shift_rms` is the spread of those applied shifts about their mean. At the
+default order 0 every template receives the same offset, so a non-zero value
+means the field moved between passes — the scene walked rather than settled.
+At higher order it is the amplitude of the gradient the field actually
+carried, which is the direct way to see whether the extra terms did anything.
 
 Three columns record how the shift was reached: `astrom_niter` (solve/apply
 passes this scene used before it dropped out of the loop), `astrom_step`
 (its last shift increment in pixels) and `flag_astrom` (`0` converged, `1`
 still moving when the budget ran out, `-1` no verdict). Every source of the
 scene inherits `flag_astrom` as the fit table's `flag_astrom_<i>`.
+
+`astrom_floor` is what `FitConfig.astrom_robust` measured, NaN where the pass
+never ran or declined. It is the **systematic error floor on an anchor's
+position**: the extra per-axis scatter, in fit-grid pixels, that must be added
+in quadrature to the anchors' formal errors before their disagreement with the
+fitted shift field is statistically consistent. Formally it is the `s >= 0`
+solving
+
+    median over anchors and axes of  r_ia^2 / (v_i + s^2)  =  median(chi^2_1)
+
+with `r_ia` the anchor's implied shift minus the fitted field and `v_i = 1 /
+I_i` its formal variance. Median-based, so one wild anchor cannot set it, and
+zero when the anchors already agree within their errors.
+
+Read it against `astrom_shift_tol`: a floor several times the tolerance means
+the anchors do not agree at the level the loop is trying to converge to, and
+the shift is limited by template and PSF fidelity rather than by noise. It is
+also the ceiling on how much any one anchor can be trusted, which is what
+`astrom_leverage_cap` approximates with a quantile.
+
+The `SCENES` extension of the fit table carries the rest of the robust
+verdict: `astrom_robust` (`1` if the pass judged this scene), `astrom_nreject`
+(anchors rejected outright) and `astrom_neff` (anchors surviving rejection --
+`n_anchor` counts those that passed the cuts, before any rejection).
+Comparing these against a run with the flag off is the intended way to judge
+whether the weighting earned its place on a given field.
 
 With `scene_plots` enabled, each scene also gets a `<name>_scene_<id>.png`
 diagnostic figure, written to a `scenes/` subdirectory of `out_dir` (created

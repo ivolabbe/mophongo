@@ -425,7 +425,7 @@ def test_a_single_anchor_still_solves_the_order_zero_shift():
     )
     assert AB.shape[1] == 2, "one anchor must still open the two shift columns"
 
-    flux, _err, shifts, _info = SceneFitter._solve_flux_and_shifts(
+    flux, _err, shifts, _cov, _info = SceneFitter._solve_flux_and_shifts(
         A.tocsr(), b, AB, BB, bB, FitConfig(),
     )
     assert shifts is not None and len(shifts) == 2

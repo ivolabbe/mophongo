@@ -35,16 +35,17 @@
   "sci_lo": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/m3.0/uds-sbkgsub-v3.0-80mas-f770w_drz_sci_extrabkg.fits",
   "wht_lo": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/m3.0/uds-sbkgsub-v3.0-80mas-f770w_drz_wht.fits",
   "csv_lo": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/m3.0/uds-v3.0_f770w_wcs.csv",
-  "expect_frames": [297, 229],
 
-  # MJD-tagged ePSF grids; psf_size in arcsec (null = full native stamp);
-  # psf_blur_fwhm "default" = shared DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC[filter_lo]
-  "psf_dir": "../data/PSF",
-  "pattern_hi": "UDS_NRC.._F444W_MJD\\d+_GRID25_OS4",
-  "pattern_lo": "UDS_MIRI_F770W_MJD\\d+_GRID9_OS4",
+  # MJD-tagged ePSF grids; psf.size in arcsec (null = full native stamp);
+  # psf.blur_fwhm "default" = shared DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC[filter_lo]
   "filter_lo": "f770w",
-  "psf_size": 4.0,
-  "psf_blur_fwhm": "default",
+  "psf": {
+    "dir": "../data/PSF",
+    "pattern_hi": "UDS_NRC.._F444W_MJD\\d+_GRID25_OS4",
+    "pattern_lo": "UDS_MIRI_F770W_MJD\\d+_GRID9_OS4",
+    "size": 4.0,
+    "blur_fwhm": "default"
+  },
 
   # preprocessing: footprint cut + trial patch (set r_trial 0 for full run).
   # trial_center = deepest fully F770W-covered 0.5' patch of the v3.0 mosaic
@@ -55,6 +56,6 @@
   "bg_filter_sigma": 64.0,
 
   # FitConfig overrides
-  "fit": {"fit_astrometry_joint": true, "scene_minimum_bright": 5, "aperture_diam": 0.5},
+  "fit": {"fit_astrometry_joint": true, "scene_minimum_anchors": 5, "aperture_diam": 0.5},
   "scene_plots": true
 }

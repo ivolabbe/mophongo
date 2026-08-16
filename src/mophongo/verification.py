@@ -1097,8 +1097,8 @@ def run_pipeline_extension_scenario(
         reg_flux=0.0,
         fit_astrometry_niter=int(fit_astrometry_niter),
         fit_astrometry_joint=True,
-        snr_thresh_astrom=0.0,
-        scene_minimum_bright=10,
+        astrom_minimum_snr=0.0,
+        scene_minimum_anchors=10,
         aperture_diam=0.5,
         template_dilate_segmap=int(template_dilate_segmap),
     )
@@ -1695,7 +1695,7 @@ def save_scene_diagnostics(
             {
                 "id": int(scene.id),
                 "n_templates": int(len(scene.templates)),
-                "n_bright": int(np.sum(scene.is_bright)),
+                "n_anchor": int(np.sum(scene.is_bright)),
                 "bbox_y0": int(scene.bbox[0]),
                 "bbox_y1": int(scene.bbox[1]),
                 "bbox_x0": int(scene.bbox[2]),
@@ -1708,7 +1708,7 @@ def save_scene_diagnostics(
             }
         )
     table = Table(rows=rows)
-    table.sort(["n_bright", "n_templates", "id"], reverse=True)
+    table.sort(["n_anchor", "n_templates", "id"], reverse=True)
     table.write(out_dir / "scene_catalog.csv", overwrite=True)
 
     selected = scenes

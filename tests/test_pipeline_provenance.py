@@ -166,7 +166,7 @@ def test_psf_size_larger_than_grid_fov_warns(caplog):
     obj.run_config = RunConfig(
         name="x", out_dir="x", sci_hi="a.fits", segmap="s.fits",
         catalog="c.fits", sci_lo="lo.fits", wht_lo="w.fits",
-        csv_hi="h.csv", csv_lo="l.csv", psf_size=4.0,
+        csv_hi="h.csv", csv_lo="l.csv", psf={"size": 4.0},
     )
     meta = {"UDS_MIRI_F770W_MJD59790_FOV11_GRID9_OS4": {"fov": 11.2},
             "UDS_MIRI_F770W_MJD59949_FOV3_GRID9_OS4": {"fov": 3.1},
@@ -178,12 +178,12 @@ def test_psf_size_larger_than_grid_fov_warns(caplog):
     assert "exceeds the field of view of 1 of 3" in caplog.text
     assert "FOV=3.1" in caplog.text
 
-    # every grid wide enough, and an unset psf_size, say nothing
+    # every grid wide enough, and an unset psf.size, say nothing
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="mophongo.pipeline"):
-        obj.run_config.psf_size = 2.0
+        obj.run_config.psf.size = 2.0
         obj._check_psf_size_fits_grids(dpsf, "lo")
-        obj.run_config.psf_size = None
+        obj.run_config.psf.size = None
         obj._check_psf_size_fits_grids(dpsf, "lo")
     assert caplog.text == ""
 
@@ -196,11 +196,11 @@ def test_repair_halo_pattern_derivation():
         name="x", out_dir="x", sci_hi="a.fits", segmap="s.fits",
         catalog="c.fits", sci_lo="lo.fits", wht_lo="w.fits",
         csv_hi="h.csv", csv_lo="l.csv",
-        pattern_hi=r"UDS_NRC.._F444W_MJD\d+_GRID25_OS4",
+        psf={"pattern_hi": r"UDS_NRC.._F444W_MJD\d+_GRID25_OS4"},
     )
     assert obj._repair_halo_pattern() == \
         r"UDS_NRC.._F444W_MJD\d+_FOV30_GRID1_OS4"
-    obj.run_config.pattern_hi = "garbage"
+    obj.run_config.psf.pattern_hi = "garbage"
     assert obj._repair_halo_pattern() == ""
 
 
@@ -412,8 +412,8 @@ def test_psf_factory_parallel_defaults_and_job_uniqueness(tmp_path, monkeypatch)
 
 
 def test_psf_workers_and_provenance_reach_the_factory(tmp_path, monkeypatch):
-    """``RunConfig.psf_workers``/``psf_provenance`` are wired, not decorative."""
-    from mophongo.pipeline import RunConfig
+    """``PsfConfig.workers``/``PsfConfig.provenance`` are wired, not decorative."""
+    from mophongo.pipeline import PsfConfig
 
-    assert RunConfig.psf_workers == 1
-    assert RunConfig.psf_provenance == "warn"
+    assert PsfConfig.workers == 1
+    assert PsfConfig.provenance == "warn"

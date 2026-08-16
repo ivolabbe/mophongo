@@ -205,6 +205,7 @@ stamps:
 
 ```bash
 $P campaign.py --dry-run                        # the plan
+$P campaign.py --check-versions --dry-run       # ... and what arc moved on to
 $P campaign.py                                  # trial patches, every config
 $P campaign.py --fields uds --bands f770w       # one band of one field
 $P campaign.py --r-trial 0 --note "n3.0 UDS"    # the full-field release
@@ -214,7 +215,10 @@ $P campaign.py --r-trial 0 --note "n3.0 UDS"    # the full-field release
 One command rewrites all 17 configs, uploads them, builds the environment, and
 submits the work in the same three phases `../canfar/campaign.py` uses — `psf`,
 `repair`, `run` — with the same step names and flags, so a campaign reads the
-same way on either platform.
+same way on either platform. Each even accepts the other's name for the config
+rewrite, so `--from arcify` works here and `--from ozify` works there.
+`--check-versions` reports configs pinned to an older release than arc now
+holds, then carries on with the pinned ones.
 
 Only `psf` blocks. It cannot be a SLURM job: the build resolves each exposure's
 wavefront by querying MAST, and compute nodes have no route to it, so it is a

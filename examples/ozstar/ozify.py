@@ -25,6 +25,7 @@ Usage::
 
     python ozify.py ../minerva/uds_f770w.json [more configs ...]
     python ozify.py ../minerva/uds_f770w.json --r-trial 1.5 --suffix _trial
+    python ozify.py ../minerva/*.json --check-versions   # scan, rewrite nothing
 
 Needs a CADC proxy certificate locally (only to *list* arc; the copying itself
 happens on OzStar with the certificate pushed by ``submit.py cert``).
@@ -48,7 +49,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.append(str(HERE.parent / "canfar"))
 
 from arcify import (  # noqa: E402
-    PATH_KEYS, _repair_cache_name, arc_index, resolve, roots_for,
+    PATH_KEYS, _repair_cache_name, arc_index, check_release_versions, resolve,
+    roots_for,
 )
 
 import ozroot  # noqa: E402
@@ -131,7 +133,7 @@ def ozify(cfg_path: Path, index: dict[str, str], out_dir: Path,
     # data/ and PSF/ live above the run directory: they are stable across
     # catalog versions, so a new run re-fits the same mosaics and reuses the
     # same grids rather than re-staging 64 GB and rebuilding 400 grids.
-    cfg["psf_dir"] = ozroot.psf_dir()
+    cfg.setdefault("psf", {})["dir"] = ozroot.psf_dir()
     cfg["out_dir"] = ozroot.out_dir(name)
     # Per-field saturation-repair cache, one level above out_dir. The repair
     # depends only on detection-side inputs, so a field's bands share it: band
@@ -161,7 +163,30 @@ def main() -> None:
                     help="override the trial-patch radius in arcmin (0 = full field)")
     ap.add_argument("--suffix", default="",
                     help="append to the run name, e.g. _trial, to keep outputs separate")
+    ap.add_argument("--check-versions", action="store_true",
+                    help="report configs pinned to an older release than arc "
+                         "now holds, and rewrite nothing")
     args = ap.parse_args()
+
+    # Reading arc is a laptop operation and needs only the certificate; the
+    # datamover partition exists to *copy* the files to /fred, not to see them.
+    # So this is the same check as `arcify.py --check-versions`, answered the
+    # same way, and it costs the cluster nothing.
+    if args.check_versions:
+        behind = check_release_versions(args.configs)
+        if not behind:
+            log.info("every config is pinned to the newest release on arc")
+            return
+        log.warning("%d config/version pair(s) are behind arc:", len(behind))
+        for name, kind, pinned, newest in behind:
+            log.warning("  %-14s %-8s %s -> %s", name, kind, pinned, newest)
+        log.warning("Nothing was rewritten. Moving to a new release changes the "
+                    "photometry, so it belongs in a new run: bump $OZSTAR_RUN, "
+                    "point the source configs at the new version, re-run ozify, "
+                    "and re-stage - /fred holds a copy of each input, so a new "
+                    "release is new files rather than an in-place update.")
+        return
+
     check_suffix(args.suffix)
 
     cert = Path.home() / ".ssl/cadcproxy.pem"

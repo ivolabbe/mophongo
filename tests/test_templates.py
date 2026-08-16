@@ -125,3 +125,83 @@ def test_pruned_templates_carry_the_outside_weight_flag(caplog):
     dropped = [t for t in kept_before if int(t.id) == 2][0]
     assert dropped.flag & Template.FLAG_OUTSIDE_WEIGHT
     assert not kept[0].flag & Template.FLAG_OUTSIDE_WEIGHT
+
+
+def test_prune_outside_weight_is_subset_invariant():
+    """A template's verdict must not depend on the company it keeps.
+
+    The threshold used to be ``rtol * median(wnorm)`` over the set being
+    pruned, so pruning a subset applied a different cut than pruning the whole
+    field. Re-solving one scene of a COSMOS F770W run dropped 76 of its 260
+    templates for that reason alone: the scene's members are brighter than the
+    field median, the threshold rose with them, and the faint edge members went
+    with it. Anything that re-extracts a subset -- ``Pipeline.refit_scene``
+    above all -- was silently working on a different source set.
+    """
+    import numpy as np
+
+    from mophongo.templates import Template, Templates
+
+    ny = nx = 320
+    half = 12
+
+    def _tmpl(xc, yc, sigma, label, scale):
+        n = 2 * half + 1
+        x0, y0 = int(round(xc)) - half, int(round(yc)) - half
+        yy, xx = np.mgrid[y0 : y0 + n, x0 : x0 + n]
+        g = np.exp(-0.5 * (((xx - xc) / sigma) ** 2 + ((yy - yc) / sigma) ** 2))
+        g = scale * g / g.sum()
+        return Template.from_stamp(g, (x0, y0), (xc, yc), (ny, nx), label=label)
+
+    weight = np.ones((ny, nx))
+
+    def _at(i, scale):
+        return _tmpl(40.0 + 9 * (i % 30), 40.0 + 9 * (i // 30), 2.0, i + 1, scale)
+
+    bright = [_at(i, 1.0) for i in range(3)]        # the scene's bright members
+    faint = [_at(100 + i, 3e-6) for i in range(3)]  # its faint edge members
+    rest = [_at(200 + i, 1e-7) for i in range(20)]  # the rest of the field
+
+    def survivors(templates):
+        ts = Templates()
+        ts.original_shape = (ny, nx)
+        ts._templates = list(templates)
+        return {int(t.id) for t in ts.prune_outside_weight(weight)}
+
+    full = survivors(bright + faint + rest)
+    subset = survivors(bright + faint)
+
+    assert {int(t.id) for t in faint} <= full
+    assert {int(t.id) for t in faint} <= subset
+    # the verdict on the shared templates is identical either way
+    assert full & {int(t.id) for t in bright + faint} == subset
+
+
+def test_prune_outside_weight_drops_templates_off_the_weight_map():
+    """The documented behaviour still holds: no usable pixels, no template."""
+    import numpy as np
+
+    from mophongo.templates import Template, Templates
+
+    ny = nx = 200
+    half = 12
+    weight = np.ones((ny, nx))
+    weight[:, 120:] = 0.0
+
+    def _tmpl(xc, label):
+        n = 2 * half + 1
+        x0, y0 = int(round(xc)) - half, 100 - half
+        yy, xx = np.mgrid[y0 : y0 + n, x0 : x0 + n]
+        g = np.exp(-0.5 * (((xx - xc) / 2.0) ** 2 + ((yy - 100.0) / 2.0) ** 2))
+        return Template.from_stamp(g / g.sum(), (x0, y0), (xc, 100.0), (ny, nx),
+                                   label=label)
+
+    inside, outside = _tmpl(60.0, 1), _tmpl(160.0, 2)
+    ts = Templates()
+    ts.original_shape = (ny, nx)
+    ts._templates = [inside, outside]
+
+    kept = ts.prune_outside_weight(weight)
+
+    assert [int(t.id) for t in kept] == [1]
+    assert outside.flag & Template.FLAG_OUTSIDE_WEIGHT

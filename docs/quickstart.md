@@ -11,17 +11,33 @@ mosaics — and passing in-memory arrays directly to
 
 ## Installation
 
-Install the dependencies with [Poetry](https://python-poetry.org/):
+Mophongo is not on PyPI; clone it from GitHub and install from the checkout.
+It needs Python >= 3.11, < 3.13.
 
 ```bash
-poetry install
+git clone https://github.com/ivolabbe/mophongo.git
+cd mophongo
+poetry install          # resolves and installs into .venv (recommended)
 ```
 
-or install in editable mode with pip:
+or, in an environment you manage yourself:
 
 ```bash
-pip install -e .
+pip install -e .        # editable install from the checkout
 ```
+
+Poetry keeps the environment in `.venv/` inside the checkout and does not put
+it on your `PATH`. Either prefix commands with `poetry run`, or activate it:
+
+```bash
+poetry run mophongo --help              # one-off
+eval $(poetry env activate)             # activate for the session (Poetry >= 2.0)
+source .venv/bin/activate               # same thing, by hand
+```
+
+The `mophongo` console script and `python -m mophongo.pipeline` both become
+available once the environment is active ({doc}`diagnostics` covers the
+subcommands).
 
 ## Choosing an entry point
 
@@ -107,19 +123,20 @@ A minimal config:
   "wht_hi": "wht_hi.fits",
   "csv_hi": "frames_hi.csv",
   "csv_lo": "frames_lo.csv",
-  "pattern_hi": "STDPSF_NRCA._F444W.*fits",
-  "pattern_lo": "STDPSF_MIRI_F770W.*fits",
-  "filter_lo": "f770w"
+  "filter_lo": "f770w",
+  "psf": {
+    "pattern_hi": "STDPSF_NRCA._F444W.*fits",
+    "pattern_lo": "STDPSF_MIRI_F770W.*fits"
+  }
 }
 ```
 
 Lines starting with `#` are treated as comments and stripped, so configs can
 be annotated. Unknown keys raise an error, so typos fail loudly.
 
-One input stays implicit above: every run needs a detection-band weight map,
-the source of the calibrated detection noise. `wht_hi` names it; left unset,
-the run looks for the standard `_sci.fits` -> `_wht.fits` sibling of `sci_hi`
-and raises when there is none.
+One input stays implicit above: every run needs a detection-band weight map.
+`wht_hi` names it; left unset, the run looks for the standard
+`_sci.fits` -> `_wht.fits` sibling of `sci_hi`.
 
 A realistic config for a JWST field — 40 mas F444W detection mosaic, 80 mas
 MIRI F770W band, MJD-tagged ePSF grids, a trial patch for testing before the
@@ -141,18 +158,19 @@ full-field run — looks like:
   "wht_lo": "data/mosaic-80mas-f770w_drz_wht.fits",
   "csv_lo": "data/mosaic-80mas-f770w_wcs.csv",
 
-  # MJD-tagged ePSF grids; psf_size in arcsec
-  "psf_dir": "data/PSF",
-  "pattern_hi": "NRC.._F444W_MJD\\d+_GRID25_OS4",
-  "pattern_lo": "MIRI_F770W_MJD\\d+_GRID9_OS4",
+  # MJD-tagged ePSF grids; psf.size in arcsec
   "filter_lo": "f770w",
-  "psf_size": 4.0,
-  "psf_blur_fwhm": "default",
+  "psf": {
+    "dir": "data/PSF",
+    "pattern_hi": "NRC.._F444W_MJD\\d+_GRID25_OS4",
+    "pattern_lo": "MIRI_F770W_MJD\\d+_GRID9_OS4",
+    "size": 4.0,
+    "blur_fwhm": "default"
+  },
 
-  # preprocessing: footprint cut + trial patch (r_trial 0 = full mosaic)
+  # preprocessing: footprint cut + trial patch ("trial": null = full mosaic)
   "footprint_filter": true,
-  "r_trial": 0.6,
-  "trial_center": [34.35, -5.27],
+  "trial": {"center": [34.35, -5.27], "radius": 0.6},
   "bg_filter_sigma": 64.0,
 
   # FitConfig overrides
@@ -160,108 +178,26 @@ full-field run — looks like:
 }
 ```
 
-Start with a small `r_trial` patch to validate PSFs, kernels, and residuals,
-then set `r_trial` to `0` for the full field: the cached PSF and kernel maps
+Start with a small `trial` patch to validate PSFs, kernels, and residuals,
+then set `trial` to `null` for the full field: the cached PSF and kernel maps
 in `out_dir` are reused.
 
-### `RunConfig` fields
+### The config fields
 
 {class}`mophongo.pipeline.RunConfig` describes one filter fit (one
-high-resolution plus one low-resolution band). Fields without a default are
-required.
+high-resolution plus one low-resolution band). The required fields are the
+ones in the minimal config above: the run `name` and `out_dir`, the
+high-resolution side (`sci_hi`, `segmap`, `catalog`, `csv_hi`), and the band
+to fit (`sci_lo`, `wht_lo`, `csv_lo`). Two nested blocks hold the settings
+that come in groups: `psf` selects the ePSF grids and the stamp size
+({class}`mophongo.pipeline.PsfConfig`), and `fit` forwards keywords to
+{class}`mophongo.fit.FitConfig`, including the template build scheme
+(`extend_mode`). The remaining top-level fields control preprocessing
+(`bg_filter_sigma`, `footprint_filter`, `trial`) and outputs (`scene_plots`,
+`save_stamps`).
 
-`name` (`str`)
-: Run label; prefixes every output file.
-
-`out_dir` (`str`)
-: Output directory for products and PSF/kernel caches (never inputs).
-
-`sci_hi` (`str`)
-: High-resolution template image (FITS).
-
-`segmap` (`str`)
-: Segmentation map on the high-resolution grid; labels equal catalog ids.
-
-`catalog` (`str`)
-: Source catalog with `id`, `x`, `y` (high-resolution pixels), `ra`, `dec`.
-
-`sci_lo` (`str`)
-: Low-resolution science mosaic to fit.
-
-`wht_lo` (`str`)
-: Low-resolution weight map (inverse variance).
-
-`csv_hi`, `csv_lo` (`str`)
-: Per-frame WCS CSV files of the high- and low-resolution mosaics, used to
-  drizzle position-dependent PSFs. The "Per-frame WCS CSVs" section of
-  {doc}`pipeline` describes what they contain and how to generate them with
-  {func}`mophongo.utils.reconstruct_wcs`.
-
-`wht_hi` (`str | None`, default `None`)
-: Detection-band weight map, the counterpart of `wht_lo`. `None` derives it
-  from `sci_hi` by the standard `_sci.fits` -> `_wht.fits` substitution; a
-  run with neither raises. Its pixels are read only by the build schemes
-  that weight data against a PSF model by signal-to-noise (`"psf_wings"`,
-  `"wren"`, `"classic"`), because a full-field high-resolution weight map
-  costs as much memory as the mosaic itself.
-
-`psf_dir` (`str`, default `"data/PSF"`)
-: Directory holding STDPSF grid files.
-
-`pattern_hi`, `pattern_lo` (`str`, default `""`)
-: STDPSF filename regexes selecting the PSF grids for each band.
-
-`filter_lo` (`str`, default `""`)
-: Low-resolution filter name (e.g. `"f770w"`), used for the blur lookup.
-
-`psf_size` (`float | None`, default `4.0`)
-: PSF stamp size in arcsec; `None` keeps the full native ePSF stamp.
-
-`psf_autobuild` (`bool`, default `True`)
-: Generate missing PSF grids with
-  {class}`mophongo.psf_factory.PSFFactory` (see {doc}`psf`).
-
-`psf_fov_arcsec` (`float | None`, default `None`)
-: PSFFactory field of view; `None` uses the backend default.
-
-`psf_blur_fwhm` (`float | str | None`, default `"default"`)
-: Extra Gaussian broadening of the low-resolution model PSF (FWHM,
-  arcsec). `"default"` looks up a per-filter value from
-  `mophongo.mock_mosaic.DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC`; a number uses
-  that value; `None` applies no broadening.
-
-`expect_frames` (`list[int] | None`, default `None`)
-: Optional `[n_frames_hi, n_frames_lo]` sanity assertion on the WCS CSVs.
-
-`bg_filter_sigma` (`float`, default `64.0`)
-: Background filter scale for the background/inverse-variance
-  preprocessing step (see {doc}`preprocessing`).
-
-`footprint_filter` (`bool`, default `True`)
-: Keep only sources where the low-resolution weight is positive.
-
-`r_trial` (`float`, default `0.0`)
-: Trial-patch radius in arcmin; `0` fits the full mosaic.
-
-`trial_center` (`list[float] | None`, default `None`)
-: `[ra, dec]` in degrees of the trial patch center.
-
-`fit` (`dict`, default `{}`)
-: Keyword arguments forwarded to {class}`mophongo.fit.FitConfig`
-  (see {doc}`fitting`). The template build scheme is selected here, with
-  `"extend_mode"`; there is no separate config field for it.
-
-`scene_plots` (`bool`, default `True`)
-: Write per-scene diagnostic PNGs during `write_outputs()`.
-
-`save_stamps` (`bool`, default `True`)
-: Write the per-source stamps FITS file (native-size high/low templates
-  plus each source's PSF region key; the PSF stamps themselves are not
-  duplicated here, they stay in the cached `<name>_psf_*.geojson` maps),
-  which later allows restoring a finished run with `Pipeline.load_fit()`.
-
-The full description of the config-driven flow, the step methods, and the
-caching behavior is in {doc}`pipeline`.
+Every field, its default, and the full description of the config-driven flow
+are in {doc}`pipeline`; the `FitConfig` fields are in {doc}`fitting`.
 
 ## An array-level run
 
@@ -331,151 +267,22 @@ Two conventions to keep in mind:
   fitted amplitude appears as `flux_<i>` and the throughput-corrected total
   as `flux_<i>_total`. See {doc}`psf` for the full convention.
 
-If a fitted band has a coarser pixel scale than the detection image, pass
-per-image WCS objects via `wcs`: the pipeline derives an integer bin factor
-from the WCS pair, block-replicates the low-resolution science pixels with
-flux conservation onto the reference grid, and copies the inverse variance
-to the subpixels multiplied by `factor**2` so the native chi-square is
-preserved.
+If a fitted band is coarser than the detection image, pass per-image WCS
+objects via `wcs`: the pipeline then derives the integer bin factor between
+the two grids and fits on the reference grid ({doc}`pipeline`).
 
-### `pipeline.run()` parameters
-
-{func}`mophongo.pipeline.run` is a thin wrapper that constructs a
-{class}`mophongo.pipeline.Pipeline` (same parameters) and calls
-{meth}`mophongo.pipeline.Pipeline.run`. All parameters after the first two
-are keyword-only.
-
-`images` (`Sequence[np.ndarray]`, required)
-: Science images. `images[0]` is the high-resolution detection image from
-  which templates are extracted; `images[1:]` are fitted. To also fit the
-  detection band, include it twice.
-
-`segmap` (`np.ndarray`, required)
-: Integer segmentation map on the `images[0]` grid. Labels correspond to
-  catalog `id` values; 0 is background.
-
-`catalog` (`astropy.table.Table | None`, default `None`)
-: Source catalog with columns `id`, `x`, `y`. Optional deblending columns
-  (`is_deblended`, `deblend_parent_label`, `deblend_nchildren`) are carried
-  through when present. As of this writing, passing `None` raises
-  `NotImplementedError` — catalog generation from the segmentation map is
-  not implemented, so build the catalog first (see {doc}`catalog`).
-
-`psfs` (`Sequence[np.ndarray] | None`, default `None`)
-: One PSF stamp per image. `psfs[0]` supplies the shape the template build
-  scheme extends with, and every scheme but `"none"` requires it, so with
-  the default scheme a run without it raises; the others provide per-band
-  PSF metadata and, when `psf_throughputs` is not given, the fallback
-  throughput from the stamp sum. Pass unit-sum shapes for fitting.
-
-`weights` (`Sequence[np.ndarray] | None`, default `None`)
-: Inverse-variance maps, one per image. `weights[0]` is the detection-band
-  map: the `"psf_wings"`, `"wren"` and `"classic"` build schemes measure
-  each segment's signal-to-noise from it, and fall back to one scalar noise
-  estimate for the whole detection image when it is `None`.
-
-`wht_images` (`Sequence[np.ndarray] | None`, default `None`)
-: Backward-compatible alias for `weights`; used only when `weights` is
-  `None`.
-
-`kernels` (`Sequence[np.ndarray | PSFRegionMap] | None`, default `None`)
-: One convolution kernel per image, mapping the detection-band PSF to that
-  band's PSF. Use `None` for entries needing no convolution (the detection
-  image itself). A {class}`mophongo.psf_map.PSFRegionMap` entry applies a
-  spatially varying kernel (see {doc}`psf_maps`).
-
-`psf_throughputs` (`Sequence[float] | None`, default `None`)
-: Finite-support PSF stamp sums, one per image. When given, these override
-  the sums of the `psfs` stamps as the filter-level throughput used for the
-  `flux_<i>_total` columns. Use `1.0` for a band fitted with a native-sum
-  PSF already summing to one.
-
-`wcs` (`Sequence[astropy.wcs.WCS] | None`, default `None`)
-: Per-image WCS. Enables the multi-resolution upsampling path (integer bin
-  factors derived from the WCS pair), RA/Dec in diagnostics, and aperture
-  radii specified in arcseconds.
-
-`window` (default `None`)
-: Accepted and stored on the pipeline for backward compatibility; as of
-  this writing it is not consumed by the fitting path.
-
-`extend_mode` (`str | None`, default `None`)
-: Constructor override for the template build scheme. When given it names a
-  scheme (`"none"`, `"psf_wings"`, `"psf_convolution"`, `"psf_model"`,
-  `"wren"`, `"classic"`) and overrides the config field; `None` leaves the
-  choice to `FitConfig.extend_mode`, which itself defaults to
-  `"psf_wings"`. `None` is therefore not "no extension" — that is
-  `"none"`, which leaves templates truncated at the segment boundary and
-  biases total fluxes low, badly so for faint sources. Prefer setting
-  `extend_mode` on the `FitConfig`; both entry points then read the same
-  field. `extend_templates` is a deprecated alias for this argument
-  (logs a warning), and `"psf"` a deprecated alias for
-  `"psf_convolution"`. The schemes are described in {doc}`pipeline` and
-  {doc}`templates`.
-
-`templates` (`Templates | Sequence[Template] | None`, default `None`)
-: Prebuilt {class}`mophongo.templates.Templates` to use instead of
-  extracting from `images[0]` and `segmap` (see {doc}`templates`).
-
-`config` ({class}`mophongo.fit.FitConfig` `| None`, default `None`)
-: Fitting configuration (regularization, astrometric iterations, scene
-  construction, aperture photometry). Defaults to `FitConfig()`; every
-  field is documented in {doc}`fitting`.
+Every argument of {func}`mophongo.pipeline.run` (the `Pipeline` constructor
+takes the same ones) is documented in {doc}`pipeline`, the kernel arguments in
+{doc}`psf`, and the `FitConfig` fields in {doc}`fitting`.
 
 ### Output columns
 
-For each fitted image `i` (counting from 1, in input order) the returned
-table gains `flux_i`, `err_i`, `err_pred_i` (raw fitted amplitude, solver
-error, and weight-map-predicted error), `throughput_i`, and the
-throughput-corrected totals `flux_i_total`, `err_i_total`,
-`err_pred_i_total`. When per-source encircled energies of the
-low-resolution PSF are available they are used in place of the filter-level
-throughput. A `scene_i` column records which scene each source was fitted
-in, `-1` for sources that had no template. Aperture and diagnostic columns
+For each fitted image `i` (counting from 1, in input order) the returned table
+gains `flux_i` (the fitted amplitude), `err_i` and `err_pred_i` (solver and
+weight-map errors), `throughput_i`, the total-flux versions `flux_i_total`,
+`err_i_total`, `err_pred_i_total`, and `scene_i`, the scene the source was
+fitted in (`-1` for sources with no template). Aperture and diagnostic columns
 are described in {doc}`outputs`.
-
-### `matching_kernel()` parameters
-
-{func}`mophongo.utils.matching_kernel` computes a kernel `k` such that
-`psf_hi * k ≈ psf_lo` under convolution. It preserves the input sums: if
-`sum(psf_lo) / sum(psf_hi)` is not one, that ratio propagates into
-`sum(k)`, which is why pipeline-facing calls should pass unit-sum shapes.
-PSFs of different shapes are zero-padded to a common grid.
-
-`psf_hi_in`, `psf_lo_in` (`np.ndarray`, required)
-: High- and low-resolution PSF arrays.
-
-`window` (default `None`)
-: Fourier-domain window for `method="window"`; defaults to
-  `photutils.psf.matching.SplitCosineBellWindow(alpha=0.4, beta=0.1)`.
-
-`recenter` (`bool`, default `False`)
-: Shift the kernel to its measured centroid with bicubic interpolation.
-
-`pixel_ratio` (`float`, default `1.0`)
-: Pixel-scale ratio between the two PSF grids; a non-unity value resamples
-  one PSF onto the other's grid with flux-conserving cubic interpolation
-  before the kernel is computed.
-
-`method` (`str`, default `"window"`)
-: Kernel algorithm: `"window"` (Fourier ratio with the window function),
-  `"tikhonov"`, `"wiener"`, or `"forward"` (ForWaRD: a regularized Fourier
-  inverse followed by wavelet denoising).
-
-`reg` (`float`, default `1e-3`)
-: Regularization strength for the `tikhonov`, `wiener`, and `forward`
-  methods.
-
-`wavelet` (`str`, default `"db4"`), `levels` (`int`, default `3`),
-`threshold_factor` (`float`, default `3.0`), `noise_sigma`
-(`float | None`, default `None`), `forward_wavelet_wiener` (`bool`,
-default `True`)
-: Wavelet-denoising controls for `method="forward"`.
-
-`signal_psd` (`np.ndarray | None`, default `None`)
-: Optional signal power spectrum for `method="wiener"`.
-
-See {doc}`psf` for kernel diagnostics and regularization scans.
 
 ## Where to go next
 

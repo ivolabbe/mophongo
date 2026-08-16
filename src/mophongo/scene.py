@@ -9,7 +9,7 @@ import scipy.sparse as sp
 from .templates import Template, Templates
 from .fit import FitConfig
 from .scene_fitter import SceneFitter
-from .astrometry import cheb_basis, AstroCorrect
+from .astrometry import cheb_basis, n_terms, AstroCorrect
 from scipy.sparse.csgraph import connected_components
 from .templates import _slices_from_bbox
 
@@ -550,6 +550,264 @@ from .templates import Template
 from .astrometry import cheb_basis
 
 
+def _scene_residual(
+    templates: Sequence[Template],
+    image: np.ndarray,
+    flux: np.ndarray,
+) -> tuple[np.ndarray, int, int]:
+    """Residual of ``image`` after ``flux``-scaled templates, over their union.
+
+    Parameters
+    ----------
+    templates
+        Scene members, in scene-local order.
+    image
+        Full-frame band image.
+    flux
+        Per-template amplitudes aligned to ``templates``.
+
+    Returns
+    -------
+    tuple
+        ``(resid, y0, x0)``: the residual on the union footprint of the
+        templates, and the origin of that footprint in image coordinates. The
+        union is taken over ``slices_original``, the same convention
+        :func:`assemble_scene_system_AB` uses for its derivative buffers.
+    """
+    y0 = min(t.slices_original[0].start for t in templates)
+    y1 = max(t.slices_original[0].stop for t in templates)
+    x0 = min(t.slices_original[1].start for t in templates)
+    x1 = max(t.slices_original[1].stop for t in templates)
+
+    resid = np.array(image[y0:y1, x0:x1], dtype=float, copy=True)
+    for t, f in zip(templates, flux):
+        so = t.slices_original
+        sl = (
+            slice(so[0].start - y0, so[0].stop - y0),
+            slice(so[1].start - x0, so[1].stop - x0),
+        )
+        resid[sl] -= float(f) * t.data[t.slices_cutout]
+    return resid, y0, x0
+
+
+def measure_anchor_shifts(
+    templates: Sequence[Template],
+    resid: np.ndarray,
+    weights: np.ndarray,
+    origin: tuple[int, int],
+    bright_idx: Sequence[int],
+    alpha: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-anchor implied shift, information and misfit, from one residual.
+
+    Each anchor is given a private displacement and flux correction and fitted
+    on its own footprint against ``resid``, by least squares on the three
+    columns :math:`(T_i, -\\partial_x T_i, -\\partial_y T_i)`. That is a
+    3x3 normal system per anchor, and it yields everything the robust
+    weighting needs:
+
+    * ``eps`` -- the displacement that anchor's residual implies,
+    * ``info`` -- its Fisher information, marginalized over the anchor's own
+      flux (the 2x2 Schur complement of the flux row), so a source whose
+      template is nearly degenerate with its own gradient is correctly
+      reported as uninformative,
+    * ``chi2_red`` -- what is *left* of the residual once that displacement and
+      flux correction are removed. This is the discriminator between a source
+      that has moved and one whose template is simply wrong: a pure
+      displacement lives entirely in the span of the two gradient columns, so
+      projecting them out leaves noise, while a colour gradient leaves
+      structure behind.
+
+    The residual to pass is the **flux-only** one. The shift block's effective
+    right-hand side after eliminating the fluxes is exactly
+    :math:`B^\\top W (d - A\\hat\\alpha_0)`, so measuring against that residual
+    is what the joint solve itself responds to, not an approximation of it.
+
+    The local system is **conditional on the anchor's neighbourhood**, which
+    is what makes the estimate usable in a blend. It holds a flux column for
+    every template overlapping the anchor, and a free displacement for every
+    overlapping template that is itself an anchor, fitted over their union
+    footprint so each of those parameters is constrained by all of its own
+    pixels. Neither addition is a refinement; each is the difference between a
+    right and a wrong answer, and both were measured:
+
+    * **A neighbour's free flux.** The residual arrives with the fluxes already
+      fitted, and a neighbour to one side absorbs part of a dipole by adjusting
+      its brightness. Projecting out only the anchor's own flux left that
+      absorption in place: a bright anchor with a faint blended neighbour read
+      0.095 px against a true 0.20 -- half its shift, in the blend direction,
+      with no misfit to show for it -- while its isolated twin read 0.20
+      exactly.
+    * **A neighbouring anchor's free shift.** Two overlapping sources that have
+      both moved leave overlapping dipoles. Holding the neighbour's shift at
+      zero split them badly: a pair at 6 px read 0.089 and 0.039 px against a
+      true 0.20, both low, both agreeing with each other, and both carrying
+      more information than the honest anchors they disagreed with. With the
+      neighbour's displacement free, 0.171 and 0.151.
+
+    The numerator ``<G_i, w, r0>`` is right in every version; it is the
+    information divided by that has to be marginalized over everything local
+    and free.
+
+    Two approximations remain, both bounded by construction. Neighbours of
+    neighbours are not included, and the union footprint stands in for the
+    global flux constraint. What survives of them is smaller than the anchor's
+    own reported uncertainty, which is the property that matters -- a residual
+    bias inside the error bar cannot make a blend look like a liar. A
+    non-anchor that has itself moved is not modelled anywhere, by design, so
+    its dipole lands in ``chi2_red``: the anchor's stamp genuinely no longer
+    explains its own footprint.
+
+    Parameters
+    ----------
+    templates
+        Scene members, in scene-local order.
+    resid
+        Flux-only residual on the union footprint, from :func:`_scene_residual`.
+    weights
+        Full-frame inverse-variance weights.
+    origin
+        ``(y0, x0)`` of ``resid`` in image coordinates.
+    bright_idx
+        Scene-local indices of the anchors to measure. Other entries come back
+        as ``nan`` shift, zero information.
+    alpha
+        Per-template flux seed, aligned to ``templates``. It sets the amplitude
+        of the gradient columns, so it must be the same seed the blocks will be
+        built with, or the weights will not correspond to the information the
+        blocks carry.
+
+    Returns
+    -------
+    tuple
+        ``(eps, info, chi2_red)`` of shapes ``(n, 2)``, ``(n,)``, ``(n,)``.
+    """
+    n = len(templates)
+    y0, x0 = origin
+    eps = np.full((n, 2), np.nan, dtype=float)
+    info = np.zeros(n, dtype=float)
+    chi2_red = np.full(n, np.nan, dtype=float)
+
+    slices = [t.slices_original for t in templates]
+    anchors = {int(k) for k in bright_idx}
+    grads: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+
+    def _grad(j: int) -> tuple[np.ndarray, np.ndarray] | None:
+        if j not in grads:
+            a_j = templates[j].data.astype(float)
+            if a_j.shape[0] < 2 or a_j.shape[1] < 2:
+                return None
+            gy_j, gx_j = np.gradient(a_j)
+            sc_j = templates[j].slices_cutout
+            grads[j] = (-gx_j[sc_j], -gy_j[sc_j])
+        return grads[j]
+
+    for i in bright_idx:
+        i = int(i)
+        a = float(alpha[i])
+        if not np.isfinite(a) or a == 0.0:
+            continue
+        t = templates[i]
+        arr = t.data.astype(float)
+        if arr.shape[0] < 2 or arr.shape[1] < 2:
+            continue
+
+        # Every template overlapping this anchor joins the local fit, and the
+        # footprint is their union so each one's flux is constrained by all of
+        # its own pixels rather than only the part under the anchor.
+        si = slices[i]
+        nb = [
+            j
+            for j, sj in enumerate(slices)
+            if sj[0].start < si[0].stop
+            and si[0].start < sj[0].stop
+            and sj[1].start < si[1].stop
+            and si[1].start < sj[1].stop
+        ]
+        fy0 = min(slices[j][0].start for j in nb)
+        fy1 = max(slices[j][0].stop for j in nb)
+        fx0 = min(slices[j][1].start for j in nb)
+        fx1 = max(slices[j][1].stop for j in nb)
+
+        w = np.asarray(weights[fy0:fy1, fx0:fx1], dtype=float)
+        r = resid[fy0 - y0 : fy1 - y0, fx0 - x0 : fx1 - x0]
+        shape = (fy1 - fy0, fx1 - fx0)
+
+        def _place(j: int, values: np.ndarray) -> np.ndarray:
+            out = np.zeros(shape, dtype=float)
+            sj = slices[j]
+            out[
+                sj[0].start - fy0 : sj[0].stop - fy0,
+                sj[1].start - fx0 : sj[1].stop - fx0,
+            ] = values
+            return out
+
+        # Columns: a flux for every overlapping template, then a free
+        # displacement for every overlapping *anchor*, with this anchor's own
+        # pair last so its conditional block is the trailing 2x2.
+        cols = [_place(j, templates[j].data[templates[j].slices_cutout]) for j in nb]
+        others = [k for k in nb if k in anchors and k != i]
+        for k in others:
+            g = _grad(k)
+            if g is None:
+                continue
+            cols.append(_place(k, g[0]))
+            cols.append(_place(k, g[1]))
+        g_i = _grad(i)
+        if g_i is None:
+            continue
+        cols.append(_place(i, g_i[0]))
+        cols.append(_place(i, g_i[1]))
+
+        ncol = len(cols)
+        nrest = ncol - 2
+        M = np.empty((ncol, ncol), dtype=float)
+        s = np.empty(ncol, dtype=float)
+        for p_ in range(ncol):
+            cw = cols[p_] * w
+            s[p_] = float(np.sum(cw * r))
+            for q_ in range(p_, ncol):
+                M[p_, q_] = M[q_, p_] = float(np.sum(cw * cols[q_]))
+
+        # A rank-deficient local system (flat template, all-zero weights, two
+        # anchors so blended their displacements are indistinguishable) carries
+        # no usable positional information; leave it at info = 0 for the caller
+        # to drop.
+        try:
+            theta = np.linalg.solve(M, s)
+            rest_inv = np.linalg.solve(M[:nrest, :nrest], M[:nrest, nrest:])
+        except np.linalg.LinAlgError:
+            continue
+        if not (np.all(np.isfinite(theta)) and np.all(np.isfinite(rest_inv))):
+            continue
+
+        schur = M[nrest:, nrest:] - M[nrest:, :nrest] @ rest_inv
+        iso = 0.5 * (schur[0, 0] + schur[1, 1])
+        if not (iso > 0):
+            continue
+
+        eps[i] = theta[nrest:] / a
+        info[i] = a**2 * iso
+
+        # Misfit is judged on the anchor's own stamp, not on the whole local
+        # footprint: the question is whether *this* template fits, and a
+        # neighbour's problems should not be charged to it.
+        model = np.zeros(shape, dtype=float)
+        for c, th in zip(cols, theta):
+            model += th * c
+        own = (
+            slice(slices[i][0].start - fy0, slices[i][0].stop - fy0),
+            slice(slices[i][1].start - fx0, slices[i][1].stop - fx0),
+        )
+        w_own = w[own]
+        dof = int(np.count_nonzero(w_own > 0)) - ncol
+        if dof > 0:
+            left = r[own] - model[own]
+            chi2_red[i] = float(np.sum(left * w_own * left)) / dof
+
+    return eps, info, chi2_red
+
+
 def assemble_scene_system_AB(
     templates: List[Template],
     image: np.ndarray,
@@ -560,6 +818,7 @@ def assemble_scene_system_AB(
     order: int = 1,
     include_y: bool = True,
     leverage_cap: float | None = None,
+    anchor_weights: np.ndarray | None = None,
 ) -> tuple[sp.csr_matrix, sp.csr_matrix, np.ndarray]:
     """
     Build the (A,B) coupling blocks and beta RHS for a *single scene*.
@@ -627,7 +886,23 @@ def assemble_scene_system_AB(
         Note what this does *not* do: it cannot tell which anchor is wrong,
         so it clips the brightest, which are often the best anchors, and it
         does nothing in a scene whose offender is the only bright member.
-        Cross-anchor robustness is the fix for that case (see TODO.md).
+        ``anchor_weights`` is the measured alternative.
+    anchor_weights
+        Per-template multiplier on the same leverage weight, or None. This is
+        where :func:`mophongo.astrom_robust.robust_anchor_weights` delivers its
+        verdict: an anchor that disagrees with the field its neighbours define,
+        or whose own stamp does not fit once it is allowed to move, arrives
+        here scaled down or at zero.
+
+        Entries at exactly zero drop the anchor from the derivative columns
+        altogether, which is both cheaper (it no longer enlarges the dense
+        buffers below) and cleaner. The two-power split above is exact for the
+        shift-only block, but the flux-marginalization term ``AB^T A^-1 AB``
+        ends up scaled as ``c_i c_j`` where the information it corrects scales
+        as ``sqrt(c_i c_j)``; one ``AB`` matrix cannot satisfy both. The
+        mismatch is worst at intermediate weights and vanishes identically at
+        ``c_i = 0``, where the anchor becomes exactly equivalent to one that
+        was never bright.
 
     Returns
     -------
@@ -643,9 +918,28 @@ def assemble_scene_system_AB(
     # One anchor is enough: it contributes two constraints (dx and dy), which
     # exactly determines the default order-0 basis. Higher orders are
     # underdetermined by a single anchor and lean on the shift-block ridge
-    # (FitConfig.reg_astrom, 1e-4 of the diagonal scale), which pulls the
+    # (FitConfig.astrom_reg, 1e-4 of the diagonal scale), which pulls the
     # unconstrained coefficients to zero rather than letting them run.
     bright_idx = [i for i, S in enumerate(basis_vals) if S is not None]
+
+    # A robustly rejected anchor is dropped here rather than carried at zero
+    # weight: it would otherwise still enlarge the dense derivative buffers
+    # below while contributing nothing to them.
+    aw = None
+    if anchor_weights is not None:
+        aw = np.clip(np.asarray(anchor_weights, dtype=float), 0.0, 1.0)
+        if aw.shape != (nA,):
+            raise ValueError(
+                f"anchor_weights must have shape ({nA},), got {aw.shape}"
+            )
+        n_before = len(bright_idx)
+        bright_idx = [i for i in bright_idx if aw[i] > 0]
+        if len(bright_idx) < n_before:
+            logger.debug(
+                "[scenes] %d of %d anchor(s) dropped by anchor_weights",
+                n_before - len(bright_idx), n_before,
+            )
+
     has_shift = len(bright_idx) >= 1
     if not has_shift:
         return sp.csr_matrix((nA, 0)), sp.csr_matrix((0, 0)), np.zeros(0, float)
@@ -709,6 +1003,13 @@ def assemble_scene_system_AB(
                         float(leverage_cap), int(over.sum()), len(bright_idx),
                         float(lev_w[over].min()),
                     )
+
+    # The measured weight composes with the quantile cap: the cap bounds
+    # leverage before any residual is seen, the measured weight acts on
+    # disagreement after. They fail in different places, so neither subsumes
+    # the other.
+    if aw is not None:
+        lev_w = lev_w * aw
 
     # Scene-wide derivative columns B_k = sum_i (-a_i S_ik) grad(T_i),
     # accumulated over the union footprint of the bright anchors. Faint
@@ -792,7 +1093,7 @@ def generate_scenes(
     *,
     coupling_thresh: float = 0.01,
     max_size: int | None = None,
-    snr_thresh_astrom: float = 7.0,
+    astrom_minimum_snr: float = 7.0,
     isolation_thresh: float = 0.0,
     minimum_bright: int | None = None,
     max_merge_radius: float = np.inf,
@@ -826,7 +1127,7 @@ def generate_scenes(
     max_size : int, optional
         Soft per-scene template cap (pipeline passes
         ``FitConfig.scene_max_size``, default 800).
-    snr_thresh_astrom : float
+    astrom_minimum_snr : float
         Bright-anchor cut on the SNR proxy ``b_i / sqrt(A_ii)``.
     isolation_thresh : float
         If positive, a template only counts as a bright anchor when its own
@@ -836,7 +1137,7 @@ def generate_scenes(
     minimum_bright : int, optional
         Minimum bright anchors per scene, forwarded to
         :func:`merge_small_scenes`. Pass an integer (the pipeline passes
-        ``FitConfig.scene_minimum_bright``): the ``None`` default is
+        ``FitConfig.scene_minimum_anchors``): the ``None`` default is
         forwarded unchanged and fails inside ``merge_small_scenes``.
     max_merge_radius : float
         The scene length scale in pixels (pipeline passes
@@ -916,7 +1217,7 @@ def generate_scenes(
     snr_proxy = np.divide(
         ATb, np.sqrt(np.maximum(d, 1e-12)), out=np.zeros_like(ATb, dtype=float), where=d > 0
     )
-    bright_mask = np.asarray(snr_proxy > float(snr_thresh_astrom), dtype=bool)
+    bright_mask = np.asarray(snr_proxy > float(astrom_minimum_snr), dtype=bool)
     if exclude_stars:
         bright_mask &= ~np.array([t.is_star for t in templates], dtype=bool)
     if isolation_thresh > 0:
@@ -1072,6 +1373,9 @@ class Scene:
     astrom_step: float | None = None
     astrom_niter: int = 0
     astrom_converged: bool | None = None
+    # Verdict of the last robust anchor pass (FitConfig.astrom_robust), an
+    # mophongo.astrom_robust.AnchorWeights; None when that pass never ran.
+    anchor_report: object | None = None
 
     def __post_init__(self) -> None:
         pass
@@ -1105,7 +1409,7 @@ class Scene:
         """Solve the scene and return ``(flux, err, shifts, info)``.
 
         Rebuilds ``A``/``b`` from the current band if needed, recomputes the
-        bright mask (SNR proxy above ``config.snr_thresh_astrom``, isolation
+        bright mask (SNR proxy above ``config.astrom_minimum_snr``, isolation
         above ``config.astrom_isolation_thresh``, optional star exclusion),
         then either solves flux-only (when ``config.fit_astrometry_joint``
         is false or ``fit_astrometry_niter <= 0``) or the joint flux+shift
@@ -1144,7 +1448,7 @@ class Scene:
             b, np.sqrt(np.maximum(d, 1e-12)), out=np.zeros_like(b, dtype=float), where=d > 0
         )
         isolated = _astrom_isolation_mask(A, b, float(cfg.astrom_isolation_thresh))
-        self.is_bright = (snr_proxy > float(cfg.snr_thresh_astrom)) & isolated
+        self.is_bright = (snr_proxy > float(cfg.astrom_minimum_snr)) & isolated
         if getattr(cfg, "astrom_exclude_stars", False):
             self.is_bright &= ~np.array([t.is_star for t in self.templates], dtype=bool)
 
@@ -1177,6 +1481,20 @@ class Scene:
             )
             self.shift_basis = [basis, (x0, y0), (Sx, Sy)]
 
+            # The measured weight supersedes the quantile cap rather than
+            # composing with it. Both bound how much one bright anchor can
+            # move the field, but the cap does it blind -- it clips whichever
+            # anchors carry the most information, which are usually the best
+            # ones -- while the robust pass sets the same ceiling from the
+            # anchors' own scatter. Where the robust pass declines to judge,
+            # the cap is still the only protection and stays on.
+            anchor_weights = None
+            leverage_cap = getattr(cfg, "astrom_leverage_cap", None)
+            if getattr(cfg, "astrom_robust", False):
+                anchor_weights = self._robust_anchor_weights(A, b, basis, alpha0, cfg)
+                if anchor_weights is not None:
+                    leverage_cap = None
+
             AB, BB, bB = assemble_scene_system_AB(
                 self.templates,
                 self.image,
@@ -1185,7 +1503,8 @@ class Scene:
                 alpha0=alpha0,
                 order=order,
                 include_y=True,
-                leverage_cap=getattr(cfg, "astrom_leverage_cap", None),
+                leverage_cap=leverage_cap,
+                anchor_weights=anchor_weights,
             )
             # if no valid AB BB solve will fall back to flux-only
             # @@@ scenefitter.solve should not take config but regularization and cg_kwargs
@@ -1245,7 +1564,7 @@ class Scene:
                     "cuts (SNR > %g, isolation >= %g%s); astrometry skipped "
                     "for this scene.",
                     getattr(self, "id", -1),
-                    float(cfg.snr_thresh_astrom),
+                    float(cfg.astrom_minimum_snr),
                     float(cfg.astrom_isolation_thresh),
                     ", stars excluded" if getattr(cfg, "astrom_exclude_stars", False) else "",
                 )
@@ -1260,6 +1579,222 @@ class Scene:
             tmpl.is_bright = bright
 
         return sol.flux, sol.err, sol.shifts, sol.info
+
+    def _robust_anchor_weights(
+        self,
+        A: sp.spmatrix,
+        b: np.ndarray,
+        basis: List[Optional[np.ndarray]],
+        alpha0: np.ndarray,
+        cfg: FitConfig,
+    ) -> np.ndarray | None:
+        """Weight this scene's anchors by their agreement with each other.
+
+        Solves the scene flux-only, measures what displacement each anchor's
+        own residual implies (:func:`measure_anchor_shifts`), and hands the
+        resulting table to
+        :func:`mophongo.astrom_robust.robust_anchor_weights`.
+
+        The flux-only solve is not an approximation of the joint one: after
+        eliminating the fluxes, the shift block's right-hand side is exactly
+        ``B^T W (d - A alpha_hat_0)``, so the flux-only residual is the thing
+        the shift block responds to. Measuring the anchors against it needs no
+        iteration around the joint solve and no lag -- the weights are known
+        before the joint system is assembled.
+
+        Parameters
+        ----------
+        A, b
+            Scene flux block and right-hand side.
+        basis
+            Per-template shift basis from :func:`make_scene_basis`; ``None``
+            marks a non-anchor.
+        alpha0
+            Flux seed the blocks will be built with. The same seed must be
+            used here, or the measured weights will not correspond to the
+            information the blocks carry.
+        cfg
+            Fit configuration; reads ``scene_minimum_anchors`` as the anchor
+            gate. That is the same floor :func:`merge_small_scenes` merges
+            scenes up to, so a scene assembled to support the shift model is
+            by construction large enough for the robust pass to judge, and
+            raising the polynomial order raises both together.
+
+        Returns
+        -------
+        ndarray or None
+            Per-template multiplier for ``assemble_scene_system_AB``, or
+            ``None`` when the robust pass declined to judge (too few anchors,
+            or rejection would have left too few standing). The verdict is
+            kept on :attr:`anchor_report` and on each anchor's
+            ``Template.astrom_weight`` either way.
+        """
+        from .astrom_robust import robust_anchor_weights
+
+        bright_idx = [i for i, S in enumerate(basis) if S is not None]
+        if not bright_idx:
+            return None
+
+        flux0 = SceneFitter.solve(A, b, config=cfg).flux
+        resid, y0, x0 = _scene_residual(self.templates, self.image, flux0)
+        eps, info, chi2_red = measure_anchor_shifts(
+            self.templates, resid, self.weights, (y0, x0), bright_idx, alpha0
+        )
+
+        rows = np.asarray(bright_idx, dtype=int)
+        report = robust_anchor_weights(
+            eps[rows],
+            info[rows],
+            np.asarray([basis[i] for i in bright_idx], dtype=float),
+            chi2_red=chi2_red[rows],
+            min_anchors=int(getattr(cfg, "scene_minimum_anchors", 0) or 0),
+        )
+        self.anchor_report = report
+        for k, i in enumerate(bright_idx):
+            self.templates[i].astrom_weight = float(report.weight[k])
+
+        if not report.applied:
+            logger.debug(
+                "[scenes] Scene %s: robust anchor weighting inactive (%s)",
+                getattr(self, "id", -1), report.reason,
+            )
+            return None
+
+        logger.info(
+            "[scenes] Scene %s: %d/%d anchor(s) rejected, systematic floor "
+            "%.3f px, %.1f effective anchor(s)",
+            getattr(self, "id", -1), report.n_rejected, rows.size,
+            report.sys_floor, report.n_eff,
+        )
+        weights = np.ones(len(self.templates), dtype=float)
+        weights[rows] = report.weight
+        return weights
+
+    def mean_shift(self) -> np.ndarray:
+        """Mean accumulated shift of this scene's templates, in fit pixels.
+
+        The scene's one reported shift, at the centroid of its own templates.
+        Deliberately the plain average of ``Template.shifted`` rather than a
+        Chebyshev field evaluated at the centre: the accumulated shift is a sum
+        of damped increments, each fitted at whatever the previous pass left
+        behind, so at order >= 1 the total is not in general representable by
+        the functional form of any single pass. Refitting the form to it is an
+        approximation of something already known exactly, and the two can
+        differ by ~0.1 px.
+
+        Returns
+        -------
+        ndarray
+            ``(dx, dy)``, or zeros when the scene has no templates with a
+            finite shift.
+        """
+        if not self.templates:
+            return np.zeros(2, dtype=float)
+        sh = np.array([np.asarray(t.shifted, dtype=float)[:2] for t in self.templates])
+        ok = np.isfinite(sh).all(axis=1)
+        return sh[ok].mean(axis=0) if ok.any() else np.zeros(2, dtype=float)
+
+    def shift_error(self) -> float:
+        """Formal 1-sigma on this scene's fitted shift at its centre, in pixels.
+
+        Propagated from the shift block's covariance with the fluxes
+        marginalized out (:meth:`~mophongo.scene_fitter.SceneFitter._shift_covariance`),
+        evaluated at the basis origin and averaged over the two axes. Without
+        it the reported ``dx``, ``dy`` and ``astrom_floor`` have no scale, and
+        a 0.2 px shift cannot be told from zero.
+
+        It is the last pass's number. Passes re-measure the same pixels, so at
+        convergence the accumulated shift is determined about as well as any
+        single pass determines it -- treat it as the scale on the total, not
+        as an error that shrinks with the number of passes.
+
+        Returns
+        -------
+        float
+            NaN when no shift was fitted or the covariance was unavailable.
+        """
+        sol = getattr(self, "solution", None)
+        cov = getattr(sol, "shift_cov", None) if sol is not None else None
+        if cov is None or np.size(cov) == 0 or self.shift_basis is None:
+            return float("nan")
+        cov = np.asarray(cov, dtype=float)
+        p = cov.shape[0] // 2
+        if p < 1:
+            return float("nan")
+        # invert n_terms(order) = (order+1)(order+2)/2 by search: orders are
+        # small and this keeps the mapping in one place
+        order = next((o for o in range(8) if n_terms(o) == p), None)
+        if order is None:
+            return float("nan")
+        phi0 = cheb_basis(0.0, 0.0, order)
+        var = [float(phi0 @ cov[s:s + p, s:s + p] @ phi0) for s in (0, p)]
+        if not all(np.isfinite(v) and v >= 0 for v in var):
+            return float("nan")
+        return float(np.sqrt(0.5 * (var[0] + var[1])))
+
+    def chi2_dof(self, residual: np.ndarray | None = None) -> float:
+        """Reduced chi-square over this scene's bounding box.
+
+        The one number that ranks scenes by how badly they are fitted, which is
+        what finding the next problem scene actually needs.
+
+        Parameters
+        ----------
+        residual
+            Full-frame residual with *every* scene's model subtracted, as
+            :meth:`~mophongo.pipeline.Pipeline.write_outputs` holds it. That is
+            the honest choice: :meth:`residual` subtracts only this scene's
+            model, so neighbours' light still sits in the footprint and
+            inflates the number. Falls back to :meth:`residual` when omitted.
+
+        Returns
+        -------
+        float
+            NaN when the scene has no weights, no solution to count parameters
+            from, or no positive-weight pixels left after the free parameters.
+        """
+        if self.weights is None or self.bbox is None:
+            return float("nan")
+        sl = _slices_from_bbox(self.bbox)
+        r = np.asarray(residual[sl] if residual is not None else self.residual(), float)
+        w = np.asarray(self.weights[sl], dtype=float)
+        if r.shape != w.shape:
+            return float("nan")
+        good = np.isfinite(r) & np.isfinite(w) & (w > 0)
+        # one free amplitude per template, plus the shift coefficients when a
+        # shift was fitted for this scene
+        nfree = len(self.templates) + (
+            len(self.shifts) if self.shifts is not None else 0
+        )
+        dof = int(good.sum()) - nfree
+        if dof <= 0:
+            return float("nan")
+        return float(np.sum(w[good] * r[good] ** 2) / dof)
+
+    def shift_scatter(self) -> float:
+        """RMS spread of the applied shifts about :meth:`mean_shift`, in pixels.
+
+        How much the shift field varied across the scene, as applied. At
+        order 0 every template receives the same offset and this is zero by
+        construction, so a non-zero value at order 0 means the field changed
+        between passes -- the scene walked rather than converged. At higher
+        order it is the amplitude of the gradient the field actually carried,
+        which is the direct way to see whether the extra terms did anything.
+
+        Returns
+        -------
+        float
+            Zero when the scene has fewer than two templates with a finite
+            shift.
+        """
+        if len(self.templates) < 2:
+            return 0.0
+        sh = np.array([np.asarray(t.shifted, dtype=float)[:2] for t in self.templates])
+        ok = np.isfinite(sh).all(axis=1)
+        if ok.sum() < 2:
+            return 0.0
+        d = sh[ok] - sh[ok].mean(axis=0)
+        return float(np.sqrt(np.mean(np.sum(d**2, axis=1))))
 
     def shift_at(self, x: ndarray, y: ndarray) -> Tuple[ndarray, ndarray]:
         """Evaluate the already-applied shift at positions ``(x, y)``.
@@ -1642,9 +2177,10 @@ class Scene:
 
             # Add shift scale indicator
             if max_shift > 0:
-                med_dx = float(np.median(dx_grid))
-                med_dy = float(np.median(dy_grid))
-                shift_text = f"shift dx={med_dx:+.2f}, dy={med_dy:+.2f} pix"
+                # the scene's one number: mean applied shift over its
+                # templates, matching the scene catalog (see mean_shift)
+                mean_dx, mean_dy = self.mean_shift()
+                shift_text = f"shift dx={mean_dx:+.2f}, dy={mean_dy:+.2f} pix"
                 model_ax.text(
                     0.02,
                     0.98,

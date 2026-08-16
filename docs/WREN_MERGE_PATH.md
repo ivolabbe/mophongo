@@ -708,7 +708,7 @@ shift applied. Each is self-consistent in its own frame, but for an edge-clipped
 The audit records this as a defect documented nowhere on `main`. It is still accurate:
 `main` has not fixed it, and the `flux-bug` work fixed a different, larger term.
 
-`docs/FLUXBUG.md` records that `SceneFitter.solve` was adding `config.reg_astrom`
+`docs/FLUXBUG.md` records that `SceneFitter.solve` was adding `config.astrom_reg`
 (default `1e-4`) to the photometric normal matrix. That was removed. What remains at
 `scene_fitter.py:178-181` is
 

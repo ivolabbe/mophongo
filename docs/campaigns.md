@@ -32,17 +32,17 @@ it. Every example below is real `--dry-run` output.
 A field's bands are not independent, even though the fits are. Three things
 belong to the field rather than to any band:
 
-- the **F444W ePSF grids**, matched by `pattern_hi` — every band of a field
+- the **F444W ePSF grids**, matched by `psf.pattern_hi` — every band of a field
   fits against the same detection PSF;
 - the **30" halo grids**, when `repair_saturated` is on — their pattern is
-  derived from `pattern_hi`, so they are shared the same way;
+  derived from `psf.pattern_hi`, so they are shared the same way;
 - the **saturation repair**. `Pipeline._repair_provenance` keys the cache on
-  the detection image, its weight, `pattern_hi`, the halo pattern,
+  the detection image, its weight, `psf.pattern_hi`, the halo pattern,
   `repair_kwargs` and the trial box. Nothing in that varies between bands.
 
 Submit a field's bands together without preparing any of it and every band
 rebuilds the same grids and re-runs the same repair. Worse, they do it at the
-same time: several jobs write the same grid filenames into one `psf_dir`, and
+same time: several jobs write the same grid filenames into one `psf.dir`, and
 several write the same repair cache file. A half-written cache read by another
 job used to be fatal — `_load_repair_cache` now treats an unreadable file as
 absent and recomputes, but the wasted work remains.
@@ -58,20 +58,20 @@ Phase 1 costs one job per field and buys a clean parallel fan-out.
 ## The F444W race, and why prep is one band per field
 
 Everything about the two-phase shape follows from one fact: **a field's bands
-all derive the same `pattern_hi`**, so they all want to build the same F444W
-grids into the same `psf_dir`, under the same filenames.
+all derive the same `psf.pattern_hi`**, so they all want to build the same
+F444W grids into the same `psf.dir`, under the same filenames.
 
 The grid build itself parallelises cleanly. One `(detector, date)` pair is one
 independent job writing one uniquely named file, and each worker costs the
 stpsf wavefront propagation — tens to low hundreds of MB, nothing that scales
 with the field. `PSFFactory(workers=N)` fans those out, and
-`RunConfig.psf_workers` reaches it from a config.
+`PsfConfig.workers` reaches it from a config.
 
 What does **not** parallelise is two *bands of the same field* building at
-once. `uds_f770w` and `uds_f1000w` both resolve `pattern_hi` to
+once. `uds_f770w` and `uds_f1000w` both resolve `psf.pattern_hi` to
 `UDS_NRC.._F444W_MJD\d+_GRID25_OS4`, so both compute the same grids and both
 write the same paths. The same applies to the 30" halo grids, whose pattern is
-derived from `pattern_hi`. Interleaved writes to one FITS file give a torn
+derived from `psf.pattern_hi`. Interleaved writes to one FITS file give a torn
 file, and the loser's work is wasted either way.
 
 So the rule is: **serialise across patterns, parallelise within one.** That is
@@ -81,7 +81,7 @@ while `--workers` fans out inside each.
 
 Prep runs **F770W** where a field has it (`campaign.py`'s `prep_leader`). It is
 the shortest MIRI band, so it is the cheapest job that still builds everything
-shared. The band's own `pattern_lo` grids have per-band names and never
+shared. The band's own `psf.pattern_lo` grids have per-band names and never
 collide, so those are safe to build concurrently across bands afterwards.
 
 ## The pipeline steps behind it

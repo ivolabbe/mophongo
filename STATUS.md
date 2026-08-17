@@ -3,6 +3,17 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] `fitsmap_url` replaces `minerva_viewer` + `minerva_release` (2026-08-16).
+  `minerva_release` was declared at `pipeline.py:293` and read nowhere, not
+  even by the code that builds the viewer link -- the release is already part
+  of the URL path when a field wants one, so a second field could only ever
+  disagree with the first.
+
+  `RunConfig.from_json` rejects unknown keys, so a plain rename would stop
+  every config in an existing run tree from loading. It migrates instead:
+  `minerva_viewer` is carried over to `fitsmap_url`, and `minerva_release` is
+  dropped. Tested both directions.
+
 - [x] Shrank the test suite to the contracts a future change can break
   (2026-08-16). 41 files / 14,088 lines / 72 s became **33 files / 11,407
   lines / 46 s**, and the suite is green: 471 passed, 0 failed. Nothing that

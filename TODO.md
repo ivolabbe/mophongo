@@ -1356,13 +1356,3 @@ This file tracks future desired features, checks, and investigations.
   it is analysis code rather than package code, move it out of
   `src/mophongo/`.
 
-- [ ] Collapse `minerva_viewer` and `minerva_release` into one `fitsmap_url`
-  (2026-08-16). Surfaced once `mophongo config` started dumping every field.
-  The `cg_kwargs` and `filter_lo` bullets of this entry have shipped; this one
-  has not.
-
-  `RunConfig.minerva_release` is dead -- declared at `pipeline.py:293` and
-  referenced nowhere, not even by the code that builds the viewer link. Only
-  `minerva_viewer` is read (`pipeline.py:2674`), where a bare
-  `<field>/<release>` gets `FITSMAP_URL` prefixed.
-

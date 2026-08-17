@@ -1294,7 +1294,7 @@ def test_scene_catalog_link_takes_the_viewer_root_from_the_config(tmp_path):
         pipe.run_config.sci_hi = str(out / "hi.fits")
         pipe.run_config.save_stamps = False
         pipe.run_config.scene_plots = False
-        pipe.run_config.minerva_viewer = viewer
+        pipe.run_config.fitsmap_url = viewer
         pipe.write_outputs()
         cat = _Table.read(out / "t_scene_catalog.csv", format="ascii.csv")
         return cat["minerva_link"][0] if "minerva_link" in cat.colnames else None

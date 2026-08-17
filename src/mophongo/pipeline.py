@@ -123,7 +123,7 @@ _SHIFT_SAMPLE_SPREAD = 0.7
 
 #: Host serving the FITSMap viewers, prefixed to a config that gives a bare
 #: ``<field>/<release>`` path rather than a full URL. Not tied to any one
-#: survey: point ``RunConfig.minerva_viewer`` at another host and it is used
+#: survey: point ``RunConfig.fitsmap_url`` at another host and it is used
 #: as given.
 FITSMAP_URL = "https://minerva.colorado.edu"
 
@@ -294,8 +294,11 @@ class RunConfig:
     # root rather than the code assembling one from the field name. A bare
     # `<field>/<release>` is accepted and gets FITSMAP_URL in front. None or ""
     # drops the column, because a guessed link is worse than no link.
-    minerva_viewer: str | None = None
-    minerva_release: str = "DR0"
+    #
+    # This was `minerva_viewer` beside a `minerva_release` that nothing read:
+    # the release is already part of the path when a field wants one, so the
+    # second field could only ever disagree with the first.
+    fitsmap_url: str | None = None
     # --- fitting ----------------------------------------------------------
     fit: dict[str, Any] = field(default_factory=dict)  # FitConfig kwargs
     scene_plots: bool = True  # write per-scene diagnostic PNGs
@@ -321,6 +324,14 @@ class RunConfig:
         )
         data = json.loads(clean)
         known = {f.name for f in fields(cls)}
+        renamed = {"minerva_viewer": "fitsmap_url"}
+        for was, now in renamed.items():
+            if was in data:
+                # `minerva_release` never had a reader, so it is dropped rather
+                # than migrated; the release belongs in the URL path.
+                data.setdefault(now, data.pop(was))
+        data.pop("minerva_release", None)
+
         legacy = {"r_trial", "trial_center"} & set(data)
         if legacy:
             raise ValueError(
@@ -2702,7 +2713,7 @@ class Pipeline:
         )
         # No viewer, no column: a guessed URL is worse than none, since the
         # fields do not agree on whether the release is part of the path.
-        viewer = (cfg.minerva_viewer or "") if cfg is not None else ""
+        viewer = (cfg.fitsmap_url or "") if cfg is not None else ""
         if viewer and "://" not in viewer:
             viewer = f"{FITSMAP_URL}/{viewer.strip('/')}"  # bare <field>/<release>
         if viewer:

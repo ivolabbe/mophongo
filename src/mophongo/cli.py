@@ -235,7 +235,8 @@ def psf_to_fits(
     _card(header, "STAMPSUM", float(np.nansum(stamp)), "sum of the stamp")
     _card(header, "EE_BOX", float(prm.ee_box[int(key)]), "encircled energy in the stamp")
     _card(header, "EE_RLIM", float(prm.ee_rlim[int(key)]), "encircled energy within R_LIM")
-    _card(header, "R_LIM", float(prm.r_lim), "inscribed-circle radius [pix]")
+    _card(header, "R_LIM", float(prm.r_lim), "inscribed-circle radius [arcsec]")
+    _card(header, "PSCALE", float(prm.pscale), "stamp pixel scale [arcsec]")
     for column, (fits_key, comment) in PROVENANCE_KEYS.items():
         if column in prm.regions.columns and len(prm.regions):
             _card(header, fits_key, prm.regions[column].iloc[int(key)], comment)

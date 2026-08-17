@@ -62,6 +62,13 @@ class PhotConfig:
     # insensitivity to the PSF wings at a real cost in SNR; smaller ones give
     # that back and lean harder on the wing model.
     #
+    # The fraction is *absolute*: it is a fraction of the source's total flux,
+    # not of what the PSF stamp happens to hold. Deliberately so -- a stamp-
+    # relative fraction would make the aperture a function of `psf.size`, since
+    # a wider stamp catches more wings and pushes the same relative fraction
+    # outward. On cosmos_f770w, where the stamp holds ee_box=0.9186, the two
+    # readings differ by 0.765" and 0.566" in diameter.
+    #
     # `aperture_diam` wins where both are set, so an explicit diameter (a run
     # tied to an external catalog's aperture, say) is never silently resized.
     aperture_ee: float | None = 0.70

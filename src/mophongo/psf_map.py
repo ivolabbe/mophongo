@@ -50,9 +50,11 @@ class PSFRegionMap:
     
     # optional ndarray to store PSF kernels as a lookup table
     psfs: np.ndarray | None = None
-    # pixel scale of ``psfs``; only sets the units of ``r_lim``.  Left at 1.0
-    # the radii are in pixels, while the encircled-energy fractions are
-    # unaffected either way.
+    # pixel scale of ``psfs`` in arcsec, which sets the units of ``r_lim`` and
+    # of any radius measured off the stamps.  The 1.0 default means "unknown,
+    # radii in pixels"; encircled-energy *fractions* are unaffected either way.
+    # It round-trips through :meth:`to_file` / :meth:`from_geojson`, so a map
+    # reloaded from a run directory still knows the grid it was drizzled onto.
     pscale: float = 1.0
 
     # encircled-energy cache, filled by refresh_ee().  Declared without
@@ -287,9 +289,10 @@ class PSFRegionMap:
         If a FITS file with the same base name (``.geojson`` replaced by
         ``.fits``) exists, its data become ``psfs``; otherwise a warning is
         logged and ``psfs`` stays ``None``. The map's ``name`` is set to the
-        file's base name. Only ``regions`` and ``psfs`` are stored on disk:
-        tolerances, ``pscale``, and ``footprints`` come back as constructor
-        defaults unless passed again via ``kwargs``.
+        file's base name. ``pscale`` is recovered from the column
+        :meth:`to_file` writes, or stays at the constructor default for a map
+        written before that column existed. Tolerances and ``footprints`` come
+        back as constructor defaults unless passed again via ``kwargs``.
 
         Parameters
         ----------
@@ -297,7 +300,7 @@ class PSFRegionMap:
             Path to the GeoJSON file.
         kwargs : dict
             Additional arguments for the PSFRegionMap constructor
-            (for example ``pscale``).
+            (for example ``pscale``, which then wins over the stored column).
         """
         from astropy.io import fits
         # str(): a Path would take .replace below as the rename method
@@ -314,6 +317,8 @@ class PSFRegionMap:
             logging.warning(f"No PSFs found for {geojson_path}, using None.")
 
         base_name = os.path.splitext(os.path.basename(geojson_path))[0]
+        if "pscale" not in kwargs and "pscale" in regions_gdf.columns and len(regions_gdf):
+            kwargs["pscale"] = float(regions_gdf["pscale"].iloc[0])
         return cls(regions=regions_gdf, psfs=psfs, name=base_name, **kwargs)
 
     # =================================================================
@@ -425,7 +430,8 @@ class PSFRegionMap:
             buffer_tol=self.buffer_tol,
             area_factor=self.area_factor,
             footprints=self.footprints,
-            name = (self.name or '') + ' by PA'
+            name = (self.name or '') + ' by PA',
+            pscale=self.pscale,
         )
         new_map._rebuild_spatial_index()
         return new_map
@@ -483,7 +489,8 @@ class PSFRegionMap:
             buffer_tol=self.buffer_tol,
             area_factor=self.area_factor,
             footprints=None,
-            name = f"{self.name}" + (f" overlay with {other.name}" if isinstance(other, PSFRegionMap) else "")
+            name = f"{self.name}" + (f" overlay with {other.name}" if isinstance(other, PSFRegionMap) else ""),
+            pscale=self.pscale,
         )
         new_map._rebuild_spatial_index()
         return new_map
@@ -1253,8 +1260,8 @@ class PSFRegionMap:
 
         The regions table is written with all its columns (including
         provenance), using any ``geopandas`` driver. :meth:`from_geojson`
-        reverses both files, but only ``regions`` and ``psfs`` round-trip;
-        tolerances, ``pscale``, and ``footprints`` are not stored, and
+        reverses both files, but only ``regions``, ``psfs`` and ``pscale``
+        round-trip; tolerances and ``footprints`` are not stored, and
         tuple-valued columns such as ``frame_list`` come back as their
         string repr.
         """
@@ -1266,6 +1273,10 @@ class PSFRegionMap:
         regions = self.regions
         if getattr(regions, "crs", None) is None:
             regions = regions.set_crs("EPSG:4326", allow_override=True)
+        # Carry the stamp scale as a column: it is the only way a reloaded map
+        # can report a radius in arcsec, and a map that has to guess it silently
+        # mis-sizes everything measured off the growth curve.
+        regions = regions.assign(pscale=float(self.pscale))
         regions.to_file(filename, driver=driver)
         # Save PSFs if present
         if self.psfs is not None:

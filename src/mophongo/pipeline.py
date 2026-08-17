@@ -1836,6 +1836,12 @@ class Pipeline:
         prm_lo = PSFRegionMap.from_footprints(
             self.dpsf_lo.footprint, name="lo"
         ).overlay_with(self.dpsf_lo.driz_footprint)
+        # The stamps are drizzled onto each band's own mosaic grid, so that is
+        # the scale of every radius later measured off them. Without it the map
+        # keeps the 1.0 "radii in pixels" default and callers reading a radius
+        # as arcsec are wrong by 1/driz_pscale.
+        prm_hi.pscale = float(self.dpsf_hi.driz_pscale)
+        prm_lo.pscale = float(self.dpsf_lo.driz_pscale)
         return prm_hi, prm_lo
 
     @staticmethod
@@ -1871,6 +1877,10 @@ class Pipeline:
                          or _provenance_matches(cached_lo, want_lo))
                 if stale is None:
                     phase.from_disk()
+                    # maps written before pscale round-tripped come back on the
+                    # 1.0 pixel default; the dpsf pair knows the real grids
+                    cached_hi.pscale = float(self.dpsf_hi.driz_pscale)
+                    cached_lo.pscale = float(self.dpsf_lo.driz_pscale)
                     self.prm_hi, self.prm_lo = cached_hi, cached_lo
                     logger.info(
                         "loaded cached PSF maps from %s (psf_size=%.3g, blur=%.3g)",
@@ -4626,9 +4636,10 @@ class Pipeline:
         blur is already fitted to the model/star mismatch, so the model curve
         is the one the corrections are consistent with.
 
-        Returns ``None`` when there is no usable PSF or the stamp never
-        reaches ``ee_fraction`` inside its inscribed circle, which leaves the
-        caller on its FWHM fallback rather than inventing a radius.
+        Returns ``None`` when there is no usable PSF, the map does not know the
+        scale of its own stamps, or the stamp never reaches ``ee_fraction``
+        inside its inscribed circle, which leaves the caller on its FWHM
+        fallback rather than inventing a radius.
         """
         from .psf import stamp_encircled_energy
 
@@ -4643,6 +4654,17 @@ class Pipeline:
         else:  # PSFRegionMap: average over the map, and it knows its own scale
             cube = np.asarray(getattr(psf_i, "psfs", None))
             pscale_psf = float(getattr(psf_i, "pscale", 0.0)) or None
+            # 1.0 is the field's "unknown, radii in pixels" default, not a real
+            # mosaic scale. Reading it as arcsec is how this returned a 9.6"
+            # aperture for F770W; refuse it instead of scaling by 1/pscale.
+            if pscale_psf == 1.0:
+                logger.warning(
+                    "image %d: PSF map %r carries no pixel scale (pscale=1.0); "
+                    "cannot size an aperture by encircled energy from it, "
+                    "falling back to 1.5x FWHM. Rebuild the PSF maps.",
+                    idx, getattr(psf_i, "name", None),
+                )
+                return None
         if cube is None or cube.size == 0 or not pscale_psf or pscale_psf <= 0:
             return None
 

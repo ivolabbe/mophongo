@@ -240,6 +240,29 @@ def test_provenance_treats_an_unstamped_map_as_stale():
     assert _provenance_matches(prm, {"psf_size": 4.0}) == "psf_size"
 
 
+def test_pixel_scale_round_trips_through_geojson(tmp_path):
+    """A reloaded map must still know the grid its stamps were drizzled onto.
+
+    Without it the map falls back on the 1.0 "radii in pixels" default, and
+    every radius read off the growth curve as arcsec is wrong by 1/pscale.
+    """
+    prm = _region_map()
+    prm.pscale = 0.08
+    path = tmp_path / "psf.geojson"
+    prm.to_file(str(path))
+
+    assert PSFRegionMap.from_geojson(str(path)).pscale == 0.08
+    # an explicit kwarg still wins, as the docstring promises
+    assert PSFRegionMap.from_geojson(str(path), pscale=0.04).pscale == 0.04
+
+
+def test_overlay_keeps_the_pixel_scale():
+    """The kernel map is an overlay; it lives on the same stamps as its parent."""
+    prm = _region_map()
+    prm.pscale = 0.04
+    assert prm.overlay_with(_region_map()).pscale == 0.04
+
+
 # ---------------------------------------------------------------- run log
 class _StubPipeline(Pipeline):
     """Only what log_run touches, so the log can be tested without data."""

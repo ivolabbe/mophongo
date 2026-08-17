@@ -3,6 +3,44 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] `aperture_ee` sized the aperture in PSF-stamp pixels, not arcsec
+  (2026-08-17). The cosmos_f770w run logged `aperture_ee=0.700 -> 9.559"
+  diameter (238.97 pix)`, 12.5x too wide. `PSFRegionMap.pscale` is the scale
+  every radius measured off the stamps is quoted in, but nothing ever set it:
+  `_region_maps` builds the maps through `from_footprints(...).overlay_with()`,
+  and `overlay_with` dropped it, so the maps carried the 1.0 "radii in pixels"
+  default. `Pipeline._ee_ap_diam_arcsec` read that as arcsec, so `r_ee` came
+  back as 4.78 *stamp pixels* and was consumed as 4.78". It did not round-trip
+  through `to_file` either, so a reloaded map had the same problem.
+
+  `pscale` is now real: `_region_maps` sets it from each band's
+  `DrizzlePSF.driz_pscale`, `overlay_with` and `group_by_pa` carry it to their
+  children (which is what gives the kernel map its scale), and `to_file` writes
+  it as a regions column that `from_geojson` reads back. The cached-reload
+  branch of `build_psfs` also re-stamps it from the dpsf pair, so maps written
+  before the column existed are repaired rather than rebuilt.
+  `_ee_ap_diam_arcsec` now refuses `pscale == 1.0` with a warning and falls
+  back to 1.5x FWHM instead of silently scaling by `1/pscale`. F770W now logs
+  `0.765" diameter (19.12 pix)`.
+
+  The tests missed it because every case in `tests/test_aperture_ee.py` passed
+  a bare ndarray PSF, which takes the image-WCS branch; the `PSFRegionMap`
+  branch the pipeline actually uses was untested. Two cases now cover it, plus
+  the round-trip and overlay propagation in `tests/test_pipeline_provenance.py`.
+  `mophongo psf` writes `PSCALE` and its `R_LIM` comment says arcsec.
+
+  Both grids appear in the conversion, correctly. The growth curve is measured
+  on the stamps' own grid -- the native lo-res mosaic, 80 mas for F770W, which
+  is what `native_pscales` already records -- and the resulting arcsec radius
+  is divided by the *fit-grid* scale, 40 mas, because `wcs[ifilt] = wcs[0]` on
+  the upsample path and that is the grid the aperture is summed on.
+
+  `aperture_ee` stays an *absolute* encircled-energy fraction, and `PhotConfig`
+  now says so: a stamp-relative fraction would make the aperture a function of
+  `psf.size`, since a wider stamp catches more wings and pushes the same
+  relative fraction outward. With `ee_box=0.9186` on this run the two readings
+  are 0.765" and 0.566" in diameter.
+
 - [x] `scene_minimum_anchors` is a flat 10, and the campaign configs stopped
   setting it (2026-08-18). The default derived the floor from the astrometric
   polynomial order, `(order+1)(order+2)+1`, which is 3 at the default order 0

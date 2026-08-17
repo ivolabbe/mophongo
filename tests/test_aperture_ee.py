@@ -125,6 +125,50 @@ def test_aperture_ee_is_the_default():
     assert FitConfig().phot.aperture_diam is None
 
 
+def _region_map(psf: np.ndarray, pscale: float):
+    """A one-region PSFRegionMap holding ``psf``, as ``build_psfs`` leaves it."""
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    from mophongo.psf_map import PSFRegionMap
+
+    regions = gpd.GeoDataFrame(
+        {"psf_key": [0]}, geometry=[box(149.9, 1.9, 150.1, 2.1)], crs="EPSG:4326"
+    )
+    return PSFRegionMap(regions=regions, psfs=psf[None], pscale=pscale, name="lo")
+
+
+def test_region_map_radius_uses_the_stamp_scale_not_the_image_scale():
+    """The real pipeline hands a PSFRegionMap, whose stamps are on their own grid.
+
+    The lo-res stamps are drizzled onto the *native* lo-res mosaic, while the
+    fit runs on the block-replicated hi-res grid, so the map's own ``pscale``
+    is what converts its growth curve to arcsec. Reading the radius in stamp
+    pixels instead put a 9.6" aperture on F770W.
+    """
+    stamp_pscale = 2.0 * PSCALE  # lo-res stamps, fit grid upsampled by 2
+    psf = PSF.gaussian(101, fwhm=6.0).array
+    pipe = _StubPipeline(psf)
+    pipe.psfs = [None, _region_map(psf, stamp_pscale)]
+
+    r_pix = pipe._resolve_image_ap_radius_pix(1, FitConfig(phot={"aperture_ee": 0.70}))
+
+    r_arcsec = stamp_encircled_energy(psf, stamp_pscale, ee_fraction=0.70)["r_ee"]
+    # radius comes back in pixels of the *image* grid, not of the stamp
+    assert r_pix * PSCALE == pytest.approx(r_arcsec, rel=1e-9)
+
+
+def test_region_map_without_a_pixel_scale_falls_back_instead_of_guessing():
+    """`pscale=1.0` is the "unknown, radii in pixels" default, not 1"/pixel."""
+    psf = PSF.gaussian(101, fwhm=6.0).array
+    pipe = _StubPipeline(psf)
+    pipe.psfs = [None, _region_map(psf, 1.0)]
+
+    r_pix = pipe._resolve_image_ap_radius_pix(1, FitConfig(phot={"aperture_ee": 0.70}))
+
+    assert r_pix == pytest.approx(1.5 * pipe._gaussian_fwhm_pix(psf))
+
+
 def _run_two_aperture_pipeline(tmp_path, use_aper_arcsec):
     """A tiny two-band run with a per-source catalog aperture column."""
     from astropy.table import Table

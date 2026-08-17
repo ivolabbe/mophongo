@@ -432,3 +432,37 @@ def test_a_single_anchor_still_solves_the_order_zero_shift():
     # sign convention aside, the magnitude must come back to within a fraction
     # of a pixel rather than being zeroed
     assert np.hypot(*shifts) == pytest.approx(np.hypot(*truth), rel=0.35)
+
+
+# ---------------------------------------------------------------------------
+# reported shift statistics
+# ---------------------------------------------------------------------------
+
+
+def test_shift_scatter_is_exactly_zero_when_the_scene_moved_rigidly():
+    """Order 0 gives every template the same shift, so the spread is zero.
+
+    Subtracting the mean of identical doubles leaves one ulp behind, and a
+    full field duly reported ``shift_rms`` of ~1e-15 px for every scene --
+    a number that reads as a measurement and is not one.
+    """
+    from types import SimpleNamespace
+
+    from mophongo.scene import Scene
+
+    scene = Scene.__new__(Scene)
+    shift = np.array([-9.7314159, 2.7182818])
+    scene.templates = [SimpleNamespace(shifted=shift.copy()) for _ in range(64)]
+    assert scene.shift_scatter() == 0.0
+
+
+def test_shift_scatter_measures_a_real_gradient():
+    """A field that varied across the scene still reports its amplitude."""
+    from types import SimpleNamespace
+
+    from mophongo.scene import Scene
+
+    scene = Scene.__new__(Scene)
+    offsets = np.array([[-1.0, 0.0], [1.0, 0.0], [0.0, -1.0], [0.0, 1.0]])
+    scene.templates = [SimpleNamespace(shifted=o + 5.0) for o in offsets]
+    assert np.isclose(scene.shift_scatter(), 1.0)

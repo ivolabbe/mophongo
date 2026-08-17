@@ -3,6 +3,104 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] The robust anchor pass stops paying for work it discards (2026-08-18).
+  `astrom_robust` (on by default since `6e0f27a`) took the astrometry phase of
+  a cosmos_f770w run from 6m23s to 29m02s. Profiling a synthetic scene at
+  MINERVA density (`scratch/bench_anchor_shifts.py`) puts almost all of it in
+  `scene.measure_anchor_shifts`, with two smaller pieces around it that are
+  pure waste:
+
+  * The gate is now checked before the measurement. `robust_anchor_weights`
+    refuses any scene with fewer usable anchors than
+    `max(scene_minimum_anchors, 2p)`, but `Scene._robust_anchor_weights` ran
+    the whole per-anchor measurement first and only then found out. Three of
+    the six scenes in the UDS DR0.1 trial patch (5, 7 and 7 anchors against a
+    gate of 10) paid in full for a verdict fixed in advance. The gate itself
+    moved to `astrom_robust.anchor_gate` so the two sites cannot drift apart,
+    and the inactive verdict to `astrom_robust.inactive_anchor_weights` so the
+    early return reports exactly what the late one did.
+  * The flux-only solve that seeds the residual no longer computes errors it
+    throws away. `SceneFitter.solve`/`solve_flux` take `errors=False`;
+    `sqrt(diag(A^-1))` is a factorization plus one back-solve per template --
+    125 ms of a 150 ms solve at 920 templates, 569 ms of 671 ms at 1718 --
+    and `_robust_anchor_weights` uses only `.flux`. Skipped errors come back
+    NaN, not zero, so they cannot be mistaken for measured ones.
+
+  Together these are ~30-40% of the added time. The remainder is
+  `measure_anchor_shifts` itself, which zero-pads every column of every
+  anchor's local system to the union footprint of its neighbours and forms the
+  Gram there: `ncol^2/2 * footprint_pixels` where the columns are supported on
+  a stamp each. That rewrite is separate work.
+
+- [x] The wall-clock breakdown covers the whole run, not only the solve
+  (2026-08-18). A cosmos_f770w run reported `all 2h17m58s` against a fit whose
+  phases summed to 40m03s, and the missing 1h38m was invisible: the second
+  table was normalised to the sum of its own rows, so its percentages added to
+  100 however little of the run they covered.
+
+  Both tables now report against the whole invocation, which makes the
+  `(other)` row the genuinely untimed remainder. Phases were added for the
+  work that was outside the fit or inside it but untimed: `epsf grids`,
+  `psf maps`, `matching kernels`, `read inputs`, `saturation repair`,
+  `background + ivar`, `convolve templates`, `catalog update`,
+  `write residual + tables`, `scene figures`, `field figures`,
+  `write stamps`. Phases must not nest, so `build_kernels` starts its own
+  after the `build_psfs` call it may make.
+
+  `_phase` yields a `_PhaseTag` whose `from_disk()` retags the phase --
+  `psf maps (from disk)`, `matching kernels (from disk)`,
+  `saturation repair (from disk)` -- so a cache hit is never reported under
+  the name of the work it stood in for. `run_all` now holds the report until
+  the outputs are written (`_defer_timings`, renamed from `_cli_stepping`),
+  which is where a quarter of the run had been going unreported.
+
+- [x] Scene PNGs sampled to the scene, and capped at `scene_plots_max`
+  (2026-08-17). `write_outputs` drew every scene at a fixed `dpi=300`, i.e.
+  onto a 4500x3000 canvas whatever the scene's size. Measured on the six-panel
+  figure, `savefig` is 90-97% of `Scene.plot` (~60% Agg draw, ~40% PNG
+  encoding) and both halves scale with the canvas, not with the data: a
+  200 px scene and a 2000 px one cost 0.7 s and 2.8 s only because the larger
+  one compresses worse. `make_lupton_rgb`, `SegmentationImage.cmap`,
+  `model_image` and the six `imshow` calls together are under 5%.
+
+  Two changes. The dpi now comes from `verification.diagnostic_pixel_sampling_dpi`
+  (made public for this) at one output pixel per scene pixel, clipped to
+  100-300. And `RunConfig.scene_plots_max` (default 200) keeps only the scenes
+  worth opening: half by worst `chi2_dof`, half by largest `astrom_floor`,
+  with the floor half topping up from the chi2 ranking because the floor is
+  NaN wherever the robust pass declined. `_scenes_to_plot` logs what it kept
+  and what it dropped.
+
+  On `examples/minerva/cosmos_f770w` (1643 scenes, median extent 770 px, all
+  written at 4500x3000 for 6.9 GB): ~55 min and 6.9 GB before, ~23 min and
+  2.9 GB from the dpi alone, ~5 min and 0.6 GB with the cap. Threads over
+  figures were measured at 1.3x (Agg holds the GIL) and processes are out --
+  scene plotting is already where campaign bands died on memory.
+
+- [x] `sigma_shift` was NaN in every scene catalog ever written (2026-08-17).
+  `_refine_scene_astrometry` closes each scene with a flux-only solve on the
+  final templates (`fit_astrometry_niter=0`). That solve returns
+  `shift_cov=None`, and `Scene.solve` assigns `self.solution = sol`
+  unconditionally, so the joint solve's covariance was overwritten on every
+  scene of every run; `Scene.shift_error()` read it off `solution` and
+  returned NaN. `self.shifts` survived because the joint branch alone writes
+  it, which is why `dx`/`dy` looked fine and only their scale was missing.
+  The covariance is now kept on `Scene.shift_cov` beside `shifts`, where the
+  closing solve does not reach, and `shift_error()` reads it there.
+
+  Not fixed: `restore_scene_fit` does not put it back, so a catalog re-emitted
+  from a reloaded fit still reports NaN. See TODO.
+
+- [x] `shift_rms` reported ~1e-15 px rather than zero (2026-08-17). At
+  `astrom_kwargs={'poly': {'order': 0}}` the field is constant, so every
+  template in a scene receives a bitwise-identical shift -- verified across
+  all 1404 multi-template scenes of the cosmos_f770w run. `shift_scatter`
+  subtracted the mean anyway and reported the ulp that leaves behind (max
+  1.6e-14 px on shifts up to 10 px). It now returns an exact 0.0 when the
+  shifts are identical. The docstring's claim that a non-zero value at order 0
+  means the scene walked was wrong and is gone: at order 0 a walk moves every
+  template equally, so the scatter stays zero however badly the scene walks.
+
 - [x] `build_kernels` indexes the band PSF maps instead of re-drizzling them
   (2026-08-17). A run drizzled four PSF cubes, not two: `build_psfs` at the
   hi and lo region centroids (4621 + 944 stamps on the COSMOS F444W/F770W

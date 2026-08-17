@@ -335,6 +335,10 @@ Optional fields:
   (`fit: {"extend_mode": ...}`); there is no separate config field for it.
 - `scene_plots` (*bool*, default `True`) — write per-scene diagnostic PNGs
   in {meth}`~mophongo.pipeline.Pipeline.write_outputs`.
+- `scene_plots_max` (*int*, default `200`) — how many of those PNGs to write:
+  half the budget on the worst `chi2_dof`, half on the largest
+  `astrom_floor`. `0` or negative writes one per scene, which on a full field
+  is ~1600 figures.
 - `save_stamps` (*bool*, default `True`) — write the per-source stamps FITS
   (native-size hi/lo templates plus fit metadata; see
   {meth}`~mophongo.pipeline.Pipeline.write_stamps`).

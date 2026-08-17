@@ -1466,7 +1466,7 @@ def save_diagnostic_image(
         plt.tight_layout(rect=(0, 0.055, 1, 1))
     else:
         plt.tight_layout()
-    save_dpi = int(dpi) if dpi is not None else _diagnostic_pixel_sampling_dpi(
+    save_dpi = int(dpi) if dpi is not None else diagnostic_pixel_sampling_dpi(
         [truth, hires, lowres, model, residual, segmap, stamp_grid],
         figsize=figsize,
         nrows=2,
@@ -1476,7 +1476,7 @@ def save_diagnostic_image(
     plt.close(fig)
 
 
-def _diagnostic_pixel_sampling_dpi(
+def diagnostic_pixel_sampling_dpi(
     panels: Iterable[np.ndarray | None],
     *,
     figsize: tuple[float, float],
@@ -1719,7 +1719,7 @@ def save_scene_diagnostics(
         fig, _ = scene.plot(
             tmpl_image, segmap, display_sig=display_sig, residual_image=residual_image
         )
-        scene_dpi = _diagnostic_pixel_sampling_dpi(
+        scene_dpi = diagnostic_pixel_sampling_dpi(
             [scene.model_image()],
             figsize=(15, 10),
             nrows=2,
@@ -1875,7 +1875,7 @@ def save_scene_partition(
 
     fig.suptitle(f"Scene partition: {len(scenes)} scenes", fontsize=13)
     fig.tight_layout()
-    dpi = _diagnostic_pixel_sampling_dpi(
+    dpi = diagnostic_pixel_sampling_dpi(
         [display], figsize=figsize, nrows=1, ncols=2, min_dpi=180, max_dpi=900,
     )
     fig.savefig(filename, dpi=dpi, bbox_inches="tight", facecolor="white")
@@ -1930,7 +1930,7 @@ def save_scene_overview(
     if step > 1:
         title += f", displayed 1:{step}"
     ax.set_title(title)
-    overview_dpi = _diagnostic_pixel_sampling_dpi(
+    overview_dpi = diagnostic_pixel_sampling_dpi(
         [image],
         figsize=figsize,
         nrows=1,

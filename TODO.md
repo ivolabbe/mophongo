@@ -2,6 +2,35 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] Carry the shift covariance through the fit table (2026-08-17). The live
+  run now reports a finite `sigma_shift`, but `restore_scene_fit` restores
+  only the shift coefficients and their normalisation, so a scene catalog
+  re-emitted from a reloaded fit (`examples/canfar/jobs/scene_plots.py`, the
+  recovery path) still reports NaN -- and `write_scene_catalog` promises the
+  same file either way. Either add the covariance to the `SCENES` extension
+  (flattened and padded like `shift_coeff`, 2x2 at the default order 0) or
+  store the derived scalar and have `shift_error` fall back to it.
+
+- [ ] Say why `astrom_floor` is NaN rather than only that it is (2026-08-17).
+  It is NaN whenever the robust anchor pass declined to judge, which is not a
+  failure but is indistinguishable in the catalog from one. On
+  `examples/minerva/cosmos_f770w-robust` that was 792 of 1434 scenes: the gate
+  is `max(scene_minimum_anchors, 2p)` = 7 there, and every scene with fewer
+  usable anchors was refused (NaN for all n_anchor <= 7, finite from 8 up).
+  Two things would settle it in the file itself: `n_anchor` counts
+  `is_bright`, not the anchors that came through `measure_anchor_shifts` with
+  finite information, so it does not match the gate the pass applied; and
+  `AnchorWeights.reason`/`n_eff` are recorded on the scene and thrown away.
+
+- [ ] Bring the verification scene loop's dpi down with the pipeline's
+  (2026-08-17). `verification.py:1722` asks for `oversample=2.0` between
+  `min_dpi=400` and `max_dpi=2400`, so its floor alone is a 24 Mpx canvas at
+  3-7 s per scene, and a 2000 px scene asks for 1000 dpi -- 150 Mpx, a 600 MB
+  RGBA buffer. `bbox_inches="tight"` renders it twice. It is capped at
+  `scene_diagnostic_count` scenes so it does not dominate a mock run, but the
+  settings are past what any viewer resolves. Left alone here because
+  lowering them changes the resolution of an existing diagnostic.
+
 - [ ] Clear the 21 stale configs in CANFAR `run1/config` (2026-08-16). They
   are older runs -- the whole `_v1.0` set for the three fields, plus
   `uds_770_dr0.1`, `uds_f770w_test`, `uds_f1800w_test`, `cosmos_f1000w_full` --
@@ -377,6 +406,12 @@ This file tracks future desired features, checks, and investigations.
   slice of `self.images[0]` and `self.segmap` while both stay fully
   resident. If it still does not fit, that loop is the place to read those
   two memmapped, since it never needs more than the scene's own box.
+  The 2026-08-17 cap changes what is being re-tested: `scene_plots_max=200`
+  puts ~200 figures through that loop instead of ~1600, at a canvas sampled
+  to the scene rather than a fixed 4500x3000, so a band now spends ~5 min
+  there rather than ~55. The peak resident is unchanged -- it is one figure
+  at a time either way -- but the window in which a band can die shrinks by
+  10x.
   Per-field RAM itself is done: `submit.py::ram_for` gives 64 GB standard
   and 82 for EGS, `--ram` overrides, and `campaign.py` passes nothing unless
   asked so each field takes its own size. Still to record: the measured peak

@@ -56,6 +56,27 @@ def _fmt_hms(seconds: float) -> str:
     return f"{h}h{m:02d}m{sec:02d}s" if h else f"{m}m{sec:02d}s"
 
 
+_FROM_DISK = " (from disk)"
+
+
+@dataclass
+class _PhaseTag:
+    """Handle yielded by :meth:`Pipeline._phase`.
+
+    A phase that can either do its work or reload the result of an earlier run
+    only knows which one it did partway through. :meth:`from_disk` retags it so
+    the breakdown never reports a cache hit under the name of the work it stood
+    in for.
+    """
+
+    name: str
+
+    def from_disk(self) -> None:
+        """Mark this phase as having reloaded its product instead of building it."""
+        if not self.name.endswith(_FROM_DISK):
+            self.name += _FROM_DISK
+
+
 def human_bytes(n: float, binary: bool = True) -> str:
     """Format a byte count with a unit that keeps it readable.
 
@@ -302,6 +323,12 @@ class RunConfig:
     # --- fitting ----------------------------------------------------------
     fit: dict[str, Any] = field(default_factory=dict)  # FitConfig kwargs
     scene_plots: bool = True  # write per-scene diagnostic PNGs
+    # Cap on how many of those PNGs get written. A full field solves ~1600
+    # scenes, and rendering all of them costs the better part of an hour and
+    # several GB, for a set nobody opens. The cap keeps the scenes worth
+    # looking at: half by worst reduced chi2, half by largest astrometric
+    # systematic floor. 0 or negative writes every scene.
+    scene_plots_max: int = 200
     # per-source stamps FITS: tmpl_hi/tmpl_lo at native sizes + per-source PSF
     # region keys (PSF stamps stay in the cached <name>_psf_*.geojson maps)
     save_stamps: bool = True
@@ -1829,43 +1856,52 @@ class Pipeline:
     # -- step 1: per-band PSF region maps ---------------------------------
     def build_psfs(self, overwrite: bool = False) -> "Pipeline":
         """Build (or reload) per-band PSF maps with PSFs at their own centroids."""
-        self._ensure_dpsfs()
+        with self._phase("epsf grids"):
+            self._ensure_dpsfs()
         cfg = self.run_config
         want_hi = {"pattern": cfg.psf.pattern_hi, "psf_size": float(cfg.psf.size or 0.0),
                    "blur_fwhm": 0.0}
         want_lo = {"pattern": cfg.psf.pattern_lo, "psf_size": float(cfg.psf.size or 0.0),
                    "blur_fwhm": float(self._blur_fwhm() or 0.0)}
         if self.f_psf_hi.exists() and self.f_psf_lo.exists() and not overwrite:
-            cached_hi = PSFRegionMap.from_geojson(str(self.f_psf_hi))
-            cached_lo = PSFRegionMap.from_geojson(str(self.f_psf_lo))
-            stale = (_provenance_matches(cached_hi, want_hi)
-                     or _provenance_matches(cached_lo, want_lo))
-            if stale is None:
-                self.prm_hi, self.prm_lo = cached_hi, cached_lo
-                logger.info(
-                    "loaded cached PSF maps from %s (psf_size=%.3g, blur=%.3g)",
-                    self.out_dir, want_lo["psf_size"], want_lo["blur_fwhm"],
-                )
-                return self
+            with self._phase("psf maps") as phase:
+                cached_hi = PSFRegionMap.from_geojson(str(self.f_psf_hi))
+                cached_lo = PSFRegionMap.from_geojson(str(self.f_psf_lo))
+                stale = (_provenance_matches(cached_hi, want_hi)
+                         or _provenance_matches(cached_lo, want_lo))
+                if stale is None:
+                    phase.from_disk()
+                    self.prm_hi, self.prm_lo = cached_hi, cached_lo
+                    logger.info(
+                        "loaded cached PSF maps from %s (psf_size=%.3g, blur=%.3g)",
+                        self.out_dir, want_lo["psf_size"], want_lo["blur_fwhm"],
+                    )
+                    return self
             logger.warning(
                 "cached PSF maps in %s disagree on %r; rebuilding",
                 self.out_dir, stale,
             )
 
-        self._ensure_dpsfs(load_epsf=True)
-        prm_hi, prm_lo = self._region_maps()
-        prm_hi.psfs = self.dpsf_hi.get_psf_radec(
-            self._centroids(prm_hi), **self._size_kw()
+        with self._phase("epsf grids"):
+            self._ensure_dpsfs(load_epsf=True)
+        with self._phase("psf maps"):
+            prm_hi, prm_lo = self._region_maps()
+            prm_hi.psfs = self.dpsf_hi.get_psf_radec(
+                self._centroids(prm_hi), **self._size_kw()
+            )
+            prm_lo.psfs = self._drizzle_lo_blurred(self._centroids(prm_lo))
+            blur = self._blur_fwhm()
+            if blur:
+                logger.info('applied %.3f" FWHM Gaussian broadening to lo-res PSFs', blur)
+            _stamp_provenance(prm_hi, **want_hi)
+            _stamp_provenance(prm_lo, **want_lo)
+            prm_hi.to_file(self.f_psf_hi)
+            prm_lo.to_file(self.f_psf_lo)
+            self.prm_hi, self.prm_lo = prm_hi, prm_lo
+        logger.info(
+            "drizzled %d hi-res and %d lo-res PSF stamp(s)",
+            len(prm_hi.psfs), len(prm_lo.psfs),
         )
-        prm_lo.psfs = self._drizzle_lo_blurred(self._centroids(prm_lo))
-        blur = self._blur_fwhm()
-        if blur:
-            logger.info('applied %.3f" FWHM Gaussian broadening to lo-res PSFs', blur)
-        _stamp_provenance(prm_hi, **want_hi)
-        _stamp_provenance(prm_lo, **want_lo)
-        prm_hi.to_file(self.f_psf_hi)
-        prm_lo.to_file(self.f_psf_lo)
-        self.prm_hi, self.prm_lo = prm_hi, prm_lo
         return self
 
     # -- step 2: matching-kernel map --------------------------------------
@@ -1894,19 +1930,21 @@ class Pipeline:
         from . import utils
 
         if self.f_kernel.exists() and not overwrite:
-            cached = PSFRegionMap.from_geojson(str(self.f_kernel))
-            cached_method = _provenance(cached, "kernel_method")
-            cached_reg = _provenance(cached, "kernel_reg")
-            cached_reg = float("nan") if cached_reg is None else float(cached_reg)
-            cached_source = _provenance(cached, "kernel_psf_source")
-            if (cached_method is not None and str(cached_method) == method
-                    and str(cached_source) == _KERNEL_PSF_SOURCE):
-                self.prm_kern = cached
-                logger.info(
-                    "loaded cached kernel map %s (method=%s, reg=%.4g)",
-                    self.f_kernel, cached_method, cached_reg,
-                )
-                return self
+            with self._phase("matching kernels") as phase:
+                cached = PSFRegionMap.from_geojson(str(self.f_kernel))
+                cached_method = _provenance(cached, "kernel_method")
+                cached_reg = _provenance(cached, "kernel_reg")
+                cached_reg = float("nan") if cached_reg is None else float(cached_reg)
+                cached_source = _provenance(cached, "kernel_psf_source")
+                if (cached_method is not None and str(cached_method) == method
+                        and str(cached_source) == _KERNEL_PSF_SOURCE):
+                    phase.from_disk()
+                    self.prm_kern = cached
+                    logger.info(
+                        "loaded cached kernel map %s (method=%s, reg=%.4g)",
+                        self.f_kernel, cached_method, cached_reg,
+                    )
+                    return self
             logger.warning(
                 "cached kernel map %s was built with method=%s from %s; this run "
                 "wants %s from %s, so it is being rebuilt",
@@ -1914,101 +1952,105 @@ class Pipeline:
                 cached_source or "unrecorded", method, _KERNEL_PSF_SOURCE,
             )
 
-        self._ensure_dpsfs()
+        with self._phase("epsf grids"):
+            self._ensure_dpsfs()
+        # outside the phase below: build_psfs times itself, and phases must not
+        # nest or the two would both charge for the same seconds
         if self.prm_hi is None or self.prm_lo is None:
             self.build_psfs()
-        prm_hi, prm_lo = self.prm_hi, self.prm_lo
-        if prm_hi.psfs is None or prm_lo.psfs is None:
-            raise ValueError(
-                "the PSF region maps carry no stamps; rebuild them with "
-                "build_psfs(overwrite=True)"
+        with self._phase("matching kernels"):
+            prm_hi, prm_lo = self.prm_hi, self.prm_lo
+            if prm_hi.psfs is None or prm_lo.psfs is None:
+                raise ValueError(
+                    "the PSF region maps carry no stamps; rebuild them with "
+                    "build_psfs(overwrite=True)"
+                )
+            prm_kern = prm_hi.overlay_with(prm_lo)
+
+            # An overlay region lies inside exactly one hi and one lo region, and a
+            # region map defines the PSF as constant within a region: the pair for
+            # overlay row i *is* (prm_hi.psfs[psf_key_1], prm_lo.psfs[psf_key_2]),
+            # which is what ``prm_hi.get_psf(ra, dec)`` returns anywhere inside it.
+            # Re-drizzling at the overlay centroid would cost 2 x N_overlay stamps
+            # to match the kernel against a PSF the fit never looks up.
+            psf_hi = np.asarray(prm_hi.psfs)[
+                prm_kern.regions["psf_key_1"].to_numpy(dtype=int)
+            ]
+            psf_lo = np.asarray(prm_lo.psfs)[
+                prm_kern.regions["psf_key_2"].to_numpy(dtype=int)
+            ]
+
+            pixel_ratio = round(self.dpsf_lo.driz_pscale / self.dpsf_hi.driz_pscale)
+            # Kernels are matched between unit-sum PSF *shapes*
+            # (docs/PSF_SHAPE_THROUGHPUT_CONVENTION.md).  Feeding native-sum stamps
+            # would make sum(kernel) carry sum(psf_lo)/sum(psf_hi), which then hides
+            # the kernel's own fidelity error inside a throughput factor.  The maps
+            # written by :meth:`build_psfs` keep their native sums; only the copies
+            # used here are normalized.
+            shapes_hi = [normalize(p) for p in psf_hi]
+            shapes_lo = [normalize(p) for p in psf_lo]
+
+            # The default SplitCosineBell window low-passes the model, which biases
+            # every fitted amplitude high by sum(W|P|^2)/sum(W^2|P|^2) -- 2.2% on the
+            # F444W/F770W pair, independent of stamp size.  A regularized method with
+            # an optimized parameter avoids it (docs/ENCIRCLED_ENERGY.pdf).
+            kw: dict[str, Any] = {"method": method}
+            if method.strip().lower() != "window":
+                if reg is None:
+                    # One scan on the median shape, reused for every region: a
+                    # per-region grid search would cost 21 kernels per region.
+                    from .psf import PSF
+
+                    med_hi = normalize(np.median(np.asarray(shapes_hi), axis=0))
+                    med_lo = normalize(np.median(np.asarray(shapes_lo), axis=0))
+                    fit = PSF.from_array(med_hi).optimize_matching_kernel_regularization(
+                        PSF.from_array(med_lo),
+                        method=method,
+                        pixel_ratio=pixel_ratio,
+                        recenter=False,
+                        growth_weight=1.0,
+                        core_weight=1.0,
+                        l2_weight=1.0,
+                        kernel_regularization_weight=1e-3,
+                    )
+                    reg = float(fit.reg)
+                    logger.info(
+                        "%s regularization from a %d-point scan on the median PSF: "
+                        "reg=%.4g (score %.5g)",
+                        method, len(fit.reg_grid), reg, float(fit.score),
+                    )
+                kw["reg"] = reg
+            kernels = [
+                utils.matching_kernel(s_hi, s_lo, pixel_ratio=pixel_ratio, **kw)
+                for s_hi, s_lo in zip(shapes_hi, shapes_lo)
+            ]
+            # Renormalize to unit sum.  Unit-sum inputs already put sum(k) within a
+            # part in 1e3 of one, so this only removes the residual regularization
+            # DC, but it guarantees the kernel carries no flux scale of its own:
+            # the total flux correction is then ee_psf_lo and nothing else.  It says
+            # nothing about whether the kernel has the right *shape*, which is a
+            # separate term (docs/ENCIRCLED_ENERGY.pdf).
+            raw_sums = np.array([float(np.nansum(k)) for k in kernels])
+            prm_kern.psfs = np.asarray([normalize(k) for k in kernels])
+            # Stamp the provenance so a cached map is never reused under a
+            # different method.  These round-trip through the geojson as columns.
+            _stamp_provenance(
+                prm_kern,
+                kernel_method=method,
+                kernel_reg=float("nan") if reg is None else float(reg),
+                kernel_psf_source=_KERNEL_PSF_SOURCE,
+                psf_size=float(self.run_config.psf.size or 0.0),
             )
-        prm_kern = prm_hi.overlay_with(prm_lo)
-
-        # An overlay region lies inside exactly one hi and one lo region, and a
-        # region map defines the PSF as constant within a region: the pair for
-        # overlay row i *is* (prm_hi.psfs[psf_key_1], prm_lo.psfs[psf_key_2]),
-        # which is what ``prm_hi.get_psf(ra, dec)`` returns anywhere inside it.
-        # Re-drizzling at the overlay centroid would cost 2 x N_overlay stamps
-        # to match the kernel against a PSF the fit never looks up.
-        psf_hi = np.asarray(prm_hi.psfs)[
-            prm_kern.regions["psf_key_1"].to_numpy(dtype=int)
-        ]
-        psf_lo = np.asarray(prm_lo.psfs)[
-            prm_kern.regions["psf_key_2"].to_numpy(dtype=int)
-        ]
-
-        pixel_ratio = round(self.dpsf_lo.driz_pscale / self.dpsf_hi.driz_pscale)
-        # Kernels are matched between unit-sum PSF *shapes*
-        # (docs/PSF_SHAPE_THROUGHPUT_CONVENTION.md).  Feeding native-sum stamps
-        # would make sum(kernel) carry sum(psf_lo)/sum(psf_hi), which then hides
-        # the kernel's own fidelity error inside a throughput factor.  The maps
-        # written by :meth:`build_psfs` keep their native sums; only the copies
-        # used here are normalized.
-        shapes_hi = [normalize(p) for p in psf_hi]
-        shapes_lo = [normalize(p) for p in psf_lo]
-
-        # The default SplitCosineBell window low-passes the model, which biases
-        # every fitted amplitude high by sum(W|P|^2)/sum(W^2|P|^2) -- 2.2% on the
-        # F444W/F770W pair, independent of stamp size.  A regularized method with
-        # an optimized parameter avoids it (docs/ENCIRCLED_ENERGY.pdf).
-        kw: dict[str, Any] = {"method": method}
-        if method.strip().lower() != "window":
-            if reg is None:
-                # One scan on the median shape, reused for every region: a
-                # per-region grid search would cost 21 kernels per region.
-                from .psf import PSF
-
-                med_hi = normalize(np.median(np.asarray(shapes_hi), axis=0))
-                med_lo = normalize(np.median(np.asarray(shapes_lo), axis=0))
-                fit = PSF.from_array(med_hi).optimize_matching_kernel_regularization(
-                    PSF.from_array(med_lo),
-                    method=method,
-                    pixel_ratio=pixel_ratio,
-                    recenter=False,
-                    growth_weight=1.0,
-                    core_weight=1.0,
-                    l2_weight=1.0,
-                    kernel_regularization_weight=1e-3,
-                )
-                reg = float(fit.reg)
-                logger.info(
-                    "%s regularization from a %d-point scan on the median PSF: "
-                    "reg=%.4g (score %.5g)",
-                    method, len(fit.reg_grid), reg, float(fit.score),
-                )
-            kw["reg"] = reg
-        kernels = [
-            utils.matching_kernel(s_hi, s_lo, pixel_ratio=pixel_ratio, **kw)
-            for s_hi, s_lo in zip(shapes_hi, shapes_lo)
-        ]
-        # Renormalize to unit sum.  Unit-sum inputs already put sum(k) within a
-        # part in 1e3 of one, so this only removes the residual regularization
-        # DC, but it guarantees the kernel carries no flux scale of its own:
-        # the total flux correction is then ee_psf_lo and nothing else.  It says
-        # nothing about whether the kernel has the right *shape*, which is a
-        # separate term (docs/ENCIRCLED_ENERGY.pdf).
-        raw_sums = np.array([float(np.nansum(k)) for k in kernels])
-        prm_kern.psfs = np.asarray([normalize(k) for k in kernels])
-        # Stamp the provenance so a cached map is never reused under a
-        # different method.  These round-trip through the geojson as columns.
-        _stamp_provenance(
-            prm_kern,
-            kernel_method=method,
-            kernel_reg=float("nan") if reg is None else float(reg),
-            kernel_psf_source=_KERNEL_PSF_SOURCE,
-            psf_size=float(self.run_config.psf.size or 0.0),
-        )
-        logger.info(
-            "kernel map: method=%s reg=%s, DC before renormalization "
-            "mean %.6f, range %.6f-%.6f; renormalized to 1",
-            method, "n/a" if reg is None else f"{reg:.4g}",
-            float(np.nanmean(raw_sums)),
-            float(np.nanmin(raw_sums)),
-            float(np.nanmax(raw_sums)),
-        )
-        prm_kern.to_file(self.f_kernel)
-        self.prm_kern = prm_kern
+            logger.info(
+                "kernel map: method=%s reg=%s, DC before renormalization "
+                "mean %.6f, range %.6f-%.6f; renormalized to 1",
+                method, "n/a" if reg is None else f"{reg:.4g}",
+                float(np.nanmean(raw_sums)),
+                float(np.nanmin(raw_sums)),
+                float(np.nanmax(raw_sums)),
+            )
+            prm_kern.to_file(self.f_kernel)
+            self.prm_kern = prm_kern
         return self
 
     def _ensure_maps(self) -> None:
@@ -2018,10 +2060,12 @@ class Pipeline:
         detection-band PSF the template build scheme reads from ``psfs[0]``
         (every ``extend_mode`` except ``'none'``).
         """
-        if self.prm_lo is None and self.f_psf_lo.exists():
-            self.prm_lo = PSFRegionMap.from_geojson(str(self.f_psf_lo))
-        if self.prm_hi is None and self.f_psf_hi.exists():
-            self.prm_hi = PSFRegionMap.from_geojson(str(self.f_psf_hi))
+        if self.prm_lo is None or self.prm_hi is None:
+            with self._phase("psf maps" + _FROM_DISK):
+                if self.prm_lo is None and self.f_psf_lo.exists():
+                    self.prm_lo = PSFRegionMap.from_geojson(str(self.f_psf_lo))
+                if self.prm_hi is None and self.f_psf_hi.exists():
+                    self.prm_hi = PSFRegionMap.from_geojson(str(self.f_psf_hi))
         if self.prm_kern is None:
             self.build_kernels()
 
@@ -2348,101 +2392,104 @@ class Pipeline:
             )
         self.trial_box_hi, self.trial_box_lo = box_hi, box_lo
 
-        tmpl_hi = _read_image(cfg.sci_hi, box_hi)
-        sci_lo = _read_image(cfg.sci_lo, box_lo)
-        wht_lo = _read_image(cfg.wht_lo, box_lo)
-        # Normalise the label dtype once, here at the boundary: releases differ
-        # (MINERVA COSMOS ships float64 where UDS and EGS ship int32) and every
-        # downstream SegmentationImage would otherwise have to defend itself.
-        segmap = as_label_array(_read_image(cfg.segmap, box_hi))
-        cat = Table.read(cfg.catalog)
+        with self._phase("read inputs"):
+            tmpl_hi = _read_image(cfg.sci_hi, box_hi)
+            sci_lo = _read_image(cfg.sci_lo, box_lo)
+            wht_lo = _read_image(cfg.wht_lo, box_lo)
+            # Normalise the label dtype once, here at the boundary: releases differ
+            # (MINERVA COSMOS ships float64 where UDS and EGS ship int32) and every
+            # downstream SegmentationImage would otherwise have to defend itself.
+            segmap = as_label_array(_read_image(cfg.segmap, box_hi))
+            cat = Table.read(cfg.catalog)
 
         wht_hi_repaired: np.ndarray | None = None
         if cfg.repair_saturated:
-            from .repair import repair_in_memory
+            with self._phase("saturation repair") as phase:
+                from .repair import repair_in_memory
 
-            self._ensure_dpsfs(load_epsf=True)
-            # Large-FOV grids for the halo model (halo + spikes); the core
-            # fit keeps the MJD-matched psf.pattern_hi ePSFs and the halo is
-            # grafted outside their support. Same two-PSF split as the
-            # original standalone repair flow.
-            pattern_halo = cfg.repair_psf_pattern or self._repair_halo_pattern()
-            stamp_dpsf = None
-            if pattern_halo and pattern_halo != cfg.psf.pattern_hi:
-                from .psf import DrizzlePSF
+                self._ensure_dpsfs(load_epsf=True)
+                # Large-FOV grids for the halo model (halo + spikes); the core
+                # fit keeps the MJD-matched psf.pattern_hi ePSFs and the halo is
+                # grafted outside their support. Same two-PSF split as the
+                # original standalone repair flow.
+                pattern_halo = cfg.repair_psf_pattern or self._repair_halo_pattern()
+                stamp_dpsf = None
+                if pattern_halo and pattern_halo != cfg.psf.pattern_hi:
+                    from .psf import DrizzlePSF
 
-                stamp_dpsf = DrizzlePSF(
-                    driz_image=str(cfg.sci_hi),
-                    info=(self.dpsf_hi.flt_keys, self.dpsf_hi.wcs,
-                          self.dpsf_hi.footprint, self.dpsf_hi.hdrs),
-                )
-                try:
-                    self._load_epsf(stamp_dpsf, pattern_halo, cfg.csv_hi, "halo")
-                except (FileNotFoundError, ValueError) as exc:
-                    # Missing grids with autobuild off, or a pattern the
-                    # autobuild grammar cannot parse (e.g. a legacy-order
-                    # spelling): degrade to the psf.pattern_hi reach instead of
-                    # failing the run — the repair itself is unaffected.
-                    logger.warning(
-                        "halo PSF grids unavailable for %r (%s); flag reach "
-                        "limited to the psf.pattern_hi field of view",
-                        pattern_halo, exc,
+                    stamp_dpsf = DrizzlePSF(
+                        driz_image=str(cfg.sci_hi),
+                        info=(self.dpsf_hi.flt_keys, self.dpsf_hi.wcs,
+                              self.dpsf_hi.footprint, self.dpsf_hi.hdrs),
                     )
-                    stamp_dpsf, pattern_halo = None, ""
-            wht0 = _read_image(self.resolve_wht_hi(), box_hi)
-            if cfg.repair_cache_path:
-                cache_path = Path(cfg.repair_cache_path)
-                if not cache_path.is_absolute():
-                    # resolves against out_dir, NOT the process CWD: multi-band
-                    # configs whose out_dirs share a field directory can all
-                    # point at "../<field>_repair_cache.fits"
-                    cache_path = self.out_dir / cache_path
-                if cache_path.is_dir() or not cache_path.suffix:
-                    cache_path = cache_path / "repair_cache.fits"
-            else:
-                cache_path = self.out_dir / "repaired" / "repair_cache.fits"
-            prov = self._repair_provenance(pattern_halo)
-            cached = None
-            if cfg.repair_reuse:
-                cached = self._load_repair_cache(
-                    cache_path, prov, tmpl_hi, wht0, segmap, cat
-                )
-            if cached is not None:
-                tmpl_hi, wht_hi_repaired, cat = cached[0], cached[1], cached[2]
-                segmap = as_label_array(cached[3])
-            else:
-                sci0 = tmpl_hi.copy()
-                seg0 = segmap.copy()
-                rep = repair_in_memory(
-                    tmpl_hi, wht0,
-                    dpsf=self.dpsf_hi, wcs=wcs_hi, psf_pattern=cfg.psf.pattern_hi,
-                    catalog=cat, segmap=segmap,
-                    stamp_dpsf=stamp_dpsf,
-                    stamp_pattern=pattern_halo or None,
-                    out_dir=self.out_dir / "repaired",
-                    plots=cfg.scene_plots,
-                    **(cfg.repair_kwargs or {}),
-                )
-                self._save_repair_cache(cache_path, prov, sci0, wht0, seg0, rep, cat)
-                # the pre-repair snapshots exist only to be written to the
-                # cache, and they are two mosaic-sized arrays
-                del sci0, seg0
-                wht_hi_repaired = rep["wht"]
-                cat = rep["catalog"]
-                # `repair_saturated_holes` returns fresh full-field copies of
-                # sci and segmap (saturate.py:733), so holding them costs two
-                # mosaics of anonymous memory for a result that differs from
-                # the inputs only over the saturated cores. Replay the patch
-                # table onto fresh maps of the originals instead, exactly as
-                # the reuse path above does: astropy maps a read-only HDU
-                # copy-on-write, so only the patched pages go private and the
-                # rest stays evictable page cache.
-                tmpl_hi = _read_image(cfg.sci_hi, box_hi)
-                segmap = as_label_array(_read_image(cfg.segmap, box_hi))
-                _apply_repair_patches(self._repair_patches, tmpl_hi, segmap)
-                del rep
-            # the raw hi-res weight map is superseded by the repaired one
-            del wht0
+                    try:
+                        self._load_epsf(stamp_dpsf, pattern_halo, cfg.csv_hi, "halo")
+                    except (FileNotFoundError, ValueError) as exc:
+                        # Missing grids with autobuild off, or a pattern the
+                        # autobuild grammar cannot parse (e.g. a legacy-order
+                        # spelling): degrade to the psf.pattern_hi reach instead of
+                        # failing the run — the repair itself is unaffected.
+                        logger.warning(
+                            "halo PSF grids unavailable for %r (%s); flag reach "
+                            "limited to the psf.pattern_hi field of view",
+                            pattern_halo, exc,
+                        )
+                        stamp_dpsf, pattern_halo = None, ""
+                wht0 = _read_image(self.resolve_wht_hi(), box_hi)
+                if cfg.repair_cache_path:
+                    cache_path = Path(cfg.repair_cache_path)
+                    if not cache_path.is_absolute():
+                        # resolves against out_dir, NOT the process CWD: multi-band
+                        # configs whose out_dirs share a field directory can all
+                        # point at "../<field>_repair_cache.fits"
+                        cache_path = self.out_dir / cache_path
+                    if cache_path.is_dir() or not cache_path.suffix:
+                        cache_path = cache_path / "repair_cache.fits"
+                else:
+                    cache_path = self.out_dir / "repaired" / "repair_cache.fits"
+                prov = self._repair_provenance(pattern_halo)
+                cached = None
+                if cfg.repair_reuse:
+                    cached = self._load_repair_cache(
+                        cache_path, prov, tmpl_hi, wht0, segmap, cat
+                    )
+                if cached is not None:
+                    phase.from_disk()
+                    tmpl_hi, wht_hi_repaired, cat = cached[0], cached[1], cached[2]
+                    segmap = as_label_array(cached[3])
+                else:
+                    sci0 = tmpl_hi.copy()
+                    seg0 = segmap.copy()
+                    rep = repair_in_memory(
+                        tmpl_hi, wht0,
+                        dpsf=self.dpsf_hi, wcs=wcs_hi, psf_pattern=cfg.psf.pattern_hi,
+                        catalog=cat, segmap=segmap,
+                        stamp_dpsf=stamp_dpsf,
+                        stamp_pattern=pattern_halo or None,
+                        out_dir=self.out_dir / "repaired",
+                        plots=cfg.scene_plots,
+                        **(cfg.repair_kwargs or {}),
+                    )
+                    self._save_repair_cache(cache_path, prov, sci0, wht0, seg0, rep, cat)
+                    # the pre-repair snapshots exist only to be written to the
+                    # cache, and they are two mosaic-sized arrays
+                    del sci0, seg0
+                    wht_hi_repaired = rep["wht"]
+                    cat = rep["catalog"]
+                    # `repair_saturated_holes` returns fresh full-field copies of
+                    # sci and segmap (saturate.py:733), so holding them costs two
+                    # mosaics of anonymous memory for a result that differs from
+                    # the inputs only over the saturated cores. Replay the patch
+                    # table onto fresh maps of the originals instead, exactly as
+                    # the reuse path above does: astropy maps a read-only HDU
+                    # copy-on-write, so only the patched pages go private and the
+                    # rest stays evictable page cache.
+                    tmpl_hi = _read_image(cfg.sci_hi, box_hi)
+                    segmap = as_label_array(_read_image(cfg.segmap, box_hi))
+                    _apply_repair_patches(self._repair_patches, tmpl_hi, segmap)
+                    del rep
+                # the raw hi-res weight map is superseded by the repaired one
+                del wht0
 
         if cfg.footprint_filter:
             scale_hi = proj_plane_pixel_scales(wcs_hi)[0]
@@ -2484,38 +2531,39 @@ class Pipeline:
             cat = cat[coords.separation(ref) < radius * u.arcmin]
             logger.info("trial radius %.2f': %d sources", radius, len(cat))
 
-        bg, ivar = self._bg_and_ivar_boxed(
-            sci_lo, wht_lo, box_lo,
-            bg_filter_sigma=cfg.bg_filter_sigma,
-            label=f"{self._filter_lo() or 'lo band'}, {Path(cfg.wht_lo).name}",
-        )
-        # Background subtraction and the non-finite guard, over the trial box
-        # only. Whole-array arithmetic here would touch every page and fault
-        # the mosaic that was deliberately not read back into memory; outside
-        # the box the arrays are zero, which is already what the guard wants.
-        sl_lo = _box_slice(box_lo)
-        # np.zeros, not np.zeros_like: zeros_like is empty_like + memset and
-        # so writes every page, which on a trial run materialises the whole
-        # grid that was deliberately never read
-        sci_fit = np.zeros(sci_lo.shape, dtype=sci_lo.dtype)
-        sub = sci_lo[sl_lo] - bg[sl_lo]
-        # zero non-finite pixels in image AND weight so they carry no information
-        bad = ~np.isfinite(sub)
-        sub[bad] = 0.0
-        sci_fit[sl_lo] = sub
-        ivar_box = ivar[sl_lo]
-        ivar_box[bad] = 0.0
-        ivar_box[~np.isfinite(ivar_box)] = 0.0
+        with self._phase("background + ivar"):
+            bg, ivar = self._bg_and_ivar_boxed(
+                sci_lo, wht_lo, box_lo,
+                bg_filter_sigma=cfg.bg_filter_sigma,
+                label=f"{self._filter_lo() or 'lo band'}, {Path(cfg.wht_lo).name}",
+            )
+            # Background subtraction and the non-finite guard, over the trial box
+            # only. Whole-array arithmetic here would touch every page and fault
+            # the mosaic that was deliberately not read back into memory; outside
+            # the box the arrays are zero, which is already what the guard wants.
+            sl_lo = _box_slice(box_lo)
+            # np.zeros, not np.zeros_like: zeros_like is empty_like + memset and
+            # so writes every page, which on a trial run materialises the whole
+            # grid that was deliberately never read
+            sci_fit = np.zeros(sci_lo.shape, dtype=sci_lo.dtype)
+            sub = sci_lo[sl_lo] - bg[sl_lo]
+            # zero non-finite pixels in image AND weight so they carry no information
+            bad = ~np.isfinite(sub)
+            sub[bad] = 0.0
+            sci_fit[sl_lo] = sub
+            ivar_box = ivar[sl_lo]
+            ivar_box[bad] = 0.0
+            ivar_box[~np.isfinite(ivar_box)] = 0.0
 
-        ivar_hi = self._load_detection_ivar(tmpl_hi, wht_hi=wht_hi_repaired)
-        sl_hi = _box_slice(box_hi)
-        tmpl_box = tmpl_hi[sl_hi]
-        bad_hi = ~np.isfinite(tmpl_box)
-        np.nan_to_num(tmpl_box, copy=False)
-        if ivar_hi is not None:
-            ivar_hi_box = ivar_hi[sl_hi]
-            ivar_hi_box[bad_hi] = 0.0
-            ivar_hi_box[~np.isfinite(ivar_hi_box)] = 0.0
+            ivar_hi = self._load_detection_ivar(tmpl_hi, wht_hi=wht_hi_repaired)
+            sl_hi = _box_slice(box_hi)
+            tmpl_box = tmpl_hi[sl_hi]
+            bad_hi = ~np.isfinite(tmpl_box)
+            np.nan_to_num(tmpl_box, copy=False)
+            if ivar_hi is not None:
+                ivar_hi_box = ivar_hi[sl_hi]
+                ivar_hi_box[bad_hi] = 0.0
+                ivar_hi_box[~np.isfinite(ivar_hi_box)] = 0.0
 
         if kernels:
             self._ensure_maps()
@@ -2797,6 +2845,63 @@ class Pipeline:
             ]
         table.write(str(path), format="ascii.csv", overwrite=True)
         return table
+
+    def _scenes_to_plot(self, table: Table) -> list:
+        """The scenes that get a diagnostic PNG, capped by ``scene_plots_max``.
+
+        A full field solves ~1600 scenes and nobody reads 1600 figures, so the
+        cap keeps the two kinds worth reading: the worst-fitted, by reduced
+        chi2 over the global residual, and the ones whose anchors disagreed
+        most, by the robust pass's systematic floor. Half the budget each.
+
+        The floor is NaN wherever the robust pass declined to judge (too few
+        usable anchors for ``FitConfig.scene_minimum_anchors``), which on a
+        real field is most scenes, so its half tops up from the chi2 ranking
+        rather than going unspent.
+
+        Args:
+            table: the scene catalog as :meth:`write_scene_catalog` returned
+                it, in ``self.scenes`` order.
+
+        Returns:
+            Scenes to plot, in scene order.
+        """
+        cfg = self.run_config
+        n_max = int(getattr(cfg, "scene_plots_max", 0) or 0)
+        if n_max <= 0 or len(self.scenes) <= n_max:
+            return list(self.scenes)
+
+        def _rank(column: str) -> list[int]:
+            """Scene ids by descending ``column``, dropping non-finite rows."""
+            v = np.asarray(table[column], dtype=float)
+            ids = np.asarray(table["id"], dtype=int)
+            keep = np.flatnonzero(np.isfinite(v))
+            return [int(i) for i in ids[keep[np.argsort(-v[keep])]]]
+
+        by_chi2, by_floor = _rank("chi2_dof"), _rank("astrom_floor")
+        picked: list[int] = []
+        seen: set[int] = set()
+
+        def _take(ids: list[int], upto: int) -> None:
+            for sid in ids:
+                if len(picked) >= upto:
+                    return
+                if sid not in seen:
+                    seen.add(sid)
+                    picked.append(sid)
+
+        _take(by_chi2, n_max // 2)
+        n_chi2 = len(picked)
+        _take(by_floor, n_max)  # the other half, skipping any already picked
+        n_floor = len(picked) - n_chi2
+        _take(by_chi2, n_max)  # ... and back to chi2 if the floors ran out
+        logger.info(
+            "[scenes] plotting %d of %d scenes (scene_plots_max=%d): %d worst "
+            "chi2_dof, %d largest astrom_floor, %d further chi2_dof",
+            len(picked), len(self.scenes), n_max, n_chi2, n_floor,
+            len(picked) - n_chi2 - n_floor,
+        )
+        return [s for s in self.scenes if int(s.id) in seen]
 
     def restore_scene_fit(self, scenes: Sequence[Any]) -> int:
         """Put the ``SCENES`` extension back onto regrouped scene objects.
@@ -3300,7 +3405,7 @@ class Pipeline:
         cfg = self.run_config
         stem = self.out_dir / cfg.name
         # residual is on the hi-res reference grid (upsample path)
-        with _quiet_hierarch_warnings():
+        with self._phase("write residual + tables"), _quiet_hierarch_warnings():
             if isinstance(self.residuals[0], np.memmap):
                 # already written: run() accumulated straight into the file's
                 # data section (see _residual_memmap), so only the pages still
@@ -3348,18 +3453,34 @@ class Pipeline:
             for t in s.templates
             if getattr(t, "is_saturated", False)
         ]
-        self.write_scene_catalog(f"{stem}_scene_catalog.csv")
+        with self._phase("write residual + tables"):
+            scene_table = self.write_scene_catalog(f"{stem}_scene_catalog.csv")
 
         if cfg.scene_plots:
             import matplotlib.pyplot as plt
+            from .verification import diagnostic_pixel_sampling_dpi
 
-            for s in self.scenes:
-                fig, _ = s.plot(
-                    self.images[0], self.segmap, display_sig=5,
-                    null_segments=sat_ids,
-                )
-                fig.savefig(scene_dir / f"{cfg.name}_scene_{s.id}.png", dpi=300)
-                plt.close(fig)
+            with self._phase("scene figures"):
+                drawn = 0
+                for s in self._scenes_to_plot(scene_table):
+                    fig, _ = s.plot(
+                        self.images[0], self.segmap, display_sig=5,
+                        null_segments=sat_ids,
+                    )
+                    # A fixed 300 dpi drew every scene onto the same 4500x3000
+                    # canvas, which is where the time went -- rendering and PNG
+                    # encoding both scale with the canvas, not with the scene. Ask
+                    # instead for one output pixel per scene pixel, which is all
+                    # the figure can show.
+                    dpi = diagnostic_pixel_sampling_dpi(
+                        [s.image[_slices_from_bbox(s.bbox)]],
+                        figsize=(15, 10), nrows=2, ncols=3,
+                        min_dpi=100, max_dpi=300, oversample=1.0,
+                    )
+                    fig.savefig(scene_dir / f"{cfg.name}_scene_{s.id}.png", dpi=dpi)
+                    plt.close(fig)
+                    drawn += 1
+            logger.info("wrote %d scene diagnostic PNG(s) to %s", drawn, scene_dir)
 
         # Two full-field views of the partition, answering different
         # questions, side by side in one figure and sharing one colour per
@@ -3371,13 +3492,15 @@ class Pipeline:
         if cfg.scene_plots and self.scenes:
             from .verification import save_scene_partition
 
-            save_scene_partition(
-                self.images[0], self.segmap, self.scenes,
-                f"{stem}_scenes.png",
-            )
+            with self._phase("field figures"):
+                save_scene_partition(
+                    self.images[0], self.segmap, self.scenes,
+                    f"{stem}_scenes.png",
+                )
 
         # shift field: only exists when astrometry was actually solved
-        out = self.plot_shift_field(save=f"{stem}_shift_field.png")
+        with self._phase("field figures"):
+            out = self.plot_shift_field(save=f"{stem}_shift_field.png")
         if out is not None:
             import matplotlib.pyplot as plt
 
@@ -3392,7 +3515,7 @@ class Pipeline:
         # that plot nothing at all.
         self._release_scene_weights()
         if cfg.save_stamps:
-            with _quiet_hierarch_warnings():
+            with self._phase("write stamps"), _quiet_hierarch_warnings():
                 self.write_stamps()
 
         logger.info("outputs written to %s", self.out_dir)
@@ -3878,8 +4001,7 @@ class Pipeline:
             )
             cat = self._fit_catalog(config)
             self._prepare_hi_templates(cat, config)
-            with self._phase("convolve templates"):
-                templates, weights_i = self._convolved_templates(ifilt, config)
+            templates, weights_i = self._convolved_templates(ifilt, config)
             # fitted amplitudes/errors/shifts: the saved per-template table is
             # exact (per component, pre-aggregation); the fit table is the
             # fallback for runs that predate it
@@ -4053,28 +4175,36 @@ class Pipeline:
 
         Re-entering a name adds to it, so a phase inside a per-band loop
         reports its total across bands rather than the last one.
+
+        Phases must not nest: :meth:`report_timings` reports them against the
+        whole invocation, so a phase inside another would be counted twice and
+        would hide the unaccounted remainder. Yields a :class:`_PhaseTag` whose
+        :meth:`~_PhaseTag.from_disk` retags a phase that reloaded its product.
         """
         if not hasattr(self, "_timings"):
             self._timings: dict[str, float] = {}
         if name.startswith("step: "):
             # a caller is partitioning the whole invocation and will report
             # once at the end; run() must not report its own half-finished view
-            self._cli_stepping = True
+            self._defer_timings = True
+        tag = _PhaseTag(name)
         started = time.perf_counter()
         try:
-            yield
+            yield tag
         finally:
             dt = time.perf_counter() - started
-            self._timings[name] = self._timings.get(name, 0.0) + dt
+            self._timings[tag.name] = self._timings.get(tag.name, 0.0) + dt
 
     def report_timings(self, total: float | None = None) -> None:
         """Log the per-section wall-clock breakdown, longest first."""
         timings = getattr(self, "_timings", None)
         if not timings:
             return
-        # Two levels, reported separately: CLI steps partition the run, while
-        # the fit's own phases sit inside one of them. Listing both in one
-        # table would double-count and the percentages would exceed 100.
+        # Two levels, reported separately: CLI steps partition the invocation
+        # coarsely, the phases partition it finely. Listing both in one table
+        # would double-count and the percentages would exceed 100. Both are
+        # reported against the same denominator -- the whole invocation -- so
+        # the phase table's ``(other)`` row is the genuinely untimed remainder.
         steps = {k[len("step: "):]: v for k, v in timings.items() if k.startswith("step: ")}
         inner = {k: v for k, v in timings.items() if not k.startswith("step: ")}
         total = total if total is not None else sum(steps.values()) or sum(inner.values())
@@ -4093,7 +4223,7 @@ class Pipeline:
                             _fmt_hms(rest), 100.0 * rest / max(denom, 1e-9))
 
         _table("time by step", steps, total)
-        _table("time within the fit", inner, steps.get("fit", sum(inner.values())))
+        _table("time by phase", inner, total)
 
     def build_repair_cache(self) -> "Pipeline":
         """Run the saturation repair, write its cache, and stop before the fit.
@@ -4147,10 +4277,19 @@ class Pipeline:
         """
         with self.log_run() as log_path:
             logger.info("logging this run to %s", log_path)
+            started = time.perf_counter()
+            # run() reports its own breakdown when it is the whole job; here it
+            # is a quarter of one, so hold the report until the outputs are
+            # written. `outer` is the CLI running `all` as a step: it reports.
+            outer = getattr(self, "_defer_timings", False)
+            self._defer_timings = True
             self.build_psfs()
             self.build_kernels()
             self.run()
             self.write_outputs()
+            if not outer:
+                self._defer_timings = False
+                self.report_timings(time.perf_counter() - started)
         return self
 
     def _update_catalog_with_fluxes(
@@ -5109,113 +5248,114 @@ class Pipeline:
         reference-grid versions, exactly as :meth:`run` always did.  Returns
         the convolved templates and the (possibly upsampled) weight image.
         """
-        images = self.images
-        weights = self.weights
-        wcs = self.wcs
-        kernels = self.kernels if self.kernels is not None else [None] * len(images)
+        with self._phase("convolve templates"):
+            images = self.images
+            weights = self.weights
+            wcs = self.wcs
+            kernels = self.kernels if self.kernels is not None else [None] * len(images)
 
-        weights_i = weights[ifilt] if weights is not None else None
-        kernel = kernels[ifilt]
-        if isinstance(kernel, PSFRegionMap):
-            logger.info("using kernel lookup table %s", kernel.name)
+            weights_i = weights[ifilt] if weights is not None else None
+            kernel = kernels[ifilt]
+            if isinstance(kernel, PSFRegionMap):
+                logger.info("using kernel lookup table %s", kernel.name)
 
-        k = bin_factor_from_wcs(wcs[0], wcs[ifilt]) if wcs is not None else 1
-        self.fit_bin_factors.append(int(k))
+            k = bin_factor_from_wcs(wcs[0], wcs[ifilt]) if wcs is not None else 1
+            self.fit_bin_factors.append(int(k))
 
-        # Native lo-band pixel scale, recorded before the upsample path
-        # rebinds wcs[ifilt] to the reference WCS: the delivered PSF stamps
-        # stay on the native grid, so PSFSZ/RCIRC metadata must use this.
-        if not hasattr(self, "native_pscales"):
-            self.native_pscales: dict[int, float | None] = {}
-        self.native_pscales[ifilt] = self._pixel_scale_arcsec(
-            wcs[ifilt] if wcs is not None else None
-        )
+            # Native lo-band pixel scale, recorded before the upsample path
+            # rebinds wcs[ifilt] to the reference WCS: the delivered PSF stamps
+            # stay on the native grid, so PSFSZ/RCIRC metadata must use this.
+            if not hasattr(self, "native_pscales"):
+                self.native_pscales: dict[int, float | None] = {}
+            self.native_pscales[ifilt] = self._pixel_scale_arcsec(
+                wcs[ifilt] if wcs is not None else None
+            )
 
-        if k > 1:
-            if config.multi_resolution_method == "upsample":
-                logger.info("upsampling %s by factor %d", self._band_label(ifilt), k)
-                images[ifilt], weights_i = _upsample_boxed(
-                    images[ifilt],
-                    weights_i,
-                    k,
-                    self.trial_box_lo,
-                )
-                wcs[ifilt] = wcs[0]
-                # Keep the instance's own weight on the same grid as its own
-                # image. The upsampled weight used to live only in this local,
-                # so afterwards images[ifilt] was on the reference grid while
-                # weights[ifilt] was still native -- and `wcs[ifilt] = wcs[0]`
-                # above erases the evidence, because the next call computes
-                # k = 1 and upsamples neither. A second pass over the same band
-                # (`_solve_frozen_scene`, or any refit) then indexed a native
-                # weight map with reference-grid slices. Numpy clips
-                # out-of-range slices rather than raising, so that read
-                # silently returned the wrong region: templates in genuinely
-                # covered sky were pruned as uncovered, and the scene residual
-                # was masked over valid pixels.
-                if weights is not None:
-                    weights[ifilt] = weights_i
-            else:
-                logger.info("downsampling templates and kernels by factor %d", k)
-                tmpls_lo = Templates()
-                tmpls_lo.original_shape = images[ifilt].shape
-                tmpls_lo.wcs = wcs[ifilt]
-                tmpls_lo._templates = [
-                    t.downsample(k, wcs_lo=wcs[ifilt]) for t in self.tmpls._templates
-                ]
-
-                if isinstance(kernel, PSFRegionMap):
-                    kernel.psfs = np.array([downsample_psf(psf, k) for psf in kernel.psfs])
+            if k > 1:
+                if config.multi_resolution_method == "upsample":
+                    logger.info("upsampling %s by factor %d", self._band_label(ifilt), k)
+                    images[ifilt], weights_i = _upsample_boxed(
+                        images[ifilt],
+                        weights_i,
+                        k,
+                        self.trial_box_lo,
+                    )
+                    wcs[ifilt] = wcs[0]
+                    # Keep the instance's own weight on the same grid as its own
+                    # image. The upsampled weight used to live only in this local,
+                    # so afterwards images[ifilt] was on the reference grid while
+                    # weights[ifilt] was still native -- and `wcs[ifilt] = wcs[0]`
+                    # above erases the evidence, because the next call computes
+                    # k = 1 and upsamples neither. A second pass over the same band
+                    # (`_solve_frozen_scene`, or any refit) then indexed a native
+                    # weight map with reference-grid slices. Numpy clips
+                    # out-of-range slices rather than raising, so that read
+                    # silently returned the wrong region: templates in genuinely
+                    # covered sky were pruned as uncovered, and the scene residual
+                    # was masked over valid pixels.
+                    if weights is not None:
+                        weights[ifilt] = weights_i
                 else:
-                    kernel = downsample_psf(kernel, k)
+                    logger.info("downsampling templates and kernels by factor %d", k)
+                    tmpls_lo = Templates()
+                    tmpls_lo.original_shape = images[ifilt].shape
+                    tmpls_lo.wcs = wcs[ifilt]
+                    tmpls_lo._templates = [
+                        t.downsample(k, wcs_lo=wcs[ifilt]) for t in self.tmpls._templates
+                    ]
 
-        if k == 1 or config.multi_resolution_method == "upsample":
-            # Shallow container, not a deepcopy: `prune_outside_weight` only
-            # drops list entries (and records `wnorm`), and `convolve_templates`
-            # with inplace=False copies each stamp as it goes, so nothing here
-            # writes into the hi-res pixels. A deepcopy would hold a second
-            # full set of stamps -- 6 GB on a MINERVA field -- for the whole
-            # convolution.
-            tmpls_lo = Templates()
-            tmpls_lo.original_shape = self.tmpls.original_shape
-            tmpls_lo.segmap = self.tmpls.segmap
-            tmpls_lo.wcs = getattr(self.tmpls, "wcs", None)
-            tmpls_lo._templates = list(self.tmpls._templates)
+                    if isinstance(kernel, PSFRegionMap):
+                        kernel.psfs = np.array([downsample_psf(psf, k) for psf in kernel.psfs])
+                    else:
+                        kernel = downsample_psf(kernel, k)
 
-        if weights_i is not None:
-            # Slicing a too-small weight map with reference-grid slices is not
-            # an error in numpy -- it clips and returns the wrong region -- so
-            # the pairing has to be checked rather than trusted.
-            if weights_i.shape != images[ifilt].shape:
-                raise RuntimeError(
-                    f"band {ifilt}: weight map {weights_i.shape} is not on the "
-                    f"same grid as the image {images[ifilt].shape}. Slicing it "
-                    f"with fit-grid coordinates would silently read the wrong "
-                    f"pixels: templates over covered sky would be pruned as "
-                    f"uncovered and residuals masked over valid data."
-                )
-            tmpls_lo.prune_outside_weight(weights_i)
+            if k == 1 or config.multi_resolution_method == "upsample":
+                # Shallow container, not a deepcopy: `prune_outside_weight` only
+                # drops list entries (and records `wnorm`), and `convolve_templates`
+                # with inplace=False copies each stamp as it goes, so nothing here
+                # writes into the hi-res pixels. A deepcopy would hold a second
+                # full set of stamps -- 6 GB on a MINERVA field -- for the whole
+                # convolution.
+                tmpls_lo = Templates()
+                tmpls_lo.original_shape = self.tmpls.original_shape
+                tmpls_lo.segmap = self.tmpls.segmap
+                tmpls_lo.wcs = getattr(self.tmpls, "wcs", None)
+                tmpls_lo._templates = list(self.tmpls._templates)
 
-        templates = tmpls_lo.convolve_templates(
-            kernel, inplace=False, psf_lo=getattr(self, "prm_lo", None)
-        )
-        del tmpls_lo
-        if k > 1 and config.multi_resolution_method == "upsample":
-            dummy_image = np.zeros(images[ifilt].shape, dtype=np.byte)
-            # project in place: a pre-projection stamp is dead the moment its
-            # projection exists, and building a second list would hold both
-            # full sets at once
-            for i, t in enumerate(templates):
-                templates[i] = t.project_to_block_replicated_grid(
-                    k, parent_image=dummy_image
-                )
-                del t
-        self.templates = templates
-        logger.info("Pipeline (convolved) memory: %.1f GB", memory())
+            if weights_i is not None:
+                # Slicing a too-small weight map with reference-grid slices is not
+                # an error in numpy -- it clips and returns the wrong region -- so
+                # the pairing has to be checked rather than trusted.
+                if weights_i.shape != images[ifilt].shape:
+                    raise RuntimeError(
+                        f"band {ifilt}: weight map {weights_i.shape} is not on the "
+                        f"same grid as the image {images[ifilt].shape}. Slicing it "
+                        f"with fit-grid coordinates would silently read the wrong "
+                        f"pixels: templates over covered sky would be pruned as "
+                        f"uncovered and residuals masked over valid data."
+                    )
+                tmpls_lo.prune_outside_weight(weights_i)
 
-        for t in templates:
-            assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
-        return templates, weights_i
+            templates = tmpls_lo.convolve_templates(
+                kernel, inplace=False, psf_lo=getattr(self, "prm_lo", None)
+            )
+            del tmpls_lo
+            if k > 1 and config.multi_resolution_method == "upsample":
+                dummy_image = np.zeros(images[ifilt].shape, dtype=np.byte)
+                # project in place: a pre-projection stamp is dead the moment its
+                # projection exists, and building a second list would hold both
+                # full sets at once
+                for i, t in enumerate(templates):
+                    templates[i] = t.project_to_block_replicated_grid(
+                        k, parent_image=dummy_image
+                    )
+                    del t
+            self.templates = templates
+            logger.info("Pipeline (convolved) memory: %.1f GB", memory())
+
+            for t in templates:
+                assert np.all(np.isfinite(t.data)), "Templates contain NaN values"
+            return templates, weights_i
 
     def run(self, config: FitConfig | None = None) -> tuple[Table, list[np.ndarray]]:
         """Run photometry on the configured images.
@@ -5448,7 +5588,8 @@ class Pipeline:
 
             fluxes = [t.flux for t in templates]
             errs = [t.err for t in templates]
-            err_pred = Templates.predicted_errors(templates, weights_i)
+            with self._phase("catalog update"):
+                err_pred = Templates.predicted_errors(templates, weights_i)
 
             # Last read of the band's inverse variance in the fit itself.
             # Nothing after this point -- residual, aperture photometry,
@@ -5494,17 +5635,18 @@ class Pipeline:
                 s.id: (-1 if s.astrom_converged is None else int(not s.astrom_converged))
                 for s in scenes
             }
-            self._update_catalog_with_fluxes(
-                cat,
-                templates,
-                fluxes,
-                errs,
-                err_pred,
-                throughput,
-                ifilt,
-                scene_ids=template_scene_ids,
-                scene_flags=scene_astrom_flags,
-            )
+            with self._phase("catalog update"):
+                self._update_catalog_with_fluxes(
+                    cat,
+                    templates,
+                    fluxes,
+                    errs,
+                    err_pred,
+                    throughput,
+                    ifilt,
+                    scene_ids=template_scene_ids,
+                    scene_flags=scene_astrom_flags,
+                )
             with self._phase("aperture photometry"):
               self._add_aperture_photometry(
                 cat,
@@ -5524,9 +5666,9 @@ class Pipeline:
 
         logger.info("Pipeline (end) memory: %.1f GB",
                     psutil.Process(os.getpid()).memory_info().rss / 1e9)
-        # the CLI reports once for the whole invocation; only report here when
-        # run() was called directly, or the breakdown would print twice
-        if not getattr(self, "_cli_stepping", False):
+        # the CLI (and run_all) report once for the whole invocation; only
+        # report here when run() was called directly, or it would print twice
+        if not getattr(self, "_defer_timings", False):
             self.report_timings()
         self.table = cat
 

@@ -388,10 +388,11 @@ template plus the shift coefficients. Sorting on it is the direct way to find
 the scenes worth looking at.
 
 `shift_rms` is the spread of those applied shifts about their mean. At the
-default order 0 every template receives the same offset, so a non-zero value
-means the field moved between passes — the scene walked rather than settled.
-At higher order it is the amplitude of the gradient the field actually
-carried, which is the direct way to see whether the extra terms did anything.
+default order 0 it is exactly zero for any number of passes: the field is a
+constant, so every template moves by the same amount every pass and a scene
+that walks rather than settles walks rigidly. At higher order it is the
+amplitude of the gradient the field actually carried, which is the direct way
+to see whether the extra terms did anything.
 
 Three columns record how the shift was reached: `astrom_niter` (solve/apply
 passes this scene used before it dropped out of the loop), `astrom_step`
@@ -418,6 +419,15 @@ the shift is limited by template and PSF fidelity rather than by noise. It is
 also the ceiling on how much any one anchor can be trusted, which is what
 `astrom_leverage_cap` approximates with a quantile.
 
+Expect the NaN to be the common case rather than the exception. The pass needs
+`max(FitConfig.scene_minimum_anchors, 2p)` usable anchors for a `p`-term field
+per axis, and declines otherwise; on a COSMOS F770W run with
+`scene_minimum_anchors=7` that was 792 of 1434 scenes, every one of them a
+scene with too few anchors rather than a scene where the measurement failed.
+Note that `n_anchor` counts the sources that passed the SNR and isolation
+cuts, which is one step ahead of the gate: an anchor whose residual carried no
+finite information does not count toward it.
+
 The `SCENES` extension of the fit table carries the rest of the robust
 verdict: `astrom_robust` (`1` if the pass judged this scene), `astrom_nreject`
 (anchors rejected outright) and `astrom_neff` (anchors surviving rejection --
@@ -425,9 +435,14 @@ verdict: `astrom_robust` (`1` if the pass judged this scene), `astrom_nreject`
 Comparing these against a run with the flag off is the intended way to judge
 whether the weighting earned its place on a given field.
 
-With `scene_plots` enabled, each scene also gets a `<name>_scene_<id>.png`
+With `scene_plots` enabled, scenes also get a `<name>_scene_<id>.png`
 diagnostic figure, written to a `scenes/` subdirectory of `out_dir` (created
-only when the plots are requested), and the partition as a whole gets
+only when the plots are requested). `scene_plots_max` decides how many:
+by default the 100 worst by `chi2_dof` and the 100 with the largest
+`astrom_floor`, since a full field solves ~1600 scenes and rendering all of
+them costs the better part of an hour. Each figure is sampled to its own
+scene rather than drawn at a fixed size, so the PNG is as large as the scene
+needs and no larger. The partition as a whole gets
 `<name>_scene_map.png` in `out_dir`: the full field with every segment
 colored by the scene that fitted it, and each scene's bounding box drawn in
 the same color. Fields wider than 4000 pixels are decimated for the display,

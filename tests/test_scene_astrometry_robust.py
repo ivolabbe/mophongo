@@ -559,6 +559,39 @@ def test_scene_minimum_anchors_defaults_from_the_polynomial_order():
     assert FitConfig(scene_minimum_anchors=11).scene_minimum_anchors == 11
 
 
+def test_a_scene_below_the_gate_is_never_measured(monkeypatch):
+    """The gate is checked before the measurement, not after.
+
+    ``measure_anchor_shifts`` fits a local least-squares system per anchor over
+    its whole neighbourhood, which is the expensive part of the pass. A scene
+    short of the anchor gate can only be declined, so the work must not happen
+    at all.
+    """
+    import mophongo.scene as scene_mod
+
+    calls = []
+    real = scene_mod.measure_anchor_shifts
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(scene_mod, "measure_anchor_shifts", counting)
+
+    tm = _grid(6)
+    f = np.linspace(100.0, 25.0, 6)
+    img = _paint(tm, f, [(0.15, -0.05)] * 6)
+    W = np.ones((NY, NX))
+
+    under = _solve_scene(tm, img, W, _cfg(astrom_robust=True, scene_minimum_anchors=9))
+    assert not under.anchor_report.applied
+    assert calls == []
+
+    over = _solve_scene(tm, img, W, _cfg(astrom_robust=True, scene_minimum_anchors=4))
+    assert over.anchor_report.applied
+    assert len(calls) == 1
+
+
 def test_robust_weighting_supersedes_the_leverage_cap():
     """Where the measured weight applies, the blind quantile stands down.
 

@@ -39,7 +39,12 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from mophongo.pipeline import Pipeline  # noqa: E402
 from mophongo.scene import Scene, SceneFitter, _bbox_union  # noqa: E402
-from mophongo.verification import save_scene_blobs, save_scene_overview  # noqa: E402
+from mophongo.templates import _slices_from_bbox  # noqa: E402
+from mophongo.verification import (  # noqa: E402
+    diagnostic_pixel_sampling_dpi,
+    save_scene_blobs,
+    save_scene_overview,
+)
 
 logger = logging.getLogger("scene_plots")
 
@@ -125,8 +130,9 @@ def main(argv: list[str]) -> None:
         # Everything that does not depend on the per-scene loop goes first.
         # That loop is the reason this script exists -- it is where the band
         # died -- so nothing it could take down should be queued behind it.
+        scene_table = None
         if restored:
-            pipe.write_scene_catalog(f"{stem}_scene_catalog.csv")
+            scene_table = pipe.write_scene_catalog(f"{stem}_scene_catalog.csv")
             out = pipe.plot_shift_field(save=f"{stem}_shift_field.png")
             if out is not None:
                 plt.close(out[0])
@@ -153,8 +159,13 @@ def main(argv: list[str]) -> None:
         scene_dir = Path(pipe.out_dir) / "scenes"
         scene_dir.mkdir(parents=True, exist_ok=True)
 
+        # Same selection and the same per-scene sampling write_outputs uses,
+        # so a recovered band carries the same set of figures at the same
+        # resolution rather than every scene at a fixed 4500x3000.
+        wanted = scenes if scene_table is None else pipe._scenes_to_plot(scene_table)
+
         drawn = 0
-        for s in scenes:
+        for s in wanted:
             try:
                 fig, _ = s.plot(pipe.images[0], pipe.segmap, display_sig=5,
                                 null_segments=sat_ids)
@@ -162,11 +173,16 @@ def main(argv: list[str]) -> None:
                 # cost the other several hundred figures
                 logger.warning("scene %s: %s: %s", s.id, type(exc).__name__, exc)
                 continue
-            fig.savefig(scene_dir / f"{name}_scene_{s.id}.png", dpi=300)
+            dpi = diagnostic_pixel_sampling_dpi(
+                [s.image[_slices_from_bbox(s.bbox)]],
+                figsize=(15, 10), nrows=2, ncols=3,
+                min_dpi=100, max_dpi=300, oversample=1.0,
+            )
+            fig.savefig(scene_dir / f"{name}_scene_{s.id}.png", dpi=dpi)
             plt.close(fig)
             drawn += 1
 
-        logger.info("wrote %d of %d scene figures to %s", drawn, len(scenes), scene_dir)
+        logger.info("wrote %d of %d scene figures to %s", drawn, len(wanted), scene_dir)
 
 
 if __name__ == "__main__":

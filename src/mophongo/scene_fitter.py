@@ -155,6 +155,7 @@ class SceneFitter:
         BB: sp.spmatrix | None = None,
         bB: np.ndarray | None = None,
         config: Optional[FitConfig] = None,
+        errors: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray | None, int]:
         """Solve ``A x = b`` with optional shift block.
 
@@ -177,6 +178,12 @@ class SceneFitter:
             and ``astrom_reg`` regularizes only the shift block.
         AB, BB, bB
             Optional blocks coupling the fluxes to shift parameters.
+        errors
+            Compute the flux errors. ``sqrt(diag(A^-1))`` costs one sparse
+            factorization plus one back-solve per template, which for a scene
+            of a few hundred members is most of the solve. Pass False where
+            only the fluxes are wanted -- the seed of an intermediate residual,
+            say -- and ``err`` comes back all-NaN rather than silently zero.
         Returns
         -------
         SimpleNamespace
@@ -205,10 +212,10 @@ class SceneFitter:
             BBreg = BB + sp.eye(BB.shape[0], format="csr") * lam_b
 
             flux, err, shifts, shift_cov, info = SceneFitter._solve_flux_and_shifts(
-                Areg, b, AB, BBreg, bB, config
+                Areg, b, AB, BBreg, bB, config, errors=errors
             )
         else:
-            flux, err, info = SceneFitter.solve_flux(Areg, b, config)
+            flux, err, info = SceneFitter.solve_flux(Areg, b, config, errors=errors)
             shifts, shift_cov = None, None
 
         return SimpleNamespace(
@@ -363,13 +370,17 @@ class SceneFitter:
 
     @staticmethod
     def solve_flux(
-        A: sp.spmatrix, b: np.ndarray, config: Optional[FitConfig] = None
+        A: sp.spmatrix,
+        b: np.ndarray,
+        config: Optional[FitConfig] = None,
+        *,
+        errors: bool = True,
     ) -> tuple[np.ndarray, np.ndarray, dict]:
         """Solve ``A x = b`` for flux parameters (flux-only path).
 
         The matrix is whitened by its diagonal, ``A_w = D^-1 A D^-1`` with
         ``D = diag(sqrt(A_ii))``, solved directly, and unwhitened. Errors
-        are ``sqrt(diag(A_w^-1)) / d``.
+        are ``sqrt(diag(A_w^-1)) / d``, or all-NaN when ``errors`` is False.
 
         ``config.fit_method`` then decides what happens to negatives:
         ``"lls"`` keeps them, ``"clip"`` clamps them to zero, ``"nnls"``
@@ -389,7 +400,7 @@ class SceneFitter:
 
         x_w = spsolve(A_w, b_w)
         x = x_w / d
-        err = SceneFitter._flux_errors(A_w) / d
+        err = SceneFitter._flux_errors(A_w) / d if errors else np.full_like(x, np.nan)
         info: dict = {"solver": "spsolve", "flux_uncon": x.copy()}
 
         method = str(cfg.fit_method).lower()
@@ -414,6 +425,8 @@ class SceneFitter:
         BB: sp.spmatrix,
         bB: np.ndarray | None = None,
         config: Optional[FitConfig] = None,
+        *,
+        errors: bool = True,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
         cfg = config or FitConfig()
         A = A.tocsr()
@@ -467,11 +480,14 @@ class SceneFitter:
 
         # Marginalize over the shift block: Schur complement S_w = A_w − AB_w AB_wᵀ
         # (BB_wI = I after whitening). Errors are sqrt(diag(S_w⁻¹)) / d.
-        if sp.issparse(AB_w):
-            S_w = (A_w - AB_w @ AB_w.T).toarray()
+        if errors:
+            if sp.issparse(AB_w):
+                S_w = (A_w - AB_w @ AB_w.T).toarray()
+            else:
+                S_w = A_w.toarray() - AB_w @ AB_w.T
+            err = SceneFitter._flux_errors(S_w) / d
         else:
-            S_w = A_w.toarray() - AB_w @ AB_w.T
-        err = SceneFitter._flux_errors(S_w) / d
+            err = np.full_like(x, np.nan)
         shift_cov = SceneFitter._shift_covariance(A_w, AB_w, Linv)
 
         info = {"solver": solver, "flux_uncon": xw_uncon / d}

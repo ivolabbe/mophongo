@@ -1757,3 +1757,206 @@ def test_extract_psf_fractional_center_alignment():
     y_c = float((stamp * y).sum())
     assert np.isclose(stamp.sum(), 1.0)
     assert np.allclose([x_c, y_c], tmpl.input_position_cutout, atol=1e-3)
+
+
+def test_shift_error_survives_the_closing_flux_only_solve():
+    """``sigma_shift`` must outlive the final flux-only solve of every run.
+
+    ``_refine_scene_astrometry`` closes with ``fit_astrometry_niter=0`` on the
+    final templates. That solve carries no shift block, so a covariance held
+    only on ``Scene.solution`` was overwritten with ``None`` on every scene of
+    every run and the scene catalog reported ``sigma_shift`` as NaN
+    throughout. The number has to come out of the run finite and positive.
+    """
+    from mophongo.fit import FitConfig
+
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=7, nsrc=20, size=121, ndilate=2, peak_snr=30.0
+    )
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+    pipe = pipeline.Pipeline(
+        [im.copy() for im in images], segmap, catalog=catalog,
+        weights=[w.copy() for w in wht], kernels=[None, kernel], psfs=psfs,
+    )
+    pipe.run(config=FitConfig(fit_astrometry_niter=3, astrom_minimum_snr=5.0))
+
+    solved = [s for s in pipe.scenes if s.shifts is not None and len(s.shifts)]
+    assert solved, "no scene fitted a shift"
+    for s in solved:
+        # the joint solve's covariance, not the closing solve's absence of one
+        assert s.solution.shift_cov is None
+        err = s.shift_error()
+        assert np.isfinite(err) and err > 0.0, f"scene {s.id} reported {err}"
+
+
+def test_scene_plots_max_picks_worst_chi2_and_worst_astrom_floor(tmp_path):
+    """The cap keeps the worst-fitted scenes and the worst-anchored ones.
+
+    Half the budget from each ranking. ``astrom_floor`` is NaN wherever the
+    robust pass declined to judge, which on a real field is most scenes, so
+    its half has to top up from the chi2 ranking rather than go unspent.
+    """
+    from types import SimpleNamespace
+
+    pipe = pipeline.Pipeline.__new__(pipeline.Pipeline)
+    pipe.all_scenes = [[SimpleNamespace(id=i) for i in range(1, 11)]]
+    table = Table(
+        {
+            "id": np.arange(1, 11),
+            # worst chi2: 10, 9, 8, ...
+            "chi2_dof": np.arange(1, 11, dtype=float),
+            # only scenes 1-3 were judged; scene 1 has the largest floor
+            "astrom_floor": np.array(
+                [3.0, 2.0, 1.0] + [np.nan] * 7, dtype=float
+            ),
+        }
+    )
+
+    pipe.run_config = SimpleNamespace(scene_plots_max=0)
+    assert len(pipe._scenes_to_plot(table)) == 10  # 0 means no cap
+
+    pipe.run_config = SimpleNamespace(scene_plots_max=20)
+    assert len(pipe._scenes_to_plot(table)) == 10  # fewer scenes than budget
+
+    pipe.run_config = SimpleNamespace(scene_plots_max=4)
+    picked = {s.id for s in pipe._scenes_to_plot(table)}
+    # two worst chi2 (10, 9) and the two largest finite floors (1, 2)
+    assert picked == {10, 9, 1, 2}
+
+    # with every floor NaN the whole budget goes to chi2
+    table["astrom_floor"] = np.nan
+    assert {s.id for s in pipe._scenes_to_plot(table)} == {10, 9, 8, 7}
+
+    # returned in scene order, whatever the ranking said
+    assert [s.id for s in pipe._scenes_to_plot(table)] == [7, 8, 9, 10]
+
+
+def test_scene_png_resolution_follows_the_scene(tmp_path):
+    """Scene PNGs are sampled to the scene, not drawn at a fixed 300 dpi.
+
+    A 101-pixel test scene needs nothing like the 4500x3000 canvas a fixed
+    ``dpi=300`` produced for every scene of every field.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    from PIL import Image
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    from mophongo.fit import FitConfig
+
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=12, nsrc=12, size=101, ndilate=2, peak_snr=2.0
+    )
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+    wcs_hi = WCS(naxis=2)
+    wcs_hi.wcs.crpix = [50.0, 50.0]
+    wcs_hi.wcs.crval = [150.0, 2.0]
+    wcs_hi.wcs.cdelt = [-1e-5, 1e-5]
+    wcs_hi.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sci_hi = out_dir / "hi.fits"
+    fits.writeto(sci_hi, np.asarray(images[0], np.float32), overwrite=True)
+
+    pipe = pipeline.Pipeline(
+        [im.copy() for im in images], segmap, catalog=catalog,
+        weights=[w.copy() for w in wht], kernels=[None, kernel], psfs=psfs,
+        wcs=[wcs_hi, wcs_hi], config=FitConfig(fit_astrometry_niter=0),
+    )
+    pipe.run_config = pipeline.RunConfig(
+        name="t", out_dir=str(out_dir), sci_hi=str(sci_hi), segmap="seg.fits",
+        catalog="cat.fits", sci_lo="lo.fits", wht_lo="wht.fits",
+        csv_hi="hi.csv", csv_lo="lo.csv", save_stamps=False,
+    )
+    pipe.out_dir = out_dir
+    pipe.run()
+    pipe.write_outputs()
+
+    pngs = sorted((out_dir / "scenes").glob("*.png"))
+    assert pngs
+    for p in pngs:
+        w, h = Image.open(p).size
+        assert (w, h) < (4500, 3000)
+        # min_dpi=100 on a (15, 10) figure
+        assert w >= 1400 and h >= 900
+
+
+def test_phase_retags_a_cache_hit_and_reports_against_the_whole_run(caplog):
+    """A reloaded product is timed under its own name, and ``(other)`` is real.
+
+    The breakdown used to report the fit's phases against the sum of those
+    phases, which made them add to 100% however much of the run they actually
+    covered. They are reported against the whole invocation instead.
+    """
+    import logging
+
+    pipe = pipeline.Pipeline.__new__(pipeline.Pipeline)
+    with pipe._phase("psf maps") as phase:
+        phase.from_disk()
+    with pipe._phase("matching kernels"):
+        pass
+
+    assert "psf maps (from disk)" in pipe._timings
+    assert "psf maps" not in pipe._timings
+
+    caplog.set_level(logging.INFO, logger="mophongo.pipeline")
+    pipe.report_timings(100.0)
+    text = caplog.text
+    assert "time by phase (1m40s)" in text
+    assert "psf maps (from disk)" in text
+    # the two phases took microseconds of the 100 s claimed, so nearly all of
+    # it is unaccounted -- which is the point of reporting against the total
+    assert "(other)" in text
+
+
+def test_run_times_every_stage_from_templates_to_outputs(tmp_path):
+    """The breakdown names the work outside the solve, not only the solve."""
+    import matplotlib
+    matplotlib.use("Agg")
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    from mophongo.fit import FitConfig
+
+    images, segmap, catalog, psfs, _truth, wht = make_simple_data(
+        seed=12, nsrc=12, size=101, ndilate=2, peak_snr=2.0
+    )
+    kernel = mutils.matching_kernel(psfs[0], psfs[1])
+    wcs_hi = WCS(naxis=2)
+    wcs_hi.wcs.crpix = [50.0, 50.0]
+    wcs_hi.wcs.crval = [150.0, 2.0]
+    wcs_hi.wcs.cdelt = [-1e-5, 1e-5]
+    wcs_hi.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sci_hi = out_dir / "hi.fits"
+    fits.writeto(sci_hi, np.asarray(images[0], np.float32), overwrite=True)
+
+    pipe = pipeline.Pipeline(
+        [im.copy() for im in images], segmap, catalog=catalog,
+        weights=[w.copy() for w in wht], kernels=[None, kernel], psfs=psfs,
+        wcs=[wcs_hi, wcs_hi], config=FitConfig(fit_astrometry_niter=0),
+    )
+    pipe.run_config = pipeline.RunConfig(
+        name="t", out_dir=str(out_dir), sci_hi=str(sci_hi), segmap="seg.fits",
+        catalog="cat.fits", sci_lo="lo.fits", wht_lo="wht.fits",
+        csv_hi="hi.csv", csv_lo="lo.csv", save_stamps=False,
+    )
+    pipe.out_dir = out_dir
+    pipe.run()
+    pipe.write_outputs()
+
+    expected = {
+        "catalog",
+        "extract templates",
+        "convolve templates",
+        "generate scenes",
+        "residual",
+        "catalog update",
+        "aperture photometry",
+        "write residual + tables",
+        "scene figures",
+        "field figures",
+    }
+    assert expected <= set(pipe._timings)

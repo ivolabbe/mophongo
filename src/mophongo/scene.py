@@ -1359,6 +1359,11 @@ class Scene:
     flux: np.ndarray | None = None
     err: np.ndarray | None = None
     shifts: np.ndarray | None = None
+    # Covariance of `shifts`, kept beside them rather than only on `solution`:
+    # the run closes with a flux-only solve on the final templates, and that
+    # solution carries no shift block, so a covariance left there alone would
+    # be discarded on every scene of every run (`sigma_shift` all NaN).
+    shift_cov: np.ndarray | None = None
     is_bright: np.ndarray | None = None  # per-template
     #    info: int | None = None
     solution: SimpleNamespace | None = None
@@ -1511,6 +1516,7 @@ class Scene:
             # than the whole config
             sol = SceneFitter.solve(A, b, AB=AB, BB=BB, bB=bB, config=cfg, **kwargs)
             self.shifts = sol.shifts
+            self.shift_cov = sol.shift_cov
 
             if self.shifts is not None and len(self.shifts) > 0:
                 # record per object shift in templates
@@ -1642,13 +1648,43 @@ class Scene:
             kept on :attr:`anchor_report` and on each anchor's
             ``Template.astrom_weight`` either way.
         """
-        from .astrom_robust import robust_anchor_weights
+        from .astrom_robust import (
+            anchor_gate,
+            inactive_anchor_weights,
+            robust_anchor_weights,
+        )
 
         bright_idx = [i for i, S in enumerate(basis) if S is not None]
         if not bright_idx:
             return None
 
-        flux0 = SceneFitter.solve(A, b, config=cfg).flux
+        # Gate before measuring, not after. `robust_anchor_weights` refuses a
+        # scene with too few anchors anyway, but `measure_anchor_shifts` below
+        # is the expensive part of the pass -- a local least-squares fit per
+        # anchor over its whole neighbourhood -- and a scene short of the gate
+        # would only have that thrown away. Same gate either way, from
+        # `anchor_gate`, so the two paths cannot drift apart.
+        p = len(np.atleast_1d(basis[bright_idx[0]]))
+        gate = anchor_gate(int(getattr(cfg, "scene_minimum_anchors", 0) or 0), p)
+        if len(bright_idx) < gate:
+            report = inactive_anchor_weights(
+                len(bright_idx), p,
+                f"{len(bright_idx)} anchor(s) < {gate} required for order "
+                f"with {p} term(s)",
+            )
+            self.anchor_report = report
+            for i in bright_idx:
+                self.templates[i].astrom_weight = 1.0
+            logger.debug(
+                "[scenes] Scene %s: robust anchor weighting inactive (%s)",
+                getattr(self, "id", -1), report.reason,
+            )
+            return None
+
+        # Only the fluxes are wanted here -- they seed the residual the anchors
+        # are measured against -- and their errors cost a factorization plus a
+        # back-solve per template.
+        flux0 = SceneFitter.solve(A, b, config=cfg, errors=False).flux
         resid, y0, x0 = _scene_residual(self.templates, self.image, flux0)
         eps, info, chi2_red = measure_anchor_shifts(
             self.templates, resid, self.weights, (y0, x0), bright_idx, alpha0
@@ -1723,13 +1759,16 @@ class Scene:
         single pass determines it -- treat it as the scale on the total, not
         as an error that shrinks with the number of passes.
 
+        Read from :attr:`shift_cov`, not from ``solution``: the run's closing
+        solve is flux-only, so ``solution`` at the end of a run holds no shift
+        block at all.
+
         Returns
         -------
         float
             NaN when no shift was fitted or the covariance was unavailable.
         """
-        sol = getattr(self, "solution", None)
-        cov = getattr(sol, "shift_cov", None) if sol is not None else None
+        cov = getattr(self, "shift_cov", None)
         if cov is None or np.size(cov) == 0 or self.shift_basis is None:
             return float("nan")
         cov = np.asarray(cov, dtype=float)
@@ -1790,23 +1829,28 @@ class Scene:
         """RMS spread of the applied shifts about :meth:`mean_shift`, in pixels.
 
         How much the shift field varied across the scene, as applied. At
-        order 0 every template receives the same offset and this is zero by
-        construction, so a non-zero value at order 0 means the field changed
-        between passes -- the scene walked rather than converged. At higher
-        order it is the amplitude of the gradient the field actually carried,
-        which is the direct way to see whether the extra terms did anything.
+        order 0 it is zero for any number of passes: every template receives
+        the same offset every pass, so a scene that walks rather than
+        converges still walks rigidly. At higher order it is the amplitude of
+        the gradient the field actually carried, which is the direct way to
+        see whether the extra terms did anything.
+
+        Identical shifts are detected before the mean is subtracted. Without
+        that, an order-0 scene reports ``x - mean(x)`` at one ulp of the
+        accumulated shift -- ~1e-15 px, which reads as a measurement rather
+        than as the exact zero it is.
 
         Returns
         -------
         float
             Zero when the scene has fewer than two templates with a finite
-            shift.
+            shift, or when every template carries the same shift.
         """
         if len(self.templates) < 2:
             return 0.0
         sh = np.array([np.asarray(t.shifted, dtype=float)[:2] for t in self.templates])
         ok = np.isfinite(sh).all(axis=1)
-        if ok.sum() < 2:
+        if ok.sum() < 2 or np.all(sh[ok] == sh[ok][0]):
             return 0.0
         d = sh[ok] - sh[ok].mean(axis=0)
         return float(np.sqrt(np.mean(np.sum(d**2, axis=1))))

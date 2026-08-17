@@ -50,7 +50,12 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["AnchorWeights", "robust_anchor_weights"]
+__all__ = [
+    "AnchorWeights",
+    "anchor_gate",
+    "inactive_anchor_weights",
+    "robust_anchor_weights",
+]
 
 #: Tukey biweight tuning constant, in units of the robust scale. 4.685 gives
 #: 95% efficiency against a Gaussian and rejects outright beyond 4.685 sigma.
@@ -115,6 +120,66 @@ class AnchorWeights:
     n_eff: float
     applied: bool
     reason: str = ""
+
+
+def anchor_gate(min_anchors: int, n_terms: int) -> int:
+    """Anchors a scene needs before the robust pass will judge it.
+
+    A robust scatter about an ``n_terms``-parameter fit per axis needs
+    comfortably more points than parameters, so the floor is the larger of the
+    caller's ``min_anchors`` and twice the width of the basis.
+
+    Exposed because the caller wants it *before* measuring: the measurement
+    that fills the anchor table is the expensive part of the pass, and a scene
+    that cannot clear this gate would only have it thrown away.
+
+    Parameters
+    ----------
+    min_anchors
+        Caller's floor, normally ``FitConfig.scene_minimum_anchors``.
+    n_terms
+        Width ``p`` of the shift-field basis.
+
+    Returns
+    -------
+    int
+        Minimum usable anchors.
+    """
+    return max(int(min_anchors), 2 * int(n_terms))
+
+
+def inactive_anchor_weights(
+    n_anchors: int, n_terms: int, reason: str, *, n_axes: int = 2
+) -> AnchorWeights:
+    """Unit-weight verdict for a scene the robust pass will not judge.
+
+    Parameters
+    ----------
+    n_anchors, n_terms
+        Anchor count ``m`` and basis width ``p`` the verdict is shaped for.
+    reason
+        Why the pass declined; carried on the report.
+    n_axes
+        Number of shift axes, i.e. the width of ``eps``.
+
+    Returns
+    -------
+    AnchorWeights
+        ``applied`` False, weights all ones.
+    """
+    m, p, k = int(n_anchors), int(n_terms), int(n_axes)
+    return AnchorWeights(
+        weight=np.ones(m, dtype=float),
+        coeff=np.zeros((k, p)),
+        field=np.zeros((m, k)),
+        resid=np.zeros((m, k)),
+        sys_floor=0.0,
+        n_rejected=0,
+        n_eff=float(m),
+        applied=False,
+        reason=reason,
+    )
+
 
 
 def _wls(basis: np.ndarray, values: np.ndarray, omega: np.ndarray) -> np.ndarray:
@@ -330,16 +395,8 @@ def robust_anchor_weights(
     m, p = basis.shape
 
     def _inactive(reason: str) -> AnchorWeights:
-        return AnchorWeights(
-            weight=np.ones(m, dtype=float),
-            coeff=np.zeros((eps.shape[1] if eps.size else 2, p)),
-            field=np.zeros_like(eps) if eps.size else np.zeros((m, 2)),
-            resid=np.zeros_like(eps) if eps.size else np.zeros((m, 2)),
-            sys_floor=0.0,
-            n_rejected=0,
-            n_eff=float(m),
-            applied=False,
-            reason=reason,
+        return inactive_anchor_weights(
+            m, p, reason, n_axes=eps.shape[1] if eps.size else 2
         )
 
     if eps.shape[0] != m or info.size != m:
@@ -352,7 +409,7 @@ def robust_anchor_weights(
     # Unusable rows carry zero weight throughout, but a NaN would still poison
     # the weighted design matrix (0 * nan = nan), so blank them here.
     eps = np.where(usable[:, None], eps, 0.0)
-    gate = max(int(min_anchors), 2 * p)
+    gate = anchor_gate(min_anchors, p)
     if int(usable.sum()) < gate:
         return _inactive(
             f"{int(usable.sum())} usable anchor(s) < {gate} required for "

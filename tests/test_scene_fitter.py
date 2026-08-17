@@ -47,6 +47,31 @@ def test_scene_fitter_with_shift_block():
     np.testing.assert_allclose(sol.shifts, dense[2:])
 
 
+def test_solve_can_skip_the_flux_errors():
+    """``errors=False`` leaves the fluxes alone and says so with NaN.
+
+    ``sqrt(diag(A^-1))`` costs a factorization plus a back-solve per template,
+    which a caller that only wants the fluxes -- the seed of an intermediate
+    residual -- should not have to pay. NaN rather than zero so a skipped
+    error cannot be mistaken for a measured one.
+    """
+    A = sp.csr_matrix([[4.0, 1.0], [1.0, 3.0]])
+    b = np.array([1.0, 2.0])
+    AB = sp.csr_matrix([[1.0], [2.0]])
+    BB = sp.csr_matrix([[3.0]])
+    bB = np.array([0.5])
+    cfg = FitConfig(reg_flux=1e-12, astrom_reg=0.0, fit_method="lls")
+
+    for blocks in ({}, dict(AB=AB, BB=BB, bB=bB)):
+        full = SceneFitter.solve(A, b, config=cfg, **blocks)
+        cheap = SceneFitter.solve(A, b, config=cfg, errors=False, **blocks)
+        np.testing.assert_allclose(cheap.flux, full.flux)
+        if blocks:
+            np.testing.assert_allclose(cheap.shifts, full.shifts)
+        assert np.all(np.isfinite(full.err))
+        assert np.all(np.isnan(cheap.err))
+
+
 def test_scene_solve_matches_dense_normal_solution():
     """Scene.solve on real templates reproduces a dense solve of the same system."""
     images, segmap, catalog, psfs, truth, wht = make_simple_data(

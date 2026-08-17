@@ -21,6 +21,7 @@ from mophongo.cli import (
     source_stamps_to_fits,
     stamp_wcs,
 )
+from mophongo.pipeline import _KERNEL_PSF_SOURCE
 from mophongo.psf_map import PSFRegionMap
 
 from utils import make_simple_data
@@ -82,6 +83,7 @@ def run_dir(tmp_path):
             "psf_key": [0, 1],
             "kernel_method": ["wiener", "wiener"],
             "kernel_reg": [1e-3, 1e-3],
+            "kernel_psf_source": [_KERNEL_PSF_SOURCE] * 2,
             "psf_size": [4.0, 4.0],
         },
         geometry=halves,

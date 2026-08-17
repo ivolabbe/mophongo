@@ -1536,9 +1536,20 @@ class Scene:
                 phi0 = cheb_basis(0.0, 0.0, order)
                 mean_dx = float(phi0 @ bx)
                 mean_dy = float(phi0 @ by)
+                # One line per scene per iteration: the robust-weighting
+                # numbers ride along here rather than as a second record.
+                report = getattr(self, "anchor_report", None)
+                anchors = ""
+                if report is not None and report.applied:
+                    anchors = (
+                        f"; {report.n_rejected}/{len(report.weight)} anchor(s) "
+                        f"rejected, floor {report.sys_floor:.3f} px, "
+                        f"{report.n_eff:.1f} effective"
+                    )
                 logger.info(
-                    "[Scenes] Scene %s shift at x0,y0 ≈ (%.3f, %.3f) px (applied x%.2f)",
-                    sid, mean_dx, mean_dy, damp,
+                    "[Scenes] Scene %s (%d templates) shift at x0,y0 ≈ "
+                    "(%.3f, %.3f) px (applied x%.2f)%s",
+                    sid, len(self.templates), mean_dx, mean_dy, damp, anchors,
                 )
 
                 logger.debug(
@@ -1561,10 +1572,11 @@ class Scene:
                 for tmpl in self.templates:
                     tmpl.to_shift = np.zeros(2, dtype=float)
                 logger.warning(
-                    "[Scenes] Scene %s: no source passes the astrometric anchor "
-                    "cuts (SNR > %g, isolation >= %g%s); astrometry skipped "
-                    "for this scene.",
+                    "[Scenes] Scene %s (%d templates): no source passes the "
+                    "astrometric anchor cuts (SNR > %g, isolation >= %g%s); "
+                    "astrometry skipped for this scene.",
                     getattr(self, "id", -1),
+                    len(self.templates),
                     float(cfg.astrom_minimum_snr),
                     float(cfg.astrom_isolation_thresh),
                     ", stars excluded" if getattr(cfg, "astrom_exclude_stars", False) else "",
@@ -1661,7 +1673,9 @@ class Scene:
             )
             return None
 
-        logger.info(
+        # Reported on the scene's shift line instead, to keep one record per
+        # scene per iteration.
+        logger.debug(
             "[scenes] Scene %s: %d/%d anchor(s) rejected, systematic floor "
             "%.3f px, %.1f effective anchor(s)",
             getattr(self, "id", -1), report.n_rejected, rows.size,

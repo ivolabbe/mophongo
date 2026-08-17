@@ -658,3 +658,116 @@ def test_missing_epochs_without_autobuild_warn_or_raise(tmp_path, caplog):
                         autobuild=False, provenance="error")
     with pytest.raises(FileNotFoundError, match="MJD60001"):
         strict._load_epsf(_Dpsf(), PATTERN, str(csv), "hi")
+
+
+def _band_map(keys, boxes, psfs):
+    """Region map over explicit sky boxes, one PSF plane per ``psf_key``."""
+    import geopandas as gpd
+    import numpy as np
+    from shapely.geometry import box
+
+    from mophongo.psf_map import PSFRegionMap
+
+    gdf = gpd.GeoDataFrame(
+        {"psf_key": list(keys)},
+        geometry=[box(*b) for b in boxes],
+        crs="EPSG:4326",
+    )
+    return PSFRegionMap(gdf, psfs=np.asarray(psfs, dtype=float))
+
+
+def _gauss(sigma):
+    import numpy as np
+
+    y, x = np.mgrid[-6:7, -6:7]
+    g = np.exp(-(x**2 + y**2) / (2 * sigma**2))
+    return g / g.sum()
+
+
+def test_build_kernels_indexes_the_band_maps_instead_of_redrizzling(tmp_path):
+    """Every kernel is matched between its own regions' cached stamps.
+
+    The overlay region carries the parent keys, and the map defines the PSF as
+    constant inside a region, so the pair is a gather from ``prm_hi.psfs`` /
+    ``prm_lo.psfs``.  The stub DrizzlePSFs here have no ``get_psf_radec``: a
+    build that re-drizzled would raise instead of quietly costing 2 x N_overlay
+    stamps.
+    """
+    import types
+
+    import numpy as np
+
+    import mophongo.utils as utils
+
+    pipe = Pipeline.from_config(_write_config(tmp_path, {"psf": {"size": 4.0}}))
+    pipe.dpsf_hi = types.SimpleNamespace(driz_pscale=0.04)
+    pipe.dpsf_lo = types.SimpleNamespace(driz_pscale=0.04)
+    pipe._ensure_dpsfs = lambda **kw: None
+
+    # hi: left/right halves.  lo: bottom/top halves.  Overlay: four quadrants.
+    pipe.prm_hi = _band_map(
+        [0, 1],
+        [(0, 0, 1, 2), (1, 0, 2, 2)],
+        [_gauss(1.0), _gauss(1.4)],
+    )
+    pipe.prm_lo = _band_map(
+        [0, 1],
+        [(0, 0, 2, 1), (0, 1, 2, 2)],
+        [_gauss(2.0), _gauss(2.6)],
+    )
+
+    seen: list[tuple[np.ndarray, np.ndarray]] = []
+    real_matching_kernel = utils.matching_kernel
+
+    def _record(psf_hi, psf_lo, **kw):
+        seen.append((psf_hi, psf_lo))
+        return real_matching_kernel(psf_hi, psf_lo, **kw)
+
+    utils.matching_kernel = _record
+    try:
+        pipe.build_kernels(method="window")
+    finally:
+        utils.matching_kernel = real_matching_kernel
+
+    prm_kern = pipe.prm_kern
+    assert len(prm_kern.regions) == 4
+    assert prm_kern.psfs.shape[0] == 4
+    assert len(seen) == 4
+
+    # each call saw the pair its overlay row names, up to the unit-sum copy
+    for (s_hi, s_lo), (k1, k2) in zip(
+        seen,
+        zip(prm_kern.regions["psf_key_1"], prm_kern.regions["psf_key_2"]),
+    ):
+        np.testing.assert_allclose(
+            s_hi, pipe.prm_hi.psfs[int(k1)] / pipe.prm_hi.psfs[int(k1)].sum(),
+            rtol=1e-6,
+        )
+        np.testing.assert_allclose(
+            s_lo, pipe.prm_lo.psfs[int(k2)] / pipe.prm_lo.psfs[int(k2)].sum(),
+            rtol=1e-6,
+        )
+
+
+def test_cached_kernel_map_from_the_old_drizzled_path_is_rebuilt(tmp_path, caplog):
+    """A kernel map without the psf-source stamp predates the gather."""
+    import logging
+
+    from mophongo.pipeline import _provenance, _stamp_provenance
+    from mophongo.psf_map import PSFRegionMap
+
+    pipe = Pipeline.from_config(_write_config(tmp_path))
+    stale = _band_map([0], [(0, 0, 1, 1)], [_gauss(1.0)])
+    _stamp_provenance(stale, kernel_method="window", kernel_reg=float("nan"))
+    stale.to_file(pipe.f_kernel)
+
+    cached = PSFRegionMap.from_geojson(str(pipe.f_kernel))
+    assert _provenance(cached, "kernel_psf_source") is None
+
+    # no mosaics behind this config, so the rebuild cannot get past the
+    # DrizzlePSF pair; that it tries at all is the point.
+    pipe._ensure_dpsfs = lambda **kw: None
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(AttributeError):
+            pipe.build_kernels(method="window")
+    assert "being rebuilt" in caplog.text

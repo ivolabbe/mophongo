@@ -3,6 +3,43 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] `build_kernels` indexes the band PSF maps instead of re-drizzling them
+  (2026-08-17). A run drizzled four PSF cubes, not two: `build_psfs` at the
+  hi and lo region centroids (4621 + 944 stamps on the COSMOS F444W/F770W
+  pair), then `build_kernels` rebuilt both region maps and drizzled both bands
+  again at the 7368 hi-x-lo overlay centroids. 20301 stamps, ~26 minutes.
+
+  An overlay region lies inside exactly one hi region and one lo region, and a
+  region map defines the PSF as constant within a region -- that is what
+  `get_psf(ra, dec)` returns. `overlay_with` already records the parents as
+  `psf_key_1`/`psf_key_2`, and `psf_key` is the dense row index, so the pair
+  for overlay row *i* is a gather: `prm_hi.psfs[k1]`, `prm_lo.psfs[k2]`. The
+  method now takes `self.prm_hi`/`self.prm_lo` (building them if a caller
+  entered here first), overlays those, and indexes. 5565 stamps, ~8 minutes,
+  and no second `_region_maps()` build.
+
+  Correctness moves with it. Re-drizzling at the overlay centroid produced a
+  stamp at a different field point inside the same exposure set, so every
+  kernel was matched against a PSF pair the fitter never looks up; the gather
+  matches the exact pair `prm_hi.get_psf()` returns. `_ensure_dpsfs` no longer
+  loads the ePSF grids here -- only the two `driz_pscale` values are needed.
+
+  Cached kernel maps carry a `kernel_psf_source` stamp and are reused only
+  when it matches, so a map written by the old path is rebuilt rather than
+  silently kept. The older standalone scripts (`examples/run_uds_770_wren.py`
+  and friends) drizzled once per band at the overlay centroids and assigned
+  those cubes to the *band* maps, leaving `prm_444.psfs` with 7368 planes
+  against 4621 regions; `PSFRegionMap._dense_psf_keys` rejects that mismatch
+  today.
+
+- [x] Scene astrometry logs one line per scene per iteration (2026-08-17). The
+  robust-anchor report was a second INFO record alongside the shift line, so a
+  200-scene run emitted ~1000 lines. Its numbers now ride on the shift line
+  (`; 0/11 anchor(s) rejected, floor 0.540 px, 10.7 effective`) and the
+  standalone record is DEBUG. Both the shift line and the no-anchors warning
+  now name the scene's template count, and the warning stays the only case
+  where a scene emits a second record.
+
 - [x] The run log names the source, and CANFAR asks git instead of a stamp
   (2026-08-17). Two halves of the same gap: a finished run could not say which
   mophongo produced it.

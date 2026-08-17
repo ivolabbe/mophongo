@@ -644,6 +644,13 @@ def _psf_factory_kwargs(pattern: str) -> dict[str, Any]:
     }
 
 
+# Where build_kernels got the PSF pair it matched.  Stamped on the kernel map
+# and required of a cached one, so a map built by the older path -- which
+# re-drizzled both bands at the overlay centroids -- is rebuilt rather than
+# silently reused.
+_KERNEL_PSF_SOURCE = "region-map-index"
+
+
 def _stamp_provenance(prm: PSFRegionMap, **fields: Any) -> None:
     """Record on a region map what produced it, as geojson-round-tripping columns."""
     for key, value in fields.items():
@@ -1891,7 +1898,9 @@ class Pipeline:
             cached_method = _provenance(cached, "kernel_method")
             cached_reg = _provenance(cached, "kernel_reg")
             cached_reg = float("nan") if cached_reg is None else float(cached_reg)
-            if cached_method is not None and str(cached_method) == method:
+            cached_source = _provenance(cached, "kernel_psf_source")
+            if (cached_method is not None and str(cached_method) == method
+                    and str(cached_source) == _KERNEL_PSF_SOURCE):
                 self.prm_kern = cached
                 logger.info(
                     "loaded cached kernel map %s (method=%s, reg=%.4g)",
@@ -1899,18 +1908,35 @@ class Pipeline:
                 )
                 return self
             logger.warning(
-                "cached kernel map %s was built with method=%s; this run wants "
-                "%s, so it is being rebuilt",
-                self.f_kernel, cached_method or "unrecorded", method,
+                "cached kernel map %s was built with method=%s from %s; this run "
+                "wants %s from %s, so it is being rebuilt",
+                self.f_kernel, cached_method or "unrecorded",
+                cached_source or "unrecorded", method, _KERNEL_PSF_SOURCE,
             )
 
-        self._ensure_dpsfs(load_epsf=True)
-        prm_hi_geom, prm_lo_geom = self._region_maps()
-        prm_kern = prm_hi_geom.overlay_with(prm_lo_geom)
-        pos = self._centroids(prm_kern)
+        self._ensure_dpsfs()
+        if self.prm_hi is None or self.prm_lo is None:
+            self.build_psfs()
+        prm_hi, prm_lo = self.prm_hi, self.prm_lo
+        if prm_hi.psfs is None or prm_lo.psfs is None:
+            raise ValueError(
+                "the PSF region maps carry no stamps; rebuild them with "
+                "build_psfs(overwrite=True)"
+            )
+        prm_kern = prm_hi.overlay_with(prm_lo)
 
-        psf_hi = self.dpsf_hi.get_psf_radec(pos, **self._size_kw())
-        psf_lo = self._drizzle_lo_blurred(pos)
+        # An overlay region lies inside exactly one hi and one lo region, and a
+        # region map defines the PSF as constant within a region: the pair for
+        # overlay row i *is* (prm_hi.psfs[psf_key_1], prm_lo.psfs[psf_key_2]),
+        # which is what ``prm_hi.get_psf(ra, dec)`` returns anywhere inside it.
+        # Re-drizzling at the overlay centroid would cost 2 x N_overlay stamps
+        # to match the kernel against a PSF the fit never looks up.
+        psf_hi = np.asarray(prm_hi.psfs)[
+            prm_kern.regions["psf_key_1"].to_numpy(dtype=int)
+        ]
+        psf_lo = np.asarray(prm_lo.psfs)[
+            prm_kern.regions["psf_key_2"].to_numpy(dtype=int)
+        ]
 
         pixel_ratio = round(self.dpsf_lo.driz_pscale / self.dpsf_hi.driz_pscale)
         # Kernels are matched between unit-sum PSF *shapes*
@@ -1970,6 +1996,7 @@ class Pipeline:
             prm_kern,
             kernel_method=method,
             kernel_reg=float("nan") if reg is None else float(reg),
+            kernel_psf_source=_KERNEL_PSF_SOURCE,
             psf_size=float(self.run_config.psf.size or 0.0),
         )
         logger.info(

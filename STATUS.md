@@ -3,6 +3,48 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] `fit_method` replaces `positivity`, and NNLS is the default (2026-08-16).
+  One switch with three values: `"lls"` keeps negative fluxes, `"clip"` clamps
+  them after an unconstrained solve, `"nnls"` solves under the constraint.
+  `positivity` is gone rather than deprecated -- `RunConfig.from_json` rejects
+  unknown keys, so an old config naming it now fails loudly instead of being
+  silently ignored.
+
+  Clipping was never the constrained optimum. It pins a template at zero and
+  leaves its neighbours holding flux they took only because the negative one
+  was there; the survivors are never re-solved. `SceneFitter.fnnls` is the
+  Bro & de Jong (1997) rearrangement of Lawson-Hanson, which consumes the Gram
+  matrix and `A^T d` directly -- exactly what a scene holds, so no design
+  matrix is reconstructed. The `lsq_linear` alternative was rejected on
+  evidence: the Cholesky at `scene_fitter.py:370` is of the *shift* block `BB`,
+  not of `A`, and scipy has no sparse Cholesky, so that route needs a
+  factorization this code does not have.
+
+  The joint flux+shift path uses the same routine with the shift coefficients
+  held free (`fnnls(..., free=...)`): a shift has no sign to respect, only the
+  fluxes do. Without that, `nnls` would have clipped on every scene, since
+  `fit_astrometry_joint` is on by default.
+
+  Verified on injected truth through `Pipeline`. Noiseless recovery is exact to
+  4e-16 for all three methods and for the joint path. Over 30 shared noise
+  realizations on a blend of 100/3/200:
+
+      lls   bias [-0.43 +0.23 -0.24]  rms [2.32 3.34 2.71]
+      clip  bias [-0.43 +0.54 -0.24]  rms [2.32 2.88 2.71]
+      nnls  bias [-0.43 +0.54 -0.24]  rms [2.32 2.88 2.71]
+
+  The bright sources are untouched by the constraint; the SNR~1 source is
+  biased high by both constrained modes, which is the truncation effect and is
+  the reason `info["flux_uncon"]` now always carries the unconstrained fluxes.
+  `clip` and `nnls` agree on this weakly blended mock and diverge in strong
+  blends, which is what `tests/test_nnls.py` covers with an 85%-correlated
+  pair.
+
+  `info["at_bound"]` marks components sitting on the bound. Their `err` is the
+  unconstrained `sqrt(diag(A^-1))`, which is not a symmetric 1-sigma interval
+  for a parameter at a constraint -- flagged rather than silently reported as
+  if it were.
+
 - [x] Dropped `cg_kwargs`, made `filter_lo` a fallback (2026-08-16).
   `FitConfig.cg_kwargs` was dead: nothing passed it and nothing read it, and
   the solver is a direct sparse factorization (`spsolve`/`splu`), so

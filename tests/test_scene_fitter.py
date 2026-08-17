@@ -16,7 +16,7 @@ def test_scene_fitter_flux_only():
     sol = SceneFitter.solve(A, b, config=cfg)
     expected = np.linalg.solve(A.toarray() + np.eye(A.shape[0]) * cfg.reg_flux, b)
 
-    assert sol.info["solver"] == "spsolve"
+    assert sol.info["solver"] == "fnnls"  # nnls is the default
     assert sol.shifts is None
     np.testing.assert_allclose(sol.flux, expected)
     assert np.all(np.isfinite(sol.err))
@@ -35,7 +35,7 @@ def test_scene_fitter_with_shift_block():
     AB = sp.csr_matrix([[1.0], [2.0]])
     BB = sp.csr_matrix([[3.0]])
     bB = np.array([0.5])
-    cfg = FitConfig(reg_flux=1e-12, astrom_reg=0.0, positivity=False)
+    cfg = FitConfig(reg_flux=1e-12, astrom_reg=0.0, fit_method="lls")
     sol = SceneFitter.solve(A, b, AB=AB, BB=BB, bB=bB, config=cfg)
     M = np.block([[A.toarray(), AB.toarray()], [AB.T.toarray(), BB.toarray()]])
     M[: A.shape[0], : A.shape[0]] += np.eye(A.shape[0]) * cfg.reg_flux
@@ -55,7 +55,7 @@ def test_scene_solve_matches_dense_normal_solution():
     weight = wht[1]
     A, b, _ = build_normal(tmpls.templates, image, weight)
 
-    cfg = FitConfig(reg_flux=1e-12, positivity=False, fit_astrometry_niter=0)
+    cfg = FitConfig(reg_flux=1e-12, fit_method="lls", fit_astrometry_niter=0)
     scene = Scene(id=1, templates=list(tmpls.templates), fitter=SceneFitter())
     scene.A = A
     scene.b = b

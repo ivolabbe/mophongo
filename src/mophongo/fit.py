@@ -85,7 +85,26 @@ class PhotConfig:
 class FitConfig:
     """Configuration for template fitting: solver, astrometry and apertures."""
 
-    positivity: bool = True
+    # How the flux block is solved. One switch, three values:
+    #
+    #   "lls"   unconstrained linear least squares; negative fluxes are kept
+    #   "clip"  "lls" then clamp negatives to zero (what every run to date did)
+    #   "nnls"  non-negative least squares, solved under the constraint
+    #
+    # "clip" and "nnls" are not two spellings of one thing. Clipping pins a
+    # template at zero and leaves its neighbours holding flux they took only
+    # because the negative one was there; NNLS re-solves the survivors, which
+    # is the whole point of the constraint in a blend.
+    #
+    # Neither constrained mode is free at the faint end: truncating the
+    # negative half of the noise distribution biases any stack or average of
+    # faint sources high, and removes the negative tail empirical depth
+    # estimates rely on. The unconstrained fluxes come back in
+    # `info["flux_uncon"]` whichever mode runs, so nothing is lost.
+    #
+    # "nnls" is the default: of the three it is the only one that is both
+    # feasible and self-consistent. "clip" is kept for reproducing earlier runs.
+    fit_method: str = "nnls"
     # Flux-block ridge. None (default) = adaptive, 1e-6 x the median positive
     # diagonal of the normal matrix; 0.0 = genuinely unregularized; > 0 = that
     # explicit value. JSON configs write null for the adaptive default.
@@ -258,6 +277,12 @@ class FitConfig:
     generate_scene_catalog: bool = False  # If True, generate scene catalog and exit
 
     def __post_init__(self):
+        if self.fit_method not in ("lls", "clip", "nnls"):
+            raise ValueError(
+                f"fit_method must be 'lls', 'clip' or 'nnls', got "
+                f"{self.fit_method!r}"
+            )
+
         # Derive scene_minimum_anchors from astrometric polynomial order if not provided
         if self.scene_minimum_anchors is None:
             try:

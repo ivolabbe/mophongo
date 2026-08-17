@@ -216,6 +216,115 @@ class SceneFitter:
         )
 
     @staticmethod
+    def fnnls(
+        A: sp.spmatrix | np.ndarray,
+        b: np.ndarray,
+        *,
+        free: np.ndarray | None = None,
+        tol: float | None = None,
+        max_iter: int | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Non-negative least squares from the normal equations.
+
+        Minimizes ``||M x - d||`` subject to ``x >= 0`` given only the Gram
+        matrix ``A = M^T M`` and ``b = M^T d`` -- which is what a scene holds,
+        so no design matrix has to be reconstructed. This is the Bro & de Jong
+        (1997) "fast NNLS" rearrangement of Lawson-Hanson: the active-set logic
+        is unchanged, but every inner least-squares problem is solved from the
+        Gram submatrix rather than from ``M``.
+
+        The difference from clipping matters most where template fitting is
+        hardest. Forcing one template to zero changes what its *neighbours*
+        should be: in a blend they took flux only because the negative one was
+        there. The active set re-solves the survivors each time the passive set
+        changes; a clip does not, and leaves the scene inconsistent.
+
+        Args:
+            A: Gram matrix, ``(n, n)``, symmetric positive semi-definite.
+            b: Right-hand side ``M^T d``, ``(n,)``.
+            free: Optional ``(n,)`` mask of components that are *not*
+                constrained -- they stay in the passive set throughout and may
+                go negative. This is what lets the joint flux+shift system use
+                the same routine: a shift coefficient has no sign to respect,
+                only the fluxes do.
+            tol: Optimality tolerance on the KKT (gradient) test. Default
+                scales with the problem: ``n * eps * max|diag(A)|``.
+            max_iter: Outer-iteration cap. Default ``30 * n``, the
+                Lawson-Hanson convention; hitting it warns and returns the
+                current feasible point rather than raising, because a scene
+                that fails to converge should still produce fluxes.
+
+        Returns:
+            ``(x, passive)``: the solution, and the boolean mask of components
+            left free (not pinned at the bound). The mask is what callers need
+            in order to say which errors describe a constrained parameter.
+        """
+        A_d = np.asarray(A.todense() if sp.issparse(A) else A, dtype=float)
+        b = np.asarray(b, dtype=float).ravel()
+        n = b.size
+        if tol is None:
+            diag_max = float(np.max(np.abs(np.diag(A_d)))) if n else 0.0
+            tol = max(n * np.finfo(float).eps * diag_max, 1e-12)
+        if max_iter is None:
+            max_iter = 30 * max(n, 1)
+
+        free = (np.zeros(n, dtype=bool) if free is None
+                else np.asarray(free, dtype=bool))
+
+        def _solve_passive(passive: np.ndarray) -> np.ndarray:
+            out = np.zeros(n)
+            idx = np.where(passive)[0]
+            if idx.size == 0:
+                return out
+            sub = A_d[np.ix_(idx, idx)]
+            try:
+                out[idx] = np.linalg.solve(sub, b[idx])
+            except np.linalg.LinAlgError:
+                out[idx] = np.linalg.lstsq(sub, b[idx], rcond=None)[0]
+            return out
+
+        # Unconstrained components start in the passive set and never leave, so
+        # the first solve already carries them.
+        passive = free.copy()
+        x = _solve_passive(passive) if passive.any() else np.zeros(n)
+        x[~passive] = 0.0
+
+        for _ in range(max_iter):
+            w = b - A_d @ x  # -gradient of 0.5 x'Ax - b'x
+            blocked = ~passive
+            if not blocked.any() or np.all(w[blocked] <= tol):
+                break
+            # bring in the blocked component with the steepest descent
+            candidates = np.where(blocked)[0]
+            passive[candidates[np.argmax(w[candidates])]] = True
+
+            # exact solve on the passive set, then walk back to feasibility
+            for _ in range(max_iter):
+                s = _solve_passive(passive)
+                # only constrained components have a sign to violate
+                check = passive & ~free
+                if not check.any() or np.all(s[check] > 0):
+                    x = s
+                    break
+                bad = np.where(check & (s <= 0))[0]
+                denom = x[bad] - s[bad]
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    ratios = np.where(denom != 0, x[bad] / denom, 0.0)
+                alpha = float(np.min(ratios))
+                x = x + alpha * (s - x)
+                passive &= free | (x > tol)
+                x[~passive] = 0.0
+            else:
+                logger.warning("fnnls inner loop hit %d iterations", max_iter)
+                break
+        else:
+            logger.warning(
+                "fnnls did not converge in %d iterations; returning the "
+                "current feasible point", max_iter,
+            )
+        return x, passive
+
+    @staticmethod
     def solve_flux(
         A: sp.spmatrix, b: np.ndarray, config: Optional[FitConfig] = None
     ) -> tuple[np.ndarray, np.ndarray, dict]:
@@ -223,9 +332,15 @@ class SceneFitter:
 
         The matrix is whitened by its diagonal, ``A_w = D^-1 A D^-1`` with
         ``D = diag(sqrt(A_ii))``, solved directly, and unwhitened. Errors
-        are ``sqrt(diag(A_w^-1)) / d``. If ``config.positivity`` is true,
-        negative fluxes are clipped to zero after the solve (a post-hoc
-        clamp, not a constrained NNLS solve).
+        are ``sqrt(diag(A_w^-1)) / d``.
+
+        ``config.fit_method`` then decides what happens to negatives:
+        ``"lls"`` keeps them, ``"clip"`` clamps them to zero, ``"nnls"``
+        re-solves under the constraint (:meth:`fnnls`). The unconstrained
+        fluxes are returned whichever runs, in ``info["flux_uncon"]``: a
+        clipped or pinned zero is not recoverable from the constrained answer,
+        and faint-source statistics need the negative half of the noise
+        distribution.
         """
         cfg = config or FitConfig()
         A = A.tocsr()
@@ -238,11 +353,21 @@ class SceneFitter:
         x_w = spsolve(A_w, b_w)
         x = x_w / d
         err = SceneFitter._flux_errors(A_w) / d
+        info: dict = {"solver": "spsolve", "flux_uncon": x.copy()}
 
-        if cfg.positivity:
+        method = str(cfg.fit_method).lower()
+        if method == "nnls":
+            # solved whitened, like the unconstrained path: the constraint
+            # x >= 0 is preserved by the positive diagonal scaling
+            x_w, passive = SceneFitter.fnnls(A_w, b_w)
+            x = x_w / d
+            info["solver"] = "fnnls"
+            info["at_bound"] = ~passive
+        elif method == "clip":
             x = np.maximum(0.0, x)
+            info["at_bound"] = info["flux_uncon"] < 0.0
 
-        return x, err, {"solver": "spsolve"}
+        return x, err, info
 
     @staticmethod
     def _solve_flux_and_shifts(
@@ -277,9 +402,25 @@ class SceneFitter:
         # --- joint solve in whitened variables
         K = sp.bmat([[A_w, AB_w], [AB_w.T, BB_wI]], format="csr")
         rhs = np.concatenate([b_w, bB_w])
-        sol = spsolve(K, rhs)
-
         na = A.shape[0]
+        nb = rhs.size - na
+
+        sol = spsolve(K, rhs)
+        xw_uncon = sol[:na]
+
+        solver = "spsolve"
+        at_bound = None
+        if str(cfg.fit_method).lower() == "nnls":
+            # Same active set as the flux-only path, with the shift
+            # coefficients held free: a shift has no sign to respect, only the
+            # fluxes do. Solving the coupled system this way keeps the shifts
+            # consistent with whichever fluxes survive, which is the whole
+            # reason the two blocks are solved together.
+            free = np.concatenate([np.zeros(na, bool), np.ones(nb, bool)])
+            sol, passive = SceneFitter.fnnls(K, rhs, free=free)
+            at_bound = ~passive[:na]
+            solver = "fnnls"
+
         xw = sol[:na]
         betaw = sol[na:]
 
@@ -296,10 +437,14 @@ class SceneFitter:
         err = SceneFitter._flux_errors(S_w) / d
         shift_cov = SceneFitter._shift_covariance(A_w, AB_w, Linv)
 
-        if cfg.positivity:
+        info = {"solver": solver, "flux_uncon": xw_uncon / d}
+        if str(cfg.fit_method).lower() == "clip":
             x = np.maximum(0.0, x)
+            info["at_bound"] = info["flux_uncon"] < 0.0
+        elif at_bound is not None:
+            info["at_bound"] = at_bound
 
-        return x, err, beta, shift_cov, {"solver": "spsolve"}
+        return x, err, beta, shift_cov, info
 
     @staticmethod
     def _shift_covariance(

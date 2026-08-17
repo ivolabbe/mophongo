@@ -425,6 +425,79 @@ def _load_fitted(config: str | Path, ifilt: int):
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+#: Placeholders for the ``RunConfig`` fields that have no default. They are
+#: paths and a run name, so there is nothing sensible to default them to; the
+#: written config is a template to fill in, not one that would run as-is.
+_CONFIG_PLACEHOLDERS: dict[str, str] = {
+    "name": "<run name, used as the output filename prefix>",
+    "out_dir": "<output directory>",
+    "sci_hi": "<high-resolution detection mosaic .fits>",
+    "segmap": "<segmentation map .fits>",
+    "catalog": "<detection catalog .fits>",
+    "sci_lo": "<low-resolution science mosaic to fit .fits>",
+    "wht_lo": "<low-resolution weight (inverse variance) map .fits>",
+    "csv_hi": "<high-resolution exposure wcs .csv>",
+    "csv_lo": "<low-resolution exposure wcs .csv>",
+}
+
+
+def write_default_config(path: str | Path, *, force: bool = False) -> Path:
+    """Write a run config with every setting written out at its default.
+
+    The `fit` block is a plain dict on :class:`~mophongo.pipeline.RunConfig`
+    and defaults to empty, which would make a dumped default config say
+    nothing about the fit at all. It is expanded to the full
+    :class:`~mophongo.fit.FitConfig` defaults here, so the file lists every
+    knob and its value rather than leaving the reader to find them in the
+    source.
+
+    The nine required fields have no defaults -- they are input paths and a run
+    name -- so they are written as angle-bracket placeholders. The result is a
+    template to fill in; it parses but does not run.
+
+    Args:
+        path: Output json.
+        force: Overwrite an existing file instead of refusing.
+
+    Returns:
+        The path written.
+
+    Raises:
+        FileExistsError: If ``path`` exists and ``force`` is false. A config is
+            hand-edited after it is generated, so silently replacing one would
+            discard work.
+    """
+    import json
+    from dataclasses import asdict
+    from datetime import date
+
+    from .fit import FitConfig
+    from .pipeline import RunConfig
+
+    out = Path(path)
+    if out.exists() and not force:
+        raise FileExistsError(f"{out} exists; pass --force to overwrite")
+
+    cfg = RunConfig(**_CONFIG_PLACEHOLDERS)
+    data = asdict(cfg)
+    data["fit"] = asdict(FitConfig())
+
+    header = (
+        f"# mophongo default run config, written {date.today()} by\n"
+        "# `mophongo config`. Every RunConfig, PsfConfig and FitConfig setting\n"
+        "# is listed at its default value.\n"
+        "#\n"
+        "# The <angle bracket> entries have no default and must be filled in\n"
+        "# before this will run. Paths are resolved relative to the config.\n"
+        "#\n"
+        "# Lines starting with '#' are comments and are stripped on load.\n"
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(header + json.dumps(data, indent=2, default=str) + "\n")
+    logger.info("wrote default run config to %s", out)
+    return out
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """Command-line entry point: ``mophongo <subcommand> ...``."""
     ap = argparse.ArgumentParser(
@@ -487,6 +560,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     p_run.add_argument("steps", nargs="*", metavar="step",
                        help="steps to run (default: all)")
 
+    p_config = sub.add_parser(
+        "config", help="write a run config with every setting at its default"
+    )
+    p_config.add_argument("out", help="output json, e.g. default.json")
+    p_config.add_argument("--force", action="store_true",
+                          help="overwrite an existing file")
+
     args = ap.parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -498,6 +578,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             args.map, args.ra, args.dec, args.out,
             kind=args.map_kind, pixel_scale=args.pixel_scale,
         )
+        return
+
+    if args.cmd == "config":
+        try:
+            write_default_config(args.out, force=args.force)
+        except FileExistsError as exc:
+            ap.error(str(exc))  # a clean message, not a traceback
         return
 
     if args.cmd == "info":

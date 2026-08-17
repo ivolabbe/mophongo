@@ -49,7 +49,7 @@ every measurement column.
 : Saturation flags from preprocessing ({doc}`preprocessing`), copied through
   when present. Flagged sources are isolated into their own scenes.
 
-When `FitConfig.aperture_catalog` names a catalog column, that column is also
+When `FitConfig.phot.aperture_catalog` names a catalog column, that column is also
 copied through.
 
 ### Flux and error columns
@@ -133,13 +133,61 @@ copied through.
 ### Aperture columns
 
 Aperture photometry on the model-plus-residual image is always attempted; the
-aperture radius comes from `FitConfig.aperture_diam` (a fixed diameter in
-`aperture_units`, one value per band as an array, or `None` for a default
-aperture radius of 1.5 times the band PSF FWHM).
+aperture radius comes from `FitConfig.phot.aperture_diam` (a fixed diameter in
+`phot.units`, or one value per band as an array). Left at `None` — the default
+— the aperture is instead sized by encircled energy through
+`FitConfig.phot.aperture_ee`, default `0.70`: the diameter enclosing that
+fraction of the band's *model* PSF, meaning the drizzled stamp after the
+Gaussian diffusion blur, which is the PSF the matching kernel was built
+against. Sizing by EE is what keeps a colour free of aperture corrections to
+first order — the same EE in every band is the same correction factor in every
+band, and it cancels in the ratio, which a fixed angular diameter cannot do
+because the PSF width runs with wavelength. It also sits near the SNR optimum:
+for a background-limited point source `SNR ~ EE(r)/r`, which for a Gaussian
+peaks at `r = 1.585 sigma`, i.e. `1.35 x FWHM` in diameter, enclosing ~71%.
+An explicit `aperture_diam` always wins, so a run tied to an external catalog's
+aperture is never silently resized. Where the PSF stamp never reaches the
+requested fraction inside its inscribed circle, the run warns and falls back to
+1.5 times the band PSF FWHM rather than extrapolating past the stamp.
+
+The radius actually measured in is, per source, **the larger of the catalog
+aperture and the encircled-energy aperture**. The two ends of the catalog fail
+in opposite directions: a bright extended source has a wide catalog aperture,
+and measuring the band in that same aperture leaves the catalog correction as a
+pure PSF correction over a shared radius; a faint source sits on the catalog's
+aperture floor (72.4% of the MINERVA SUPER catalog is at 0.2"), which at MIRI
+resolution is well inside the PSF core, and the encircled-energy aperture is
+the floor that catches it near maximum SNR. Both raw sums are written whichever
+way the rule falls, so the choice is auditable per source.
 
 `aper_<i>`
-: The aperture diameter used, in arcsec. Only written when
-  `FitConfig.aperture_diam` is set.
+: The aperture diameter actually used, in arcsec, per source — the larger of
+  the two. Always written. Under `aperture_ee` the diameter is derived from the
+  band's model PSF rather than configured, so this column is the only record of
+  the realized size, and it is what you need to compare two bands or compare
+  this run against a fixed-diameter one.
+
+`aper_ee_<i>`
+: The encircled-energy aperture diameter, in arcsec. A band constant, so it is
+  the same for every source; the value `aper_<i>` falls back to.
+
+`ap_flux_ee_<i>`
+: Raw aperture sum on (model + residual) in the encircled-energy aperture.
+
+`ap_flux_catap_<i>`
+: Raw aperture sum on (model + residual) in the catalog aperture. Equals
+  `ap_flux_ee_<i>` when no catalog aperture is configured. Not to be confused
+  with `ap_flux_cat_<i>`, which is a corrected *total* on the catalog's Kron
+  convention, not a raw sum.
+
+`ap_res_<i>`
+: `sum_Omega(res)`: the residual map summed over `disk(aper_<i>/2)` with other
+  sources' segment pixels zeroed. The unscaled term of Estimator 3.
+
+`ap_flux_est3_<i>`
+: Estimator 3, `ap_model_<i> * psfcor_<i> * totcor_cat + ap_res_<i>`. Written
+  only where `totcor_cat` and `psfcor_<i>` are both finite, so it needs the
+  `phot.kron_flux_col` / `aper_flux_col` / `kron_radius_col` knobs set.
 
 With `src_tmpl` the unit-normalized high-resolution composite `H` and
 `src_img` the unit-normalized band-convolved composite `H*K`,
@@ -197,8 +245,8 @@ which convention is meant and the bare name does not.
   `(f_kron / f_aper) / EE_H(k * R_kron)`: the detection catalog's
   Kron-to-aperture flux ratio times the inverse encircled energy of the
   high-resolution PSF at the scaled circularized Kron radius. Written only
-  when `FitConfig.cat_kron_flux_col`, `cat_aper_flux_col` and
-  `cat_kron_radius_col` name existing catalog columns (`cat_kron_k` scales
+  when `FitConfig.phot.kron_flux_col`, `phot.aper_flux_col` and
+  `phot.kron_radius_col` name existing catalog columns (`phot.kron_k` scales
   the radius; SExtractor AUTO convention is 2.5). This is the quantity the
   flux-estimator report called `tcorH`.
 
@@ -206,6 +254,73 @@ which convention is meant and the bare name does not.
 : `ap_flux_<i> * psfcor_<i> * totcor_cat`: the aperture flux carried onto
   the detection catalog's Kron total convention, for catalog-type
   comparisons.
+
+### How the aperture enters the flux estimator
+
+Estimator 3 of the flux-estimator comparison report (its Eq. 12) is written to
+`ap_flux_est3_<i>`:
+
+```
+f3     = aper(model - model_nn, R) * psfcor * totcor_cat + sum_Omega(res)
+psfcor = ap_hi / ap_lo
+Omega  = disk(R), other sources' segment pixels zeroed
+```
+
+`R` is `aper_<i>`, the band's own measurement aperture after the max rule
+below. The aperture-to-total is built as `psfcor * totcor_cat` — the
+high-res→low-res band correction times the high-res aperture-to-total — rather
+than from a bare `1/ap_lo`, which avoids the name `totcor` entirely; that name
+has meant both the with-EE and the without-EE convention in different
+codebases. `f3` is a total in the full sense, because `totcor_cat` carries the
+encircled-energy term.
+
+read left to right as three separate jobs:
+
+- `aper(model - model_nn, R) * psfcor` — the best-fit model, with the
+  neighbours' models subtracted, summed in the measurement aperture and then
+  carried onto the high-resolution template's PSF. This is one joint
+  aperture-and-PSF correction rather than two: `psfcor` is a ratio of two
+  encircled energies at the *same* radius, so the aperture size cancels out of
+  it and only the hi/lo PSF difference remains. Written as `ap_model_<i>`.
+- `totcor_cat` — the correction to a genuine total, taken from the detection
+  catalog: the F444W Kron-to-aperture ratio times the inverse encircled energy
+  outside the scaled Kron radius. Catalog-tied, so results on this estimator
+  compare only against the release catalog, never against the internal
+  `totcor_<i>` convention.
+- `sum_Omega(res)` — the residual summed over the same disk, with other
+  sources' segment pixels zeroed, written as `ap_res_<i>`. **Added unscaled.**
+  The neighbours are already subtracted in the model, but their residuals are
+  not this source's to claim, and inside a shared aperture they would be. This
+  is the data-driven term: where the template is wrong, it is what keeps the
+  estimator honest.
+
+The unscaled residual is what separates `ap_flux_est3_<i>` from
+`ap_flux_cat_<i>`. The latter is `ap_flux_<i> * psfcor * totcor_cat`, and
+`ap_flux_<i>` already contains the residual, so it applies the
+aperture-to-total correction to the residual as well as to the model. The two
+differ by `ap_res * (psfcor * totcor_cat - 1)` and agree only where the
+residual vanishes. They are different estimators, not two spellings of one.
+
+The aperture rule is what makes the first two terms compose cleanly. When the
+catalog aperture wins, the band is measured at the catalog's own `R_phi`, and
+`totcor_cat` — which was itself defined at that radius on the detection band —
+needs no aperture-size adjustment at all: `psfcor` is left doing pure PSF work.
+When the source sits on the catalog's aperture floor, that radius is far inside
+the MIRI core and the encircled-energy aperture takes over, trading an exactly
+matched radius for the SNR that would otherwise be thrown away. The larger of
+the two is the right pick in both regimes, and the two raw sums
+(`ap_flux_catap_<i>`, `ap_flux_ee_<i>`) are both written so the trade is
+visible per source.
+
+The residual term is why the floor should not simply be made large: it grows
+with aperture area, so a wide aperture admits more noise and more of any
+neighbour the fit failed to subtract. The model term is already corrected, so
+buying wing-insensitivity with a wide floor mostly buys noise in `res` — which
+is why `aperture_ee` defaults near the SNR optimum rather than to a near-total
+aperture.
+
+`aper_<i>` records the realized diameter per source, which is the number to
+quote when reporting any of this.
 
 ### Header metadata
 

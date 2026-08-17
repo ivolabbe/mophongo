@@ -246,11 +246,17 @@ from mophongo.pipeline import Pipeline
 pipe = Pipeline(images, cat.segmap.data, catalog=cat.table)
 ```
 
-### Columns for a user-supplied catalog
+### Running with an external input catalog
 
 The catalog does not have to come from `Catalog`: any table with the right
 columns works, for example one converted from a SExtractor run, together with
-its matching segmentation map. Required columns:
+its matching segmentation map. The array-level API takes the `Table` itself;
+the run-config driver takes a path in its `catalog` field and reads it with
+`Table.read`, so any format astropy infers from the extension (FITS, ECSV,
+CSV) is accepted. Column names are matched literally: nothing is renamed,
+guessed or crossmatched, so the table has to carry the names below.
+
+Required columns:
 
 `id` : `int`
 : Must equal the segmentation label at the source position. The pipeline
@@ -278,20 +284,46 @@ Optional columns the pipeline consumes when present:
   catalog; the parent/children columns are read only when `is_deblended` is
   present.
 
-`FLAG_SATURATED_*`
-: Any column whose name starts with `FLAG_SATURATED_`; a nonzero value marks
-  the template saturated, which isolates it into its own scene.
+`FLAG_SATURATED_*` : `int`
+: Any column whose name starts with `FLAG_SATURATED_`, one per repaired
+  filter. The value is the saturated star's group id — the lowest flagged
+  segment id — so rows sharing a value belong to one star and are fitted
+  together in a single scene. A legacy 0/1 column still works and gives one
+  scene per flagged template. With several such columns present, the largest
+  value on the row wins. Written by
+  {func}`~mophongo.catalog.flag_saturated_segments` and
+  {func}`~mophongo.catalog.repair_saturated_catalog`.
 
 `ra`, `dec` : `float`, degrees
 : Not read by the fit itself. The run-config driver needs them only when the
   `r_trial` patch cut is enabled.
 
-*aperture column*
-: When `FitConfig.aperture_catalog` names a column, that column must exist
-  and hold per-source aperture **diameters**, in the units set by
-  `FitConfig.aperture_units` (arcsec or pixels).
+Columns named by the configuration rather than by convention. These are read
+only when the corresponding `FitConfig.phot` field names them, and the name is
+whatever the catalog already uses:
 
-All other columns are dropped from the fit's output catalog.
+`phot.aperture_catalog` : `float`
+: Per-source aperture **diameters**, in the units set by `phot.units`
+  (`"arcsec"` or `"pix"`). Sets the catalog aperture the band is measured in;
+  see {doc}`outputs` for how it combines with the encircled-energy aperture.
+  The field also accepts a plain number, in which case no column is read.
+
+`phot.kron_flux_col`, `phot.aper_flux_col`, `phot.kron_radius_col` : `float`
+: The detection catalog's Kron (AUTO) flux, its flux in its own aperture, and
+  its circularized Kron radius **in arcsec** (`phot.kron_k`, default 2.5,
+  scales that radius). All three must name existing columns or the catalog-side
+  aperture-to-total `totcor_cat` is skipped with a warning. The two fluxes
+  enter only as a ratio, so their unit is free as long as it is the same one.
+
+#### What survives into the output
+
+The fit's output table is rebuilt from `id`, `x`, `y`, the deblend and
+`FLAG_SATURATED_*` provenance columns when present, and the
+`phot.aperture_catalog` column when one is named. Every other input column is
+dropped, `ra`, `dec` and the three Kron columns included; the Kron columns
+survive only through the derived `totcor_cat`. `Table.meta` is carried through
+and written to the output header, where keywords longer than eight characters
+(`PHOT_UNIT`, `APER_DIAM`, ...) round-trip as HIERARCH cards.
 
 See {doc}`pipeline` for the full argument list, {doc}`templates` for how
 segments become fit templates, and {doc}`outputs` for the flux columns the

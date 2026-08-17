@@ -149,7 +149,9 @@ if locals().get("r_trial", 0) > 0:
 
 # first fit, no shifts: first image is template, 2nd and on the fitting images
 config = FitConfig(
-    fit_astrometry_niter=2, fit_astrometry_joint=True, scene_minimum_anchors=10, aperture_diam=0.5
+    # F1800W standard aperture, matching classic IDL subphot on Y. Asada's
+    # MIRI catalog (see docs/campaigns.md).
+    fit_astrometry_niter=2, fit_astrometry_joint=True, scene_minimum_anchors=10, aperture_diam=1.50
 )
 
 pipe = Pipeline(

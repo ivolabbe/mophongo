@@ -155,8 +155,14 @@ class PsfConfig:
 
     # directory of STDPSF grid files (generated grids are cached here too)
     dir: str = "data/PSF"
-    pattern_hi: str = ""  # STDPSF filename regex for the hi-res band
-    pattern_lo: str = ""  # STDPSF filename regex for the lo-res band
+    # STDPSF filename regexes, hi-res and lo-res band. The grids carry no field
+    # in their names: stpsf takes instrument, detector, filter, OPD date and
+    # grid geometry, and no sky position, so a grid is a property of the
+    # instrument and the epoch rather than of the field it was built for. The
+    # defaults are the MINERVA pair, F444W against F770W; override the filter
+    # token for another band.
+    pattern_hi: str = r"STDPSF_NRC.._F444W_MJD\d+_GRID25_OS4"
+    pattern_lo: str = r"STDPSF_MIRI_F770W_MJD\d+_GRID9_OS4"
     # PSF stamp size in arcsec; None = full native ePSF stamp as generated
     size: float | None = 4.0
     autobuild: bool = True  # generate missing PSF grids with PSFFactory
@@ -4354,14 +4360,57 @@ class Pipeline:
         except Exception:
             return None
 
+    def _ee_ap_diam_arcsec(self, idx: int, ee_fraction: float) -> float | None:
+        """Diameter [arcsec] enclosing ``ee_fraction`` of band ``idx``'s model PSF.
+
+        Measured on the drizzled stamp *after* the Gaussian diffusion blur --
+        ``self.psfs[idx]`` is the blurred map (`build_psfs` assigns
+        ``prm_lo``), which is the PSF the matching kernel was built against.
+        Measuring the model rather than an empirical star is deliberate: the
+        blur is already fitted to the model/star mismatch, so the model curve
+        is the one the corrections are consistent with.
+
+        Returns ``None`` when there is no usable PSF or the stamp never
+        reaches ``ee_fraction`` inside its inscribed circle, which leaves the
+        caller on its FWHM fallback rather than inventing a radius.
+        """
+        from .psf import stamp_encircled_energy
+
+        if self.psfs is None or len(self.psfs) <= idx or self.psfs[idx] is None:
+            return None
+        psf_i = self.psfs[idx]
+
+        if isinstance(psf_i, np.ndarray):
+            cube, pscale_psf = psf_i, self._pixel_scale_arcsec(
+                self.wcs[idx] if self.wcs is not None else None
+            )
+        else:  # PSFRegionMap: average over the map, and it knows its own scale
+            cube = np.asarray(getattr(psf_i, "psfs", None))
+            pscale_psf = float(getattr(psf_i, "pscale", 0.0)) or None
+        if cube is None or cube.size == 0 or not pscale_psf or pscale_psf <= 0:
+            return None
+
+        ee = stamp_encircled_energy(cube, pscale_psf, ee_fraction=float(ee_fraction))
+        r_ee = float(ee.get("r_ee", np.nan))
+        if not np.isfinite(r_ee) or r_ee <= 0:
+            logger.warning(
+                "aperture_ee=%.3f not reached within the PSF stamp for image %d "
+                "(inscribed circle holds %.4f); falling back to 1.5x FWHM",
+                ee_fraction, idx, float(ee.get("ee_circ", np.nan)),
+            )
+            return None
+        return 2.0 * r_ee
+
     def _resolve_image_ap_radius_pix(self, idx: int, cfg: _FitConfig) -> float:
         """
         Diameter source: cfg.phot.aperture_diam
         - float/int => same for all images
         - np.ndarray(len(images)-1) => per image (idx>=1), pick [idx-1]
-        - None => 1.5 × FWHM of PSF[idx] (in *pixels* of image idx),
-                    fallback 3.0 pixels if PSF is missing.
-        Units: cfg.phot.units ("arcsec" or "pix")
+        - None => the diameter enclosing cfg.phot.aperture_ee of image idx's
+                    model PSF; then 1.5 × FWHM of PSF[idx] (in *pixels* of
+                    image idx), fallback 3.0 pixels if PSF is missing.
+        Units: cfg.phot.units ("arcsec" or "pix"); the encircled-energy path is
+        always in arcsec, since that is what the PSF stamp measures.
         """
         diam = None
         if isinstance(cfg.phot.aperture_diam, (int, float)):
@@ -4371,6 +4420,20 @@ class Pipeline:
             if cfg.phot.aperture_diam.size != (len(self.images) - 1):
                 raise ValueError("aperture_diam array must have len(images)-1 elements")
             diam = float(cfg.phot.aperture_diam[idx - 1])  # idx>=1 by construction here
+
+        if diam is None and cfg.phot.aperture_ee is not None:
+            ee_diam = self._ee_ap_diam_arcsec(idx, float(cfg.phot.aperture_ee))
+            if ee_diam is not None:
+                pscale = self._pixel_scale_arcsec(
+                    self.wcs[idx] if self.wcs is not None else None
+                )
+                if not pscale or pscale <= 0:
+                    raise ValueError("aperture_ee requires valid WCS for each image")
+                logger.info(
+                    'image %d: aperture_ee=%.3f -> %.3f" diameter (%.2f pix)',
+                    idx, float(cfg.phot.aperture_ee), ee_diam, ee_diam / pscale,
+                )
+                return float(ee_diam / (2.0 * pscale))
 
         if diam is None:
             # default: 1.5×FWHM of this image PSF (pixels)
@@ -4599,6 +4662,34 @@ class Pipeline:
                                report's ``tcorH``, renamed)
         ap_flux_cat_{idx}    – ap_flux * psfcor * totcor_cat: total flux on the
                                detection catalog's Kron convention
+        aper_{idx}           – diameter actually measured in, arcsec, per source
+        aper_ee_{idx}        – the encircled-energy aperture, arcsec
+        ap_flux_ee_{idx}     – raw sum in the encircled-energy aperture
+        ap_flux_catap_{idx}  – raw sum in the catalog aperture
+        ap_res_{idx}         – sum_Omega(res): the residual over disk(R) with
+                               other sources' segment pixels zeroed
+        ap_flux_est3_{idx}   – Estimator 3 (Eq. 12 of the flux-estimator
+                               report): ap_model * psfcor * totcor_cat + ap_res.
+                               The correction scales the model term only, and
+                               the residual is added unscaled; that is what
+                               separates it from ap_flux_cat_{idx}, which
+                               scales the residual along with the model
+
+        **Which radius is used.** Per source, the larger of the catalog
+        aperture and the encircled-energy aperture. The two failure modes it
+        avoids sit at opposite ends of the catalog:
+
+        * A bright, extended source has a large catalog aperture. Measuring the
+          band in that same aperture makes the catalog correction a pure PSF
+          correction over a *shared* radius -- ``psfcor`` alone -- with no
+          aperture-size mismatch left to model.
+        * A faint source sits on the catalog's aperture floor (72.4% of the
+          MINERVA SUPER catalog is on 0.2"), which at MIRI resolution is far
+          inside the PSF core. The encircled-energy aperture is the floor that
+          catches it, near maximum SNR rather than near zero.
+
+        Both raw sums are written whatever the rule picks, so the choice is
+        auditable and either can be recovered without a rerun.
         """
         from photutils.aperture import CircularAperture, aperture_photometry
 
@@ -4613,15 +4704,23 @@ class Pipeline:
         # ensure columns exist
         for name in (f"ap_model_{idx}", f"ap_flux_{idx}", f"ee_psf_lo_{idx}",
                      f"stampcor_{idx}", f"totcor_{idx}", f"psfcor_{idx}",
-                     f"ap_flux_corr_{idx}", f"ap_flux_cat_{idx}"):
+                     f"ap_flux_corr_{idx}", f"ap_flux_cat_{idx}",
+                     f"ap_flux_ee_{idx}", f"ap_flux_catap_{idx}",
+                     f"aper_{idx}", f"aper_ee_{idx}",
+                     f"ap_res_{idx}", f"ap_flux_est3_{idx}"):
             if name not in cat.colnames:
                 cat[name] = cfg.bad_value
         totcor_cat = self._totcor_cat(cat)
 
-        # radii
-        r_img_pix = self._resolve_image_ap_radius_pix(
-            idx, cfg
-        )  # same for all in this band (by design)
+        # radii. r_ee is the band's encircled-energy (or configured) aperture
+        # and is constant across the band; r_cat is per source, and defaults to
+        # r_ee where the catalog supplies no aperture, which makes the max
+        # below a no-op rather than a special case.
+        r_ee_pix = self._resolve_image_ap_radius_pix(idx, cfg)
+        r_cat_by_id = self._resolve_catalog_ap_radius_pix(cat, cfg, r_default=r_ee_pix)
+        pscale_img = self._pixel_scale_arcsec(
+            self.wcs[idx] if self.wcs is not None else None
+        ) or np.nan
         # residual+model patch measurement (raw)
         for tmpl, fl in zip(templates, fluxes):
             pid = tmpl.id_parent if getattr(tmpl, "parent_id", None) is not None else tmpl.id
@@ -4634,6 +4733,19 @@ class Pipeline:
             model_patch = fl * tmpl.data[tmpl.slices_cutout]
             patch = res_patch + model_patch
 
+            # Omega = disk(R) with *other* sources' segment pixels zeroed, the
+            # region Estimator 3 sums the residual over. Neighbours are already
+            # subtracted in the model, but their residuals are not this source's
+            # to claim, and inside a shared aperture they would be.
+            res_omega = res_patch
+            if self.segmap is not None:
+                seg_patch = self.segmap[tmpl.slices_original]
+                if seg_patch.shape == res_patch.shape:
+                    mine = (seg_patch == int(tmpl.id)) | (seg_patch == int(pid))
+                    other = (seg_patch != 0) & ~mine
+                    if other.any():
+                        res_omega = np.where(other, 0.0, res_patch)
+
             # Aperture at the *fitted* position: the astrometric passes moved
             # both the source and its resampled template off the catalog
             # position (median ~1.3 fit-pix), and an off-centre aperture
@@ -4641,9 +4753,28 @@ class Pipeline:
             sx, sy = (float(v) for v in getattr(tmpl, "shifted", (0.0, 0.0))[:2])
             x0 = tmpl.input_position_cutout[0] - tmpl.slices_cutout[1].start + sx
             y0 = tmpl.input_position_cutout[1] - tmpl.slices_cutout[0].start + sy
-            aper_img = CircularAperture((float(x0), float(y0)), r=float(r_img_pix))
-            phot = aperture_photometry(patch, aper_img, method="exact")
-            ap_raw = float(phot["aperture_sum"][0])
+
+            def _sum_in(arr: np.ndarray, r_pix: float) -> float:
+                aper = CircularAperture((float(x0), float(y0)), r=float(r_pix))
+                return float(
+                    aperture_photometry(arr, aper, method="exact")["aperture_sum"][0]
+                )
+
+            def _raw(r_pix: float) -> float:
+                return _sum_in(patch, r_pix)
+
+            r_cat_pix = r_cat_by_id.get(int(pid))
+            if not (r_cat_pix is not None and np.isfinite(r_cat_pix) and r_cat_pix > 0):
+                r_cat_pix = r_ee_pix
+            # The rule: the larger of the two. Below the catalog's aperture
+            # floor the EE aperture takes over; above it the band is measured
+            # in the catalog's own aperture, which is what leaves psfcor as a
+            # pure PSF correction at a shared radius.
+            r_img_pix = max(float(r_cat_pix), float(r_ee_pix))
+
+            ap_ee = _raw(r_ee_pix)
+            ap_catap = _raw(r_cat_pix) if r_cat_pix != r_ee_pix else ap_ee
+            ap_raw = ap_catap if r_img_pix == r_cat_pix else ap_ee
 
             # ap_lo (times the post-conv total): the post-conv total rather
             # than 1.0 accounts for any flux lost at the template boundary
@@ -4678,6 +4809,10 @@ class Pipeline:
 
             cat[f"ap_model_{idx}"][row] = ap_model
             cat[f"ap_flux_{idx}"][row] = ap_raw
+            cat[f"ap_flux_ee_{idx}"][row] = ap_ee
+            cat[f"ap_flux_catap_{idx}"][row] = ap_catap
+            cat[f"aper_{idx}"][row] = 2.0 * r_img_pix * pscale_img
+            cat[f"aper_ee_{idx}"][row] = 2.0 * r_ee_pix * pscale_img
             cat[f"ee_psf_lo_{idx}"][row] = ee
             cat[f"stampcor_{idx}"][row] = inv_ap_b
             cat[f"totcor_{idx}"][row] = totcor
@@ -4686,6 +4821,17 @@ class Pipeline:
             tcc = totcor_cat.get(int(pid), np.nan)
             if np.isfinite(psfcor) and np.isfinite(tcc):
                 cat[f"ap_flux_cat_{idx}"][row] = ap_raw * psfcor * tcc
+
+            # Estimator 3 (flux_estimator_comparison.pdf, Eq. 12):
+            #   aper(model - model_nn, R) * psfcor * totcor_cat + sum_Omega(res)
+            # The correction multiplies the *model* term only; the residual is
+            # added unscaled. `ap_flux_cat_{idx}` above scales `ap_raw`, which
+            # already contains the residual, so the two are different
+            # estimators and not two spellings of one.
+            ap_res = _sum_in(res_omega, r_img_pix)
+            cat[f"ap_res_{idx}"][row] = ap_res
+            if np.isfinite(psfcor) and np.isfinite(tcc):
+                cat[f"ap_flux_est3_{idx}"][row] = ap_model * psfcor * tcc + ap_res
 
     def _fit_catalog(self, config: _FitConfig) -> Table:
         """Output-catalog skeleton :meth:`run` fits into: id/x/y + provenance."""
@@ -5212,13 +5358,12 @@ class Pipeline:
             )
 
 
-            if config.phot.aperture_diam is not None:
-                pscale = self._pixel_scale_arcsec(
-                    self.wcs[ifilt] if self.wcs is not None else None
-                )
-                r_img_pix = self._resolve_image_ap_radius_pix(ifilt, config)
-                r_img_arcsec = r_img_pix * pscale
-                cat["aper_" + str(ifilt)] = 2 * r_img_arcsec
+            # `aper_<i>` is written per source by _add_aperture_photometry,
+            # which is where the max(catalog, encircled-energy) rule is applied
+            # and so the only place the realized radius is known. A band-wide
+            # scalar used to be written here; it would now overwrite the
+            # per-source values with the encircled-energy radius alone.
+
             # Scene membership, taken off the scene objects themselves rather
             # than generate_scenes' labels: the scenes hold the very template
             # instances that were fitted, so identity is exact.

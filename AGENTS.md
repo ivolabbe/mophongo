@@ -92,7 +92,7 @@ Key components:
 - `repair.py`: standalone saturation-repair entry point (`mophongo-repair`
   console script / `python -m mophongo.repair`).
 - `cli.py`: command-line access to a finished run's products (`mophongo`
-  console script: `psf`, `stamps`, `diag`, `info`, `run`).
+  console script: `psf`, `stamps`, `diag`, `info`, `run`, `config`).
 - `template_schemes.py`: self-contained ports of the alternative template build
   schemes (wren fork, IDL classic) selected by `FitConfig.extend_mode`.
 - `astrometry.py`, `jwst_psf.py`: astrometric corrections and JWST PSF

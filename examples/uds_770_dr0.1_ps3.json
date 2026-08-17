@@ -16,48 +16,61 @@
 #     UDS_..._OS4_GRID25 static grids.
 #
 # Lines starting with '#' are comments. Paths relative to examples/.
-{
   # ps3 variant: psf_size 3.0" (wren-parity test) — 8" native stamps make the
   # coupling graph percolate into one scene at any usable threshold.
-  "name": "uds_770",
-  "out_dir": "uds_770_dr0.1_ps3",
-
   # high-res template side: grizli v8.0 minerva-v3.0 40mas F444W mosaic +
   # n3.0_v1.2 ACS+WEBB chi-mean segmap, n3.0_m3.1_v1.2.1 SUPER catalog (wMIRI).
   # No saturated-star repair has been run on the v3.0 UDS mosaic yet, so this is
   # the raw mosaic (the DR0 v2.3 run used repair_saturate_out/*_sci_repaired).
+  # low-res fit side: m3.0 MIRI F770W (extrabkg sci; shipped wcs csv, symlinked
+  # to the f770w spelling the filter parser expects)
+  # MJD-tagged ePSF grids; psf.size in arcsec (null = full native stamp);
+  # psf.blur_fwhm "default" = shared DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC[filter_lo]
+  # preprocessing: footprint cut + trial patch (set r_trial 0 for full run).
+  # trial_center = deepest fully F770W-covered 0.5' patch of the v3.0 mosaic
+  # (median wht 1.30e8, 2.0x the footprint median), found by scanning the
+  # weight map; close to the [34.4, -5.26] patch of the DR0 v2.4 UDS run.
+  # FitConfig overrides
+{
+  "name": "uds_770",
+  "out_dir": "uds_770_dr0.1_ps3",
   "sci_hi": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/n3.0/uds-grizli-v8.0-minerva-v3.0-40mas-f444w-clear_drc_sci.fits",
   "wht_hi": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/n3.0/uds-grizli-v8.0-minerva-v3.0-40mas-f444w-clear_drc_wht.fits",
   "segmap": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/n3.0_v1.2_SEC/MINERVA-UDS_n3.0_v1.2_ACS+WEBB_SEGMAP.fits",
   "catalog": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/n3.0_m3.1_v1.2.1/MINERVA-UDS_n3.0_m3.1_v1.2.1_ACS+WEBB_Kf444w_SUPER_CATALOG_wMIRI.fits",
   "csv_hi": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/n3.0/uds-grizli-v8.0-minerva-v3.0-40mas-f444w-clear_wcs.csv",
-
-  # low-res fit side: m3.0 MIRI F770W (extrabkg sci; shipped wcs csv, symlinked
-  # to the f770w spelling the filter parser expects)
   "sci_lo": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/m3.0/uds-sbkgsub-v3.0-80mas-f770w_drz_sci_extrabkg.fits",
   "wht_lo": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/m3.0/uds-sbkgsub-v3.0-80mas-f770w_drz_wht.fits",
   "csv_lo": "/Users/ivo/Astro/PROJECTS/MINERVA/data/UDS/m3.0/uds-v3.0_f770w_wcs.csv",
-
-  # MJD-tagged ePSF grids; psf.size in arcsec (null = full native stamp);
-  # psf.blur_fwhm "default" = shared DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC[filter_lo]
   "filter_lo": "f770w",
   "psf": {
     "dir": "../data/PSF",
-    "pattern_hi": "UDS_NRC.._F444W_MJD\\d+_GRID25_OS4",
-    "pattern_lo": "UDS_MIRI_F770W_MJD\\d+_GRID9_OS4",
+    "pattern_hi": "STDPSF_NRC.._F444W_MJD\\d+_GRID25_OS4",
+    "pattern_lo": "STDPSF_MIRI_F770W_MJD\\d+_GRID9_OS4",
     "size": 3.0,
     "blur_fwhm": "default"
   },
-
-  # preprocessing: footprint cut + trial patch (set r_trial 0 for full run).
-  # trial_center = deepest fully F770W-covered 0.5' patch of the v3.0 mosaic
-  # (median wht 1.30e8, 2.0x the footprint median), found by scanning the
-  # weight map; close to the [34.4, -5.26] patch of the DR0 v2.4 UDS run.
   "footprint_filter": true,
-  "trial": {"center": [34.34914, -5.27462], "radius": 0.6},
+  "trial": {
+    "center": [
+      34.34914,
+      -5.27462
+    ],
+    "radius": 0.6
+  },
   "bg_filter_sigma": 64.0,
-
-  # FitConfig overrides
-  "fit": {"fit_astrometry_joint": true, "scene_minimum_anchors": 5, "aperture_diam": 0.5},
+  "fit": {
+    "fit_astrometry_joint": true,
+    "scene_minimum_anchors": 5,
+    # Aperture sized by encircled energy of the band's model PSF rather than
+    # by a fixed angle: the same EE in every band is the same correction
+    # factor in every band, so it cancels in a colour. 0.70 also sits near the
+    # background-limited SNR optimum (1.35 x FWHM). The realized diameter is
+    # written to aper_<i>. See docs/outputs.md.
+    "phot": {
+      "aperture_ee": 0.7,
+      "aperture_catalog": null
+    }
+  },
   "scene_plots": true
 }

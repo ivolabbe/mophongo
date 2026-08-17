@@ -69,7 +69,7 @@ with the field. `PSFFactory(workers=N)` fans those out, and
 
 What does **not** parallelise is two *bands of the same field* building at
 once. `uds_f770w` and `uds_f1000w` both resolve `psf.pattern_hi` to
-`UDS_NRC.._F444W_MJD\d+_GRID25_OS4`, so both compute the same grids and both
+`STDPSF_NRC.._F444W_MJD\d+_GRID25_OS4`, so both compute the same grids and both
 write the same paths. The same applies to the 30" halo grids, whose pattern is
 derived from `psf.pattern_hi`. Interleaved writes to one FITS file give a torn
 file, and the loser's work is wasted either way.
@@ -240,6 +240,52 @@ else does, which matters just as much: `RunConfig.repair_cache_path` defaults
 to `'..'`, one unnamed file for the whole run tree, and a release campaign has
 three fields and a dozen patch geometries whose provenance never matches. Each
 would find the others' cache stale, recompute, and overwrite it.
+
+## Aperture diameters are per filter, and they are not free parameters
+
+Every campaign band has one standard photometric aperture diameter, in arcsec.
+The four MIRI bands with an IDL counterpart use the diameters classic
+`subphot.pro` uses on Y. Asada's MIRI catalog, so raw aperture fluxes are
+directly comparable between the two codes without a correction step. The
+remaining three are interpolated on the same roughly linear trend with
+wavelength:
+
+| Band | Diameter (") | Source |
+|---|---|---|
+| F560W | 0.60 | interpolated |
+| F770W | 0.70 | IDL `subphot` / Y. Asada |
+| F1000W | 0.90 | interpolated |
+| F1280W | 1.20 | IDL `subphot` / Y. Asada |
+| F1500W | 1.20 | IDL `subphot` / Y. Asada |
+| F1800W | 1.50 | IDL `subphot` / Y. Asada |
+| F2100W | 1.70 | interpolated |
+
+These are near-total apertures: F770W's 0.70" is about 2.7 times that band's
+FWHM, enclosing ~99% of the PSF. That buys insensitivity to the PSF wings and
+costs SNR — roughly 40% against an aperture at the background-limited optimum,
+which for a Gaussian is 1.35 x FWHM in diameter and encloses ~71%. They are the
+right choice when the point is comparability with the IDL catalog, and the
+wrong one when the point is depth. For the latter, leave `aperture_diam` unset
+and let `phot.aperture_ee` (default 0.70) size the aperture from the band's
+model PSF; `aper_<i>` then records what it picked. See {doc}`outputs` for how
+the aperture enters the flux estimator, and why fixed encircled energy is what
+makes a colour aperture-correction-free.
+
+The table lives once in code, as `APERTURE_DIAM_ARCSEC` in
+`examples/make_minerva_configs.py`, and every generated per-band config takes
+its `fit.phot.aperture_diam` from it. Generated configs are therefore correct
+by construction; hand-written ones are not, and the four UDS values are the
+ones to check a config against.
+
+The diameter tracks the band's PSF, not the field, so a given filter uses the
+same aperture in UDS and COSMOS. Do not carry one band's diameter to another
+when copying a config: at 0.5" an F1800W aperture captures a small fraction of
+a PSF whose standard aperture is three times wider, and the fluxes are not
+comparable with anything.
+
+Mock runs are exempt. A synthetic mosaic has no Asada catalog to tie to, so
+`examples/run_mock.py`, `run_mock_hisnr.py` and `replot_scenes.py` keep
+whatever diameter their mock was built around.
 
 ## These directories hold no outputs
 

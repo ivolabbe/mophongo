@@ -1,7 +1,10 @@
+"""Solving a scene's normal equations: the flux block, the shift block, and
+the quick flux/error estimates that stand in for a solve."""
+
 import numpy as np
 import scipy.sparse as sp
 
-from mophongo.fit import FitConfig
+from mophongo.fit import FitConfig, SparseFitter
 from mophongo.psf import PSF
 from mophongo.scene import Scene
 from mophongo.scene_fitter import SceneFitter, build_normal
@@ -16,7 +19,7 @@ def test_scene_fitter_flux_only():
     sol = SceneFitter.solve(A, b, config=cfg)
     expected = np.linalg.solve(A.toarray() + np.eye(A.shape[0]) * cfg.reg_flux, b)
 
-    assert sol.info["solver"] == "spsolve"
+    assert sol.info["solver"] == "fnnls"  # nnls is the default
     assert sol.shifts is None
     np.testing.assert_allclose(sol.flux, expected)
     assert np.all(np.isfinite(sol.err))
@@ -35,7 +38,7 @@ def test_scene_fitter_with_shift_block():
     AB = sp.csr_matrix([[1.0], [2.0]])
     BB = sp.csr_matrix([[3.0]])
     bB = np.array([0.5])
-    cfg = FitConfig(reg_flux=1e-12, astrom_reg=0.0, positivity=False)
+    cfg = FitConfig(reg_flux=1e-12, astrom_reg=0.0, fit_method="lls")
     sol = SceneFitter.solve(A, b, AB=AB, BB=BB, bB=bB, config=cfg)
     M = np.block([[A.toarray(), AB.toarray()], [AB.T.toarray(), BB.toarray()]])
     M[: A.shape[0], : A.shape[0]] += np.eye(A.shape[0]) * cfg.reg_flux
@@ -55,7 +58,7 @@ def test_scene_solve_matches_dense_normal_solution():
     weight = wht[1]
     A, b, _ = build_normal(tmpls.templates, image, weight)
 
-    cfg = FitConfig(reg_flux=1e-12, positivity=False, fit_astrometry_niter=0)
+    cfg = FitConfig(reg_flux=1e-12, fit_method="lls", fit_astrometry_niter=0)
     scene = Scene(id=1, templates=list(tmpls.templates), fitter=SceneFitter())
     scene.A = A
     scene.b = b
@@ -65,3 +68,23 @@ def test_scene_solve_matches_dense_normal_solution():
 
     expected = np.linalg.solve(A.toarray() + np.eye(A.shape[0]) * cfg.reg_flux, b)
     np.testing.assert_allclose(flux, expected, rtol=1e-3, atol=1e-6)
+
+
+def test_flux_and_rms_estimation():
+    """SparseFitter.flux_and_rms matches quick flux and error estimates."""
+    images, segmap, catalog, psfs, _, rms = make_simple_data()
+
+    tmpls = Templates.from_image(
+        images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel=None
+    )
+
+    fitter = SparseFitter(tmpls.templates, images[1], 1.0 / rms[1] ** 2, FitConfig())
+
+    flux, err = fitter.flux_and_rms()
+    np.testing.assert_allclose(flux, fitter.quick_flux())
+    np.testing.assert_allclose(err, fitter.predicted_errors())
+
+    for tmpl in tmpls.templates:
+        tmpl.flux = 42.0
+    flux2, _ = fitter.flux_and_rms()
+    assert np.all(flux2 == 42.0)

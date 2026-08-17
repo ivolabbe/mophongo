@@ -384,7 +384,7 @@ This file tracks future desired features, checks, and investigations.
 
 - [ ] Re-tune the background source mask against real mosaics. P1-03
   (2026-08-12) set `detect_thresh=2.5` and `faint_thresh=4.0` from injected
-  sources on synthetic correlated noise (`tests/test_background_masking.py`),
+  sources on synthetic correlated noise (`tests/test_catalog.py`),
   which fixes the coupled polarity/threshold defects but calibrates the
   thresholds on a source population whose realism is unverified. Check the
   mask occupancy and recovered `sigma_true` on a real UDS/COSMOS mosaic
@@ -953,11 +953,11 @@ This file tracks future desired features, checks, and investigations.
   wire one in if the wren truncation bookkeeping is kept. Note
   `template_comparison.tex` Sec. 8.1 flags wren's own `containment` as
   normalised to the parent grid and therefore ~+2.9% (F444W) high.
-- [ ] `tests/test_pipeline_multitemplate.py::test_pipeline_multitemplate_pass`
-  no longer exercises a multi-template pass: `_add_templates_for_bad_fits` and
-  the `multi_tmpl_*` config knobs were removed in the 2026-08 cleanup (the
-  only call site had been commented out long before). Either reinstate the
-  feature or rename the test to what it now covers, a plain pipeline run.
+- [ ] `tests/test_pipeline.py::test_pipeline_multitemplate_pass` no longer
+  exercises a multi-template pass: `_add_templates_for_bad_fits` and the
+  `multi_tmpl_*` config knobs were removed in the 2026-08 cleanup (the only
+  call site had been commented out long before). Either reinstate the feature
+  or rename the test to what it now covers, a plain pipeline run.
 - [ ] `SparseFitter` no longer solves: after the 2026-08 cleanup it builds the
   normal matrix and returns model/residual images and covariance-free
   estimators, while `SceneFitter` owns all flux solving. Decide whether the
@@ -1334,59 +1334,25 @@ This file tracks future desired features, checks, and investigations.
   - [ ] remove unused modules, orphan code
 
 - [ ] Decide where the MINERVA SED estimator experiment belongs (2026-08-16).
-  `tests/test_sed_estimator_experiment.py` imports
+  `tests/test_sed_estimator_experiment.py` imported
   `scratch.minerva_sed_estimator_experiment`, and `scratch/` is gitignored, so
-  the module is absent from every fresh checkout. That broke collection and
+  the module was absent from every fresh checkout. That broke collection and
   with it the whole CI run -- the suite reported one error and never ran, on
-  `main` as well as on branches. The import is now guarded with
-  `pytest.importorskip`, which stops it taking the run down but leaves the test
-  dead everywhere except a working tree that happens to have the experiment.
-  Either promote the estimator into `src/mophongo/` if it has become
-  reusable, or move the test into `scratch/` with it. `CLAUDE.md` is explicit:
-  tests are tracked and must not depend on scratch work.
+  `main` as well as on branches. Guarding the import with
+  `pytest.importorskip` stopped it taking the run down but left the test dead
+  everywhere except a working tree that happened to have the experiment, and
+  the test file is now deleted (2026-08-16 suite shrink). What remains open is
+  the estimator itself: promote it into `src/mophongo/` with a real test if it
+  has become reusable, or leave it in `scratch/` as a one-off. `CLAUDE.md` is
+  explicit that tests are tracked and must not depend on scratch work.
 
-- [ ] Retire three dead or redundant config fields (2026-08-16). Each showed up
-  once `mophongo config` started dumping every field, and each is small on its
-  own; they are grouped because all three change the config schema.
+- [ ] `src/mophongo/sed_stack.py` has no tests (2026-08-16). Its 27-test file
+  was removed in the suite shrink. The module is a leaf -- nothing in the
+  package imports it -- so nothing in the pipeline notices, but its callers
+  are the redshift-stacking analysis and the tests were its only written
+  specification of the rasterization and filter-overlap conventions. If the
+  module stays, give it a small test covering the top-hat filter interval,
+  the once-per-galaxy overlap averaging, and the rest-frame `1+z` scaling; if
+  it is analysis code rather than package code, move it out of
+  `src/mophongo/`.
 
-  * `FitConfig.cg_kwargs` (`{"M": null, "maxiter": 500, "atol": 1e-06}`) is
-    dead. Nothing passes it and nothing reads it: `SceneFitter.solve` takes a
-    `cg_kwargs` parameter (`scene_fitter.py:158`) and mentions it only in its
-    own docstring. The solver is a direct sparse factorization (`spsolve` /
-    `splu`, `scene_fitter.py:242,285`), not conjugate gradient, so `maxiter`,
-    `atol` and `M` describe an iterative solver that is not there. Drop both
-    the field and the parameter; `scene.py:1510` already carries a note that
-    `solve` should take regularization and cg settings rather than the config.
-  * `RunConfig.minerva_release` is dead -- declared at `pipeline.py:293` and
-    referenced nowhere, not even by the code that builds the viewer link. Only
-    `minerva_viewer` is read (`pipeline.py:2674`), where a bare
-    `<field>/<release>` gets `FITSMAP_URL` prefixed. Collapse the pair into one
-    `fitsmap_url`.
-  * `RunConfig.filter_lo` is derivable. It is read for the MIRI diffusion-blur
-    lookup (`DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC`, `pipeline.py:1518`) and two
-    plot labels, and `jwst_psf.filter_from_path` already recovers a filter from
-    a path. Derive it from `sci_lo`, keeping the field as an override for paths
-    that carry no filter token.
-
-- [ ] Solve the flux block as true NNLS, not a post-hoc clip (2026-08-16).
-  `FitConfig.positivity` is on by default and does `x = np.maximum(0.0, x)`
-  *after* the unconstrained solve (`scene_fitter.py:247` and `:305`). That is
-  not the non-negative least-squares optimum: when a template is forced to
-  zero its neighbours are left holding flux they only took because the
-  negative one was there, and they are never re-solved. The scene is biased
-  rather than best-fit under the constraint.
-
-  The inputs for a proper solve are already in hand. `A` is the normal matrix
-  and `b` the projected data, which is exactly what FNNLS (Bro & de Jong 1997)
-  consumes -- a Lawson-Hanson active set over the Gram matrix, no design matrix
-  required, each iteration a smaller solve on the passive set that `splu`
-  already covers. Most scenes drive only a handful of templates negative, so it
-  should converge in a few passes. Equivalently, `A = L L^T` gives
-  `min ||Mx - d||^2 = ||L^T x - L^-1 b||^2`, so `scipy.optimize.lsq_linear`
-  with `bounds=(0, inf)` on design `L^T` reaches the same answer reusing the
-  whitening and Cholesky already computed for `_shift_covariance`.
-
-  Keep the clip as an option -- it is cheap and it is what every run to date
-  used, so comparisons need it. Note that `sqrt(diag(A^-1))` is not the right
-  uncertainty for a template sitting at the bound; report those separately
-  rather than quoting an unconstrained error for a constrained parameter.

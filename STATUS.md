@@ -3,6 +3,117 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] `fitsmap_url` replaces `minerva_viewer` + `minerva_release` (2026-08-16).
+  `minerva_release` was declared at `pipeline.py:293` and read nowhere, not
+  even by the code that builds the viewer link -- the release is already part
+  of the URL path when a field wants one, so a second field could only ever
+  disagree with the first.
+
+  `RunConfig.from_json` rejects unknown keys, so a plain rename would stop
+  every config in an existing run tree from loading. It migrates instead:
+  `minerva_viewer` is carried over to `fitsmap_url`, and `minerva_release` is
+  dropped. Tested both directions.
+
+- [x] Shrank the test suite to the contracts a future change can break
+  (2026-08-16). 41 files / 14,088 lines / 72 s became **33 files / 11,407
+  lines / 46 s**, and the suite is green: 471 passed, 0 failed. Nothing that
+  pins a behaviour was dropped without its coverage landing somewhere else.
+
+  Deleted outright: `test_scene_astrometry.py` (an empty file), and
+  `test_sed_estimator_experiment.py`, whose module lives in the gitignored
+  `scratch/` tree so it could only ever skip. `test_sed_stack.py` went too --
+  `sed_stack.py` is a leaf nothing in the package imports.
+
+  Merged into the module that owns them: `test_fit.py` into
+  `test_scene_fitter.py`; `test_pipeline_dedup.py` and
+  `test_pipeline_multitemplate.py` into `test_pipeline.py`;
+  `test_background_masking.py` and the old `test_catalog.py` into one
+  `test_catalog.py`. Cross-file duplicates went with them: `get_bg_and_ivar`'s
+  masking was asserted in three files and is now in `test_catalog.py` alone,
+  and `as_label_array` was tested weakly in `test_templates.py` and
+  thoroughly in `test_memory_footprint.py` -- the thorough four moved to
+  `test_templates.py` and the weak one is gone.
+
+  `test_moffat_recovery.py` became `examples/verify_moffat_recovery.py`. It
+  was 24 s of the suite -- a third of it -- to produce diagnostic PNGs and
+  assert only that the median flux ratio is somewhere near unity. It is a
+  validation run, not a unit test, and now runs on demand
+  (`python examples/verify_moffat_recovery.py [outdir]`); verified end to end,
+  all five scenarios, median ratio 0.9998-1.0007.
+
+  The astrometry files were the exception to the plan. Four files, 2,199
+  lines, were the obvious consolidation target, but `test_astrom_robust.py`
+  (leaf statistics), `test_scene_astrometry_blocks.py` (blocks against a dense
+  design) and `test_scene_astrometry_robust.py` (per-anchor measurement) are
+  three layers of one argument rather than three copies of it -- collapsing
+  them would have lost the layer that localizes a failure. The redundancy was
+  in `test_astrometry.py` instead: four end-to-end scene tests asserting a
+  0.6 px shift to `atol=0.3`, where the scene files assert the same properties
+  to 1e-9. Those four went, `test_astrometry.py` is now the non-joint
+  `AstroCorrect`/`AstroMap` path plus the alpha0 scaling nothing else covers,
+  and its write into `Path("../tmp")` -- outside the repository -- went with
+  them.
+
+  Left alone deliberately: `tests/test_nnls.py`, live work on this branch.
+
+- [x] `fit_method` replaces `positivity`, and NNLS is the default (2026-08-16).
+  One switch with three values: `"lls"` keeps negative fluxes, `"clip"` clamps
+  them after an unconstrained solve, `"nnls"` solves under the constraint.
+  `positivity` is gone rather than deprecated -- `RunConfig.from_json` rejects
+  unknown keys, so an old config naming it now fails loudly instead of being
+  silently ignored.
+
+  Clipping was never the constrained optimum. It pins a template at zero and
+  leaves its neighbours holding flux they took only because the negative one
+  was there; the survivors are never re-solved. `SceneFitter.fnnls` is the
+  Bro & de Jong (1997) rearrangement of Lawson-Hanson, which consumes the Gram
+  matrix and `A^T d` directly -- exactly what a scene holds, so no design
+  matrix is reconstructed. The `lsq_linear` alternative was rejected on
+  evidence: the Cholesky at `scene_fitter.py:370` is of the *shift* block `BB`,
+  not of `A`, and scipy has no sparse Cholesky, so that route needs a
+  factorization this code does not have.
+
+  The joint flux+shift path uses the same routine with the shift coefficients
+  held free (`fnnls(..., free=...)`): a shift has no sign to respect, only the
+  fluxes do. Without that, `nnls` would have clipped on every scene, since
+  `fit_astrometry_joint` is on by default.
+
+  Verified on injected truth through `Pipeline`. Noiseless recovery is exact to
+  4e-16 for all three methods and for the joint path. Over 30 shared noise
+  realizations on a blend of 100/3/200:
+
+      lls   bias [-0.43 +0.23 -0.24]  rms [2.32 3.34 2.71]
+      clip  bias [-0.43 +0.54 -0.24]  rms [2.32 2.88 2.71]
+      nnls  bias [-0.43 +0.54 -0.24]  rms [2.32 2.88 2.71]
+
+  The bright sources are untouched by the constraint; the SNR~1 source is
+  biased high by both constrained modes, which is the truncation effect and is
+  the reason `info["flux_uncon"]` now always carries the unconstrained fluxes.
+  `clip` and `nnls` agree on this weakly blended mock and diverge in strong
+  blends, which is what `tests/test_nnls.py` covers with an 85%-correlated
+  pair.
+
+  Lawson-Hanson starts at `x = 0` and admits one component per iteration, so a
+  scene whose solution is entirely positive -- the common case -- would pay `n`
+  growing solves to reach what one solve gives: 4.0 s against 0.077 s for
+  `spsolve` at 1000 templates. `fnnls` now tries the unconstrained answer
+  first and keeps it when it satisfies the KKT conditions, which is a proof of
+  optimality rather than a guess, so the shortcut cannot return a different
+  solution from the long route. That case is now 0.012 s, faster than
+  `spsolve`. A bounded refinement (drop what came out negative, re-solve,
+  re-test) handles partly pinned scenes, and anything that fails the test falls
+  back to the exact loop.
+
+  On realistic scene coupling -- a template overlapping only its neighbours --
+  the worst measured case is 0.074 s at 500 templates with 30% pinned. The
+  alarming ratios in a dense random benchmark come from every template
+  overlapping every other, which no real scene does.
+
+  `info["at_bound"]` marks components sitting on the bound. Their `err` is the
+  unconstrained `sqrt(diag(A^-1))`, which is not a symmetric 1-sigma interval
+  for a parameter at a constraint -- flagged rather than silently reported as
+  if it were.
+
 - [x] Dropped `cg_kwargs`, made `filter_lo` a fallback (2026-08-16).
   `FitConfig.cg_kwargs` was dead: nothing passed it and nothing read it, and
   the solver is a direct sparse factorization (`spsolve`/`splu`), so

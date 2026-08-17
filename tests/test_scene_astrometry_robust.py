@@ -104,7 +104,7 @@ def _cfg(**kw) -> FitConfig:
     base = dict(
         reg_flux=0.0,
         astrom_reg=0.0,
-        positivity=False,
+        fit_method="lls",
         fit_astrometry_joint=True,
         fit_astrometry_niter=1,
         astrom_minimum_snr=0.0,

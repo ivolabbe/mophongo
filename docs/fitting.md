@@ -301,12 +301,22 @@ the shift block a relative ridge `FitConfig.astrom_reg`; a scene with fewer
 than two bright members has empty shift blocks and falls back to the
 flux-only path, {meth}`~mophongo.scene_fitter.SceneFitter.solve_flux`, which
 whitens the matrix by its diagonal as described under
-[Error estimates](#error-estimates-err-vs-err_pred) above. Despite some
-argument names, the solve is a direct sparse factorization
-(`scipy.sparse.linalg.spsolve`), not conjugate gradients, and `info` is
-always `{"cg_info": 0}`. If `FitConfig.positivity` is true, negative fluxes
-are clipped to zero after the solve (a post-hoc clamp, not a constrained
-NNLS solve). {func}`mophongo.scene_fitter.build_normal` is the module-level,
+[Error estimates](#error-estimates-err-vs-err_pred) above. The solve is a
+direct sparse factorization (`scipy.sparse.linalg.spsolve`), not conjugate
+gradients, so `info` reports the solver rather than an iteration count.
+
+`FitConfig.fit_method` then decides what happens to negative fluxes. `"lls"`
+keeps them. `"clip"` clamps them to zero after the unconstrained solve — a
+post-hoc clamp, which pins a template at zero but leaves its neighbours
+holding flux they took only because the negative one was there. `"nnls"`
+re-solves under the constraint, so the survivors are refitted; that is the
+whole point of the constraint in a blend. Whichever runs, the unconstrained
+fluxes are returned in `info["flux_uncon"]` and `info["at_bound"]` marks the
+components sitting on the bound — their `err` is the unconstrained
+`sqrt(diag(A^-1))`, which is not a symmetric 1σ interval for a parameter at a
+constraint. On the joint flux+shift path `"nnls"` falls back to clipping and
+says so in `info["nnls_unavailable"]`: imposing the constraint on the flux
+half of a coupled system is a different problem. {func}`mophongo.scene_fitter.build_normal` is the module-level,
 stateless clone of `SparseFitter.build_normal_tree` that assembles
 `(ATA, ATb, rtree)` for a template list.
 
@@ -518,7 +528,8 @@ page.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `positivity` | `bool` | `True` | Clip negative fitted fluxes to zero after the solve. |
+| `fit_method` | `str` | `"clip"` | How the flux block is solved: `"lls"` keeps negative fluxes, `"clip"` clamps them to zero after an unconstrained solve, `"nnls"` re-solves under the constraint ({meth}`mophongo.scene_fitter.SceneFitter.fnnls`). The unconstrained fluxes come back in `info["flux_uncon"]` whichever runs. |
+| `positivity` | `bool` | `True` | Deprecated alias. `False` selects `fit_method="lls"` when `fit_method` is left at its default. |
 | `reg_flux` | `float \| None` | `None` | Ridge added to the flux block diagonal. `None` = adaptive (`1e-6` times the matrix scale), `0.0` = genuinely unregularized, positive = that value. JSON configs write `null` for the default. |
 | `bad_value` | `float` | `np.nan` | Fill value for missing catalog entries. |
 | `fit_astrometry_niter` | `int` | `5` | Maximum astrometry solve/apply passes per band; `0` disables shift fitting. |

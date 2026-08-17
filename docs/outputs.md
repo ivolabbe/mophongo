@@ -360,8 +360,11 @@ astrometric anchor cuts — SNR, isolation, and optional star exclusion — so i
 counts more than brightness despite the older `is_bright` spelling), `ra`,
 `dec` of the scene center, the total astrometric shift `dx`, `dy` at that
 center in reference-grid pixels (NaN where the scene solved no astrometry),
-`sigma_shift`, `shift_rms`, `chi2_dof`, and a URL column linking each position
-to an external sky viewer.
+`sigma_shift`, `shift_rms`, `chi2_dof`, and a `minerva_link` column linking
+each position to an external sky viewer. That column is written only when
+`RunConfig.fitsmap_url` gives a FITSMap root — a full URL, or a bare
+`<field>/<release>` which gets the default host in front. Unset or empty drops
+the column, since a guessed link is worse than none.
 
 `dx`, `dy` is the mean shift actually applied to the scene's templates, at
 the centroid of those templates. It is not a field evaluation: accumulated

@@ -102,3 +102,40 @@ def test_cli_entry_point(tmp_path):
 
     assert target.exists()
     assert RunConfig.from_json(target).fit["astrom_robust"] is True
+
+
+def test_fitsmap_url_replaces_the_minerva_pair(tmp_path):
+    """Old configs name `minerva_viewer`; `from_json` rejects unknown keys.
+
+    The rename therefore has to migrate rather than merely rename, or every
+    config in an existing run tree stops loading. `minerva_release` is dropped
+    rather than migrated: nothing ever read it, and the release is already part
+    of the URL path when a field wants one.
+    """
+    import json
+
+    required = {k: f"<{k}>" for k in (
+        "name", "out_dir", "sci_hi", "segmap", "catalog",
+        "sci_lo", "wht_lo", "csv_hi", "csv_lo")}
+
+    old = tmp_path / "old.json"
+    old.write_text(json.dumps(dict(
+        required,
+        minerva_viewer="https://minerva.colorado.edu/uds/DR0",
+        minerva_release="DR0",
+    )))
+    cfg = RunConfig.from_json(old)
+    assert cfg.fitsmap_url == "https://minerva.colorado.edu/uds/DR0"
+    assert not hasattr(cfg, "minerva_release")
+
+    new = tmp_path / "new.json"
+    new.write_text(json.dumps(dict(required, fitsmap_url="https://x/cosmos")))
+    assert RunConfig.from_json(new).fitsmap_url == "https://x/cosmos"
+
+
+def test_default_config_names_fitsmap_url(tmp_path):
+    out = write_default_config(tmp_path / "default.json")
+    text = out.read_text()
+
+    assert "fitsmap_url" in text
+    assert "minerva_viewer" not in text and "minerva_release" not in text

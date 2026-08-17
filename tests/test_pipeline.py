@@ -1294,7 +1294,7 @@ def test_scene_catalog_link_takes_the_viewer_root_from_the_config(tmp_path):
         pipe.run_config.sci_hi = str(out / "hi.fits")
         pipe.run_config.save_stamps = False
         pipe.run_config.scene_plots = False
-        pipe.run_config.minerva_viewer = viewer
+        pipe.run_config.fitsmap_url = viewer
         pipe.write_outputs()
         cat = _Table.read(out / "t_scene_catalog.csv", format="ascii.csv")
         return cat["minerva_link"][0] if "minerva_link" in cat.colnames else None
@@ -1685,3 +1685,75 @@ def test_convolved_templates_rejects_a_weight_on_the_wrong_grid(tmp_path):
 
     with _pytest.raises(RuntimeError, match="same grid"):
         pipe._convolved_templates(1, pipe.config)
+
+
+# ---------------------------------------------------------------------------
+# the pipeline.run() convenience entry point
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_deduplicates_templates():
+    """A catalog listing one source twice still yields one fitted row."""
+    from mophongo.fit import FitConfig
+
+    images, segmap, catalog, psfs, truth, wht = make_simple_data(nsrc=3, size=51)
+    dup_catalog = catalog[:2].copy()
+    dup_catalog.add_row(catalog[0])  # duplicate first source
+    kernel = [mutils.matching_kernel(psfs[0], p) for p in psfs]
+    kernel[0] = None
+
+    table, resid, fitter = pipeline.run(
+        images,
+        segmap,
+        catalog=dup_catalog,
+        psfs=psfs,
+        weights=wht,
+        kernels=kernel,
+        config=FitConfig(fit_astrometry_niter=0),
+    )
+    mask = dup_catalog["id"] == dup_catalog["id"][0]
+    assert np.count_nonzero(np.isfinite(table["flux_1"][mask])) == 1
+
+
+def test_pipeline_multitemplate_pass():
+    """Every catalog source gets a template and a finite flux."""
+    from scipy.ndimage import shift as nd_shift
+
+    from mophongo.fit import FitConfig
+
+    images, segmap, catalog, psfs, truth, wht = make_simple_data(nsrc=3, size=51)
+    images[1] = nd_shift(images[1], (0.5, -0.3))
+    kernel = [mutils.matching_kernel(psfs[0], p) for p in psfs]
+    kernel[0] = None
+
+    table, resid, fitter = pipeline.run(
+        images,
+        segmap,
+        catalog=catalog,
+        psfs=psfs,
+        weights=wht,
+        kernels=kernel,
+        config=FitConfig(fit_astrometry_niter=0),
+    )
+    assert len(fitter.templates) >= len(catalog)
+    assert np.all(np.isfinite(table["flux_1"]))
+
+
+def test_extract_psf_fractional_center_alignment():
+    """``_extract_psf_at`` centres the stamp on the template's sub-pixel position."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class DummyTemplate:
+        data: np.ndarray
+        input_position_cutout: tuple[float, float]
+
+    psf = np.zeros((21, 21))
+    psf[10, 10] = 1.0
+    tmpl = DummyTemplate(data=np.zeros((11, 11)), input_position_cutout=(5.3, 5.7))
+    stamp = pipeline._extract_psf_at(tmpl, psf)
+    y, x = np.indices(stamp.shape)
+    x_c = float((stamp * x).sum())
+    y_c = float((stamp * y).sum())
+    assert np.isclose(stamp.sum(), 1.0)
+    assert np.allclose([x_c, y_c], tmpl.input_position_cutout, atol=1e-3)

@@ -581,7 +581,9 @@ Astrometry:
   `{"poly": {"order": 0}, "gp": {"length_scale": 400}}`) — per-model
   parameters.
 
-Apertures:
+Apertures — all of these live in the `phot` block of `fit`, e.g.
+`"fit": {"phot": {"aperture_diam": 0.7}}`, and are read as
+`FitConfig.phot.<name>`:
 
 - `aperture_diam` (*float | np.ndarray | None*, default `None`) —
   measurement aperture **diameter** on the fitted image: a scalar applies to
@@ -593,7 +595,7 @@ Apertures:
 - `aperture_catalog` (*float | str | None*, default `None`) — catalog
   aperture: a fixed diameter, the name of a catalog column with per-source
   diameters, or `None`.
-- `aperture_units` (*str*, default `"arcsec"`) — units of the two aperture
+- `units` (*str*, default `"arcsec"`) — units of the two aperture
   settings, `"arcsec"` or `"pix"`.
 
 Templates:

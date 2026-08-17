@@ -544,7 +544,8 @@ page.
 | `scene_max_merge_radius` | `float` | `1500.0` | The scene length scale (pixels): scenes wider than this are split, underfilled scenes look no further for a merge partner, and a merge that would exceed it is refused. `np.inf` disables all three. |
 | `generate_scene_catalog` | `bool` | `False` | Write `scene_catalog_<i>.ecsv` and exit without fitting. |
 
-Aperture fields (`aperture_diam`, `aperture_catalog`, `aperture_units`),
+Aperture fields (the `phot` block: `aperture_diam`, `aperture_ee`,
+`aperture_catalog`, `units`),
 template-extraction fields (`template_dilate_segmap`,
 `skip_template_extension_for_deblended`, `extend_wings_background_only`) and
 the template build-scheme fields (`extend_mode` and the per-scheme knobs it

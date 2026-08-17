@@ -335,7 +335,7 @@ def band_configs(rel: Release) -> list[dict]:
                     # rather than advice; matches FitConfig's default.
                     "scene_max_size": 1000,
                     "scene_max_merge_radius": 1000,
-                    "aperture_diam": APERTURE_DIAM_ARCSEC[band],
+                    "phot": {"aperture_diam": APERTURE_DIAM_ARCSEC[band]},
                 },
                 "scene_plots": True,
             }

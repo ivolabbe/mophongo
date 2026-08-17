@@ -42,8 +42,29 @@ class PhotConfig:
     # Image measurement aperture, as a diameter:
     # - float/int: fixed size, in `units`
     # - str: column name in the input catalog for per-source sizes
-    # - None: fall back to 1.5 * FWHM (in pixels) measured from the template
+    # - None: size the aperture by encircled energy instead, via `aperture_ee`
     aperture_diam: float | np.ndarray | str | None = None
+    # Aperture size as a fraction of the band's encircled energy, used when
+    # `aperture_diam` is None. The radius is read off the *model* PSF -- the
+    # drizzled stamp after the Gaussian diffusion blur, which is the PSF the
+    # kernel was matched to -- so the empirical/model mismatch is already in
+    # it and no separate correction is needed.
+    #
+    # Sizing by EE rather than by angle is what makes a colour aperture-
+    # correction-free to first order: the same EE in every band means the same
+    # correction factor in every band, and it cancels in the ratio. A fixed
+    # angular diameter cannot do that, because the PSF width runs with
+    # wavelength.
+    #
+    # 0.70 is also close to the SNR optimum. For a background-limited point
+    # source SNR ~ EE(r)/r, which for a Gaussian peaks at r = 1.585 sigma,
+    # i.e. 1.35 x FWHM in diameter, enclosing ~71%. Larger apertures buy
+    # insensitivity to the PSF wings at a real cost in SNR; smaller ones give
+    # that back and lean harder on the wing model.
+    #
+    # `aperture_diam` wins where both are set, so an explicit diameter (a run
+    # tied to an external catalog's aperture, say) is never silently resized.
+    aperture_ee: float | None = 0.70
     # Catalog aperture: a diameter, or the name of a table column holding one
     aperture_catalog: float | str | None = None
     units: str = "arcsec"  # "arcsec" or "pix", for both apertures above

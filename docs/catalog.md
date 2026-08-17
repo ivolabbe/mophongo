@@ -287,9 +287,9 @@ Optional columns the pipeline consumes when present:
   `r_trial` patch cut is enabled.
 
 *aperture column*
-: When `FitConfig.aperture_catalog` names a column, that column must exist
+: When `FitConfig.phot.aperture_catalog` names a column, that column must exist
   and hold per-source aperture **diameters**, in the units set by
-  `FitConfig.aperture_units` (arcsec or pixels).
+  `FitConfig.phot.units` (arcsec or pixels).
 
 All other columns are dropped from the fit's output catalog.
 

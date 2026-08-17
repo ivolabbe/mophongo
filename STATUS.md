@@ -6,14 +6,22 @@ This file records completed implementations, validation runs, and the current wo
 - [x] `PSFRegionMap.to_file` writes a projection (2026-08-17). `from_wcs_list`
   sets `EPSG:4326`, but `overlay_with` rebuilt its frame with
   `gpd.GeoDataFrame(overlays)` and `group_by_pa` its empty frames with
-  `gpd.GeoDataFrame()`, both dropping the CRS -- so a map that had been through
-  either was written as a projectionless GeoJSON, which pyogrio warns about and
-  no other tool can place. Those three constructions now carry the source CRS,
-  and `to_file` falls back to `EPSG:4326` when a map still arrives without one:
-  the polygons are sky footprints in degrees, so that is what they are. The
-  fallback applies to a copy, so the in-memory object is unchanged. Verified
-  under `-W error::UserWarning`; the written file now reads back as
-  `EPSG:4326`.
+  `gpd.GeoDataFrame()`, both dropping the CRS, so a map that had been through
+  either was written as a projectionless GeoJSON and pyogrio warned on every
+  write. Those three constructions now carry the source CRS, and `to_file`
+  falls back to `EPSG:4326` when a map still arrives without one: the polygons
+  are sky footprints in degrees, so that is what they are. The fallback applies
+  to a copy, so the in-memory object is unchanged.
+
+  **No lookup was ever wrong.** `lookup_key` builds a `Point(ra, dec)` and runs
+  point-in-polygon against the raw shapely geometries, which carry no
+  projection; the written coordinates were identical either way; and GeoJSON
+  implies WGS84 by spec, so GDAL assigns `EPSG:4326` on read regardless.
+  Checked by round-tripping a map both ways: identical coordinates, identical
+  keys. The value of the fix is narrower than the warning suggests --
+  `to_file` takes any geopandas driver, and for a format with no implied CRS
+  (GPKG, shapefile) a missing one is genuinely lost. Verified under
+  `-W error::UserWarning`.
 
 - [x] OzStar pins its source and venv per run, like CANFAR (2026-08-17).
   `ozroot.src_dir()` and `venv_dir()` moved from `base/mophongo` and

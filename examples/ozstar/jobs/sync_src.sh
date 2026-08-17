@@ -20,9 +20,6 @@ unset PYTHONPATH   # keep the EasyBuild shim off sys.path; see setup_env.sh
 git -C "$SRC" fetch --quiet origin "$BRANCH"
 git -C "$SRC" checkout --quiet "$BRANCH"
 git -C "$SRC" reset --hard "origin/$BRANCH"
-# Keep the stamp in step with the clone it describes; the clone is per run, so
-# this file is the run's version and nothing else's.
-git -C "$SRC" rev-parse --short HEAD > "$CFGDIR/SRC_VERSION"
 echo "mophongo $(git -C "$SRC" log --oneline -1)"
 
 "$VENV/bin/python" -c "

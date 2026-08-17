@@ -53,10 +53,12 @@ else
     fi
     git clone --quiet --branch "$BRANCH" "$REPO_URL" "$SRC"
 fi
-# The commit is the version. Stamped beside the configs so a finished run's
-# outputs, its configs and its source are one directory and cannot drift apart.
-git -C "$SRC" rev-parse --short HEAD > "$CFGDIR/SRC_VERSION"
-echo "mophongo $(cat "$CFGDIR/SRC_VERSION") on $BRANCH"
+# No SRC_VERSION file here, unlike CANFAR. The clone is per run and this host
+# takes ssh, so `submit.src_version()` asks git in that clone directly -- a
+# stamp would be a second copy of the same fact, able to go stale. CANFAR
+# writes one because the laptop can only transfer files from arc, not run git
+# on it.
+echo "mophongo $(git -C "$SRC" rev-parse --short HEAD) on $BRANCH"
 
 echo "=== venv (mophongo, module python, compute nodes)"
 if [[ ${REBUILD:-0} == 1 ]]; then

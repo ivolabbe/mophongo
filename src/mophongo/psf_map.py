@@ -393,7 +393,7 @@ class PSFRegionMap:
             homogeneous["psf_key"] = homogeneous.groupby("merge_key").ngroup()
             dissolved = homogeneous.dissolve(by="merge_key", as_index=False, aggfunc="first")
         else:
-            dissolved = gpd.GeoDataFrame()
+            dissolved = gpd.GeoDataFrame(geometry=[], crs=self.regions.crs)
 
         # Keep inhomogeneous regions separate with unique psf_keys
         if not inhomogeneous.empty:
@@ -409,7 +409,7 @@ class PSFRegionMap:
         elif not inhomogeneous.empty:
             final = inhomogeneous
         else:
-            final = gpd.GeoDataFrame()
+            final = gpd.GeoDataFrame(geometry=[], crs=self.regions.crs)
         
         # Renumber psf_key to be consecutive starting from 0
         if not final.empty:
@@ -468,8 +468,11 @@ class PSFRegionMap:
         else:
             raise TypeError("overlay_with: 'other' must be a PSFRegionMap or a shapely Polygon.")
 
-        # Build GeoDataFrame
-        overlay_gdf = gpd.GeoDataFrame(overlays)
+        # Build GeoDataFrame. Carry the source CRS: these polygons are the sky
+        # footprints of the map they came from, and a frame built without one
+        # writes a GeoJSON with no projection -- which pyogrio warns about, and
+        # which `from_geojson` then reads back as CRS-less.
+        overlay_gdf = gpd.GeoDataFrame(overlays, crs=getattr(self.regions, "crs", None))
         overlay_gdf = overlay_gdf[overlay_gdf.geometry.type.isin(["Polygon", "MultiPolygon"])].reset_index(drop=True)
         overlay_gdf["psf_key"] = overlay_gdf.index  # Assign new unique keys
 
@@ -1256,8 +1259,14 @@ class PSFRegionMap:
         string repr.
         """
         from astropy.io import fits
-        # Save regions
-        self.regions.to_file(filename, driver=driver)
+        # Save regions. The polygons are sky footprints in degrees, so a map
+        # that reached here without a CRS -- one built by an operation that
+        # dropped it -- is written as EPSG:4326 rather than as a projectionless
+        # file that pyogrio warns about and no other tool can place.
+        regions = self.regions
+        if getattr(regions, "crs", None) is None:
+            regions = regions.set_crs("EPSG:4326", allow_override=True)
+        regions.to_file(filename, driver=driver)
         # Save PSFs if present
         if self.psfs is not None:
             fits.writeto(str(filename).replace('.geojson', '.fits'), self.psfs, overwrite=True)

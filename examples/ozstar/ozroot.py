@@ -108,8 +108,9 @@ def src_dir() -> str:
     other run in the tree, so a finished run's outputs could not be tied to the
     source that produced them -- and its config, which does live per run, could
     disagree with the code that read it. Per run, the commit is a property of
-    the run, and `SRC_VERSION` beside the configs cannot drift from the outputs
-    next to it. Matches the CANFAR layout, where the same argument applies.
+    the run: the clone sits beside the configs it was used with and the outputs
+    it produced, so `git` in that directory answers which source made them.
+    Matches the CANFAR layout, where the same argument applies.
 
     The cost is a clone and a venv per run, which is minutes and a few hundred
     MB against a class of irreproducibility that is silent.

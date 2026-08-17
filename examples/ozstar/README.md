@@ -23,9 +23,8 @@ $OZSTAR_BASE/               default /fred/<project>/<user>/mophongo
 └── run3/               one catalog version      $OZSTAR_RUN
     ├── README.md         what this run is and how it differs from the last
     ├── config/           <name>_ozstar.json, <name>_stage.tsv
-    │   ├── mophongo/       this run's clone
-    │   ├── venv/           this run's environment (module python)
-    │   └── SRC_VERSION     the commit the run was built from
+    │   ├── mophongo/       this run's clone — git here is the version
+    │   └── venv/           this run's environment (module python)
     ├── logs/             SLURM logs of jobs with no single output dir
     └── <field>/          uds, cosmos, egs
         ├── <field>_repair_cache.fits
@@ -50,8 +49,10 @@ CANFAR. A run pins one mophongo version, and a shared clone meant a `sync` for
 the run being worked on silently changed the code under every other run in the
 tree: a finished run's outputs could not be tied to the source that produced
 them, and its config — which does live per run — could disagree with the code
-that read it. `SRC_VERSION` sits beside the configs so the commit, the config
-and the outputs are one directory. The cost is a clone and a venv per run,
+that read it. The clone sits beside the configs it was used with and the
+outputs it produced, so `git` in that directory answers which source made them
+— no stamp file, unlike CANFAR, where the laptop can only transfer files from
+arc and cannot run `git` on it. The cost is a clone and a venv per run,
 minutes and a few hundred MB, against a class of irreproducibility that is
 silent. `campaign.py` runs `setup` as its third step, so a new `run<N>` gets its
 own checkout without anyone remembering to ask.

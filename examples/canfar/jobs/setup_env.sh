@@ -40,8 +40,10 @@ else
     fi
     git clone -q --branch "$BRANCH" "$REPO" "$CFGDIR/mophongo"
 fi
-# The commit IS the version: nothing to stamp, nothing to keep in step with a
-# separate upload, and a run that used stale source cannot look current.
+# Stamped because the laptop cannot run git on arc -- there is no ssh, only file
+# transfer -- so `submit._arc_src_version()` reads this file to refuse a launch
+# against stale source. The OzStar toolkit deliberately has no equivalent: it
+# asks git over ssh, where a stamp would only be a second copy able to drift.
 git -C "$CFGDIR/mophongo" rev-parse --short HEAD > "$CFGDIR/SRC_VERSION"
 echo "mophongo: $(cat "$CFGDIR/SRC_VERSION")"
 

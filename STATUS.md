@@ -3,6 +3,18 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] `PSFRegionMap.to_file` writes a projection (2026-08-17). `from_wcs_list`
+  sets `EPSG:4326`, but `overlay_with` rebuilt its frame with
+  `gpd.GeoDataFrame(overlays)` and `group_by_pa` its empty frames with
+  `gpd.GeoDataFrame()`, both dropping the CRS -- so a map that had been through
+  either was written as a projectionless GeoJSON, which pyogrio warns about and
+  no other tool can place. Those three constructions now carry the source CRS,
+  and `to_file` falls back to `EPSG:4326` when a map still arrives without one:
+  the polygons are sky footprints in degrees, so that is what they are. The
+  fallback applies to a copy, so the in-memory object is unchanged. Verified
+  under `-W error::UserWarning`; the written file now reads back as
+  `EPSG:4326`.
+
 - [x] OzStar pins its source and venv per run, like CANFAR (2026-08-17).
   `ozroot.src_dir()` and `venv_dir()` moved from `base/mophongo` and
   `bin/venv` to `run<N>/config/{mophongo,venv}`. A run pins one mophongo
@@ -29,8 +41,14 @@ This file records completed implementations, validation runs, and the current wo
     neither branch of the old conditional repaired it -- so setup failed on
     every retry until someone cleared it by hand, which is exactly what CANFAR
     `run1` did earlier today.
-  * Both stamp `SRC_VERSION` beside the configs; OzStar's `sync_src.sh`
-    refreshes it too, so the stamp cannot outlive the clone it describes.
+  * `SRC_VERSION` stays a CANFAR-only file, and the asymmetry is now stated in
+    both scripts so a later harmonization pass does not delete it. The laptop
+    cannot run git on arc -- there is no ssh, only file transfer -- so
+    `submit._arc_src_version()` reads that stamp to refuse a launch against
+    stale source. OzStar takes ssh, and `submit.src_version()` already asks git
+    in the clone, where a stamp would be a second copy of the same fact able to
+    drift. Briefly added to OzStar for symmetry and removed once it was clear
+    nothing read it.
   * Both rebuild the venv only under `REBUILD=1`. CANFAR was deleting and
     rebuilding on every setup, seven minutes each time, for no gain: the
     install is editable and `pip install -e` still runs to pick up dependency

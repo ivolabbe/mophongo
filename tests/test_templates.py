@@ -1,26 +1,51 @@
+"""Template extraction: which segments become templates, which are pruned,
+and how a segmap's labels are read whatever dtype it arrives in."""
+
+import numpy as np
+import pytest
+
+from mophongo.utils import as_label_array
 
 
-def test_as_label_array_accepts_float_segmaps():
-    """Segmaps stored as float must be usable as labels.
+# --- segmap label casting ----------------------------------------------------
+# MINERVA UDS and EGS ship int32 segmaps, COSMOS ships the same labels as
+# float64, and SegmentationImage rejects non-integer input outright.
 
-    MINERVA UDS and EGS ship int32 segmaps, COSMOS ships the same labels as
-    float64, and SegmentationImage rejects non-integer input outright.
+
+def test_integer_segmaps_are_returned_untouched():
+    """Including big-endian and int64.
+
+    The full-field read hands over a memmap view; rewriting it as native int32
+    would turn file-backed pages into anonymous memory that counts against the
+    process. MINERVA UDS and EGS segmaps arrive as '>i4'.
     """
-    import numpy as np
-    import pytest
+    for dtype in ("int32", ">i4", "int64", "uint16"):
+        arr = np.array([[0, 1], [2, 2]], dtype=dtype)
+        assert as_label_array(arr) is arr
 
-    from mophongo.utils import as_label_array
 
-    ints = np.array([[0, 1], [2, 2]], dtype=np.int32)
-    assert as_label_array(ints) is ints
+def test_float_segmaps_cast_to_int32_in_bands():
+    """COSMOS ships float64 labels; the cast must not depend on the band size."""
+    rng = np.random.default_rng(4)
+    labels = rng.integers(0, 2_000_000, (37, 11)).astype(np.float64)
+    ref = as_label_array(labels, band_rows=10**6)
+    assert ref.dtype == np.int32
+    assert np.array_equal(ref, labels.astype(np.int32))
+    for band in (1, 5, 13):
+        assert np.array_equal(ref, as_label_array(labels, band_rows=band))
 
-    floats = np.array([[0.0, 1.0], [2085561.0, 0.0]], dtype=np.float64)
-    out = as_label_array(floats)
-    assert np.issubdtype(out.dtype, np.integer)
-    assert out.max() == 2085561
 
+def test_non_finite_segmap_pixels_become_background():
+    """NaN has no label, and inf would overflow the cast into an arbitrary one."""
+    out = as_label_array(np.array([[np.nan, 3.0], [np.inf, -np.inf]]))
+    assert out.tolist() == [[0, 3], [0, 0]]
+
+
+def test_float_segmap_rejects_fractions_and_out_of_range_labels():
     with pytest.raises(ValueError, match="non-integer"):
         as_label_array(np.array([[0.0, 0.5]]))
+    with pytest.raises(ValueError, match="int32"):
+        as_label_array(np.array([[0.0, 2.0**40]]))
 
 
 def test_uncovered_sources_get_no_template(caplog):

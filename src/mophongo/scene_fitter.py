@@ -283,6 +283,43 @@ class SceneFitter:
                 out[idx] = np.linalg.lstsq(sub, b[idx], rcond=None)[0]
             return out
 
+        def _optimal(x: np.ndarray, passive: np.ndarray) -> bool:
+            """KKT test: feasible, and no blocked component wants to grow."""
+            if np.any(x[passive & ~free] < -tol) or np.any(x[~passive] != 0.0):
+                return False
+            blocked = ~passive
+            if not blocked.any():
+                return True
+            return bool(np.all((b - A_d @ x)[blocked] <= tol))
+
+        # Warm start. Lawson-Hanson begins at x = 0 and admits one component
+        # per iteration, so a scene whose solution is entirely positive -- the
+        # common case -- pays n growing solves to reach what one solve gives.
+        # Try the unconstrained answer first and keep it if it satisfies the
+        # KKT conditions; that is a proof of optimality, not a guess, so the
+        # shortcut cannot return a different solution from the long route.
+        guess_passive = np.ones(n, dtype=bool)
+        guess = _solve_passive(guess_passive)
+        if _optimal(guess, guess_passive):
+            return guess, guess_passive
+
+        # Second try: drop whatever the solve wanted negative and re-solve,
+        # a few times. Each round is one solve and the result is checked
+        # against the same KKT test, so this can only save work -- a guess that
+        # does not survive the test is discarded and the exact loop below runs
+        # from scratch. In practice the active set settles in two or three
+        # rounds even when a fifth of the scene is pinned.
+        guess_passive = np.ones(n, dtype=bool)
+        for _ in range(10):
+            shrunk = free | (guess > tol)
+            if np.array_equal(shrunk, guess_passive):
+                break
+            guess_passive = shrunk
+            guess = _solve_passive(guess_passive)
+            guess[~guess_passive] = 0.0
+            if _optimal(guess, guess_passive):
+                return guess, guess_passive
+
         # Unconstrained components start in the passive set and never leave, so
         # the first solve already carries them.
         passive = free.copy()

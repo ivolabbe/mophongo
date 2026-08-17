@@ -1,7 +1,10 @@
+"""Solving a scene's normal equations: the flux block, the shift block, and
+the quick flux/error estimates that stand in for a solve."""
+
 import numpy as np
 import scipy.sparse as sp
 
-from mophongo.fit import FitConfig
+from mophongo.fit import FitConfig, SparseFitter
 from mophongo.psf import PSF
 from mophongo.scene import Scene
 from mophongo.scene_fitter import SceneFitter, build_normal
@@ -65,3 +68,23 @@ def test_scene_solve_matches_dense_normal_solution():
 
     expected = np.linalg.solve(A.toarray() + np.eye(A.shape[0]) * cfg.reg_flux, b)
     np.testing.assert_allclose(flux, expected, rtol=1e-3, atol=1e-6)
+
+
+def test_flux_and_rms_estimation():
+    """SparseFitter.flux_and_rms matches quick flux and error estimates."""
+    images, segmap, catalog, psfs, _, rms = make_simple_data()
+
+    tmpls = Templates.from_image(
+        images[0], segmap, list(zip(catalog["x"], catalog["y"])), kernel=None
+    )
+
+    fitter = SparseFitter(tmpls.templates, images[1], 1.0 / rms[1] ** 2, FitConfig())
+
+    flux, err = fitter.flux_and_rms()
+    np.testing.assert_allclose(flux, fitter.quick_flux())
+    np.testing.assert_allclose(err, fitter.predicted_errors())
+
+    for tmpl in tmpls.templates:
+        tmpl.flux = 42.0
+    flux2, _ = fitter.flux_and_rms()
+    assert np.all(flux2 == 42.0)

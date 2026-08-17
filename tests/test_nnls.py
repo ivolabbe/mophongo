@@ -227,3 +227,73 @@ def test_nnls_beats_clip_at_recovering_truth_in_a_blend():
 
     # the bright neighbour is recovered better once the survivors are re-solved
     assert np.median(nnls_err) < np.median(clip_err)
+
+
+def test_warm_start_agrees_with_scipy_when_many_components_are_pinned():
+    """Exercises the KKT shortcut, its refinement, and the exact fallback.
+
+    The shortcut returns early only when the KKT test passes, so a disagreement
+    here would mean the test itself is wrong -- which is the thing worth
+    guarding, since the fast path is what production runs take.
+    """
+    rng = np.random.default_rng(101)
+    for _ in range(5):
+        m, n = 200, 40
+        M = rng.standard_normal((m, n))
+        truth = rng.standard_normal(n) * 5
+        d = M @ truth + 0.5 * rng.standard_normal(m)
+        A, b = _normal(M, d)
+
+        x, passive = SceneFitter.fnnls(A, b)
+        want, _ = nnls(M, d)
+
+        np.testing.assert_allclose(x, want, atol=1e-6)
+        assert np.all(x[~passive] == 0.0)
+        assert (~passive).any(), "fixture must pin something"
+
+
+def test_all_positive_scene_returns_the_plain_solve_at_scale():
+    """The common case must not pay for the constraint.
+
+    Lawson-Hanson from x = 0 admits one component per iteration, so without a
+    warm start a fully positive scene of this size costs hundreds of growing
+    solves to reproduce what one solve gives.
+    """
+    n = 300
+    rng = np.random.default_rng(102)
+    A = sp.diags(np.ones(n)).tolil()
+    for i in range(n - 1):
+        A[i, i + 1] = A[i + 1, i] = 0.3
+    A = A.tocsr()
+    truth = np.abs(rng.standard_normal(n)) * 10 + 1.0
+    b = A @ truth
+
+    x, passive = SceneFitter.fnnls(A, b)
+
+    assert passive.all()
+    np.testing.assert_allclose(x, truth, rtol=1e-8)
+
+
+def test_shifts_are_never_constrained_in_the_joint_system():
+    """`free` components may go negative and are never pinned."""
+    rng = np.random.default_rng(103)
+    na, nb, m = 6, 3, 200
+    M = np.abs(rng.standard_normal((m, na)))
+    S = rng.standard_normal((m, nb))
+    D = np.column_stack([M, S])
+    free = np.concatenate([np.zeros(na, bool), np.ones(nb, bool)])
+
+    truth = np.concatenate([[5.0, -4.0, 8.0, 2.0, 6.0, 4.0], [-2.0, 1.0, -3.0]])
+    A, b = _normal(D, D @ truth)
+
+    x, passive = SceneFitter.fnnls(A, b, free=free)
+
+    assert np.all(x[:na] >= -1e-12), "fluxes are constrained"
+    assert passive[na:].all(), "shift components must never be pinned"
+    assert np.any(x[na:] < 0), "a shift must be free to go negative"
+    # with nothing pinned, the joint answer is the unconstrained one
+    x2, passive2 = SceneFitter.fnnls(*_normal(D, D @ np.abs(truth)), free=free)
+    np.testing.assert_allclose(
+        x2, np.linalg.solve(D.T @ D, D.T @ (D @ np.abs(truth))), atol=1e-8
+    )
+    assert passive2.all()

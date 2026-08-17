@@ -12,4 +12,4 @@ test-scene:
 	$(PY) -m pytest tests/test_scene_fitter.py -v
 
 test-fit:
-	$(PY) -m pytest tests/test_fit.py -v
+	$(PY) -m pytest tests/test_scene_fitter.py tests/test_nnls.py -v

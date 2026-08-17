@@ -18,17 +18,22 @@ Scenarios mirror the Moffat talk plots in 25.minerva/mf_mof.pdf:
 Each scenario saves:
   * diagnostic.png          (truth / hires / segmap / lowres / model / residual)
   * flux_ratio_lowres.png   (recovered/true vs true flux; Moffat analogue of PDF)
+
+Run as a script; the outputs are the plots, not a pass/fail verdict::
+
+    python examples/verify_moffat_recovery.py [outdir]
 """
 
 import os
 import sys
+from pathlib import Path
 
 current = os.path.dirname(__file__)
 sys.path.insert(0, os.path.join(current, "..", "src"))
-sys.path.insert(0, current)
+# mock-data and plotting helpers shared with the test suite
+sys.path.insert(0, os.path.join(current, "..", "tests"))
 
 import numpy as np
-import pytest
 from astropy.convolution import Gaussian2DKernel
 from astropy.modeling.models import Gaussian2D
 from astropy.table import Table
@@ -314,24 +319,21 @@ def _make_moffat_data(
     return [hires, lowres], segmap, catalog, [psf_hi.array, psf_lo.array], truth, [wht_hi, wht_lo]
 
 
-@pytest.mark.parametrize(
-    "scenario, ndilate, extend",
-    [
-        ("dilated0",     0, None),
-        ("dilated1",     1, None),
-        ("dilated2",     2, None),
-        ("dilated3",     3, None),
-        ("psf_wing",     3, "psf"),
-    ],
-)
-def test_moffat_flux_recovery(tmp_path, scenario, ndilate, extend):
+SCENARIOS = [
+    ("dilated0",     0, None),
+    ("dilated1",     1, None),
+    ("dilated2",     2, None),
+    ("dilated3",     3, None),
+    ("psf_wing",     3, "psf"),
+]
+
+
+def run_scenario(out: Path, scenario: str, ndilate: int, extend: str | None) -> None:
     """Run the pipeline on Moffat-PSF mocks and save PDF-style diagnostics.
 
-    The test asserts only that the pipeline completes and the median flux
-    ratio is close to unity; the primary artifacts are the saved plots,
-    which are the object of the diagnostic.
+    The recovered/true median ratio is checked only for a catastrophic
+    failure; the primary artifacts are the saved plots.
     """
-    out = tmp_path
     images, segmap, catalog, psfs, truth, wht = _make_moffat_data(
         seed=5, nsrc=150, size=904, ndilate=ndilate, peak_snr=50.0,
     )
@@ -416,8 +418,16 @@ def test_moffat_flux_recovery(tmp_path, scenario, ndilate, extend):
             f"kernel_score={kernel_fit.score:.4g}\n"
         )
 
-    # Diagnostic test — do not enforce tight bias tolerance; the point is to
-    # compare scenarios. Still sanity-check that nothing catastrophic happened.
+    # Do not enforce a tight bias tolerance; the point is to compare
+    # scenarios. Still sanity-check that nothing catastrophic happened.
     assert np.isfinite(med_hi) and np.isfinite(med_lo)
     assert 0.5 < med_hi < 1.5, f"hires ratio {med_hi} nowhere near unity"
     assert 0.5 < med_lo < 1.5, f"lores ratio {med_lo} nowhere near unity"
+
+
+if __name__ == "__main__":
+    out = Path(sys.argv[1] if len(sys.argv) > 1 else "moffat_recovery")
+    (out / "scenarios").mkdir(parents=True, exist_ok=True)
+    for scenario, ndilate, extend in SCENARIOS:
+        run_scenario(out / "scenarios", scenario, ndilate, extend)
+    print(f"\nwrote plots and moffat_summary.txt under {out}")

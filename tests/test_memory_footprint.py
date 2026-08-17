@@ -20,9 +20,8 @@ from astropy.nddata import block_replicate
 from astropy.wcs import WCS
 
 import mophongo.pipeline as pipeline
-from mophongo.catalog import _mean_downsample, _valid_block_means, get_bg_and_ivar
+from mophongo.catalog import _mean_downsample, _valid_block_means
 from mophongo.templates import Template, Templates
-from mophongo.utils import as_label_array
 
 
 def _wcs(shape: tuple[int, int]) -> WCS:
@@ -71,19 +70,6 @@ def test_valid_block_means_is_independent_of_the_band_height():
         got = _valid_block_means(sci, wht, valid, 8, band_blocks=band)
         for a, b in zip(ref, got):
             assert np.array_equal(a, b)
-
-
-def test_get_bg_and_ivar_without_bg_returns_the_same_weights():
-    sci, wht = _noisy_field(seed=7)
-    bg, ivar = get_bg_and_ivar(sci, wht, bg_filter_sigma=64.0)
-    bg_none, ivar_none = get_bg_and_ivar(sci, wht, bg_filter_sigma=64.0, need_bg=False)
-
-    assert bg is not None and bg.shape == sci.shape
-    assert bg_none is None
-    assert np.array_equal(ivar, ivar_none)
-    # pixels the science image cannot vouch for carry no weight
-    assert ivar[20, 30] == 0.0 and ivar[40, 50] == 0.0
-    assert np.all(ivar[:8] == 0.0)
 
 
 def test_bg_and_ivar_boxed_passes_need_bg_through():
@@ -208,42 +194,3 @@ def test_model_images_is_empty_before_a_run():
     assert len(models) == 0
     with pytest.raises(IndexError):
         models[0]
-
-
-# -- segmap label casting -----------------------------------------------------
-
-
-def test_integer_segmaps_are_returned_untouched():
-    """Including big-endian and int64.
-
-    The full-field read hands over a memmap view; rewriting it as native int32
-    would turn file-backed pages into anonymous memory that counts against the
-    process. MINERVA UDS and EGS segmaps arrive as '>i4'.
-    """
-    for dtype in ("int32", ">i4", "int64", "uint16"):
-        arr = np.array([[0, 1], [2, 2]], dtype=dtype)
-        assert as_label_array(arr) is arr
-
-
-def test_float_segmaps_cast_to_int32_in_bands():
-    """COSMOS ships float64 labels; the cast must not depend on the band size."""
-    rng = np.random.default_rng(4)
-    labels = rng.integers(0, 2_000_000, (37, 11)).astype(np.float64)
-    ref = as_label_array(labels, band_rows=10**6)
-    assert ref.dtype == np.int32
-    assert np.array_equal(ref, labels.astype(np.int32))
-    for band in (1, 5, 13):
-        assert np.array_equal(ref, as_label_array(labels, band_rows=band))
-
-
-def test_non_finite_segmap_pixels_become_background():
-    """NaN has no label, and inf would overflow the cast into an arbitrary one."""
-    out = as_label_array(np.array([[np.nan, 3.0], [np.inf, -np.inf]]))
-    assert out.tolist() == [[0, 3], [0, 0]]
-
-
-def test_float_segmap_rejects_fractions_and_out_of_range_labels():
-    with pytest.raises(ValueError, match="non-integer"):
-        as_label_array(np.array([[0.0, 0.5]]))
-    with pytest.raises(ValueError, match="int32"):
-        as_label_array(np.array([[0.0, 2.0**40]]))

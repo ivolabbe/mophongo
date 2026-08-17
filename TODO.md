@@ -2,6 +2,16 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] Decide whether `PhotConfig.aperture_diam` should accept a column name
+  (2026-08-16). Its type hint and comment say `str` names an input-catalog
+  column of per-source sizes, but `Pipeline._resolve_image_ap_radius_pix`
+  (`pipeline.py:4404`) tests only `int`/`float`/`np.ndarray`, so a string
+  leaves `diam` as `None` and the aperture is silently sized by
+  `aperture_ee` instead. Either implement the lookup (`aperture_catalog`
+  already has one in `_resolve_catalog_ap_radius_pix`) or drop `str` from the
+  annotation and raise on it. `docs/catalog.md` and `docs/pipeline.md`
+  currently document the implemented behaviour, not the annotation.
+
 - [ ] Key ePSF grid identity on the OPD file, not the MJD (2026-08-16).
   `stpsf`'s `load_wss_opd_by_date(..., choice="closest")` snaps a date to the
   nearest measured wavefront-sensing OPD, and JWST measures roughly every two
@@ -1334,3 +1344,49 @@ This file tracks future desired features, checks, and investigations.
   Either promote the estimator into `src/mophongo/` if it has become
   reusable, or move the test into `scratch/` with it. `CLAUDE.md` is explicit:
   tests are tracked and must not depend on scratch work.
+
+- [ ] Retire three dead or redundant config fields (2026-08-16). Each showed up
+  once `mophongo config` started dumping every field, and each is small on its
+  own; they are grouped because all three change the config schema.
+
+  * `FitConfig.cg_kwargs` (`{"M": null, "maxiter": 500, "atol": 1e-06}`) is
+    dead. Nothing passes it and nothing reads it: `SceneFitter.solve` takes a
+    `cg_kwargs` parameter (`scene_fitter.py:158`) and mentions it only in its
+    own docstring. The solver is a direct sparse factorization (`spsolve` /
+    `splu`, `scene_fitter.py:242,285`), not conjugate gradient, so `maxiter`,
+    `atol` and `M` describe an iterative solver that is not there. Drop both
+    the field and the parameter; `scene.py:1510` already carries a note that
+    `solve` should take regularization and cg settings rather than the config.
+  * `RunConfig.minerva_release` is dead -- declared at `pipeline.py:293` and
+    referenced nowhere, not even by the code that builds the viewer link. Only
+    `minerva_viewer` is read (`pipeline.py:2674`), where a bare
+    `<field>/<release>` gets `FITSMAP_URL` prefixed. Collapse the pair into one
+    `fitsmap_url`.
+  * `RunConfig.filter_lo` is derivable. It is read for the MIRI diffusion-blur
+    lookup (`DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC`, `pipeline.py:1518`) and two
+    plot labels, and `jwst_psf.filter_from_path` already recovers a filter from
+    a path. Derive it from `sci_lo`, keeping the field as an override for paths
+    that carry no filter token.
+
+- [ ] Solve the flux block as true NNLS, not a post-hoc clip (2026-08-16).
+  `FitConfig.positivity` is on by default and does `x = np.maximum(0.0, x)`
+  *after* the unconstrained solve (`scene_fitter.py:247` and `:305`). That is
+  not the non-negative least-squares optimum: when a template is forced to
+  zero its neighbours are left holding flux they only took because the
+  negative one was there, and they are never re-solved. The scene is biased
+  rather than best-fit under the constraint.
+
+  The inputs for a proper solve are already in hand. `A` is the normal matrix
+  and `b` the projected data, which is exactly what FNNLS (Bro & de Jong 1997)
+  consumes -- a Lawson-Hanson active set over the Gram matrix, no design matrix
+  required, each iteration a smaller solve on the passive set that `splu`
+  already covers. Most scenes drive only a handful of templates negative, so it
+  should converge in a few passes. Equivalently, `A = L L^T` gives
+  `min ||Mx - d||^2 = ||L^T x - L^-1 b||^2`, so `scipy.optimize.lsq_linear`
+  with `bounds=(0, inf)` on design `L^T` reaches the same answer reusing the
+  whitening and Cholesky already computed for `_shift_covariance`.
+
+  Keep the clip as an option -- it is cheap and it is what every run to date
+  used, so comparisons need it. Note that `sqrt(diag(A^-1))` is not the right
+  uncertainty for a template sitting at the bound; report those separately
+  rather than quoting an unconstrained error for a constrained parameter.

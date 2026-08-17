@@ -62,12 +62,14 @@
   "fit": {
     "fit_astrometry_joint": true,
     "scene_minimum_anchors": 5,
-    # F770W standard aperture: matches classic IDL subphot on Y. Asada's MIRI
-    # catalog, so raw aperture fluxes are comparable between the two codes.
-    # Per-filter table in docs/campaigns.md; canonical values in
-    # examples/make_minerva_configs.py APERTURE_DIAM_ARCSEC.
+    # Aperture sized by encircled energy of the band's model PSF rather than
+    # by a fixed angle: the same EE in every band is the same correction
+    # factor in every band, so it cancels in a colour. 0.70 also sits near the
+    # background-limited SNR optimum (1.35 x FWHM). The realized diameter is
+    # written to aper_<i>. See docs/outputs.md.
     "phot": {
-      "aperture_diam": 0.70
+      "aperture_ee": 0.7,
+      "aperture_catalog": null
     }
   },
   "scene_plots": true

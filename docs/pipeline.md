@@ -288,8 +288,11 @@ Required fields:
 - `sci_hi` (*str*) — high-resolution template (detection) image, FITS.
 - `segmap` (*str*) — segmentation map on the hi-res grid; labels are catalog
   ids.
-- `catalog` (*str*) — source catalog with `id`, `x`, `y` (hi-res pixels),
-  `ra`, `dec`.
+- `catalog` (*str*) — source catalog, in any format `Table.read` infers from
+  the extension (FITS, ECSV, CSV). Needs `id`, `x`, `y` on the hi-res pixel
+  grid, plus `ra`, `dec` when `r_trial` cuts a trial patch. Column names are
+  matched literally; see "Running with an external input catalog" in
+  {doc}`catalog` for the optional and configuration-named columns.
 - `sci_lo` (*str*) — low-resolution science mosaic to fit.
 - `wht_lo` (*str*) — low-resolution weight (inverse-variance) map.
 - `csv_hi`, `csv_lo` (*str*) — per-frame WCS csv of the hi-res and lo-res
@@ -588,15 +591,27 @@ Apertures — all of these live in the `phot` block of `fit`, e.g.
 - `aperture_diam` (*float | np.ndarray | None*, default `None`) —
   measurement aperture **diameter** on the fitted image: a scalar applies to
   all bands, an array of length `len(images) - 1` gives one per band, and
-  `None` falls back to an aperture *radius* of 1.5 times the PSF FWHM in
-  pixels (3.0-pixel radius when no PSF is available). Aperture photometry
-  runs either way; setting a diameter additionally writes the aperture-size
-  column `aper_<i>`.
+  `None` hands the sizing to `aperture_ee`. An explicit diameter always wins,
+  so a run tied to an external catalog's aperture is never resized.
+- `aperture_ee` (*float | None*, default `0.70`) — aperture size as a
+  fraction of the band's encircled energy, used when `aperture_diam` is
+  `None`: the diameter enclosing that fraction of the band's model PSF. Where
+  the stamp never reaches the requested fraction, the run warns and falls back
+  to 1.5 times the band PSF FWHM (3.0-pixel radius with no PSF at all). See
+  {doc}`outputs` for why EE sizing keeps a colour aperture-correction-free.
 - `aperture_catalog` (*float | str | None*, default `None`) — catalog
   aperture: a fixed diameter, the name of a catalog column with per-source
   diameters, or `None`.
-- `units` (*str*, default `"arcsec"`) — units of the two aperture
-  settings, `"arcsec"` or `"pix"`.
+- `units` (*str*, default `"arcsec"`) — units of the aperture settings
+  above, `"arcsec"` or `"pix"`.
+- `kron_flux_col`, `aper_flux_col`, `kron_radius_col` (*str | None*, default
+  `None`) — names of the input catalog's Kron (AUTO) flux, own-aperture flux
+  and circularized Kron radius (arcsec) columns. All three are needed for the
+  catalog-side aperture-to-total `totcor_cat`; with any of them unset or
+  absent from the table the column is skipped and a warning is logged.
+- `kron_k` (*float*, default `2.5`) — scaling of the Kron radius at which the
+  high-resolution PSF encircled energy is evaluated (SExtractor AUTO
+  convention).
 
 Templates:
 

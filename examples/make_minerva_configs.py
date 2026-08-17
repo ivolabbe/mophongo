@@ -338,7 +338,15 @@ def band_configs(rel: Release) -> list[dict]:
                     # rather than advice; matches FitConfig's default.
                     "scene_max_size": 1000,
                     "scene_max_merge_radius": 1000,
-                    "phot": {"aperture_diam": APERTURE_DIAM_ARCSEC[band]},
+                    # Sized by encircled energy of the band's model PSF, not by
+                    # a fixed angle: the same EE in every band is the same
+                    # correction factor, so it cancels in a colour, and 0.70
+                    # sits near the background-limited SNR optimum. The
+                    # realized diameter is written to aper_<i>.
+                    # APERTURE_DIAM_ARCSEC above stays as the record of the
+                    # IDL-matched diameters, for runs that need to tie to
+                    # Y. Asada's catalog with an explicit `aperture_diam`.
+                    "phot": {"aperture_ee": 0.7, "aperture_catalog": None},
                 },
                 "scene_plots": True,
             }

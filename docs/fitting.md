@@ -521,7 +521,6 @@ page.
 | `positivity` | `bool` | `True` | Clip negative fitted fluxes to zero after the solve. |
 | `reg_flux` | `float \| None` | `None` | Ridge added to the flux block diagonal. `None` = adaptive (`1e-6` times the matrix scale), `0.0` = genuinely unregularized, positive = that value. JSON configs write `null` for the default. |
 | `bad_value` | `float` | `np.nan` | Fill value for missing catalog entries. |
-| `cg_kwargs` | `dict` | `{"M": None, "maxiter": 500, "atol": 1e-6}` | Iterative-solver options; unused by the current direct solver. |
 | `fit_astrometry_niter` | `int` | `5` | Maximum astrometry solve/apply passes per band; `0` disables shift fitting. |
 | `astrom_shift_tol` | `float` | `0.1` | Stop iterating a scene once its largest per-template shift increment (fit-grid pixels) drops below this. |
 | `astrom_damping` | `float` | `0.8` | Factor applied to each pass's fitted shift increment before it is applied to the templates; `1.0` is undamped. |

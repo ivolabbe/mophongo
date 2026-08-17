@@ -155,7 +155,6 @@ class SceneFitter:
         BB: sp.spmatrix | None = None,
         bB: np.ndarray | None = None,
         config: Optional[FitConfig] = None,
-        cg_kwargs: Optional[dict] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray | None, int]:
         """Solve ``A x = b`` with optional shift block.
 
@@ -178,16 +177,13 @@ class SceneFitter:
             and ``astrom_reg`` regularizes only the shift block.
         AB, BB, bB
             Optional blocks coupling the fluxes to shift parameters.
-        cg_kwargs
-            Unused: the solve is a direct sparse factorization, not
-            conjugate gradients. Kept for interface compatibility.
-
         Returns
         -------
         SimpleNamespace
             Fields ``flux`` (unwhitened fluxes), ``err`` (1σ errors),
             ``shifts`` (shift coefficients, ``None`` on the flux-only path)
-            and ``info`` (always ``{"cg_info": 0}`` for the direct solver).
+            and ``info`` (solver provenance; the solve is a direct sparse
+            factorization, so there is no iteration count to report).
         """
         # Flux regularization must use only the photometric ridge; astrom_reg
         # is reserved for the shift block below. Three-state semantics:
@@ -240,14 +236,13 @@ class SceneFitter:
         b_w = Dinv @ b
 
         x_w = spsolve(A_w, b_w)
-        info = 0
         x = x_w / d
         err = SceneFitter._flux_errors(A_w) / d
 
         if cfg.positivity:
             x = np.maximum(0.0, x)
 
-        return x, err, {"cg_info": info}
+        return x, err, {"solver": "spsolve"}
 
     @staticmethod
     def _solve_flux_and_shifts(
@@ -283,7 +278,6 @@ class SceneFitter:
         K = sp.bmat([[A_w, AB_w], [AB_w.T, BB_wI]], format="csr")
         rhs = np.concatenate([b_w, bB_w])
         sol = spsolve(K, rhs)
-        info = 0
 
         na = A.shape[0]
         xw = sol[:na]
@@ -305,7 +299,7 @@ class SceneFitter:
         if cfg.positivity:
             x = np.maximum(0.0, x)
 
-        return x, err, beta, shift_cov, {"cg_info": int(info)}
+        return x, err, beta, shift_cov, {"solver": "spsolve"}
 
     @staticmethod
     def _shift_covariance(

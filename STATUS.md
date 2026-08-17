@@ -3,6 +3,26 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Dropped `cg_kwargs`, made `filter_lo` a fallback (2026-08-16).
+  `FitConfig.cg_kwargs` was dead: nothing passed it and nothing read it, and
+  the solver is a direct sparse factorization (`spsolve`/`splu`), so
+  `maxiter`, `atol` and `M` described an iterative solver that is not there.
+  Gone, along with the `SceneFitter.solve` parameter and the doc-table rows.
+  The returned `{"cg_info": ...}` is now `{"solver": "spsolve"}` -- it was the
+  last cg-flavoured name, and a direct solve has no iteration count to report
+  -- and the two dead `info = 0` assignments went with it.
+
+  `Pipeline._filter_lo()` reads the `FILTER` card of `sci_lo` and falls back to
+  `RunConfig.filter_lo`, which is now documented as the fallback it is: the
+  mosaic header cannot disagree with the pixels being fitted, so it is the
+  better source, but a mosaic carrying no filter still needs the config value.
+  All three readers go through it -- blur lookup and two labels.
+
+  Deliberately not cached. A cached version broke
+  `test_blur_resolution_modes`, which edits `run_config.filter_lo` between
+  calls; caching makes an edited config silently inert, and interactive
+  sessions do exactly that. `fits.getheader` reads header blocks, not pixels.
+
 - [x] Example configs measure at `aperture_ee = 0.7` (2026-08-16). The five
   `examples/*.json` and `make_minerva_configs.py` now carry
   `phot: {aperture_ee: 0.7, aperture_catalog: null}` instead of a fixed

@@ -16,7 +16,7 @@ def test_scene_fitter_flux_only():
     sol = SceneFitter.solve(A, b, config=cfg)
     expected = np.linalg.solve(A.toarray() + np.eye(A.shape[0]) * cfg.reg_flux, b)
 
-    assert sol.info["cg_info"] == 0
+    assert sol.info["solver"] == "spsolve"
     assert sol.shifts is None
     np.testing.assert_allclose(sol.flux, expected)
     assert np.all(np.isfinite(sol.err))

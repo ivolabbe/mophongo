@@ -314,7 +314,10 @@ Optional fields:
   detection background is measured alongside it but, unlike the low-resolution
   side, not subtracted.
 - `filter_lo` (*str*, default `""`) — lo-res filter name (e.g. `"f770w"`),
-  used for the default Gaussian-blur lookup and for figure labels.
+  used for the default Gaussian-blur lookup and for figure labels. A fallback
+  only: the `FILTER` card of `sci_lo` is read first, since the mosaic header
+  cannot disagree with the pixels being fitted. Set this for a mosaic whose
+  header carries no filter, or to override one that carries the wrong one.
 - `psf` (*dict*, default `{}`) — the PSF block, loaded into a
   {class}`mophongo.pipeline.PsfConfig` (see below). Like `fit`, it is a
   nested object in the JSON rather than a row of top-level keys.
@@ -526,8 +529,6 @@ Solver:
 - `reg_flux` (*float*, default `0.0`) — flux regularization strength.
 - `bad_value` (*float*, default `np.nan`) — fill value for catalog entries of
   sources that were not fitted.
-- `cg_kwargs` (*dict*, default `{"M": None, "maxiter": 500, "atol": 1e-6}`) —
-  keyword arguments for the conjugate-gradient solver.
 - `normal` (*str*, default `"tree"`) — normal-matrix assembly strategy. Only
   `"tree"` (STRtree overlap search) is implemented; any other value raises.
 - `multi_resolution_method` (*str*, default `"upsample"`) — `"upsample"`

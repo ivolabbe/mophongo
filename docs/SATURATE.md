@@ -179,7 +179,7 @@ wht     = fits.getdata("wht.fits").astype("float32")
 # small ~4" FOV, 5x5 grid across the detector).
 dpsf = DrizzlePSF(driz_image="sci.fits", csv_file="exposures_wcs.csv")
 dpsf.epsf_obj.load_jwst_stdpsf(local_dir="data/PSF",
-    filter_pattern="UDS_NRC.._F444W_OS4_GRID25")
+    filter_pattern="STDPSF_NRC.._F444W_OS4_GRID25")
 
 # 1. detect holes
 holes = find_wht_holes(wht, merge_radius=3, min_area=1)
@@ -188,7 +188,7 @@ holes = find_wht_holes(wht, merge_radius=3, min_area=1)
 res = repair_saturated_holes(
     sci, wht,
     dpsf=dpsf, wcs=wcs, holes=holes,
-    psf_filter="UDS_NRC.._F444W_OS4_GRID25",
+    psf_filter="STDPSF_NRC.._F444W_OS4_GRID25",
     output_csv="saturate_fits.csv",
     plot_dir="diagnostics/",
 )
@@ -199,13 +199,13 @@ fits.writeto("wht_repaired.fits", res["wht"], overwrite=True)
 #    position at detector centre, built once via scratch/build_large_psf.py).
 dpsf_lg = DrizzlePSF(driz_image="sci.fits", csv_file="exposures_wcs.csv")
 dpsf_lg.epsf_obj.load_jwst_stdpsf(local_dir="data/PSF",
-    filter_pattern=r"UDS_NRC.._F444W_MJD\d+_FOV30_GRID1_OS4")
+    filter_pattern=r"STDPSF_NRC.._F444W_MJD\d+_FOV30_GRID1_OS4")
 
 ok = res["fits"][res["fits"]["ok"]]
 sub = repair_saturated_holes(
     sci, wht,                       # ORIGINAL — not the repaired image
     dpsf=dpsf_lg, wcs=wcs, holes=ok,
-    psf_filter=r"UDS_NRC.._F444W_MJD\d+_FOV30_GRID1_OS4",
+    psf_filter=r"STDPSF_NRC.._F444W_MJD\d+_FOV30_GRID1_OS4",
     mode="subtract",
     output_csv="subtract_fits.csv",
     plot_dir="diagnostics/",

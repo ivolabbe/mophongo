@@ -69,7 +69,7 @@ with the field. `PSFFactory(workers=N)` fans those out, and
 
 What does **not** parallelise is two *bands of the same field* building at
 once. `uds_f770w` and `uds_f1000w` both resolve `psf.pattern_hi` to
-`UDS_NRC.._F444W_MJD\d+_GRID25_OS4`, so both compute the same grids and both
+`STDPSF_NRC.._F444W_MJD\d+_GRID25_OS4`, so both compute the same grids and both
 write the same paths. The same applies to the 30" halo grids, whose pattern is
 derived from `psf.pattern_hi`. Interleaved writes to one FITS file give a torn
 file, and the loser's work is wasted either way.

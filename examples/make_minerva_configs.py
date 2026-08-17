@@ -281,8 +281,11 @@ def band_configs(rel: Release) -> list[dict]:
                 "filter_lo": band,
                 "psf": {
                     "dir": str(PSF_DIR),
-                    "pattern_hi": rf"{rel.local}_NRC.._F444W_MJD\d+_GRID25_OS4",
-                    "pattern_lo": rf"{rel.local}_MIRI_{band.upper()}_MJD\d+_GRID9_OS4",
+                    # No field in the grid names: stpsf takes instrument,
+                    # detector, filter, OPD date and grid geometry, and no sky
+                    # position, so one grid serves every field of that epoch.
+                    "pattern_hi": r"STDPSF_NRC.._F444W_MJD\d+_GRID25_OS4",
+                    "pattern_lo": rf"STDPSF_MIRI_{band.upper()}_MJD\d+_GRID9_OS4",
                     # 4.0 for every band: size sets the hi-res support too,
                     # and the F444W grids are only 4.09 arcsec across, so a
                     # larger stamp would measure the grid edge (see TODO.md).

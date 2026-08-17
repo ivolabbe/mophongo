@@ -24,7 +24,7 @@ Each backend object exposes:
 Example
 -------
 >>> from mophongo.psf_factory import PSFFactory
->>> fac = PSFFactory(prefix="UDS", outdir="data/PSF", fov_arcsec=8.0)
+>>> fac = PSFFactory(outdir="data/PSF", fov_arcsec=8.0)
 >>> fac.from_csv("data/uds-f444w_wcs.csv", num_psfs=9, save=True)
 >>> # explicit single PSF
 >>> grid = fac.build(telescope="JWST", instrument="NIRCAM",
@@ -218,7 +218,11 @@ class PSFFactory:
     Attributes
     ----------
     prefix
-        Filename prefix (e.g. project tag ``'UDS'``).
+        Filename prefix, ``'STDPSF'`` by default. Not a field tag: stpsf takes
+        instrument, detector, filter, OPD date and grid geometry, and no sky
+        position, so a grid is a property of the instrument and the epoch and
+        one file serves every field observed at that epoch. Naming grids per
+        field only produced duplicates.
     outdir
         Output directory for saved FITS files. Created on demand.
     num_psfs

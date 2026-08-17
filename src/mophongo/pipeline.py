@@ -155,8 +155,14 @@ class PsfConfig:
 
     # directory of STDPSF grid files (generated grids are cached here too)
     dir: str = "data/PSF"
-    pattern_hi: str = ""  # STDPSF filename regex for the hi-res band
-    pattern_lo: str = ""  # STDPSF filename regex for the lo-res band
+    # STDPSF filename regexes, hi-res and lo-res band. The grids carry no field
+    # in their names: stpsf takes instrument, detector, filter, OPD date and
+    # grid geometry, and no sky position, so a grid is a property of the
+    # instrument and the epoch rather than of the field it was built for. The
+    # defaults are the MINERVA pair, F444W against F770W; override the filter
+    # token for another band.
+    pattern_hi: str = r"STDPSF_NRC.._F444W_MJD\d+_GRID25_OS4"
+    pattern_lo: str = r"STDPSF_MIRI_F770W_MJD\d+_GRID9_OS4"
     # PSF stamp size in arcsec; None = full native ePSF stamp as generated
     size: float | None = 4.0
     autobuild: bool = True  # generate missing PSF grids with PSFFactory

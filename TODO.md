@@ -2,6 +2,33 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] Key ePSF grid identity on the OPD file, not the MJD (2026-08-16).
+  `stpsf`'s `load_wss_opd_by_date(..., choice="closest")` snaps a date to the
+  nearest measured wavefront-sensing OPD, and JWST measures roughly every two
+  days, so several MJDs resolve to one OPD and produce byte-identical grids.
+  Measured on the 443-file `data/PSF` set: of 356 dated grids, 68
+  (config, OPD) groups hold more than one MJD, so **75 grids duplicate another
+  grid's content** -- 1.17 GiB of 3.31 GiB, 35%. Verified directly, e.g.
+  MJD59945/59946/59947 of `MIRI_F770W_FOV8_GRID9_OS4` are all
+  `R2023010203-NRCA3_FP1-1.fits` and compare equal to 0.
+
+  The identity key is already on disk: every grid header carries `OPDFILE`.
+  Have `PSFFactory` resolve the date to its OPD first and skip the build when a
+  grid with that (detector, filter, OPD, FOV, GRID, OS) already exists, then
+  point the extra MJDs at it. What that saves is CPU and disk, not bandwidth:
+  `prewarm_opds` already fetches each OPD once into `STPSF_PATH` and the
+  parallel phase is local. Worth checking whether the *date to OPD resolution*
+  still needs MAST when the file is cached -- if it does, this cuts lookups
+  too, which matters on OzStar where only the login node has internet.
+
+  Two grids in the scan report the same MJD twice under one OPD
+  (`MIRI_F770W` at 60086 and 59940). That is a straight duplicate rather than
+  an OPD coincidence and wants identifying separately.
+
+  While in there: the `.gitignore` negations for the PSF directory
+  (`!data/PSF/*OS4_GRID25*`, `!data/PSF/*OS4_GRID9*`) use the pre-rename token
+  order and match nothing now.
+
 - [ ] Give badly determined scenes the shift their neighbours define, in a
   robust pass after all scenes are fit (2026-08-16). Interim for the global
   field below, and worth having on its own.

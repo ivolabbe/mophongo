@@ -42,8 +42,8 @@
   "filter_lo": "f770w",
   "psf": {
     "dir": "../data/PSF",
-    "pattern_hi": "UDS_NRC.._F444W_MJD\\d+_GRID25_OS4",
-    "pattern_lo": "UDS_MIRI_F770W_MJD\\d+_GRID9_OS4",
+    "pattern_hi": "STDPSF_NRC.._F444W_MJD\\d+_GRID25_OS4",
+    "pattern_lo": "STDPSF_MIRI_F770W_MJD\\d+_GRID9_OS4",
     "size": 4.0,
     "blur_fwhm": "default"
   },

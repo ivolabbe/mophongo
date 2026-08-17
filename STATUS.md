@@ -3,6 +3,40 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] ePSF grids are named `STDPSF_*`, with no field (2026-08-16). The field
+  was never a physical input. `build_jwst_psf` (`jwst_psf.py:106`) takes
+  instrument, filter, detector, date, grid geometry and parity, and its body
+  sets `inst.filter`, `inst.detector`, `inst.options["parity"]` and calls
+  `load_wss_opd_by_date`. Sky position is never passed and stpsf has nowhere to
+  take it. The field dependence that does exist is *detector* position, which
+  is what `GRID<N>` samples. So a grid is a property of the instrument and the
+  epoch, and one file serves every field observed then.
+
+  Renamed all 443 files in `data/PSF` from `<FIELD>_` to `STDPSF_`; verified
+  collision-free first (every stem is unique once the prefix is stripped) and
+  the count is unchanged. Git is unaffected -- the `.gitignore` negations for
+  that directory use the pre-rename token order and match nothing.
+
+  `PsfConfig.pattern_hi`/`pattern_lo` were empty strings and now default to the
+  MINERVA pair, `STDPSF_NRC.._F444W_MJD\d+_GRID25_OS4` against
+  `STDPSF_MIRI_F770W_MJD\d+_GRID9_OS4`. The five example configs and
+  `make_minerva_configs.py` follow, as do `docs/campaigns.md`, `docs/pipeline.md`,
+  `docs/SATURATE.md` and the `verification.py` defaults; the historical reports
+  keep their original names as the record of what those runs used.
+
+  The payoff is pooling. Matched the way the loader does it
+  (`fov_agnostic_pattern`), the F444W pattern now finds 160 grids and the F770W
+  pattern 45, where a `UDS_`-prefixed pattern saw only that field's. A UDS run
+  can now use a COSMOS-built grid of the right epoch, because they are the same
+  grid.
+
+  `PSFFactory.prefix` already defaulted to `STDPSF` and the pipeline's autobuild
+  passes no prefix, so autobuilt grids were landing as `STDPSF_*` while
+  hand-built ones carried fields -- the rename removes that split.
+  `examples/repair_saturate.py` no longer forces `prefix="UDS"`. TODO carries
+  the follow-up: grid identity belongs on the OPD file, not the MJD, which
+  would retire 75 duplicate grids.
+
 - [x] `mophongo config <out.json>` writes a default run config (2026-08-16).
   A new run had no starting point but an existing config from another field,
   which carries that field's paths and whatever settings it happened to pin.

@@ -3,6 +3,54 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] `scene_minimum_anchors` is a flat 10, and the campaign configs stopped
+  setting it (2026-08-18). The default derived the floor from the astrometric
+  polynomial order, `(order+1)(order+2)+1`, which is 3 at the default order 0
+  -- an algebraic count of the field's free parameters, not a number of
+  anchors a scatter can be measured from. Every campaign config overrode it by
+  hand anyway (5 on CANFAR and OzStar, 7 and 10 in the MINERVA runs), so the
+  derivation only ever described runs nobody launched.
+
+  It is now `scene_minimum_anchors: int = 10` with the `__post_init__`
+  derivation removed, and the hand-set values are gone from
+  `examples/minerva`, `examples/canfar` and `examples/ozstar` (and from
+  `make_minerva_configs.py`, which writes them) so those runs take the
+  default. A wider astrometric basis still raises the floor where it needs to:
+  `astrom_robust.anchor_gate` takes `max(scene_minimum_anchors, 2p)`.
+
+  `_beta_err` in `tests/test_scene_astrometry_robust.py` pins the floor at 3:
+  its nine-template field is about the weighting, not the gate.
+
+- [x] Anchor local systems assembled from slice intersections (2026-08-18).
+  The rest of the `astrom_robust` slowdown. `measure_anchor_shifts` gave every
+  anchor a local least-squares system over the union footprint of its
+  neighbours, with each column zero-padded onto that footprint and the Gram
+  formed there: `ncol^2 / 2` products over ~80k pixels per anchor, for columns
+  supported on one ~10k-pixel stamp each. Both factors grow with crowding,
+  since `ncol` counts every template whose bbox touches the anchor.
+
+  Columns are now keys `(template, kind)` carrying no padding, and every inner
+  product runs over the intersection of the two templates' slices -- zero, and
+  untouched, where they do not overlap. The entries are cached across anchors
+  as well: `<c_p, W, c_q>` depends on the two columns and the weight map, not
+  on whose system it appears in, and neighbouring anchors share most of their
+  neighbourhoods. The `chi2_red` model is built on the anchor's own stamp,
+  which is the only place it was ever read.
+
+  Neither is an approximation, and the numbers say so: against the padded
+  version on synthetic scenes at MINERVA density, `max |d eps| <= 4e-17 px`,
+  `max rel d info <= 1e-14`, `d chi2_red` exactly zero, and the NaN/zero masks
+  identical. 1456 -> 184 ms at 320 templates, 1308 -> 197 ms at 920, 13249 ->
+  1965 ms at 920 with 151-px stamps: 6.7-7.9x throughout.
+  `test_local_systems_match_the_padded_reference` keeps a padded reference in
+  the test file and checks the two agree on overlapping templates of different
+  sizes, one clipped by the frame, over a weight map with a dead strip.
+
+  With the two changes below, the robust pass on the 920-template benchmark
+  goes from 1489 ms to ~74 ms, i.e. ~5% of what it cost. TODO carries the one
+  remaining step: the flux-flux block is `A` and its RHS is `b - A @ flux0`,
+  so ~95% of a crowded local system need not be integrated at all.
+
 - [x] The robust anchor pass stops paying for work it discards (2026-08-18).
   `astrom_robust` (on by default since `6e0f27a`) took the astrometry phase of
   a cosmos_f770w run from 6m23s to 29m02s. Profiling a synthetic scene at

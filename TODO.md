@@ -251,6 +251,32 @@ This file tracks future desired features, checks, and investigations.
   Both variants still linearize `T(x + d) ~ T + d . grad T`, so the outer
   `fit_astrometry_niter` loop stays.
 
+- [ ] Take the flux-flux block of the anchor local systems from `A` and `b`
+  (2026-08-18). `measure_anchor_shifts` now assembles each anchor's local
+  system from slice intersections rather than from padded buffers, which is
+  7x. Most of what is left is still the flux-flux block, and it does not need
+  computing at all: `<T_j, W, T_k>` *is* `A[j, k]`, and `<T_j, W, resid>` *is*
+  `(b - A @ flux0)_j`, both already built for the scene's flux solve. In a
+  crowded scene the flux columns are ~95% of a local system -- 134 of 138
+  columns on the 920-template benchmark -- so the remaining integrals would be
+  the gradient rows only. Measured at 40-129x against the padded version
+  (`scratch/bench_anchor_fast.py::measure_anchor_shifts_fastest`), against 7x
+  for intersections alone.
+
+  Two things to weigh before doing it. The signature grows `A`, `b`, `flux0`,
+  and with them an invariant that is currently implicit: the matrix passed
+  must be the one the residual was built from. Both come out of
+  `Scene._robust_anchor_weights` three lines apart, so it holds today, but it
+  would break silently rather than loudly. And `build_normal` forms
+  `cut * w * cut` in float32 before widening the accumulator, so reusing `A`
+  moves the flux-flux block by ~1e-7 relative where the intersection version
+  matches the padded one to ~1e-14; `test_local_systems_match_the_padded_reference`
+  would need a tolerance rather than staying exact.
+
+  Only worth it if the astrometry phase is still the run's bottleneck after
+  the three changes already made. On the 920-template benchmark it would take
+  the robust pass from ~74 ms to ~50 ms against a scene solve of ~440 ms.
+
 - [ ] Accumulate the shift coefficients across astrometric passes
   (2026-08-16). `Scene.solve` overwrites `self.shifts` on every pass
   (`scene.py:1512`), so a scene that took two passes keeps only the second,

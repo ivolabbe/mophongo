@@ -117,9 +117,9 @@ class FitConfig:
     # drops below this tolerance (fit-grid pixels). The linearized shift solve
     # only captures part of a large offset per pass, so set
     # fit_astrometry_niter to the maximum passes allowed and let this tol stop.
-    # 0.1 sits just above the statistical floor of the weakest scene the
-    # anchor cuts admit -- 5 bright members (scene_minimum_anchors) at
-    # astrom_minimum_snr = 15 give a scene centroid good to ~0.08 fit pixels --
+    # 0.1 sits above the statistical floor of the weakest scene the anchor cuts
+    # admit -- 10 bright members (scene_minimum_anchors) at
+    # astrom_minimum_snr = 15 give a scene centroid good to ~0.05 fit pixels --
     # and well below PSF-matching centroid systematics, which are a bias no
     # tolerance can iterate away. The increment tested is the applied (damped)
     # one, so the last sub-tolerance step is on the templates, not discarded.
@@ -188,11 +188,14 @@ class FitConfig:
     normal: str = "tree"  # 'loop' or 'tree'
     # Minimum bright anchors per scene: the floor `merge_small_scenes` merges
     # toward, and the gate below which `astrom_robust` declines to judge a
-    # scene. None (the default) derives it from the astrometric model order in
-    # __post_init__ as (order+1)(order+2) + 1 -- one more anchor than the field
-    # has free parameters -- so raising the order raises the floor with it
-    # instead of leaving a hand-set number behind. Set an int to override.
-    scene_minimum_anchors: int | None = None
+    # scene. 10 is what the MINERVA campaign configs set by hand, and it is a
+    # statistical floor rather than an algebraic one: the default order-0 field
+    # has two free parameters, so three anchors would determine it but leave
+    # nothing to measure the scatter of. The robust pass raises the floor where
+    # the basis is wider (`astrom_robust.anchor_gate` takes
+    # `max(scene_minimum_anchors, 2p)`), so a higher polynomial order does not
+    # need this changed with it.
+    scene_minimum_anchors: int = 10
 
     # Aperture photometry and the catalog columns it compares against, as one
     # block (see PhotConfig). Nothing in the linear solve reads these.
@@ -282,17 +285,6 @@ class FitConfig:
                 f"fit_method must be 'lls', 'clip' or 'nnls', got "
                 f"{self.fit_method!r}"
             )
-
-        # Derive scene_minimum_anchors from astrometric polynomial order if not provided
-        if self.scene_minimum_anchors is None:
-            try:
-                # fallback matches the astrom_kwargs default above: order 0
-                poly_order = int(self.astrom_kwargs.get("poly", {}).get("order", 0))
-            except Exception:
-                poly_order = 0
-            # default to 2x # of Chebyshev terms + 1
-            n_poly = (poly_order + 1) * (poly_order + 2)
-            self.scene_minimum_anchors = n_poly + 1
 
         # Coerce a JSON `phot` object into a PhotConfig, as RunConfig does for
         # `psf`. Unknown keys raise rather than being ignored: a misspelled

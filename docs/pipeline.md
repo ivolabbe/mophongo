@@ -684,11 +684,11 @@ Scenes:
   partner, and a merge that would leave the scene wider than this is refused.
   `np.inf` disables all three. The size cap above bounds a scene's template
   count and leaves its shape free; this bounds the shape.
-- `scene_minimum_anchors` (*int | None*, default `None`) — minimum number of
-  bright anchors per scene, derived by default from the astrometric
-  polynomial order as `(order + 1) * (order + 2) + 1`, i.e. one more anchor
-  than the shift field has free parameters. Set an int to override. Also the
-  gate below which `astrom_robust` declines to judge a scene.
+- `scene_minimum_anchors` (*int*, default `10`) — minimum number of bright
+  anchors per scene. Also the gate below which `astrom_robust` declines to
+  judge a scene, which raises it to `max(scene_minimum_anchors, 2p)` for a
+  `p`-term shift field, so a wider astrometric basis does not need this
+  changed with it.
 - `generate_scene_catalog` (*bool*, default `False`) — write a scene catalog
   (`scene_catalog_<i>.ecsv`) and exit without fitting.
 

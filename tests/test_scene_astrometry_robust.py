@@ -133,6 +133,151 @@ def _solve_scene(templates, image, weights, cfg):
 # ---------------------------------------------------------------------------
 
 
+def _measure_anchor_shifts_padded(templates, resid, weights, origin, bright_idx, alpha):
+    """Reference: every column laid out on the neighbourhood's union footprint.
+
+    The obvious way to write the local system, and the way it was written
+    before the columns were reduced to slice intersections. Kept here so the
+    shipped version has something to be equal to -- the slice arithmetic is
+    where a rewrite like that goes wrong, and it goes wrong quietly.
+    """
+    n = len(templates)
+    y0, x0 = origin
+    eps = np.full((n, 2), np.nan)
+    info = np.zeros(n)
+    chi2_red = np.full(n, np.nan)
+    slices = [t.slices_original for t in templates]
+    anchors = {int(k) for k in bright_idx}
+
+    def _grad(j):
+        arr = np.asarray(templates[j].data, dtype=float)
+        if min(arr.shape) < 2:
+            return None
+        gy, gx = np.gradient(arr)
+        sc = templates[j].slices_cutout
+        return -gx[sc], -gy[sc]
+
+    for i in map(int, bright_idx):
+        a = float(alpha[i])
+        if not np.isfinite(a) or a == 0.0 or _grad(i) is None:
+            continue
+        si = slices[i]
+        nb = [j for j, sj in enumerate(slices)
+              if sj[0].start < si[0].stop and si[0].start < sj[0].stop
+              and sj[1].start < si[1].stop and si[1].start < sj[1].stop]
+        fy0 = min(slices[j][0].start for j in nb)
+        fy1 = max(slices[j][0].stop for j in nb)
+        fx0 = min(slices[j][1].start for j in nb)
+        fx1 = max(slices[j][1].stop for j in nb)
+        w = np.asarray(weights[fy0:fy1, fx0:fx1], dtype=float)
+        r = resid[fy0 - y0 : fy1 - y0, fx0 - x0 : fx1 - x0]
+
+        def _place(j, values):
+            out = np.zeros((fy1 - fy0, fx1 - fx0))
+            sj = slices[j]
+            out[sj[0].start - fy0 : sj[0].stop - fy0,
+                sj[1].start - fx0 : sj[1].stop - fx0] = values
+            return out
+
+        cols = [_place(j, templates[j].data[templates[j].slices_cutout]) for j in nb]
+        for k in nb:
+            if k in anchors and k != i and _grad(k) is not None:
+                g = _grad(k)
+                cols += [_place(k, g[0]), _place(k, g[1])]
+        g_i = _grad(i)
+        cols += [_place(i, g_i[0]), _place(i, g_i[1])]
+
+        ncol = len(cols)
+        nrest = ncol - 2
+        M = np.empty((ncol, ncol))
+        s = np.empty(ncol)
+        for p_ in range(ncol):
+            cw = cols[p_] * w
+            s[p_] = float(np.sum(cw * r))
+            for q_ in range(p_, ncol):
+                M[p_, q_] = M[q_, p_] = float(np.sum(cw * cols[q_]))
+
+        try:
+            theta = np.linalg.solve(M, s)
+            rest_inv = np.linalg.solve(M[:nrest, :nrest], M[:nrest, nrest:])
+        except np.linalg.LinAlgError:
+            continue
+        if not (np.all(np.isfinite(theta)) and np.all(np.isfinite(rest_inv))):
+            continue
+        schur = M[nrest:, nrest:] - M[nrest:, :nrest] @ rest_inv
+        iso = 0.5 * (schur[0, 0] + schur[1, 1])
+        if not (iso > 0):
+            continue
+        eps[i] = theta[nrest:] / a
+        info[i] = a**2 * iso
+
+        model = sum(th * c for c, th in zip(cols, theta))
+        own = (slice(si[0].start - fy0, si[0].stop - fy0),
+               slice(si[1].start - fx0, si[1].stop - fx0))
+        w_own = w[own]
+        dof = int(np.count_nonzero(w_own > 0)) - ncol
+        if dof > 0:
+            left = r[own] - model[own]
+            chi2_red[i] = float(np.sum(left * w_own * left)) / dof
+    return eps, info, chi2_red
+
+
+def _ragged_scene(seed: int = 3):
+    """Overlapping templates of different sizes, some clipped by the frame.
+
+    Equal-sized stamps on a regular grid would let a wrong offset cancel. The
+    sizes differ, the centres are off-pixel, two sit close enough to overlap
+    heavily, and one runs off the edge so its ``slices_cutout`` is a strict
+    sub-slice of its own data.
+    """
+    rng = np.random.default_rng(seed)
+    spec = [
+        (40.3, 60.7, 9, 3.0), (46.9, 63.1, 14, 4.0), (58.2, 57.4, 7, 2.0),
+        (95.6, 61.2, 18, 5.0), (101.1, 66.8, 11, 3.5), (8.4, 62.5, 20, 4.5),
+        (150.7, 60.1, 12, 3.0), (156.3, 55.9, 16, 4.0),
+    ]
+    templates = []
+    for label, (xc, yc, half, sigma) in enumerate(spec, start=1):
+        nn = 2 * half + 1
+        ix, iy = int(round(xc)) - half, int(round(yc)) - half
+        yy, xx = np.mgrid[iy : iy + nn, ix : ix + nn]
+        g = np.exp(-0.5 * (((xx - xc) / sigma) ** 2 + ((yy - yc) / sigma) ** 2))
+        templates.append(
+            Template.from_stamp(g / g.sum(), (ix, iy), (xc, yc), (NY, NX), label=label)
+        )
+    flux = np.array([120.0, 60.0, 25.0, 200.0, 45.0, 90.0, 150.0, 70.0])
+    img = _paint(templates, flux, [(0.18, -0.09)] * len(templates))
+    img += rng.normal(0.0, 1e-4, img.shape)
+    weights = rng.uniform(0.4, 1.6, img.shape)
+    weights[:, :6] = 0.0  # a strip with no exposure, as a real weight map has
+    return templates, img, weights, flux
+
+
+def test_local_systems_match_the_padded_reference():
+    """The intersection assembly is bookkeeping, not a new estimator.
+
+    Columns are zero off their own template's slice, so restricting every
+    inner product to a slice intersection can only drop zeros. Checked against
+    the padded reference on overlapping templates of different sizes, one of
+    them clipped by the frame, over a weight map with a dead strip.
+    """
+    templates, img, weights, flux = _ragged_scene()
+    A, b, _ = build_normal(templates, img, weights)
+    resid, y0, x0 = _scene_residual(templates, img, flux)
+    alpha = np.asarray(b / np.maximum(A.diagonal(), 1e-12))
+    bright = [0, 1, 3, 5, 6]
+
+    want = _measure_anchor_shifts_padded(
+        templates, resid, weights, (y0, x0), bright, alpha
+    )
+    got = measure_anchor_shifts(templates, resid, weights, (y0, x0), bright, alpha)
+
+    for name, w_, g_ in zip(("eps", "info", "chi2_red"), want, got):
+        assert np.array_equal(np.isnan(w_), np.isnan(g_)), name
+        np.testing.assert_allclose(g_, w_, rtol=1e-10, atol=1e-14, err_msg=name)
+    assert np.isfinite(want[0][bright]).all(), "reference measured nothing"
+
+
 def test_anchor_shift_is_recovered_exactly_for_isolated_anchors():
     """Noiseless, isolated, exact model: eps is the injected shift."""
     shift = (0.17, -0.09)
@@ -547,16 +692,27 @@ def test_the_gate_is_scene_minimum_anchors():
     assert over.anchor_report.applied
 
 
-def test_scene_minimum_anchors_defaults_from_the_polynomial_order():
-    """One more anchor than the field has free parameters."""
-    assert FitConfig().scene_minimum_anchors == 3
+def test_scene_minimum_anchors_is_a_flat_floor_the_basis_can_raise():
+    """One number, whatever the astrometric model.
+
+    The floor used to be derived from the polynomial order. It is a
+    statistical floor rather than an algebraic one, so it does not follow the
+    order; where a wider basis does need more anchors, ``anchor_gate`` is what
+    raises it.
+    """
+    from mophongo.astrom_robust import anchor_gate
+
+    assert FitConfig().scene_minimum_anchors == 10
     assert (
         FitConfig(
             astrom_kwargs={"poly": {"order": 1}, "gp": {"length_scale": 400}}
         ).scene_minimum_anchors
-        == 7
+        == 10
     )
     assert FitConfig(scene_minimum_anchors=11).scene_minimum_anchors == 11
+
+    assert anchor_gate(10, 1) == 10  # order 0: the floor binds
+    assert anchor_gate(10, 6) == 12  # order 2: the basis binds
 
 
 def test_a_scene_below_the_gate_is_never_measured(monkeypatch):
@@ -658,8 +814,10 @@ def _beta_err(tm, img, W, iso, robust):
     truth = (0.20, -0.12)
     scn = _solve_scene(
         tm, img, W,
+        # a nine-template field cannot clear the default anchor floor, and
+        # these two tests are about the weighting rather than the gate
         _cfg(astrom_isolation_thresh=iso, astrom_minimum_snr=0.0,
-             astrom_robust=robust),
+             astrom_robust=robust, scene_minimum_anchors=3),
     )
     return np.abs(scn.shifts - np.array(truth)).max(), scn
 

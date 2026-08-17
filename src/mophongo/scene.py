@@ -8,7 +8,7 @@ import scipy.sparse as sp
 
 from .templates import Template, Templates
 from .fit import FitConfig
-from .scene_fitter import SceneFitter
+from .scene_fitter import SceneFitter, _slice_intersection
 from .astrometry import cheb_basis, n_terms, AstroCorrect
 from scipy.sparse.csgraph import connected_components
 from .templates import _slices_from_bbox
@@ -590,6 +590,21 @@ def _scene_residual(
     return resid, y0, x0
 
 
+def _local_slice(
+    outer: tuple[slice, slice], inner: tuple[slice, slice]
+) -> tuple[slice, slice]:
+    """``inner`` re-expressed as offsets into an array laid out over ``outer``.
+
+    Both are slices in image coordinates and ``inner`` must lie inside
+    ``outer``, which is what :func:`~mophongo.scene_fitter._slice_intersection`
+    guarantees for the intersections it returns.
+    """
+    return (
+        slice(inner[0].start - outer[0].start, inner[0].stop - outer[0].start),
+        slice(inner[1].start - outer[1].start, inner[1].stop - outer[1].start),
+    )
+
+
 def measure_anchor_shifts(
     templates: Sequence[Template],
     resid: np.ndarray,
@@ -649,6 +664,16 @@ def measure_anchor_shifts(
     information divided by that has to be marginalized over everything local
     and free.
 
+    The local system is assembled from slice intersections, and its entries
+    are cached across anchors. Both are bookkeeping, not approximations: a
+    column is zero off its own template's slice, so integrating it over the
+    neighbourhood's union footprint adds only zeros, and ``<c_p, w, c_q>``
+    depends on the two columns and the weight map rather than on whose system
+    it is part of. What that avoids is a cost of ``ncol^2 / 2`` products over
+    the whole footprint per anchor, for columns each supported on one stamp;
+    on a 920-template scene at MINERVA density it is the difference between
+    1.3 s and 0.2 s (``scratch/bench_anchor_shifts.py``).
+
     Two approximations remain, both bounded by construction. Neighbours of
     neighbours are not included, and the union footprint stands in for the
     global flux constraint. What survives of them is smaller than the anchor's
@@ -690,31 +715,80 @@ def measure_anchor_shifts(
 
     slices = [t.slices_original for t in templates]
     anchors = {int(k) for k in bright_idx}
-    grads: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
-    def _grad(j: int) -> tuple[np.ndarray, np.ndarray] | None:
+    # A column is a key ``(template, kind)``: FLUX is the template itself, GX
+    # and GY its negated gradients. Nothing is ever laid out on the union
+    # footprint, because a column is zero everywhere off its own template's
+    # slice -- so every inner product below runs over the intersection of two
+    # slices, and a pair that does not overlap is zero without being touched.
+    #
+    # The keys are what makes the cache possible as well. ``<c_p, W, c_q>``
+    # depends on the two columns and the weight map, not on which anchor's
+    # system it appears in, and neighbouring anchors share most of their
+    # neighbourhoods -- so a scene's anchors share most of their entries.
+    FLUX, GX, GY = 0, 1, 2
+    grads: dict[int, tuple[np.ndarray, np.ndarray] | None] = {}
+
+    def _col(key: tuple[int, int]) -> np.ndarray | None:
+        """Column ``key`` over its own template's slice, or None if degenerate."""
+        j, kind = key
+        t = templates[j]
+        if kind == FLUX:
+            return t.data[t.slices_cutout]
         if j not in grads:
-            a_j = templates[j].data.astype(float)
-            if a_j.shape[0] < 2 or a_j.shape[1] < 2:
-                return None
-            gy_j, gx_j = np.gradient(a_j)
-            sc_j = templates[j].slices_cutout
-            grads[j] = (-gx_j[sc_j], -gy_j[sc_j])
-        return grads[j]
+            arr = np.asarray(t.data, dtype=float)
+            if arr.shape[0] < 2 or arr.shape[1] < 2:
+                grads[j] = None
+            else:
+                gy_j, gx_j = np.gradient(arr)
+                sc_j = t.slices_cutout
+                grads[j] = (-gx_j[sc_j], -gy_j[sc_j])
+        g = grads[j]
+        return None if g is None else g[kind - GX]
+
+    gram: dict[tuple[tuple[int, int], tuple[int, int]], float] = {}
+    rhs: dict[tuple[int, int], float] = {}
+
+    def _gram(ka: tuple[int, int], kb: tuple[int, int]) -> float:
+        key = (ka, kb) if ka <= kb else (kb, ka)
+        if key in gram:
+            return gram[key]
+        ja, jb = key[0][0], key[1][0]
+        inter = _slice_intersection(slices[ja], slices[jb])
+        if inter is None:
+            val = 0.0
+        else:
+            # float64 on the left so the products are taken in float64 whatever
+            # the stamps are stored as, which is what the padded buffers this
+            # replaced did by construction.
+            ca = np.asarray(_col(key[0])[_local_slice(slices[ja], inter)], dtype=float)
+            cb = _col(key[1])[_local_slice(slices[jb], inter)]
+            val = float(np.sum(ca * weights[inter] * cb))
+        gram[key] = val
+        return val
+
+    def _rhs(key: tuple[int, int]) -> float:
+        if key in rhs:
+            return rhs[key]
+        sl = slices[key[0]]
+        r = resid[
+            sl[0].start - y0 : sl[0].stop - y0, sl[1].start - x0 : sl[1].stop - x0
+        ]
+        c = np.asarray(_col(key), dtype=float)
+        rhs[key] = float(np.sum(c * weights[sl] * r))
+        return rhs[key]
 
     for i in bright_idx:
         i = int(i)
         a = float(alpha[i])
         if not np.isfinite(a) or a == 0.0:
             continue
-        t = templates[i]
-        arr = t.data.astype(float)
-        if arr.shape[0] < 2 or arr.shape[1] < 2:
+        if _col((i, GX)) is None:
             continue
 
-        # Every template overlapping this anchor joins the local fit, and the
-        # footprint is their union so each one's flux is constrained by all of
-        # its own pixels rather than only the part under the anchor.
+        # Every template overlapping this anchor joins the local fit, so each
+        # one's flux is constrained by all of its own pixels rather than only
+        # the part under the anchor.
         si = slices[i]
         nb = [
             j
@@ -724,50 +798,23 @@ def measure_anchor_shifts(
             and sj[1].start < si[1].stop
             and si[1].start < sj[1].stop
         ]
-        fy0 = min(slices[j][0].start for j in nb)
-        fy1 = max(slices[j][0].stop for j in nb)
-        fx0 = min(slices[j][1].start for j in nb)
-        fx1 = max(slices[j][1].stop for j in nb)
-
-        w = np.asarray(weights[fy0:fy1, fx0:fx1], dtype=float)
-        r = resid[fy0 - y0 : fy1 - y0, fx0 - x0 : fx1 - x0]
-        shape = (fy1 - fy0, fx1 - fx0)
-
-        def _place(j: int, values: np.ndarray) -> np.ndarray:
-            out = np.zeros(shape, dtype=float)
-            sj = slices[j]
-            out[
-                sj[0].start - fy0 : sj[0].stop - fy0,
-                sj[1].start - fx0 : sj[1].stop - fx0,
-            ] = values
-            return out
-
         # Columns: a flux for every overlapping template, then a free
         # displacement for every overlapping *anchor*, with this anchor's own
         # pair last so its conditional block is the trailing 2x2.
-        cols = [_place(j, templates[j].data[templates[j].slices_cutout]) for j in nb]
-        others = [k for k in nb if k in anchors and k != i]
-        for k in others:
-            g = _grad(k)
-            if g is None:
-                continue
-            cols.append(_place(k, g[0]))
-            cols.append(_place(k, g[1]))
-        g_i = _grad(i)
-        if g_i is None:
-            continue
-        cols.append(_place(i, g_i[0]))
-        cols.append(_place(i, g_i[1]))
+        cols: list[tuple[int, int]] = [(j, FLUX) for j in nb]
+        for k in nb:
+            if k in anchors and k != i and _col((k, GX)) is not None:
+                cols += [(k, GX), (k, GY)]
+        cols += [(i, GX), (i, GY)]
 
         ncol = len(cols)
         nrest = ncol - 2
         M = np.empty((ncol, ncol), dtype=float)
         s = np.empty(ncol, dtype=float)
         for p_ in range(ncol):
-            cw = cols[p_] * w
-            s[p_] = float(np.sum(cw * r))
+            s[p_] = _rhs(cols[p_])
             for q_ in range(p_, ncol):
-                M[p_, q_] = M[q_, p_] = float(np.sum(cw * cols[q_]))
+                M[p_, q_] = M[q_, p_] = _gram(cols[p_], cols[q_])
 
         # A rank-deficient local system (flat template, all-zero weights, two
         # anchors so blended their displacements are indistinguishable) carries
@@ -791,18 +838,24 @@ def measure_anchor_shifts(
 
         # Misfit is judged on the anchor's own stamp, not on the whole local
         # footprint: the question is whether *this* template fits, and a
-        # neighbour's problems should not be charged to it.
-        model = np.zeros(shape, dtype=float)
-        for c, th in zip(cols, theta):
-            model += th * c
-        own = (
-            slice(slices[i][0].start - fy0, slices[i][0].stop - fy0),
-            slice(slices[i][1].start - fx0, slices[i][1].stop - fx0),
+        # neighbour's problems should not be charged to it. So the model is
+        # only ever built there.
+        model = np.zeros(
+            (si[0].stop - si[0].start, si[1].stop - si[1].start), dtype=float
         )
-        w_own = w[own]
+        for key, th in zip(cols, theta):
+            inter = _slice_intersection(si, slices[key[0]])
+            if inter is None:
+                continue
+            model[_local_slice(si, inter)] += (
+                th * _col(key)[_local_slice(slices[key[0]], inter)]
+            )
+        w_own = np.asarray(weights[si], dtype=float)
         dof = int(np.count_nonzero(w_own > 0)) - ncol
         if dof > 0:
-            left = r[own] - model[own]
+            left = resid[
+                si[0].start - y0 : si[0].stop - y0, si[1].start - x0 : si[1].stop - x0
+            ] - model
             chi2_red[i] = float(np.sum(left * w_own * left)) / dof
 
     return eps, info, chi2_red

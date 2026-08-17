@@ -1774,6 +1774,44 @@ class Scene:
         weights[rows] = report.weight
         return weights
 
+    def n_anchors(self) -> int:
+        """Templates that anchor this scene's shift field.
+
+        The bright mask rather than the basis rows: `make_scene_basis` gives a
+        row to exactly the bright members, and the mask is also what the
+        ``n_anchor`` column of the scene catalog counts, so the figure and the
+        table cannot disagree. It also survives a reload, which the per-template
+        basis does not.
+        """
+        if self.is_bright is None:
+            return 0
+        return int(np.sum(np.asarray(self.is_bright, dtype=bool)))
+
+    def _residual_summary(self, residual: np.ndarray | None = None) -> str:
+        """How well this scene was fitted, for the residual panel's title.
+
+        The anchor count with its rejections, then the two scalars the scene
+        catalog carries for the same scene: the robust pass's systematic floor
+        and the reduced chi-square over the bbox. Terms that do not apply --
+        no robust pass, no weights to form a chi-square from -- are left out
+        rather than printed as NaN.
+        """
+        n = self.n_anchors()
+        label = f"{n} anchor" + ("" if n == 1 else "s")
+        report = getattr(self, "anchor_report", None)
+        applied = report is not None and getattr(report, "applied", False)
+        if applied and report.n_rejected:
+            label += f", {int(report.n_rejected)} rejected"
+        parts = [f"({label})"]
+        if applied and np.isfinite(report.sys_floor):
+            parts.append(f"floor {float(report.sys_floor):.3f} px")
+        chi2 = self.chi2_dof(residual)
+        if np.isfinite(chi2):
+            # 3 significant figures: a badly fitted scene runs to 1e4 and the
+            # note has to stay inside the panel it is drawn on
+            parts.append(f"chi2/dof {chi2:.3g}")
+        return "  ".join(parts)
+
     def mean_shift(self) -> np.ndarray:
         """Mean accumulated shift of this scene's templates, in fit pixels.
 
@@ -1988,6 +2026,45 @@ class Scene:
         y0b, y1b, x0b, x1b = b
         return not (y1a <= y0b or y1b <= y0a or x1a <= x0b or x1b <= x0a)
 
+    @staticmethod
+    def _draw_region_outlines(
+        axis,
+        outlines: Sequence[np.ndarray] | None,
+        origin: tuple[int, int],
+        shape: tuple[int, int],
+    ) -> int:
+        """Draw full-frame boundary rings over one panel, in panel coordinates.
+
+        Rings whose bounding box misses the panel are skipped: a region map can
+        hold a thousand of them and a scene sees one or two, so drawing the rest
+        would cost more than the panel. Returns how many were drawn.
+        """
+        if not outlines:
+            return 0
+        from matplotlib.collections import LineCollection
+
+        ox, oy = float(origin[0]), float(origin[1])
+        ny, nx = shape
+        paths = []
+        for ring in outlines:
+            ring = np.asarray(ring, dtype=float)
+            if ring.ndim != 2 or ring.shape[0] < 2:
+                continue
+            local = ring - (ox, oy)
+            lo, hi = local.min(axis=0), local.max(axis=0)
+            if hi[0] < -0.5 or lo[0] > nx - 0.5 or hi[1] < -0.5 or lo[1] > ny - 0.5:
+                continue
+            paths.append(local)
+        if not paths:
+            return 0
+        # autolim off: the panel is an image, and letting a ring that runs off
+        # the cutout stretch the axes would shrink the residual to a corner
+        axis.add_collection(
+            LineCollection(paths, colors="lightblue", linewidths=0.6, zorder=5),
+            autolim=False,
+        )
+        return len(paths)
+
     def plot(
         self,
         tmpl_image: np.ndarray,
@@ -1996,6 +2073,7 @@ class Scene:
         display_sig_by_title: dict[str, float] | None = None,
         residual_image: np.ndarray | None = None,
         null_segments: Sequence[int] | None = None,
+        region_outlines: Sequence[np.ndarray] | None = None,
         ax=None,
         **imshow_kwargs,
     ) -> tuple["matplotlib.figure.Figure", np.ndarray]:
@@ -2025,11 +2103,20 @@ class Scene:
         null_segments
             Segmentation labels of sources whose brightness would otherwise
             dominate a neighbouring scene's display — typically the saturated
-            stars' segments. They are excluded from the *display scale* of
-            the image panel but still drawn there, and nulled in the residual
-            panel, where the fit residual under a saturated core is
-            meaningless. Labels belonging to THIS scene's templates are never
-            affected. The template and colour panels ignore the list.
+            stars' segments. They are *nulled* in the residual panel, where the
+            fit residual under a saturated core is meaningless, and still drawn
+            in the image panel. Labels belonging to THIS scene's templates are
+            never affected. The template and colour panels ignore the list.
+            Keeping them out of the display scale no longer needs the list:
+            every foreign source is out of it (see ``foreign`` below).
+        region_outlines
+            Boundary rings to draw over the residual panel, each an ``(N, 2)``
+            array of ``(x, y)`` vertices in *full-frame fit-grid pixels*.
+            Typically the lo-res PSF region map, whose edges are where the PSF
+            and the matching kernel change: a residual pattern that stops at
+            one is a PSF-map artefact rather than a source. Rings that miss the
+            scene bbox are dropped. Plain arrays rather than a region map, so
+            this stays free of the PSF-map domain.
         ax
             Optional array of matplotlib axes to draw on.
         **imshow_kwargs
@@ -2043,6 +2130,7 @@ class Scene:
         """
 
         from copy import deepcopy
+        from astropy.stats import sigma_clipped_stats
         from astropy.visualization import make_lupton_rgb
         from photutils.segmentation import SegmentationImage
         import matplotlib.pyplot as plt
@@ -2126,26 +2214,57 @@ class Scene:
         # Plot panels - use the masked residual
         images = [tmpl_cut, img_cut, model_cut, seg_cut, res_cut_masked, col_cut]
         titles = ["Template", "Image", "Model", "Segmap", "Residual", "Color"]
+        # Drawn inside their panels, not appended to the titles: the titles say
+        # what a panel *is*, and three numbers in one of them reads as clutter
+        # long before it reads as a diagnostic. chi2 comes off the same
+        # residual the panel shows -- the global one when it was handed in,
+        # which is what `write_scene_catalog` reports too.
+        notes = {
+            "Template": f"{len(self.templates)} templates",
+            "Residual": self._residual_summary(residual_image),
+        }
 
-        # Pixels each panel's grayscale stretch is measured on; only the image
-        # panel differs from what it displays (foreign saturated segments are
-        # shown but excluded from its scale).
-        scale_data = list(images)
+        # Pixels each panel's greyscale stretch is measured on, which is not
+        # what it displays: sources belonging to OTHER scenes are dropped.
+        # One bright neighbour inside the bbox set a stretch ~50x the scene's
+        # own and flattened every panel to grey. This generalizes what
+        # `null_segments` did for saturated stars on the image panel alone --
+        # that mask is folded in, and is a subset of this one by construction,
+        # since labels of this scene's own templates are never in it.
+        foreign = (seg_cut > 0) & (scene_segmap == 0)
         if null_mask is not None:
-            scale_data[1] = img_cut[~null_mask]
+            foreign |= null_mask
+        scale_data = [
+            img[~foreign] if img.shape == foreign.shape else img for img in images
+        ]
 
-        def _panel_std(ref: np.ndarray, fallback: np.ndarray) -> float:
+        # Panels whose nonzero pixels are noise, so a bright source that
+        # survives the mask -- one of this scene's own -- must not set the
+        # stretch either. Not the template and model panels: their nonzero
+        # pixels ARE the signal, mostly near-zero wings, and a robust scale
+        # there collapses to zero and burns the panel white.
+        noise_panels = {"Image", "Residual"}
+
+        def _panel_std(ref: np.ndarray, fallback: np.ndarray, robust: bool) -> float:
             values = ref[ref != 0]
             if values.size == 0:
                 values = fallback[fallback != 0]
-            return float(np.std(values)) if values.size else 1.0
+            if values.size == 0:
+                return 1.0
+            if robust:
+                clipped = float(
+                    sigma_clipped_stats(values, sigma=3.0, maxiters=5)[2]
+                )
+                if np.isfinite(clipped) and clipped > 0:
+                    return clipped
+            return float(np.std(values)) or 1.0
 
         for i, (img, title) in enumerate(zip(images, titles)):
             sig = (display_sig_by_title or {}).get(title, display_sig)
             if "Segmap" in title:
                 ax[i].imshow(img, origin="lower", cmap=segmap_cmap, interpolation="nearest")
             elif "Residual" in title:  # residual
-                std = _panel_std(scale_data[i], img)
+                std = _panel_std(scale_data[i], img, title in noise_panels)
                 ax[i].imshow(
                     img,
                     origin="lower",
@@ -2163,10 +2282,11 @@ class Scene:
                         cmap=ListedColormap([(1.0, 1.0, 1.0, 0.28)]),
                         interpolation="nearest",
                     )
+                self._draw_region_outlines(ax[i], region_outlines, (x0, y0), img.shape)
             elif "Color" in title:  # color
                 ax[i].imshow(img, origin="lower", **imshow_kwargs)
             else:
-                std = _panel_std(scale_data[i], img)
+                std = _panel_std(scale_data[i], img, title in noise_panels)
                 ax[i].imshow(
                     img,
                     origin="lower",
@@ -2185,6 +2305,13 @@ class Scene:
                     )
 
             ax[i].set_title(title)
+            if notes.get(title):
+                ax[i].text(
+                    0.02, 0.98, notes[title],
+                    transform=ax[i].transAxes, va="top", ha="left",
+                    color="red", fontsize=8,
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8),
+                )
             ax[i].set_xticks([])
             ax[i].set_yticks([])
 

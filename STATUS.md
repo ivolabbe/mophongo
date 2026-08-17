@@ -41,6 +41,47 @@ This file records completed implementations, validation runs, and the current wo
   relative fraction outward. With `ee_box=0.9186` on this run the two readings
   are 0.765" and 0.566" in diameter.
 
+- [x] Scene PNGs report how the scene was fitted, and the PSF region
+  boundaries (2026-08-17). Annotated inside the panels, in the style of the
+  model panel's shift label, so the titles stay bare: `N templates` on the
+  template panel, and `(N anchors[, M rejected])  floor X px  chi2/dof Y` on
+  the residual. The anchor count is `Scene.n_anchors()` -- the `is_bright`
+  sum, which is what the scene catalog's `n_anchor` column counts, so figure
+  and table cannot drift -- and the rejections and floor come from
+  `anchor_report` when the robust pass ran. `chi2_dof` is measured on the
+  residual the panel actually shows, i.e. the global one where `write_outputs`
+  hands it in, matching the catalog. Terms that do not apply are dropped
+  rather than printed as NaN.
+
+  The residual also carries the lo-res PSF region boundaries as thin lightblue
+  lines: that is where the PSF and the matching kernel change under the scene,
+  so a residual pattern that stops at one is a PSF-map artefact rather than a
+  source. `Scene.plot` takes them as plain `(N, 2)` pixel paths
+  (`region_outlines`) and keeps no knowledge of region maps;
+  `pipeline._region_outlines_pixels` does the sky-to-fit-grid projection once
+  per run and each scene clips the rings to its own bbox.
+  `tests/test_scene_plot_annotations.py`.
+
+- [x] Scene PNGs are stretched to the scene, not to its brightest neighbour
+  (2026-08-17). Two changes, because the six panels are not measuring the same
+  thing. First, sources belonging to *other* scenes are dropped from every
+  greyscale panel's display scale: the scene bbox is a rectangle over the
+  union of its templates and routinely contains another scene's sources, and
+  one of them 100x brighter set a stretch nothing else survived. This
+  generalizes `null_segments`, which did it for saturated stars on the image
+  panel alone; that mask is folded in and is a subset of the new one by
+  construction, so `null_segments` now only nulls the residual panel.
+
+  Second, the image and residual panels take a sigma-clipped width instead of
+  a plain `std`, so a bright source inside the scene cannot set the stretch
+  either. Deliberately not the template and model panels: their nonzero pixels
+  ARE the signal, mostly near-zero wings, and a clipped or MAD width there
+  measures 0.09 and 0.00 against a plain 52.8 on the same data -- the panel
+  would burn white. Measured on a scene with a 100x neighbour, the template
+  panel's vmax goes 654 -> 16.2 and the image panel's 14.8 -> 14.6, i.e. the
+  masking carries the source-like panels and the clipping carries the
+  noise-like ones. Both pinned in `tests/test_scene_plot_annotations.py`.
+
 - [x] `scene_minimum_anchors` is a flat 10, and the campaign configs stopped
   setting it (2026-08-18). The default derived the floor from the astrometric
   polynomial order, `(order+1)(order+2)+1`, which is 3 at the default order 0

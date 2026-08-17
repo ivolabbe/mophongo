@@ -919,6 +919,30 @@ def _idl_robust_sigma(a: np.ndarray) -> float:
     return s
 
 
+def _region_outlines_pixels(
+    prm: PSFRegionMap | None, wcs: WCS | None
+) -> list[np.ndarray]:
+    """Boundary rings of a PSF region map, as fit-grid pixel paths.
+
+    One ``(N, 2)`` array of ``(x, y)`` vertices per ring, exteriors and holes
+    alike, projected through ``wcs``. Flat arrays rather than the map itself:
+    the scene figure draws them and has no business knowing about region maps.
+    """
+    regions = getattr(prm, "regions", None)
+    if regions is None or wcs is None or not len(regions):
+        return []
+    rings: list[np.ndarray] = []
+    for geom in regions.geometry:
+        if geom is None or geom.is_empty:
+            continue
+        for part in getattr(geom, "geoms", [geom]):
+            for ring in (part.exterior, *part.interiors):
+                lon, lat = np.asarray(ring.coords, dtype=float).T[:2]
+                x, y = wcs.wcs_world2pix(lon, lat, 0)
+                rings.append(np.column_stack([x, y]))
+    return rings
+
+
 def _fptv_panel(
     img: np.ndarray,
     *,
@@ -1083,6 +1107,11 @@ class SceneRefit:
         scene = self.baseline if which == "baseline" else self.variant
         if scene is None:
             raise ValueError(f"no {which} solve on this refit")
+        # same PSF-region boundaries the written figure carries
+        kwargs.setdefault("region_outlines", _region_outlines_pixels(
+            getattr(self.pipeline, "prm_lo", None),
+            self.pipeline.wcs[0] if self.pipeline.wcs is not None else None,
+        ))
         fig, _ = scene.plot(self.pipeline.images[0], self.pipeline.segmap,
                             display_sig=display_sig, **kwargs)
         if path is not None:
@@ -3472,10 +3501,16 @@ class Pipeline:
 
             with self._phase("scene figures"):
                 drawn = 0
+                # projected once: every scene draws the same rings, clipped to
+                # its own bbox
+                outlines = _region_outlines_pixels(
+                    getattr(self, "prm_lo", None),
+                    self.wcs[0] if self.wcs is not None else None,
+                )
                 for s in self._scenes_to_plot(scene_table):
                     fig, _ = s.plot(
                         self.images[0], self.segmap, display_sig=5,
-                        null_segments=sat_ids,
+                        null_segments=sat_ids, region_outlines=outlines,
                     )
                     # A fixed 300 dpi drew every scene onto the same 4500x3000
                     # canvas, which is where the time went -- rendering and PNG

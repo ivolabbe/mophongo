@@ -144,6 +144,7 @@ def test_scene_plot_keeps_foreign_saturated_out_of_the_image_scale(tmp_path):
     y0, y1, x0, x1 = normal.bbox
     seg_cut = segmap[y0 : y1 + 1, x0 : x1 + 1]
     foreign = seg_cut == sat_id
+    foreign_full = segmap == sat_id
     assert foreign.any(), "the foreign saturated segment is outside the bbox"
 
     def _panels(f, axs):
@@ -164,8 +165,18 @@ def test_scene_plot_keeps_foreign_saturated_out_of_the_image_scale(tmp_path):
     assert np.array_equal(nulled["Image"][0], plain["Image"][0]), (
         "Image panel pixels changed when null_segments was passed"
     )
-    # ... but its brightness is kept out of the panel's stretch
-    assert nulled["Image"][1][1] < plain["Image"][1][1], (
+    # ... and its brightness is out of the panel's stretch either way: every
+    # source belonging to another scene is now kept out of the display scale,
+    # so null_segments no longer has to name the saturated ones to achieve it
+    assert nulled["Image"][1] == plain["Image"][1], (
+        "null_segments still changes the image stretch"
+    )
+    # what it would be if the star counted as one of this scene's own
+    fig3, axes3 = normal.plot(
+        image, np.where(foreign_full, int(normal.templates[0].id), segmap)
+    )
+    as_ours = _panels(fig3, axes3)
+    assert plain["Image"][1][1] < as_ours["Image"][1][1], (
         "Image panel stretch still set by the foreign saturated star"
     )
     # the Color panel is unaffected by null_segments entirely

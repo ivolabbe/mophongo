@@ -21,6 +21,8 @@ This file tracks future desired features, checks, and investigations.
   `is_bright`, not the anchors that came through `measure_anchor_shifts` with
   finite information, so it does not match the gate the pass applied; and
   `AnchorWeights.reason`/`n_eff` are recorded on the scene and thrown away.
+  `Scene.n_anchors()` now puts the same `is_bright` count on the residual
+  panel of every scene PNG, so whatever this settles on should move both.
 
 - [ ] Bring the verification scene loop's dpi down with the pipeline's
   (2026-08-17). `verification.py:1722` asks for `oversample=2.0` between

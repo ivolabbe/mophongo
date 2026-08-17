@@ -3,6 +3,28 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] `mophongo config <out.json>` writes a default run config (2026-08-16).
+  A new run had no starting point but an existing config from another field,
+  which carries that field's paths and whatever settings it happened to pin.
+  The command writes every `RunConfig`, `PsfConfig` and `FitConfig` setting at
+  its default, so the file doubles as a listing of what exists without reading
+  the source.
+
+  The `fit` block is a plain dict on `RunConfig` and defaults to `{}`, so a
+  naive `asdict` dump would say nothing at all about the fit; it is expanded to
+  the full `FitConfig` defaults (41 keys). The nine fields with no default are
+  input paths and a run name, written as `<angle bracket>` placeholders rather
+  than empty strings -- an empty string reads as a legitimate value and fails
+  deep in a run, a placeholder cannot. The file parses through `from_json` but
+  does not run until they are filled in.
+
+  Refuses to overwrite without `--force`, since configs are hand-edited after
+  generation, and reports that as a clean argparse error rather than a
+  traceback. `tests/test_cli_config.py` (7 tests) checks the round trip, that
+  every `FitConfig` field is present, that the recently changed defaults
+  (`astrom_model="poly"`, `astrom_robust=True`, `phot.aperture_ee=0.70`) are
+  what lands in the file, and the clobber guard. Full suite: 500 passed.
+
 - [x] Estimator 3 is written out, in the form the report defines it
   (2026-08-16). `ap_flux_est3_<i> = ap_model * psfcor * totcor_cat + ap_res`,
   Eq. 12 of `scratch/wren/flux_estimator_comparison.pdf`. The aperture-to-total

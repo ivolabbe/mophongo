@@ -301,7 +301,19 @@ mophongo diag run/uds_770.json 4711 --size 101
 
 mophongo info run/uds_770.json               # summarize a run, no pixels read
 mophongo run  run/uds_770.json fit outputs   # pipeline steps
+
+# a run config with every setting written out at its default
+mophongo config default.json
 ```
+
+`config` writes a template to start a new run from. Every `RunConfig`,
+`PsfConfig` and `FitConfig` setting appears with its default value, so the file
+doubles as a listing of what is available without reading the source — the
+`fit` block especially, which is an empty dict on `RunConfig` and would
+otherwise say nothing. The nine fields that have no default are input paths and
+a run name, written as `<angle bracket>` placeholders: the file parses, but it
+will not run until they are filled in. An existing file is never overwritten
+without `--force`, since configs are hand-edited after they are generated.
 
 `psf` reads only the cached region map (`_psf_hi`, `_psf_lo`, or `_kernel`),
 so it costs nothing. The stamp is written centered on the requested

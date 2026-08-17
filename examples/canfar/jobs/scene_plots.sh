@@ -16,7 +16,7 @@ export MPLBACKEND=Agg
 mkdir -p $RUN
 cd $RUN
 echo "=== $CFG [scene plots] on $(hostname): $(nproc) cores, $(free -g | awk '/Mem/{print $2}')GB"
-echo "=== mophongo: $(cat $CFGDIR/SRC_VERSION 2>/dev/null || echo 'SRC_VERSION missing')"
+echo "=== mophongo: $(git -C $CFGDIR/mophongo log --oneline -1 2>/dev/null || echo 'no checkout')"
 time $CFGDIR/venv/bin/python $RUN/jobs/scene_plots.py $CFGDIR/${CFG}_canfar.json
 echo "=== scene figures: $(ls $RUN/run*/*/$CFG/scenes 2>/dev/null | wc -l)"
 echo RUN_DONE

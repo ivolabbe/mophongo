@@ -23,7 +23,7 @@ echo "=== $CFG [$STEP] on $(hostname): $(nproc) cores, $(free -g | awk '/Mem/{pr
 # Which mophongo this is. Without it a run that silently used stale source -
 # push writes the tarball, but only setup_env.sh and update_src.sh unpack it -
 # looks exactly like one that picked the change up.
-echo "=== mophongo: $(cat $CFGDIR/SRC_VERSION 2>/dev/null || echo 'SRC_VERSION missing')"
+echo "=== mophongo: $(git -C $CFGDIR/mophongo log --oneline -1 2>/dev/null || echo 'no checkout')"
 time $CFGDIR/venv/bin/python -m mophongo.pipeline $CFGDIR/${CFG}_canfar.json $STEP
 # out_dir is absolute in the config: run<N>/<field>/<band>
 echo "=== outputs:"; ls -lh $RUN/run*/*/$CFG 2>/dev/null | head -25

@@ -3,6 +3,33 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] The run log names the source, and CANFAR asks git instead of a stamp
+  (2026-08-17). Two halves of the same gap: a finished run could not say which
+  mophongo produced it.
+
+  `pipeline.source_version()` returns `<package version> (<git sha>)`, read
+  from the checkout the installed package lives in -- an editable install from
+  `run<N>/config/mophongo` reports that clone's HEAD -- and `log_run` writes it
+  into every run's header beside the python and platform lines. `+dirty` marks
+  an uncommitted tree. Falls back to the package version where the source is
+  not a checkout, rather than failing a run over provenance.
+
+  This is what a config cannot record. The outputs already carry the full
+  config, but a config does not pin behavior: a *default* can move under a file
+  that never named the field, which is exactly how `fit_method` gave a clipped
+  solve before today and an NNLS one after, with nothing in the config to tell
+  the two runs apart. Four defaults moved in this session alone.
+
+  On CANFAR, `check_src_current` now asks git in the checkout from a one-CPU
+  4 GB container (`jobs/src_version.sh`) instead of reading a stamped
+  `SRC_VERSION`. It schedules immediately and takes about 27 s, against a
+  campaign of hours, and it is the same question OzStar answers over ssh. The
+  stamp is gone from every writer and reader -- `setup_env.sh`,
+  `update_src.sh`, and the log lines in `build_psfs.sh`, `run.sh` and
+  `scene_plots.sh` all ask git now -- so the repository is the only record of
+  what is installed and cannot disagree with itself. Exercised live: it read
+  `2d2d014` off arc and correctly refused a launch against local `95e6113`.
+
 - [x] `PSFRegionMap.to_file` writes a projection (2026-08-17). `from_wcs_list`
   sets `EPSG:4326`, but `overlay_with` rebuilt its frame with
   `gpd.GeoDataFrame(overlays)` and `group_by_pa` its empty frames with

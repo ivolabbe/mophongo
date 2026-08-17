@@ -27,7 +27,7 @@ mkdir -p "$STPSF_PATH"
 
 echo "=== psf shard ${SHARD:-1/1} on $(hostname): $(nproc) cores, $(free -g | awk '/Mem/{print $2}')GB"
 echo "=== STPSF_PATH=$STPSF_PATH"
-echo "=== mophongo: $(cat $CFGDIR/SRC_VERSION 2>/dev/null || echo 'SRC_VERSION missing')"
+echo "=== mophongo: $(git -C $CFGDIR/mophongo log --oneline -1 2>/dev/null || echo 'no checkout')"
 echo "=== grids before: $(ls $RUN/PSF | wc -l)"
 
 cfgs=()

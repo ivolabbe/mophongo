@@ -40,12 +40,11 @@ else
     fi
     git clone -q --branch "$BRANCH" "$REPO" "$CFGDIR/mophongo"
 fi
-# Stamped because the laptop cannot run git on arc -- there is no ssh, only file
-# transfer -- so `submit._arc_src_version()` reads this file to refuse a launch
-# against stale source. The OzStar toolkit deliberately has no equivalent: it
-# asks git over ssh, where a stamp would only be a second copy able to drift.
-git -C "$CFGDIR/mophongo" rev-parse --short HEAD > "$CFGDIR/SRC_VERSION"
-echo "mophongo: $(cat "$CFGDIR/SRC_VERSION")"
+# No stamp file. `submit.check_src_current` asks git in this checkout from a
+# one-CPU container, so the repository is the only record of what is installed
+# and cannot disagree with itself. A stamp had to be rewritten by every path
+# that moved the source, and was silently wrong if one forgot.
+echo "mophongo: $(git -C "$CFGDIR/mophongo" log --oneline -1)"
 
 echo "=== venv"
 # Rebuilt only when asked. The install is editable, so a code change needs a

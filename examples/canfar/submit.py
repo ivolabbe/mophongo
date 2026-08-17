@@ -512,21 +512,29 @@ def ram_for(name: str, override: int | None) -> int:
 
 
 def arc_src_version() -> str:
-    """The ``SRC_VERSION`` this run's checkout recorded, or ``""`` if unreadable.
+    """``<sha> <subject>`` of this run's checkout, or ``""`` if unreadable.
 
-    Written by ``setup_env.sh`` / ``update_src.sh`` as ``git rev-parse --short
-    HEAD`` of the checkout they just updated, so it describes what is installed
-    rather than what was uploaded.
+    Asks git in the checkout, in a one-CPU container. That is the same question
+    the OzStar toolkit answers over ssh, and asking the repository directly
+    means there is no stamp file to write, to refresh, or to disagree with the
+    clone it describes -- a run whose source was moved by hand still reports
+    what it actually holds.
+
+    The job is deliberately tiny (1 core, 4 GB) so it schedules immediately;
+    the cost over reading a stamped file is the container start, seconds
+    against the hours a campaign runs, and it is paid once per launch.
     """
-    tmp = WORK / "_upload"
-    tmp.mkdir(exist_ok=True)
-    dest = tmp / "SRC_VERSION.arc"
-    dest.unlink(missing_ok=True)
-    try:
-        vcp(f"{cfg_vos()}/SRC_VERSION", str(dest))
-    except (FileNotFoundError, SystemExit):
+    ids = [launch(session_name("mophongo-srcver"), "src_version.sh", 1, 4,
+                  {"RUN": RUN})]
+    if not ids[0]:
         return ""
-    return dest.read_text().strip() if dest.exists() else ""
+    wait(ids)
+    text = first_log(ids)
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("SRC_VERSION "):
+            return line[len("SRC_VERSION "):].strip()
+    return ""
 
 
 def check_src_current(ref: str, force: bool) -> None:
@@ -548,7 +556,7 @@ def check_src_current(ref: str, force: bool) -> None:
     if sha and (sha.startswith(want) or want.startswith(sha)):
         log.info("source on arc: %s", have)
         return
-    problem = (f"no SRC_VERSION in {cfg_vos()}" if not have
+    problem = (f"no checkout at {cfg_vos()}/mophongo" if not have
                else f"arc has [{have}], local {ref} is {want}")
     if force:
         log.warning("%s (continuing anyway: --force-stale)", problem)

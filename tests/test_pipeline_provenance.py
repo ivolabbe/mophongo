@@ -417,3 +417,43 @@ def test_psf_workers_and_provenance_reach_the_factory(tmp_path, monkeypatch):
 
     assert PsfConfig.workers == 1
     assert PsfConfig.provenance == "warn"
+
+
+def test_source_version_reports_the_commit():
+    """The run log has to say which source produced it.
+
+    A config and a release version do not identify a run: a *default* can move
+    under a config that never named the field, which is how the same file gave
+    a clipped solve before `fit_method` existed and an NNLS one after. The
+    commit is what tells those apart.
+    """
+    from mophongo.pipeline import source_version
+
+    got = source_version()
+
+    assert got and got.split()[0][0].isdigit(), got
+    # in a git checkout the sha is present; elsewhere the version alone is the
+    # documented fallback, so accept either rather than pin the environment
+    if "(" in got:
+        sha = got.split("(", 1)[1].rstrip(")").removesuffix("+dirty")
+        assert sha and all(c in "0123456789abcdef" for c in sha), got
+
+
+def test_run_log_header_names_the_source(tmp_path):
+    from pathlib import Path
+    from mophongo.pipeline import Pipeline, RunConfig, source_version
+
+    required = {k: f"<{k}>" for k in (
+        "name", "out_dir", "sci_hi", "segmap", "catalog",
+        "sci_lo", "wht_lo", "csv_hi", "csv_lo")}
+    cfg = RunConfig(**{**required, "name": "prov", "out_dir": str(tmp_path)})
+
+    pipe = Pipeline.__new__(Pipeline)
+    pipe.run_config = cfg
+    pipe.out_dir = Path(tmp_path)
+    pipe._log_run_path = None
+    with pipe.log_run() as path:
+        pass
+
+    header = Path(path).read_text()
+    assert f"mophongo {source_version()}" in header

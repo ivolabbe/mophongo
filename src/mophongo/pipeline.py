@@ -702,6 +702,53 @@ class _ModelImages(_SequenceABC):
         return model
 
 
+
+def source_version() -> str:
+    """``<package version> (<git sha>)`` of the mophongo being run.
+
+    The git commit is the part that matters. Two runs can share a config, a
+    package version and a release and still differ in science, because a
+    *default* moved -- a config that never named `fit_method` got a clipped
+    solve before this line existed and an NNLS one after, with nothing in the
+    config or the outputs to tell them apart. The commit is what distinguishes
+    them, so it belongs in the log the run writes.
+
+    Read from the checkout the installed package lives in, which is the one
+    that ran: an editable install from `run<N>/config/mophongo` reports that
+    clone's HEAD. Falls back to the package version alone where the source is
+    not a git checkout (a wheel, a tarball), rather than failing a run over
+    provenance.
+    """
+    import subprocess
+    from importlib.metadata import PackageNotFoundError, version as pkg_version
+
+    try:
+        release = pkg_version("mophongo")
+    except PackageNotFoundError:  # not installed, e.g. a source-tree import
+        release = "unknown"
+
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent),
+             "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        sha = proc.stdout.strip() if proc.returncode == 0 else ""
+    except Exception:  # noqa: BLE001 - provenance is not worth failing a run
+        sha = ""
+    dirty = ""
+    if sha:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(Path(__file__).resolve().parent),
+                 "status", "--porcelain", "-uno"],
+                capture_output=True, text=True, timeout=5,
+            )
+            dirty = "+dirty" if proc.stdout.strip() else ""
+        except Exception:  # noqa: BLE001
+            dirty = ""
+    return f"{release} ({sha}{dirty})" if sha else release
+
 class _Tee:
     """Write to a stream and a log file at once, one whole line at a time.
 
@@ -3897,6 +3944,7 @@ class Pipeline:
         started = time.time()
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         handle.write(f"\n{'=' * 78}\nmophongo run {self.run_config.name}  {stamp}\n")
+        handle.write(f"mophongo {source_version()}\n")
         handle.write(f"python {platform.python_version()} on {platform.platform()}\n")
         handle.write(f"out_dir {self.out_dir}\n{'=' * 78}\n")
 

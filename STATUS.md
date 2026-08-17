@@ -3,6 +3,47 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] OzStar pins its source and venv per run, like CANFAR (2026-08-17).
+  `ozroot.src_dir()` and `venv_dir()` moved from `base/mophongo` and
+  `bin/venv` to `run<N>/config/{mophongo,venv}`. A run pins one mophongo
+  version, and a shared clone meant a `sync` for the run being worked on
+  silently changed the code under every other run: a finished run's outputs
+  could not be tied to the source that produced them, and its config -- which
+  does live per run -- could disagree with the code that read it. Every job
+  script already took `$SRC` and `$VENV` from the environment, so the two
+  functions moved everything. `venv-vos` stays shared under `bin/`: the CADC
+  tools run on datamover nodes that have no module tree, and they are not
+  pinned to a mophongo version.
+
+  `campaign.py` already runs `setup` as its third step, so a new `run<N>` gets
+  its own checkout with nobody remembering to ask, and `write_run_readme`
+  (`campaign.py:241`) already writes `run<N>/README.md` over ssh with the
+  commit, the bands, the release-version table and a diff against the previous
+  run -- both were in place, only the paths were not.
+
+  Harmonized the two setups while there:
+
+  * Both now move a source directory aside when it exists without a `.git` and
+    clone fresh. That state is an unpacked tarball from the older
+    ship-the-source convention, `git clone` refuses a non-empty target, and
+    neither branch of the old conditional repaired it -- so setup failed on
+    every retry until someone cleared it by hand, which is exactly what CANFAR
+    `run1` did earlier today.
+  * Both stamp `SRC_VERSION` beside the configs; OzStar's `sync_src.sh`
+    refreshes it too, so the stamp cannot outlive the clone it describes.
+  * Both rebuild the venv only under `REBUILD=1`. CANFAR was deleting and
+    rebuilding on every setup, seven minutes each time, for no gain: the
+    install is editable and `pip install -e` still runs to pick up dependency
+    changes.
+  * OzStar's `REBUILD=1` no longer deletes `$VOS`, the shared CADC venv --
+    rebuilding one run's environment must not take it from the others.
+
+  Verified on OzStar: `run2/config/{mophongo,venv}` in place, `SRC_VERSION`
+  `4e76e5c` matching the clone, and the per-run venv importing mophongo from
+  the per-run clone. The old `base/mophongo` and `bin/venv` are now orphaned
+  and were left rather than deleted. The empty `csv/` directory is gone; the
+  wcs csvs were already in `data/`, which is where the configs point.
+
 - [x] OzStar and CANFAR redeployed on `2d2d014` (2026-08-16). Both clusters
   now run the same source as `main`, with grids and configs that agree:
 

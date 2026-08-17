@@ -17,13 +17,15 @@ version of the catalog produced.
 ```
 $OZSTAR_BASE/               default /fred/<project>/<user>/mophongo
 ├── bin/                job scripts, shared by every run
-│   ├── venv/             mophongo + dependencies (module python)
 │   └── venv-vos/         CADC transfer tools (OS python)
-├── mophongo/           the GitHub clone
 ├── PSF/                MJD-tagged ePSF grids
-├── data/               inputs staged from CANFAR arc
+├── data/               inputs staged from CANFAR arc, including the wcs csvs
 └── run3/               one catalog version      $OZSTAR_RUN
+    ├── README.md         what this run is and how it differs from the last
     ├── config/           <name>_ozstar.json, <name>_stage.tsv
+    │   ├── mophongo/       this run's clone
+    │   ├── venv/           this run's environment (module python)
+    │   └── SRC_VERSION     the commit the run was built from
     ├── logs/             SLURM logs of jobs with no single output dir
     └── <field>/          uds, cosmos, egs
         ├── <field>_repair_cache.fits
@@ -37,13 +39,26 @@ release impossible to compare without renaming files. `ozify.py` refuses a
 `--suffix` that looks like a version; bump `$OZSTAR_RUN` instead. `--suffix`
 remains for genuine variants, such as a `_trial` patch beside the full field.
 
-Data, grids, clone and both venvs are shared because a release is re-fitted
-many times against the same 64 GB of inputs and the same ~500 grids, and only
-the configs and the outputs change. It also means deleting a run destroys only
-that run — which was learned the hard way, when consolidating two runs left the
-entire campaign in one directory and a single `rm -rf` took all of it.
+Data and grids are shared because a release is re-fitted many times against the
+same 64 GB of inputs and the same ~500 grids, and those do not change between
+runs. It also means deleting a run destroys only that run — which was learned
+the hard way, when consolidating two runs left the entire campaign in one
+directory and a single `rm -rf` took all of it.
 
-Two venvs, because the two kinds of node do not share a software stack. The
+**The clone and the science venv are per run**, under `run<N>/config/`, matching
+CANFAR. A run pins one mophongo version, and a shared clone meant a `sync` for
+the run being worked on silently changed the code under every other run in the
+tree: a finished run's outputs could not be tied to the source that produced
+them, and its config — which does live per run — could disagree with the code
+that read it. `SRC_VERSION` sits beside the configs so the commit, the config
+and the outputs are one directory. The cost is a clone and a venv per run,
+minutes and a few hundred MB, against a class of irreproducibility that is
+silent. `campaign.py` runs `setup` as its third step, so a new `run<N>` gets its
+own checkout without anyone remembering to ask.
+
+`venv-vos` stays shared under `bin/`, because the two kinds of node do not
+share a software stack and the CADC tools are not pinned to a mophongo version.
+The
 datamover nodes, which are the only ones that can reach CANFAR, have no `/apps`
 module tree at all, so the module python the science venv is built against does
 not exist there; `venv-vos` is built from the OS python, which is on every node.

@@ -41,13 +41,29 @@ if [[ -d $SRC/.git ]]; then
     git -C "$SRC" checkout --quiet "$BRANCH"
     git -C "$SRC" reset --hard "origin/$BRANCH"
 else
+    # A directory that exists but holds no .git is an unpacked tarball from the
+    # older ship-the-source convention. `git clone` refuses a non-empty target,
+    # so neither branch above repairs it and setup fails on every retry until
+    # someone clears it by hand -- which is exactly what happened on CANFAR.
+    # Move it aside and clone: reversible, and the run gets a real checkout.
+    if [[ -e $SRC ]]; then
+        stale="$SRC.stale-$(date +%Y%m%dT%H%M%S)"
+        echo "no .git in $SRC; moving it to $stale"
+        mv "$SRC" "$stale"
+    fi
     git clone --quiet --branch "$BRANCH" "$REPO_URL" "$SRC"
 fi
-echo "mophongo $(git -C "$SRC" rev-parse --short HEAD) on $BRANCH"
+# The commit is the version. Stamped beside the configs so a finished run's
+# outputs, its configs and its source are one directory and cannot drift apart.
+git -C "$SRC" rev-parse --short HEAD > "$CFGDIR/SRC_VERSION"
+echo "mophongo $(cat "$CFGDIR/SRC_VERSION") on $BRANCH"
 
 echo "=== venv (mophongo, module python, compute nodes)"
 if [[ ${REBUILD:-0} == 1 ]]; then
-    rm -rf "$VENV" "$VOS"
+    # Only this run's venv. `$VOS` is the CADC tool venv under `bin/`, shared by
+    # every run and by the datamover jobs, so rebuilding one run's environment
+    # must not take it out from under the others.
+    rm -rf "$VENV"
 fi
 if [[ ! -x $VENV/bin/python ]]; then
     python -m venv "$VENV"

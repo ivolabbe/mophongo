@@ -29,6 +29,15 @@ if [ -d "$CFGDIR/mophongo/.git" ]; then
     git -C "$CFGDIR/mophongo" checkout -q "$BRANCH"
     git -C "$CFGDIR/mophongo" reset -q --hard "origin/$BRANCH"
 else
+    # A directory that exists but holds no .git is an unpacked tarball from the
+    # older ship-the-source convention. `git clone` refuses a non-empty target,
+    # so neither branch repairs it and setup fails on every retry until someone
+    # clears it by hand -- which is what run1 did. Move it aside and clone.
+    if [ -e "$CFGDIR/mophongo" ]; then
+        stale="$CFGDIR/mophongo.stale-$(date +%Y%m%dT%H%M%S)"
+        echo "no .git in $CFGDIR/mophongo; moving it to $stale"
+        mv "$CFGDIR/mophongo" "$stale"
+    fi
     git clone -q --branch "$BRANCH" "$REPO" "$CFGDIR/mophongo"
 fi
 # The commit IS the version: nothing to stamp, nothing to keep in step with a
@@ -37,9 +46,17 @@ git -C "$CFGDIR/mophongo" rev-parse --short HEAD > "$CFGDIR/SRC_VERSION"
 echo "mophongo: $(cat "$CFGDIR/SRC_VERSION")"
 
 echo "=== venv"
-rm -rf "$CFGDIR/venv"
-python -m venv "$CFGDIR/venv"
-"$CFGDIR/venv/bin/pip" -q install -U pip
+# Rebuilt only when asked. The install is editable, so a code change needs a
+# git pull and nothing else, and `pip install -e` still runs below to pick up a
+# dependency change -- rebuilding from scratch every time cost seven minutes
+# per setup and bought nothing. REBUILD=1 forces it.
+if [ "${REBUILD:-0}" = 1 ]; then
+    rm -rf "$CFGDIR/venv"
+fi
+if [ ! -x "$CFGDIR/venv/bin/python" ]; then
+    python -m venv "$CFGDIR/venv"
+    "$CFGDIR/venv/bin/pip" -q install -U pip
+fi
 "$CFGDIR/venv/bin/pip" install -e "$CFGDIR/mophongo" 2>&1 | tail -3
 
 echo "=== versions"

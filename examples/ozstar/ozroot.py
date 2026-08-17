@@ -101,18 +101,30 @@ def config_dir() -> str:
 
 
 def src_dir() -> str:
-    """The mophongo clone, shared by every run."""
-    return f"{base_root()}/mophongo"
+    """The mophongo clone for this run, under its own config directory.
+
+    A run pins one mophongo version. Sharing one clone across runs meant a
+    `sync` for the run being worked on silently changed the code under every
+    other run in the tree, so a finished run's outputs could not be tied to the
+    source that produced them -- and its config, which does live per run, could
+    disagree with the code that read it. Per run, the commit is a property of
+    the run, and `SRC_VERSION` beside the configs cannot drift from the outputs
+    next to it. Matches the CANFAR layout, where the same argument applies.
+
+    The cost is a clone and a venv per run, which is minutes and a few hundred
+    MB against a class of irreproducibility that is silent.
+    """
+    return f"{config_dir()}/mophongo"
 
 
 def venv_dir() -> str:
-    """The mophongo venv (module python), shared by every run.
+    """The mophongo venv (module python) for this run, beside its clone.
 
-    Under ``bin/`` with the CADC tools: both are executables rather than data,
-    and keeping them together leaves the top level to the things worth looking
-    at - the clone, the inputs, the grids and the runs.
+    Installed editable from :func:`src_dir`, so it pins the same commit and has
+    to move with it: a shared venv pointing at a per-run clone would resolve to
+    whichever run installed last.
     """
-    return f"{bin_dir()}/venv"
+    return f"{config_dir()}/venv"
 
 
 def vos_dir() -> str:

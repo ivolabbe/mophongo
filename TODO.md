@@ -2,6 +2,23 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] Clear the 21 stale configs in CANFAR `run1/config` (2026-08-16). They
+  are older runs -- the whole `_v1.0` set for the three fields, plus
+  `uds_770_dr0.1`, `uds_f770w_test`, `uds_f1800w_test`, `cosmos_f1000w_full` --
+  and they still name `UDS_*`/`COSMOS_*` PSF patterns. The grids were renamed
+  to `STDPSF_*` under them, so launching any of those names now matches zero
+  grids and falls through to `autobuild`. They are distinct runs rather than
+  superseded copies of the current 17, so regenerate them from their source
+  configs if they are still wanted, or move them aside the way
+  `mophongo.stale-archive` was; leaving them is a trap for whoever launches one
+  next.
+
+- [ ] Remove the two one-off job scripts left on CANFAR (2026-08-16):
+  `jobs/rename_psfs.sh` (the grid rename) and `jobs/verify_cfg.sh` (reads
+  deployed state from inside a container, which is how you check a config that
+  `vcp` refuses to download after an overwrite). Harmless, but `jobs/` is
+  meant to hold the campaign's scripts, not maintenance leftovers.
+
 - [ ] Decide whether `PhotConfig.aperture_diam` should accept a column name
   (2026-08-16). Its type hint and comment say `str` names an input-catalog
   column of per-source sizes, but `Pipeline._resolve_image_ap_radius_pix`

@@ -3,6 +3,24 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] `scene_minimum_anchors` is a flat 10, and the campaign configs stopped
+  setting it (2026-08-18). The default derived the floor from the astrometric
+  polynomial order, `(order+1)(order+2)+1`, which is 3 at the default order 0
+  -- an algebraic count of the field's free parameters, not a number of
+  anchors a scatter can be measured from. Every campaign config overrode it by
+  hand anyway (5 on CANFAR and OzStar, 7 and 10 in the MINERVA runs), so the
+  derivation only ever described runs nobody launched.
+
+  It is now `scene_minimum_anchors: int = 10` with the `__post_init__`
+  derivation removed, and the hand-set values are gone from
+  `examples/minerva`, `examples/canfar` and `examples/ozstar` (and from
+  `make_minerva_configs.py`, which writes them) so those runs take the
+  default. A wider astrometric basis still raises the floor where it needs to:
+  `astrom_robust.anchor_gate` takes `max(scene_minimum_anchors, 2p)`.
+
+  `_beta_err` in `tests/test_scene_astrometry_robust.py` pins the floor at 3:
+  its nine-template field is about the weighting, not the gate.
+
 - [x] Anchor local systems assembled from slice intersections (2026-08-18).
   The rest of the `astrom_robust` slowdown. `measure_anchor_shifts` gave every
   anchor a local least-squares system over the union footprint of its

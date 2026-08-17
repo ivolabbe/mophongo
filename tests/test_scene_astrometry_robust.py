@@ -692,16 +692,27 @@ def test_the_gate_is_scene_minimum_anchors():
     assert over.anchor_report.applied
 
 
-def test_scene_minimum_anchors_defaults_from_the_polynomial_order():
-    """One more anchor than the field has free parameters."""
-    assert FitConfig().scene_minimum_anchors == 3
+def test_scene_minimum_anchors_is_a_flat_floor_the_basis_can_raise():
+    """One number, whatever the astrometric model.
+
+    The floor used to be derived from the polynomial order. It is a
+    statistical floor rather than an algebraic one, so it does not follow the
+    order; where a wider basis does need more anchors, ``anchor_gate`` is what
+    raises it.
+    """
+    from mophongo.astrom_robust import anchor_gate
+
+    assert FitConfig().scene_minimum_anchors == 10
     assert (
         FitConfig(
             astrom_kwargs={"poly": {"order": 1}, "gp": {"length_scale": 400}}
         ).scene_minimum_anchors
-        == 7
+        == 10
     )
     assert FitConfig(scene_minimum_anchors=11).scene_minimum_anchors == 11
+
+    assert anchor_gate(10, 1) == 10  # order 0: the floor binds
+    assert anchor_gate(10, 6) == 12  # order 2: the basis binds
 
 
 def test_a_scene_below_the_gate_is_never_measured(monkeypatch):
@@ -803,8 +814,10 @@ def _beta_err(tm, img, W, iso, robust):
     truth = (0.20, -0.12)
     scn = _solve_scene(
         tm, img, W,
+        # a nine-template field cannot clear the default anchor floor, and
+        # these two tests are about the weighting rather than the gate
         _cfg(astrom_isolation_thresh=iso, astrom_minimum_snr=0.0,
-             astrom_robust=robust),
+             astrom_robust=robust, scene_minimum_anchors=3),
     )
     return np.abs(scn.shifts - np.array(truth)).max(), scn
 

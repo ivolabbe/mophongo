@@ -447,9 +447,9 @@ solve leaves the fitted shifts alone and costs one pass.
 
 The tolerance is a stopping rule, not an accuracy claim, and `0.1` fit-grid
 pixels is chosen against the noise rather than against the arithmetic. The
-weakest scene the anchor cuts admit — `scene_minimum_anchors` = 3 members at
+weakest scene the anchor cuts admit — `scene_minimum_anchors` = 10 members at
 `astrom_minimum_snr` = 15 — has a centroid good to roughly
-$\sigma_{\rm PSF}/({\rm SNR}\sqrt{N}) \approx 0.10$ fit pixels, so iterating
+$\sigma_{\rm PSF}/({\rm SNR}\sqrt{N}) \approx 0.05$ fit pixels, so iterating
 below that measures nothing; and the systematic floor from PSF and kernel
 mismatch is a bias, which no number of passes removes. Tightening the
 tolerance buys passes, not precision. Because the fit grid is the
@@ -547,7 +547,7 @@ page.
 | `astrom_kwargs` | `dict` | `{"poly": {"order": 0}, "gp": {"length_scale": 400}}` | Per-model options; the joint scene fit reads `astrom_kwargs["poly"]["order"]`. |
 | `multi_resolution_method` | `str` | `"upsample"` | Multi-resolution handling (see {doc}`pipeline`). |
 | `normal` | `str` | `"tree"` | Normal-matrix builder; only `"tree"` is implemented. |
-| `scene_minimum_anchors` | `int \| None` | `None` | Minimum bright anchors per scene; smaller scenes are merged. `None` derives it from the polynomial order as `(order+1)(order+2)+1` — 3 at order 0, 7 at order 1. Also the gate for `astrom_robust`. |
+| `scene_minimum_anchors` | `int` | `10` | Minimum bright anchors per scene; smaller scenes are merged. Also the gate for `astrom_robust`, which raises it to `max(scene_minimum_anchors, 2p)` for a `p`-term shift field. |
 | `run_scene_solver` | `bool` | `True` | Must remain `True`; the scene solver is the only fitting path and `False` raises. |
 | `scene_coupling_thresh` | `float` | `1e-3` | Leakage score above which templates share a scene. |
 | `scene_max_size` | `int \| None` | `800` | Soft cap on templates per scene, enforced by local threshold-raising. `None` disables. |

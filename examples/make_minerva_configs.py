@@ -328,7 +328,6 @@ def band_configs(rel: Release) -> list[dict]:
                 "bg_filter_sigma": 64.0,
                 "fit": {
                     "fit_astrometry_joint": True,
-                    "scene_minimum_anchors": 5,
                     # larger scenes before the local threshold bisection kicks
                     # in, and no long-range gluing of underfilled scenes
                     # (radius in 40 mas reference pixels; 1000 px = 40").

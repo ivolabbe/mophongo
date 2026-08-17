@@ -1507,7 +1507,8 @@ class Scene:
                 anchor_weights=anchor_weights,
             )
             # if no valid AB BB solve will fall back to flux-only
-            # @@@ scenefitter.solve should not take config but regularization and cg_kwargs
+            # @@@ scenefitter.solve should take regularization directly rather
+            # than the whole config
             sol = SceneFitter.solve(A, b, AB=AB, BB=BB, bB=bB, config=cfg, **kwargs)
             self.shifts = sol.shifts
 

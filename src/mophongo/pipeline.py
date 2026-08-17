@@ -228,7 +228,12 @@ class RunConfig:
     # '_sci' -> '_wht' naming" (see :meth:`Pipeline.resolve_wht_hi`).
     wht_hi: str | None = None
     # --- PSFs -------------------------------------------------------------
-    filter_lo: str = ""  # lo-res filter name, e.g. "f770w" (blur lookup, labels)
+    # Lo-res filter name, e.g. "f770w" (blur lookup, plot labels). Fallback
+    # only: `Pipeline._filter_lo` reads the FILTER card of `sci_lo` first,
+    # since the mosaic header cannot disagree with the pixels being fitted.
+    # Set this for a mosaic whose header carries no filter, or to override one
+    # that carries the wrong one.
+    filter_lo: str = ""
     # Grid selection and stamp settings; a plain dict in the JSON is coerced
     # to a PsfConfig by __post_init__.
     psf: PsfConfig = field(default_factory=PsfConfig)
@@ -1510,12 +1515,38 @@ class Pipeline:
                     setattr(self, key, snapshot[key])
 
     # -- shared helpers ----------------------------------------------------
+    def _filter_lo(self) -> str:
+        """The low-resolution band's filter, lowercased, or ``""``.
+
+        Read from the ``FILTER`` card of ``sci_lo`` first, because the mosaic
+        header is the thing that cannot disagree with the pixels being fitted.
+        ``RunConfig.filter_lo`` is the fallback for mosaics whose header
+        carries no filter, and the override for one that carries the wrong
+        one. Not cached: ``fits.getheader`` reads header blocks rather than
+        pixels, and caching would make a config edited between calls -- which
+        is what the tests and any interactive session do -- silently inert.
+        """
+        filt = ""
+        sci_lo = getattr(self.run_config, "sci_lo", None)
+        if sci_lo and Path(sci_lo).exists():
+            try:
+                for hdu in range(2):
+                    card = fits.getheader(sci_lo, hdu).get("FILTER")
+                    if card:
+                        filt = str(card).strip().lower()
+                        break
+            except Exception as exc:  # noqa: BLE001 - a header is best effort
+                logger.debug("no FILTER in %s (%s)", sci_lo, exc)
+        if not filt:
+            filt = (self.run_config.filter_lo or "").strip().lower()
+        return filt
+
     def _blur_fwhm(self) -> float | None:
         blur = self.run_config.psf.blur_fwhm
         if blur == "default":
             from .mock_mosaic import DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC
 
-            return DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC.get(self.run_config.filter_lo)
+            return DEFAULT_PSF_GAUSSIAN_FWHM_ARCSEC.get(self._filter_lo())
         return float(blur) if blur else None
 
     def _size_kw(self) -> dict:
@@ -2371,7 +2402,7 @@ class Pipeline:
         bg, ivar = self._bg_and_ivar_boxed(
             sci_lo, wht_lo, box_lo,
             bg_filter_sigma=cfg.bg_filter_sigma,
-            label=f"{cfg.filter_lo or 'lo band'}, {Path(cfg.wht_lo).name}",
+            label=f"{self._filter_lo() or 'lo band'}, {Path(cfg.wht_lo).name}",
         )
         # Background subtraction and the non-finite guard, over the trial box
         # only. Whole-array arithmetic here would touch every page and fault
@@ -2734,7 +2765,7 @@ class Pipeline:
         if not path:
             return f"image {ifilt}"
         name = Path(path).name
-        filt = (cfg.filter_lo or "") if ifilt else ""
+        filt = self._filter_lo() if ifilt else ""
         return f"{filt} ({name})" if filt else name
 
     def _scene_fit_table(self) -> Table:

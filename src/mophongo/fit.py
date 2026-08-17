@@ -91,9 +91,6 @@ class FitConfig:
     # explicit value. JSON configs write null for the adaptive default.
     reg_flux: float | None = None
     bad_value: float = np.nan
-    cg_kwargs: Dict[str, Any] = field(
-        default_factory=lambda: {"M": None, "maxiter": 500, "atol": 1e-6}
-    )
 
     # condense fit astrometry flags into one: fit_astrometry_niter = 0, means not fitting astrometry
     fit_astrometry_niter: int = 5  # Max astrometry refinement passes (0 → disabled)

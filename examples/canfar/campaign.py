@@ -327,9 +327,16 @@ def main() -> None:
     ap.add_argument("--from", dest="start", type=step_name, default="push",
                     metavar="STEP",
                     help="skip everything before this step (%s)" % ", ".join(STEPS))
-    ap.add_argument("--skip", nargs="+", type=step_name, default=[], metavar="STEP",
+    # `extend`, not the default `store`: with `store` a second --skip replaced
+    # the first instead of adding to it, so `--skip stage --skip psf` silently
+    # ran staging. default=None so the accumulator cannot append into a list
+    # shared between parses.
+    ap.add_argument("--skip", nargs="+", type=step_name, action="extend",
+                    default=None, metavar="STEP",
                     help="drop these steps from the middle of the chain, e.g. "
-                         "--skip stage when the inputs are already decompressed")
+                         "--skip stage when the inputs are already "
+                         "decompressed; repeatable, and takes several names "
+                         "at once")
     # --mem is the OzStar spelling of the same knob, accepted so a campaign
     # reads the same on either platform
     ap.add_argument("--ram", "--mem", dest="ram", type=int, default=None,
@@ -356,7 +363,8 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    todo = [s for s in STEPS[STEPS.index(args.start):] if s not in args.skip]
+    skip = args.skip or []
+    todo = [s for s in STEPS[STEPS.index(args.start):] if s not in skip]
     cfgs = configs_for(args.fields, args.bands)
     names = [c.stem + args.suffix for c in cfgs]
     log.info("campaign over %d config(s): %s", len(names), ", ".join(names))

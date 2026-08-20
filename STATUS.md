@@ -3,6 +3,21 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] A second `--skip` silently discarded the first (2026-08-20). `--skip` was
+  `nargs="+"` with the default `store` action, so `--skip stage --skip psf` left
+  `args.skip == ["psf"]` and staging ran. That is not an exotic invocation:
+  `release.sh` spells `--skip-stage` as `--skip stage` and passes its remaining
+  arguments through, so any `release.sh --skip-stage --skip psf` hits it. run3's
+  relaunch did, and three staging jobs went to the datamover partition; they
+  completed in 3-4 s because every input was already present, so the only cost
+  was the surprise.
+
+  Both campaigns now use `action="extend"` with `default=None`, normalised to
+  `[]` at the point of use so the accumulator cannot append into a list shared
+  between parses. Verified on the OzStar dry-run plan: no flag runs both steps,
+  `--skip stage` drops staging alone, and `--skip stage psf`, `--skip stage
+  --skip psf` and three repeated flags all drop both.
+
 - [x] The PSF-build wait killed every campaign at 20 minutes (2026-08-20).
   `wait_for_psf_build` polled with `stat -c %s ... || echo 0; grep -c
   PSF_BUILD_DONE ... || echo 0` and parsed the reply as two tokens. `grep -c`

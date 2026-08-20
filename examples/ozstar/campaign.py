@@ -335,9 +335,17 @@ def main() -> None:
     ap.add_argument("--from", dest="start", type=step_name, default="ozify",
                     metavar="STEP",
                     help="skip everything before this step (%s)" % ", ".join(STEPS))
-    ap.add_argument("--skip", nargs="+", type=step_name, default=[], metavar="STEP",
+    # `extend`, not the default `store`: with `store` a second --skip replaced
+    # the first instead of adding to it, so `--skip stage --skip psf` silently
+    # ran staging. release.sh spells --skip-stage as `--skip stage` and passes
+    # the rest of its arguments through, which makes two --skip flags the
+    # normal case rather than a typo. default=None so the accumulator cannot
+    # append into a list shared between parses.
+    ap.add_argument("--skip", nargs="+", type=step_name, action="extend",
+                    default=None, metavar="STEP",
                     help="drop these steps from the middle of the chain, e.g. "
-                         "--skip stage when the inputs are already on /fred")
+                         "--skip stage when the inputs are already on /fred; "
+                         "repeatable, and takes several names at once")
     ap.add_argument("--cores", type=int, default=submit.DEFAULT_CORES)
     ap.add_argument("--mem", "--ram", dest="mem", type=int, default=None,
                     help="GB per run; default %d for every field%s" % (
@@ -380,7 +388,8 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    todo = [s for s in STEPS[STEPS.index(args.start):] if s not in args.skip]
+    skip = args.skip or []
+    todo = [s for s in STEPS[STEPS.index(args.start):] if s not in skip]
     cfgs = configs_for(args.fields, args.bands)
     names = [c.stem + args.suffix for c in cfgs]
     log.info("campaign over %d config(s): %s", len(names), ", ".join(names))

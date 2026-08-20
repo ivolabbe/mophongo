@@ -3,6 +3,29 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] OzStar `README.md` and `MANUAL.md` corrected and cut back (2026-08-20).
+  Both had drifted from the code. The manual claimed the run tree defaults to
+  `.../mophongo/run` (it is `run2`, `ozroot.DEFAULT_RUN`), put the ePSF grids at
+  `$OZSTAR_RUN/PSF` when `psf_dir()` is `$OZSTAR_BASE/PSF` (shared above the
+  run, which is the whole reason they survive a new run directory), gave the fit
+  defaults as 16 cores / 64 GB against the actual 32 / 96
+  (`submit.DEFAULT_CORES`, `DEFAULT_MEM_GB`), and described the science venv as
+  shared when it has been per run under `run<N>/config/` for some time. The
+  README's resource table labelled rows "(run3)" and "(run4)" for runs that did
+  not exist, and still carried a paragraph justifying a 72 GB request that is no
+  longer the default; it now reads 96 GB against the 67.5 GB `cosmos_f770w`
+  peak. The `ozroot.py` module docstring had the same stale layout, showing
+  `bin/venv/` and a base-level `mophongo/` clone, and was fixed with it.
+
+  Every `submit.py` subcommand and every flag named in either document was
+  cross-checked against the argparse definitions; all 13 subcommands and 15
+  flags resolve, and no subcommand is undocumented. Prose was cut for a reader
+  who needs to run the fields rather than to relitigate the design: all 43 em
+  and en dashes removed, signposting ("Two things to know", "Two footnotes worth
+  having") replaced by the content it announced, and the justification essays
+  shortened without dropping the operational facts. Both files now say to launch
+  a campaign under `nohup`, which is the failure this session actually hit.
+
 - [x] `aperture_ee` sized the aperture in PSF-stamp pixels, not arcsec
   (2026-08-17). The cosmos_f770w run logged `aperture_ee=0.700 -> 9.559"
   diameter (238.97 pix)`, 12.5x too wide. `PSFRegionMap.pscale` is the scale

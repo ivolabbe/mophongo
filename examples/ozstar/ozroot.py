@@ -5,25 +5,28 @@ The tree separates what is stable from what is per-run, mirroring the CANFAR
 layout::
 
     /fred/<project>/<user>/mophongo/     $OZSTAR_BASE
-    ├── bin/                  job scripts and environments, shared by every run
-    │   ├── venv/             mophongo and its dependencies (module python)
+    ├── bin/                  job scripts, shared by every run
     │   └── venv-vos/         CADC transfer tools (OS python, datamover nodes)
-    ├── mophongo/             the GitHub clone
     ├── PSF/                  ePSF grids, expensive and reusable
     ├── data/                 inputs staged from CANFAR arc
     └── run2/                 one catalog version   $OZSTAR_RUN
         ├── config/           the rewritten configs
+        │   ├── mophongo/     this run's clone; git here is the version
+        │   └── venv/         this run's environment (module python)
         ├── logs/             SLURM logs of jobs with no single output dir
         └── <field>/          uds, cosmos, egs
             ├── <field>_repair_cache.fits
             └── <field>_<band>/   the fit's out_dir, and its own SLURM log
 
-Everything stable sits *above* the run directory: the mosaics, the grids, the
-clone, both venvs and the job scripts. A release is re-fitted many times
-against the same 64 GB of inputs and the same 492 grids, and only the configs
-and the outputs change. Putting any of it inside a run would mean re-staging
-and rebuilding for every version - and it makes deleting a run destructive
-beyond that run, which is exactly how a campaign's tooling was lost once.
+What a run cannot change sits *above* the run directory: the mosaics, the
+grids, the job scripts and the vos venv. A release is re-fitted many times
+against the same 64 GB of inputs and the same ~500 grids, and putting any of it
+inside a run would mean re-staging and rebuilding for every version. It also
+keeps deleting a run from destroying anything beyond that run.
+
+The clone and the science venv go the other way, into ``run<N>/config/``: a run
+pins one mophongo version, and a shared clone meant a ``sync`` for one run
+silently changed the code under every other run in the tree.
 
 The per-field level matters too. ``RunConfig.repair_cache_path`` defaults to
 ``".."`` relative to ``out_dir``, so with ``<field>/<field>_<band>/`` a field's

@@ -3,6 +3,28 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] The run README named the laptop's HEAD, not the source that ran
+  (2026-08-20). `write_run_readme` stamped `git rev-parse --short HEAD` in the
+  local checkout, and it runs before `setup`/`sync_src`, so the commit it
+  recorded was neither the clone under `run<N>/config/mophongo` nor necessarily
+  anything the cluster ever had: the cluster pulls GitHub, so an unpushed local
+  commit was reported as having produced outputs it never touched. run3 caught
+  it live, stamping `b8f17e0` while the clone was about to be synced past it.
+
+  Provenance now comes from the clone. `readme_commit()` asks
+  `submit.src_version()` first, which is git in `config/mophongo`, and falls
+  back to `origin/<ref>` labelled `(intended; clone not read yet)` when `setup`
+  has not run. The README is written twice: once up front, so a run that dies
+  halfway still says what it was trying to do, and again after `sync_src` and
+  `check_src_current`, when the clone is at the commit the jobs will import.
+  `--dry-run` passes `probe=False` and never ssh's the cluster.
+
+  `examples/canfar/campaign.py` had the identical defect and the same fix,
+  using `arc_src_version()` and re-stamping after `setup`. Verified against the
+  live run3 tree: `probe=True` returns `b8f17e0`, the clone's actual commit,
+  and `--dry-run` returns `7e54aae82 (intended; clone not read yet)` with no
+  cluster access. Neither example script has test coverage.
+
 - [x] OzStar `README.md` and `MANUAL.md` corrected and cut back (2026-08-20).
   Both had drifted from the code. The manual claimed the run tree defaults to
   `.../mophongo/run` (it is `run2`, `ozroot.DEFAULT_RUN`), put the ePSF grids at

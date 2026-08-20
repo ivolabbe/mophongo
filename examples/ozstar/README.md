@@ -108,7 +108,10 @@ run while every output looked normal. `--force-stale` submits anyway.
 
 Each campaign writes `$OZSTAR_RUN/README.md` before submitting anything: the
 mophongo commit, the release versions each field is pinned to, whatever you pass
-as `--note`, and what changed against the previous run.
+as `--note`, and what changed against the previous run. The commit it names is
+the one in `run<N>/config/mophongo`, which is the source the jobs import, so it
+is written once up front (naming the ref the run intends) and again after the
+source sync, once the clone has actually moved.
 
 Then watch with `submit.py status` / `logs` / `fetch`.
 

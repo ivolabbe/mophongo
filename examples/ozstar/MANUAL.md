@@ -257,7 +257,9 @@ Three behaviours to expect:
 
 Each campaign writes `$OZSTAR_RUN/README.md` before submitting: the mophongo
 commit, the release version each field is pinned to, your `--note`, and what
-changed against the previous run directory.
+changed against the previous run directory. The commit is read from
+`run<N>/config/mophongo`, not from your laptop, so it is the source that
+actually ran.
 
 To stop everything:
 

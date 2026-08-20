@@ -227,8 +227,34 @@ def check_versions(cfgs: list[Path]) -> None:
                 "and re-run with --note saying what changed.")
 
 
+def readme_commit(ref: str, probe: bool = True) -> str:
+    """The mophongo commit the README should report, and where it came from.
+
+    Provenance means the checkout under the run's config directory, because
+    that is the source the sessions import. Ask it first, the same way
+    ``check_src_current`` does. Before ``setup`` has run there is nothing to
+    ask, so fall back to ``origin/<ref>``, which is what ``push`` and ``setup``
+    will put there, and say the fallback was used.
+
+    Never the laptop's ``HEAD``: arc receives a git archive of ``origin/<ref>``,
+    so a local commit that was never pushed is absent from the run while the
+    README claims it produced the outputs.
+
+    ``probe`` is false under ``--dry-run``, which must not launch a session.
+    """
+    import submit  # local, for the same reason as elsewhere in this module
+
+    have = submit.arc_src_version() if probe else ""
+    if have:
+        return have.split()[0]
+    try:
+        return submit.resolve_ref(ref)[:9] + " (intended; checkout not read yet)"
+    except SystemExit:  # a README is not worth failing a launch over
+        return "unknown"
+
+
 def write_run_readme(names: list[str], cfgs: list[Path], note: str,
-                     dry: bool) -> None:
+                     dry: bool, ref: str = "main") -> None:
     """Write ``run<N>/README.md``: what this run is, and how it differs.
 
     A run directory is the unit of versioning here, and a number says nothing
@@ -239,7 +265,8 @@ def write_run_readme(names: list[str], cfgs: list[Path], note: str,
     stated rather than reconstructed months later from file dates.
 
     Written before the work is submitted, so a run that dies halfway still
-    says what it was trying to do.
+    says what it was trying to do, and again once ``setup`` has put the
+    checkout on arc, so the commit it names is the one that ran.
     """
     import submit
     from arcify import config_versions
@@ -254,11 +281,7 @@ def write_run_readme(names: list[str], cfgs: list[Path], note: str,
         cfg = json.loads(re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text()))
         versions[name.split("_")[0]] = config_versions(cfg)
 
-    try:
-        commit = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],
-                                capture_output=True, text=True).stdout.strip()
-    except Exception:  # noqa: BLE001 - a README is not worth failing a launch
-        commit = "unknown"
+    commit = readme_commit(ref, probe=not dry)
 
     lines = [f"# run{run}", ""]
     if note:
@@ -343,12 +366,18 @@ def main() -> None:
     # moment the answer is most useful.
     if args.check_versions:
         check_versions(cfgs)
-    write_run_readme(names, cfgs, args.note, args.dry_run)
+    write_run_readme(names, cfgs, args.note, args.dry_run, args.ref)
 
     if "push" in todo:
         run_step(["submit.py", "push"], args.dry_run)
     if "setup" in todo:
         run_step(["submit.py", "setup"], args.dry_run)
+    if "setup" in todo and not args.dry_run:
+        # Re-stamp now that the checkout exists. The first write happened
+        # before it did, so it could only name the ref this run intended; what
+        # is on arc is the source the sessions will import, and that is the
+        # provenance the README owes whoever reads it next to the outputs.
+        write_run_readme(names, cfgs, args.note, args.dry_run, args.ref)
     if "arcify" in todo:
         arcify = ["arcify.py", *[str(c) for c in cfgs]]
         if args.r_trial is not None:

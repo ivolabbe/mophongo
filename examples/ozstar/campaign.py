@@ -238,8 +238,32 @@ def previous_run(name: str) -> str | None:
     return f"{match.group(1)}{int(match.group(2)) - 1}"
 
 
+def readme_commit(ref: str, probe: bool = True) -> str:
+    """The mophongo commit the README should report, and where it came from.
+
+    Provenance means the clone under ``<run>/config/mophongo``, because that is
+    the source the jobs import. Ask it first. Before ``setup`` has run there is
+    nothing to ask, so fall back to ``origin/<ref>``, which is what ``setup``
+    and ``sync_src`` will put there, and say the fallback was used.
+
+    Never the laptop's ``HEAD``: the cluster pulls GitHub, so a local commit
+    that was never pushed is absent from the run while the README claims it
+    produced the outputs. That is the one reading of this line that is worse
+    than no line at all.
+
+    ``probe`` is false under ``--dry-run``, which must not ssh the cluster.
+    """
+    have = submit.src_version() if probe else ""   # "<sha> <subject>", or ""
+    if have:
+        return have.split()[0]
+    try:
+        return submit.resolve_ref(ref)[:9] + " (intended; clone not read yet)"
+    except SystemExit:  # a README is not worth failing a launch over
+        return "unknown"
+
+
 def write_run_readme(names: list[str], cfgs: list[Path], note: str,
-                     dry: bool) -> None:
+                     dry: bool, ref: str = "main") -> None:
     """Write ``<run>/README.md``: what this run is, and how it differs.
 
     A run directory is the unit of versioning here, and a number says nothing
@@ -250,8 +274,10 @@ def write_run_readme(names: list[str], cfgs: list[Path], note: str,
     stated rather than reconstructed months later from file dates.
 
     Written before the work is submitted, so a run that dies halfway still says
-    what it was trying to do. The copy under ``scratch/ozstar`` is kept as well
-    as uploaded, since reading it back needs an ssh.
+    what it was trying to do, and again after ``sync_src`` has moved the clone,
+    so the commit it names is the one that ran. The copy under
+    ``scratch/ozstar`` is kept as well as uploaded, since reading it back needs
+    an ssh.
     """
     from arcify import config_versions
 
@@ -264,10 +290,7 @@ def write_run_readme(names: list[str], cfgs: list[Path], note: str,
         cfg = json.loads(re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text()))
         versions[name.split("_")[0]] = config_versions(cfg)
 
-    try:
-        commit = submit.git("rev-parse", "--short", "HEAD")
-    except SystemExit:  # a README is not worth failing a launch over
-        commit = "unknown"
+    commit = readme_commit(ref, probe=not dry)
 
     lines = [f"# {run}", ""]
     if note:
@@ -368,7 +391,7 @@ def main() -> None:
     # the answer is most useful.
     if args.check_versions:
         check_versions(cfgs)
-    write_run_readme(names, cfgs, args.note, args.dry_run)
+    write_run_readme(names, cfgs, args.note, args.dry_run, args.ref)
 
     if "ozify" in todo:
         ozify = ["ozify.py", *[str(c) for c in cfgs]]
@@ -430,6 +453,12 @@ def main() -> None:
     if not args.dry_run:
         submit.sync_src(args.ref)
         submit.check_src_current(args.ref, args.force_stale)
+        # Re-stamp now that the clone has moved. The first write happened
+        # before `setup`, so it could only name the ref this run intended; the
+        # commit under config/mophongo is the one the jobs about to be
+        # submitted will import, and that is the provenance the README owes
+        # whoever reads it next to the outputs.
+        write_run_readme(names, cfgs, args.note, args.dry_run, args.ref)
 
     # Phase 2: one saturation-repair job per field, all fields at once, each
     # depending only on its own staging. It writes the field's shared repair

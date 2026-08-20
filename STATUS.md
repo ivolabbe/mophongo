@@ -3,6 +3,31 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] The PSF-build wait killed every campaign at 20 minutes (2026-08-20).
+  `wait_for_psf_build` polled with `stat -c %s ... || echo 0; grep -c
+  PSF_BUILD_DONE ... || echo 0` and parsed the reply as two tokens. `grep -c`
+  prints its count *and* exits 1 when the count is zero, so `|| echo 0` fired
+  as well and the reply carried three. `len(out) == 2` was therefore false on
+  every poll, `size, done` fell to `(0, 0)`, and `size == last` held from the
+  second poll onward: `idle` reached `stall` and the campaign died at exactly
+  20 minutes no matter how healthy the build was. The same parse meant
+  `PSF_BUILD_DONE` could never be seen, so the wait had no successful path at
+  all.
+
+  run3 hit it. The campaign exited claiming the log had not grown for 20 min
+  while the log's mtime was the current second, the error scan was empty, three
+  build processes were alive, and the grid count had gone 488 -> 571.
+
+  The poll now uses `grep -q ... && echo 1 || echo 0`, which emits one token,
+  and the parse rejects any reply that is not two digits: a dropped ssh warns
+  and re-polls instead of counting as a size of zero toward the stall. Verified
+  on the cluster across all three branches: growing log `12 0`, marker present
+  `27 1`, missing file `0 0`. No other instance of the pattern exists in
+  `examples/`.
+
+  The detached build is unaffected by this and kept running; only the laptop's
+  watcher died, so nothing was submitted.
+
 - [x] The run README named the laptop's HEAD, not the source that ran
   (2026-08-20). `write_run_readme` stamped `git rev-parse --short HEAD` in the
   local checkout, and it runs before `setup`/`sync_src`, so the commit it

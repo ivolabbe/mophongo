@@ -313,11 +313,27 @@ def wait_for_psf_build(log_path: str, poll: int = 60, stall: int = 20) -> None:
     quoted = shlex.quote(log_path)
     last, idle = -1, 0
     while True:
-        # size and the done-marker in one round trip: this loops for hours
+        # Size and the done-marker in one round trip: this loops for hours.
+        # `grep -q` rather than `grep -c`, because `grep -c` prints its count
+        # *and* exits 1 when the count is zero, so `|| echo 0` fired as well
+        # and the reply carried three tokens instead of two. The parse below
+        # then fell to its (0, 0) branch on every poll, which reads as a log
+        # that never grows: the wait killed every campaign at exactly `stall`
+        # polls no matter how healthy the build was, and could never see the
+        # marker it was waiting for.
         out = ssh(f"stat -c %s {quoted} 2>/dev/null || echo 0; "
-                  f"grep -c PSF_BUILD_DONE {quoted} 2>/dev/null || echo 0",
+                  f"grep -q PSF_BUILD_DONE {quoted} 2>/dev/null "
+                  f"&& echo 1 || echo 0",
                   check=False).split()
-        size, done = (int(out[0]), int(out[1])) if len(out) == 2 else (0, 0)
+        if len(out) != 2 or not all(t.isdigit() for t in out):
+            # A dropped ssh is not evidence about the build. Say so and poll
+            # again without counting it toward the stall, rather than reading
+            # the silence as a size of zero.
+            log.warning("  psf: could not read the build log this poll (%r)",
+                        " ".join(out))
+            time.sleep(poll)
+            continue
+        size, done = int(out[0]), int(out[1])
         if done:
             log.info("PSF build finished")
             log.info("%s", ssh(f"tail -n 3 {quoted}", check=False).rstrip())

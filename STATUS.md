@@ -3,6 +3,35 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] run3: full MINERVA release on OzStar, all 17 bands (2026-08-20). Every
+  job completed with exit 0: three staging jobs (3-4 s, inputs already on
+  `/fred`), three per-field repairs (~6 min), and 17 full-field fits. Wall clock
+  for the whole campaign was under two hours, two fits per milan node at 32
+  cores / 96 GB. Source `f8fac40`; release versions cosmos `n3.0/m3.0/v1.0.1`,
+  egs `n2.0/m2.1/v1.3.1`, uds `n3.0/m3.1/v1.2.1`. 504 GB under
+  `/fred/oz030/ilabbe/mophongo/run3`, project total 1.22 TB of 10 TB.
+
+  This is the first release carrying the arcsec encircled-energy aperture
+  (`fb1e017`), and the logs confirm it: `aperture_ee=0.700` resolves to
+  0.790"-1.673" diameter (19.7-41.8 pix) across the bands, against the
+  9.559"/238.97 pix the pre-fix cosmos_f770w run recorded.
+
+  Photometry checked on all 17 fetched tables rather than assumed from exit
+  codes: `flux_1` is 100% finite in every band, 37-61% positive (NNLS clips the
+  rest, and most catalog sources are undetected in MIRI), and the median
+  `flux_1_total / flux_1` throughput ratio runs 1.086 at F1000W to 1.147 at
+  F2100W. That ordering is the check worth keeping: the correction grows with
+  wavelength because the PSF does, so a ratio that stopped tracking wavelength
+  would mean the encircled-energy chain had come loose again.
+
+  Peak RSS 19.8-64.4 GB, worst `cosmos_f770w` at 64.4 GB against the 96 GB
+  request (67%). The default needs no revisiting.
+
+  Three toolkit bugs surfaced during the launch and are fixed on main: the run
+  README stamping the laptop's HEAD, `wait_for_psf_build` declaring every
+  healthy build dead at 20 minutes, and `--skip` discarding all but its last
+  occurrence.
+
 - [x] A second `--skip` silently discarded the first (2026-08-20). `--skip` was
   `nargs="+"` with the default `store` action, so `--skip stage --skip psf` left
   `args.skip == ["psf"]` and staging ran. That is not an exotic invocation:

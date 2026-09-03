@@ -72,18 +72,45 @@ same thing done by hand.
 
 ## Prerequisites
 
-A CADC proxy certificate, valid 10 days:
-
-```bash
-~/bin/remote/canfar-cert.sh                  # prompts for the CADC password
-```
-
-`skaha` and the `vos` tools live in `~/.venvs/canfar`. Everything below runs
+`skaha` and the `vos` tools live in `~/.venvs/canfar`, and everything below runs
 with that interpreter:
 
 ```bash
+python -m venv ~/.venvs/canfar
+~/.venvs/canfar/bin/pip install vos cadcutils skaha
 P=~/.venvs/canfar/bin/python
 ```
+
+`remote/` holds the shell helpers that get a machine onto CANFAR. Copy the
+config once, then fetch a certificate:
+
+```bash
+cp remote/canfar.conf.example remote/canfar.conf   # then set CANFAR_USER in it
+remote/canfar-cert.sh                              # prompts for the CADC password
+```
+
+The certificate lands in `~/.ssl/cadcproxy.pem` and is valid for ten days.
+Re-running the script refreshes it only when it is close to expiring;
+`--force` fetches a new one regardless. `canfar.conf` is not tracked, since it
+names one CADC account; `runroot.py` reads `CANFAR_USER` from it, or from the
+environment, or from `~/bin/remote/canfar.conf` if that is where an older
+machine keeps it.
+
+The mount is optional and worth having, because it is what makes `sync` and
+other file movement take seconds rather than a queue wait:
+
+```bash
+remote/canfar-mount.sh                     # $CANFAR_REMOTE -> ~/canfar
+remote/canfar-mount.sh /projects/minerva ~/canfar_projects
+remote/canfar-umount.sh                    # when you are done
+```
+
+It needs FUSE-T rather than macFUSE (kext-free); the script prints the `brew`
+line if `sshfs` is missing. `remote/canfar-sync.sh` is the alternative when
+there is no mount: a `vsync` of a directory tree in either direction, which
+needs only the certificate. `remote/ozstar-mount.sh` is the same idea for
+`/fred`, and lives beside it because the two mounts are one piece of machine
+setup.
 
 ## One-time setup
 
@@ -249,7 +276,8 @@ refuses a run tree there.
   Pending for half an hour to do seconds of copying; through the mount the same
   unpack takes about twenty seconds. `sync` therefore uses the mount when it
   finds one — `$CANFAR_RUN_LOCAL`, or `~/canfar_projects`/`~/canfar_home` — and
-  `--job` forces a container. Reserve jobs for work that needs one. The caveat
+  `--job` forces a container. `remote/canfar-mount.sh` makes one; mount
+  `/projects/minerva` at `~/canfar_projects` and `sync` finds it by itself. Reserve jobs for work that needs one. The caveat
   is the same either way: rewriting source under a running job is only safe
   because already-running jobs keep the code they imported.
 - CANFAR always runs a commit. `push` ships `git archive` of `main` by
@@ -313,5 +341,7 @@ refuses a run tree there.
   the data are already there and bands can run as concurrent jobs.
 
 Background, and the traps found getting the first run working, are in
-`scratch/canfar/RUNNING_ON_CANFAR.md`. Data access from a laptop (scp, vsync,
-sshfs) is in `MINERVA/data/00CANFAR`.
+`scratch/canfar/RUNNING_ON_CANFAR.md`. Getting a laptop onto CANFAR at all —
+certificate, sshfs mount, `vsync` — is `remote/`, described under
+Prerequisites above; `MINERVA/data/00CANFAR` covers the same ground for the
+data staging scripts that live with the release.

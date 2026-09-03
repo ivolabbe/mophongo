@@ -191,7 +191,7 @@ def main() -> None:
 
     cert = Path.home() / ".ssl/cadcproxy.pem"
     if not cert.exists():
-        raise SystemExit(f"no CADC certificate at {cert}; run ~/bin/remote/canfar-cert.sh first")
+        raise SystemExit(f"no CADC certificate at {cert}; run ../canfar/remote/canfar-cert.sh first")
 
 
     # Collect the subtrees every config needs, then index each one once: the

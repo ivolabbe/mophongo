@@ -295,12 +295,39 @@ python -m venv ~/.venvs/canfar
 ~/.venvs/canfar/bin/pip install vos cadcutils skaha
 ```
 
-Then, from `mophongo/examples/canfar/`:
+Then, from `mophongo/examples/canfar/`, tell the toolkit who you are and get a
+certificate. `remote/` holds the shell helpers for both:
 
 ```bash
-export CANFAR_USER=<user>
-~/.venvs/canfar/bin/cadc-get-cert -u <user>    # 10-day certificate
+cp remote/canfar.conf.example remote/canfar.conf   # set CANFAR_USER in it
+remote/canfar-cert.sh                              # 10-day certificate
+```
 
+`canfar.conf` is read by every `remote/*.sh` script and by `runroot.py`, which
+is where the username comes from if `$CANFAR_USER` is not exported. It is not
+tracked, because it names one CADC account. `canfar-cert.sh` writes
+`~/.ssl/cadcproxy.pem`, refreshes it only when it is nearly expired, and takes
+`--force` to fetch one regardless; underneath it is `cadc-get-cert -u <user>`.
+
+### 5.1 The `/arc` mount
+
+Optional, and the thing that makes file movement quick — seconds through the
+mount against a half-hour queue wait for a container to do the same copying:
+
+```bash
+remote/canfar-mount.sh /projects/minerva ~/canfar_projects
+remote/canfar-umount.sh ~/canfar_projects
+```
+
+`submit.py sync` looks for exactly that mount point (or `~/canfar_home`, or
+`$CANFAR_RUN_LOCAL`) and uses it when it is there. macOS needs FUSE-T rather
+than macFUSE; the script prints the `brew` incantation if `sshfs` is missing.
+Without a mount, `remote/canfar-sync.sh <src> <dst>` copies a directory tree in
+either direction with `vsync`, needing only the certificate.
+
+### 5.2 Running
+
+```bash
 P=~/.venvs/canfar/bin/python
 $P submit.py push                              # source, job scripts, PSF grids
 $P submit.py setup                             # build the venv on /arc
@@ -329,7 +356,7 @@ $P submit.py push --src-only                   # setup is the only thing that
 $P submit.py sync                              # unpacks psf.tar, so skip it
 ```
 
-`sync` does the unpacking through the `/arc` mount when you have one (Part 2),
+`sync` does the unpacking through the `/arc` mount when you have one (Part 5.1),
 which takes seconds; without a mount it launches a container and waits in the
 queue, which has taken half an hour for the same work. `--job` forces the
 container.
@@ -378,6 +405,7 @@ See `README.md` here for the details of what each step does.
 - Science Portal: https://www.canfar.net/science-portal
 - Storage browser: https://www.canfar.net/storage/arc/list
 - What the MINERVA products are and where: `MINERVA/data/00WHERE`
+- Certificate, sshfs mounts and `vsync` from a laptop: `remote/` (Part 5)
 - Getting data on and off CANFAR from a laptop: `MINERVA/data/00CANFAR`
 - Background and the traps found setting this up:
   `mophongo/scratch/canfar/RUNNING_ON_CANFAR.md`

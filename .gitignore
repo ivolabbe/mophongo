@@ -52,6 +52,16 @@ examples/ozstar/jobs/*
 !examples/ozstar/jobs/*.sh
 !examples/ozstar/jobs/*.slurm
 !examples/ozstar/jobs/*.py
+
+# The remote-access toolkit: shell helpers that fetch a CADC proxy certificate
+# and mount /arc over sshfs. Tracked, because getting a new machine onto CANFAR
+# is part of running a campaign and the alternative is a page of prose. Its
+# `canfar.conf` is not: it names one CADC account, so the account-free
+# `canfar.conf.example` is what ships and the working copy stays out.
+!examples/canfar/remote/
+examples/canfar/remote/*
+!examples/canfar/remote/*.sh
+!examples/canfar/remote/*.example
 legacy/autopilot/*png
 legacy/autopilot/*pdf
 # IDL reference-run output: 2.4 MB of FITS per run, regenerable from the

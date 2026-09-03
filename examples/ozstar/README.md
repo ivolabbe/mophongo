@@ -59,15 +59,35 @@ are absolute, so `setup` rebuilds rather than moves one.
 ## Prerequisites
 
 ```bash
-export OZSTAR_USER=<your cluster username>     # ssh key access to nt.swin.edu.au
-~/bin/remote/canfar-cert.sh                    # CADC proxy certificate, 10 days
-P=~/.venvs/canfar/bin/python                   # ozify.py needs the vos client
+export OZSTAR_USER=<your cluster username>   # ssh key access to nt.swin.edu.au
+P=~/.venvs/canfar/bin/python                 # ozify.py needs the vos client
 ```
+
+CANFAR access is needed for two steps only: `ozify` reads the release layout on
+arc, and `stage` copies the files across. Both want a CADC proxy certificate,
+which `../canfar/remote/` fetches — see the prerequisites there for the
+one-time `canfar.conf`:
+
+```bash
+../canfar/remote/canfar-cert.sh              # ~/.ssl/cadcproxy.pem, 10 days
+$P submit.py cert                            # copy it to OzStar for the staging job
+```
+
+Neither is needed once a release is staged. `data/` sits above the run
+directory and is shared by every run in the tree, so a second attempt at a
+release has nothing to copy: `campaign.py` lists what is already on `/fred` and
+submits no staging job for a field that is short of nothing. A campaign that
+skips `ozify` too — the configs having been rewritten already — touches CANFAR
+nowhere and runs with an expired certificate.
+
+`../canfar/remote/ozstar-mount.sh` mounts `/fred` over sshfs at `~/ozstar`,
+which is convenient for reading logs and fit tables directly. Nothing in the
+toolkit depends on it.
 
 ## Everything at once
 
 ```bash
-OZSTAR_RUN=run3 ./release.sh --skip-stage   # the full-field release
+OZSTAR_RUN=run3 ./release.sh                # the full-field release
 $P campaign.py --fields uds                 # one field
 $P campaign.py --bands f770w                # one band of every field
 $P campaign.py --skip psf repair            # grids and caches already in place
@@ -86,8 +106,8 @@ submits the work in three phases:
    *waited on*. Skipped when they are already on `/fred`, which is the usual
    case once a release has been fitted once.
 2. **`repair`**: one saturation-repair job per field, behind that field's
-   staging. Repair depends on the detection band alone, so one job fills the
-   cache that every band of the field then reloads.
+   staging when there was one. Repair depends on the detection band alone, so
+   one job fills the cache that every band of the field then reloads.
 3. **`run`**: that field's band fits, chained behind its repair with
    `--dependency=afterok`.
 
@@ -95,6 +115,14 @@ Only the first phase blocks, and only because it cannot be a SLURM job: the
 build queries MAST for each exposure's OPD and compute nodes have no route to
 it, so nothing can be made to depend on it. Phases 2 and 3 go up as one
 dependency graph.
+
+Staging comes between the grids and the repair, and like the grid build it is
+conditional. `campaign.py` lists `$OZSTAR_BASE/data` and submits a datamover
+job only for a field that is actually short of an input, so the second campaign
+against a release submits none: the inputs sit above the run directory and are
+copied once. That is what keeps a re-fit off CANFAR — no transfer, and no CADC
+certificate to have expired since the first one. `--skip stage` still exists,
+and now means "do not even list what is there".
 
 The step names and flags match `../canfar/campaign.py`, so a campaign reads the
 same way on either platform. Each accepts the other's name for the config
@@ -120,7 +148,7 @@ takes, and the process is a child of your shell. Closing the terminal kills it
 mid-launch:
 
 ```bash
-OZSTAR_RUN=run3 nohup ./release.sh --skip-stage > ../../scratch/ozstar/run3.log 2>&1 &
+OZSTAR_RUN=run3 nohup ./release.sh > ../../scratch/ozstar/run3.log 2>&1 &
 ```
 
 Nothing submitted is lost if it dies. `push`, `setup` and `psf` are idempotent,

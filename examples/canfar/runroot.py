@@ -63,10 +63,14 @@ def run_number() -> int:
 
 
 #: Where the shell toolkit keeps its config. Those scripts (``canfar-cert.sh``,
-#: ``canfar-mount.sh`` and friends) set up sshfs mounts and CADC certificates,
-#: which are machine infrastructure rather than part of mophongo, so they live
-#: outside the repo. ``$CANFAR_CONF`` points at a different copy.
-DEFAULT_CONF = Path.home() / "bin" / "remote" / "canfar.conf"
+#: ``canfar-mount.sh`` and friends) live in ``remote/`` beside this file and set
+#: up the CADC certificate and the sshfs mounts. ``canfar.conf`` itself is not
+#: tracked - it names one CADC account - so ``remote/canfar.conf.example`` is
+#: what ships. ``$CANFAR_CONF`` points at a copy kept somewhere else, and the
+#: old ``~/bin/remote`` location is still read so an existing machine keeps
+#: working.
+DEFAULT_CONF = Path(__file__).resolve().parent / "remote" / "canfar.conf"
+LEGACY_CONF = Path.home() / "bin" / "remote" / "canfar.conf"
 
 
 def canfar_user() -> str:
@@ -74,13 +78,17 @@ def canfar_user() -> str:
     user = os.environ.get("CANFAR_USER")
     if user:
         return user
-    conf = Path(os.environ.get("CANFAR_CONF") or DEFAULT_CONF)
-    if conf.exists():
+    override = os.environ.get("CANFAR_CONF")
+    for conf in ([Path(override)] if override else [DEFAULT_CONF, LEGACY_CONF]):
+        if not conf.exists():
+            continue
         match = re.search(r'^\s*CANFAR_USER\s*=\s*"?([^"\s]+)', conf.read_text(), re.M)
         if match and match.group(1) != "your_cadc_username":
             return match.group(1)
     raise SystemExit(
-        f"set CANFAR_USER to your CADC username, or fill in {conf}"
+        "set CANFAR_USER to your CADC username, or copy "
+        f"{DEFAULT_CONF.parent / 'canfar.conf.example'} to {DEFAULT_CONF} "
+        "and fill it in"
     )
 
 

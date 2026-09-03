@@ -1,0 +1,21 @@
+# CANFAR access settings. Copy to canfar.conf and edit.
+#   cp canfar.conf.example canfar.conf
+# canfar.conf is sourced by all canfar-*.sh scripts (and is gitignored).
+
+# Your CADC / CANFAR username.
+CANFAR_USER="your_cadc_username"
+
+# SSHFS endpoint (CANFAR ARC filesystem gateway).
+CANFAR_HOST="ws-uv.canfar.net"
+CANFAR_PORT="64022"
+
+# Default remote path to mount. The SFTP gateway is chrooted at /arc, so paths
+# are given without the /arc prefix (a leading /arc is stripped if present).
+CANFAR_REMOTE="/projects/minerva"
+
+# Default local mount point.
+CANFAR_MOUNT="$HOME/canfar"
+
+# Venv holding the vos tools (vcp, vsync, vls, cadc-get-cert). Prepended to PATH
+# by canfar-common.sh. Same venv MINERVA/data/stage/stage_canfar.py uses.
+CANFAR_VENV="$HOME/.venvs/canfar"

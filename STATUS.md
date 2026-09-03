@@ -3,6 +3,33 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] The CANFAR access toolkit is in the repo, and OzStar staging asks before
+  it reaches for CANFAR (2026-09-03). `examples/canfar/remote/` now ships the
+  shell helpers that get a machine onto CANFAR — `canfar-cert.sh` for the CADC
+  proxy certificate, `canfar-mount.sh`/`canfar-umount.sh` for the `/arc` sshfs
+  mount, `canfar-sync.sh` for a `vsync` in either direction, and
+  `ozstar-mount.sh` for `/fred`. This reverses the 2026-08-15 entry below,
+  which moved them to `~/bin/remote/` as machine setup rather than mophongo.
+  The objection there was a LaunchAgent `RunAtLoad` path pointing into a
+  gitignored `scratch/`; a tracked `examples/canfar/remote/` is not that, and
+  the cost of the move was that the error messages of five scripts named a
+  directory nobody else has — getting a second machine onto CANFAR meant
+  reconstructing the toolkit from those messages. `canfar.conf` stays untracked
+  (it names one CADC account) and `canfar.conf.example` ships in its place;
+  `runroot.py` reads the repo copy first and still falls back to
+  `~/bin/remote/canfar.conf`, so an existing machine and its LaunchAgents keep
+  working.
+
+  On OzStar, `submit.stage()` now lists `$OZSTAR_BASE/data` and submits a
+  datamover job only for a field short of an input, returning field -> job id
+  rather than a list, and `jobs/stage.sh` computes its missing set before
+  loading the transfer tools or checking the certificate. Staged inputs live
+  above the run directory and are shared, so from the second campaign against a
+  release onwards there is nothing to copy: run3's three staging jobs each
+  queued for the datamover partition to spend 3-4 seconds confirming that.
+  `release.sh` no longer refuses to start without a certificate — it warns —
+  since only `ozify` and a staging job that has work to do need one.
+
 - [x] run3: full MINERVA release on OzStar, all 17 bands (2026-08-20). Every
   job completed with exit 0: three staging jobs (3-4 s, inputs already on
   `/fred`), three per-field repairs (~6 min), and 17 full-field fits. Wall clock

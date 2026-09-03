@@ -72,13 +72,23 @@ staged inputs, the PSF grids and the job scripts above it are reused.
 ### 2.2 Certificate
 
 ```bash
-~/bin/remote/canfar-cert.sh              # prompts for the CADC password
+../canfar/remote/canfar-cert.sh          # prompts for the CADC password
 $P submit.py cert                        # copies it to OzStar
 ```
 
+`canfar-cert.sh` is one of the shell helpers in `../canfar/remote/`; it wants a
+`canfar.conf` naming your CADC username, which `../canfar/MANUAL.md` Part 5
+sets up. It writes `~/.ssl/cadcproxy.pem`, and refreshes it only when it is
+close to expiring.
+
 Valid for ten days. The staging job authenticates with this and nothing else, so
-a campaign that outlives one needs both commands again. The symptom otherwise is
-a staging job failing immediately on every file.
+a campaign that has to stage after one expires needs both commands again. The
+symptom otherwise is a staging job failing immediately on every file.
+
+Only two things use it: `ozify.py`, which reads the release layout on arc, and
+the staging job. A campaign whose configs are written and whose inputs are on
+`/fred` submits no staging job at all — `campaign.py` lists what is there first
+— so it neither needs a certificate nor notices that one has expired.
 
 ### 2.3 The run tree
 
@@ -158,6 +168,12 @@ and decompresses the gzipped ones. About 15 GB per field; UDS takes tens of
 minutes. Files already present are skipped, so the job can be resubmitted after
 a timeout and will resume.
 
+`stage` first lists `$OZSTAR_BASE/data` and submits nothing for a field whose
+inputs are all there — the usual case for every run after the first, since
+`data/` sits above the run directory and is shared. Nothing then contacts
+CANFAR, which is why a re-fit works with an expired certificate. The job itself
+makes the same check before reaching for `vcp`.
+
 Pass several bands of a field in one call and they share a single job, since the
 bands of a field share the F444W mosaic, its weight map and the segmap:
 
@@ -212,7 +228,7 @@ $P campaign.py --check-versions --dry-run       # ... and what arc moved on to
 $P campaign.py                                  # trial patches, every config
 $P campaign.py --fields uds --bands f770w       # one band of one field
 $P campaign.py --r-trial 0 --note "n3.0 UDS"    # the full-field release
-./release.sh --skip-stage                       # the same, arguments filled in
+./release.sh                                    # the same, arguments filled in
 ```
 
 One command rewrites all 17 configs, uploads them, builds the environment, and
@@ -226,7 +242,7 @@ Run it detached. The `psf` phase blocks, and the process is a child of your
 shell:
 
 ```bash
-OZSTAR_RUN=run3 nohup ./release.sh --skip-stage > ../../scratch/ozstar/run3.log 2>&1 &
+OZSTAR_RUN=run3 nohup ./release.sh > ../../scratch/ozstar/run3.log 2>&1 &
 ```
 
 If it does die mid-launch, nothing is lost: `push`, `setup` and `psf` are
@@ -298,4 +314,5 @@ $P submit.py sync          # git pull; the venv and running jobs are untouched
 - Cluster reference (partitions, modules, quotas, SLURM): `~/.claude/ozstar.md`
 - The CANFAR equivalent of this toolkit: `../canfar/README.md`, `../canfar/MANUAL.md`
 - What the MINERVA products are and where: `MINERVA/data/00WHERE`
+- CADC certificate, sshfs mounts, `vsync`: `../canfar/remote/`
 - Getting data off CANFAR: `MINERVA/data/00CANFAR`

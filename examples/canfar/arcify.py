@@ -203,7 +203,7 @@ def check_release_versions(cfg_paths: list[Path]) -> list[tuple[str, str, str, s
     """
     cert = Path.home() / ".ssl/cadcproxy.pem"
     if not cert.exists():
-        raise SystemExit(f"no CADC certificate at {cert}; run ~/bin/remote/canfar-cert.sh first")
+        raise SystemExit(f"no CADC certificate at {cert}; run remote/canfar-cert.sh first")
     client = Client(vospace_certfile=str(cert))
 
     latest: dict[tuple[str, str], list[str]] = {}
@@ -382,7 +382,7 @@ def main() -> None:
 
     cert = Path.home() / ".ssl/cadcproxy.pem"
     if not cert.exists():
-        raise SystemExit(f"no CADC certificate at {cert}; run ~/bin/remote/canfar-cert.sh first")
+        raise SystemExit(f"no CADC certificate at {cert}; run remote/canfar-cert.sh first")
 
     # Collect the subtrees every config needs, then index each one once: the
     # bands of a field overlap almost completely.

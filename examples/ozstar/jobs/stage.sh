@@ -33,6 +33,34 @@ JOBS=${JOBS:-6}
 
 export PATH="$VOS/bin:$PATH"
 unset PYTHONPATH
+
+D=$DATA
+mkdir -p "$D"
+
+manifests=()
+for cfg in $CFGS; do
+    m=$CFGDIR/${cfg}_stage.tsv
+    [[ -s $m ]] || { echo "no manifest: $m" >&2; exit 1; }
+    manifests+=("$m")
+done
+
+# What this field still needs, worked out before anything reaches for CANFAR.
+# Staged inputs sit above the run directory and are shared by every run in the
+# tree, so a re-run of a release that was already staged has nothing to copy,
+# and it must not then fail on a certificate it was never going to use. The
+# laptop asks the same question before submitting; this is the job's own answer
+# for the case where the two disagree - a concurrent job for another field
+# having just fetched the shared mosaics, say.
+wanted=$(sort -u "${manifests[@]}" | awk -F'\t' '!seen[$2]++ {print $2}')
+missing=$(while read -r f; do [[ -s $D/$f ]] || echo "$f"; done <<< "$wanted")
+if [[ -z $missing ]]; then
+    echo "every input is already in $D; nothing to fetch"
+    du -sh "$D"
+    echo STAGE_DONE
+    exit 0
+fi
+echo "=== to fetch: $(wc -l <<< "$missing" | tr -d ' ') of $(wc -l <<< "$wanted" | tr -d ' ') file(s)"
+
 command -v vcp > /dev/null || { echo "no vcp; run 'submit.py setup' first" >&2; exit 1; }
 
 [[ -s $HOME/.ssl/cadcproxy.pem ]] || {
@@ -41,20 +69,10 @@ command -v vcp > /dev/null || { echo "no vcp; run 'submit.py setup' first" >&2; 
     exit 1
 }
 
-D=$DATA
-mkdir -p "$D"
-
 # A cancelled or timed-out job leaves its ".<name>.<pid>" temporaries behind,
 # and they are several GB each. Sweep only the old ones: a concurrent staging
 # job's temporaries look the same and are still being written.
 find "$D" -maxdepth 1 -name '.*.[0-9]*' -mmin +360 -delete 2>/dev/null || true
-
-manifests=()
-for cfg in $CFGS; do
-    m=$CFGDIR/${cfg}_stage.tsv
-    [[ -s $m ]] || { echo "no manifest: $m" >&2; exit 1; }
-    manifests+=("$m")
-done
 
 # One file: fetch to a private temp name, decompress if gzipped, move into
 # place. Concurrent jobs of different fields can want the same file, so the

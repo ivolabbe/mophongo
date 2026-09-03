@@ -441,15 +441,20 @@ def main() -> None:
         else:
             log.info("psf: every grid is on /fred already; skipping")
 
+    # Staging is per field and only for the fields that need it: `submit.stage`
+    # lists what is already in the shared data directory and submits nothing
+    # for a field whose inputs are all there. That is the usual case from the
+    # second campaign against a release onwards, and it is what keeps those
+    # campaigns off CANFAR altogether.
     stage_ids: dict[str, str] = {}
     if "stage" in todo:
-        for field, bands in submit.by_field(names).items():
-            if args.dry_run:
+        if args.dry_run:
+            for field, bands in submit.by_field(names).items():
                 log.info("+ stage %s: %s", field, " ".join(bands))
                 # so the plan below shows the dependency it would really carry
                 stage_ids[field] = f"<{field}-stage>"
-                continue
-            stage_ids[field] = submit.stage(bands, walltime=args.stage_time)[0]
+        else:
+            stage_ids = submit.stage(names, walltime=args.stage_time)
 
     if not any(s in todo for s in ("repair", "run")):
         return

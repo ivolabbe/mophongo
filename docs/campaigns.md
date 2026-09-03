@@ -203,7 +203,16 @@ The `/arc` sshfs mount is what makes file movement fast — about twenty seconds
 against a half-hour queue wait for a container to do the same copying — and
 `submit.py` uses it whenever it can find the run tree beneath
 `$CANFAR_RUN_LOCAL`, `~/canfar_projects` or `~/canfar_home`, falling back to a
-container otherwise.
+container otherwise. `examples/canfar/remote/` holds the shell helpers that
+make one, alongside the CADC proxy certificate every arc read needs;
+`examples/canfar/README.md` has the setup.
+
+On OzStar the staged copies are what a campaign reads, so a re-fit needs
+neither. `campaign.py` lists `$OZSTAR_BASE/data` and submits a datamover job
+only for a field that is short of an input, and `jobs/stage.sh` repeats the
+check before it loads the transfer tools. Only the first campaign against a
+release copies anything; the ones after it never reach for CANFAR, or for a
+certificate that has since expired.
 
 ## Memory
 

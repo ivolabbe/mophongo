@@ -16,8 +16,14 @@
 #
 #   ./release.sh                       # into $OZSTAR_RUN (default run2)
 #   OZSTAR_RUN=run3 ./release.sh       # the next attempt
-#   ./release.sh --skip-stage          # inputs already on /fred
+#   ./release.sh --skip-stage          # do not even look at what is staged
 #   ./release.sh --dry-run             # print the plan
+#
+# --skip-stage is rarely needed now: campaign.py lists the shared data
+# directory and submits a staging job only for a field that is actually short
+# of an input, so a release re-fitted against staged data never reaches for
+# CANFAR. The flag remains for the case where you want no cluster listing at
+# all.
 #
 # Any other argument is passed through to campaign.py -- `--skip psf` when the
 # grids are already on /fred, `--note` to say what this attempt changes. Memory
@@ -40,9 +46,17 @@ PYTHON=${PYTHON:-$HOME/.venvs/canfar/bin/python}
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 : "${OZSTAR_USER:?set OZSTAR_USER to your cluster username}"
+
+# A warning, not a gate. Only two steps read CANFAR - `ozify` resolves the
+# release paths on arc, and `stage` copies the files - and campaign.py drops
+# `stage` when the inputs are already on /fred, which is every attempt after
+# the first. A release re-fitted against staged data needs no certificate at
+# all, and refusing to start without one made an expired certificate look like
+# a broken toolkit. The two steps that do need it say so themselves.
 [[ -s $HOME/.ssl/cadcproxy.pem ]] || {
-    echo "no CADC certificate; run ~/bin/remote/canfar-cert.sh" >&2
-    exit 1
+    echo "note: no CADC certificate at $HOME/.ssl/cadcproxy.pem." >&2
+    echo "      Fine unless this campaign has to read arc; if it does, run" >&2
+    echo "      ../canfar/remote/canfar-cert.sh and 'submit.py cert'." >&2
 }
 
 args=(--r-trial 0 --cores "$CORES" --time "$WALLTIME")

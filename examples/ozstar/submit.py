@@ -6,7 +6,10 @@ is ordinary ssh and ``sbatch`` rather than a REST API, so jobs chain with
 ``--dependency`` instead of a laptop-side process blocking on each stage. And
 the MINERVA data are not there: everything a config names is copied from CANFAR
 arc onto ``/fred`` first, by a job on the ``datamover`` partition, because
-ordinary compute nodes have no internet at all.
+ordinary compute nodes have no internet at all. Those copies sit above the run
+directory and are shared by every run in the tree, so ``stage`` submits a job
+only for a field that is short of an input - which is what lets a re-fit of a
+staged release run without touching CANFAR, or a CADC certificate, at all.
 
     python submit.py cert                    # push the CADC proxy certificate
     python submit.py setup                   # clone mophongo, build the venv
@@ -425,20 +428,72 @@ def check_src_current(ref: str = "main", force: bool = False) -> None:
                          f"a local commit, push it first.")
 
 
+def manifest(name: str) -> list[str] | None:
+    """Destination basenames one config's staging manifest names.
+
+    ``None`` when the manifest is not on the laptop. That is not the same as an
+    empty list: it means the question of what this config needs cannot be
+    answered here, so the caller must stage rather than assume.
+    """
+    path = HERE / f"{name}_stage.tsv"
+    if not path.is_file():
+        return None
+    return [line.split("\t")[1].strip()
+            for line in path.read_text().splitlines() if "\t" in line]
+
+
+def fields_needing_stage(names: list[str]) -> dict[str, list[str]]:
+    """The fields whose inputs are not all on ``/fred`` yet, as field -> bands.
+
+    Staged inputs live above the run directory and are shared by every run in
+    the tree, so the second and every later campaign against a release has
+    nothing to copy. Asking first is what keeps those campaigns off CANFAR
+    entirely: no datamover job, no CADC certificate, no transfer that fails
+    because one expired ten days ago.
+
+    The listing is by filename. A partly transferred file cannot be mistaken
+    for a finished one, because ``stage.sh`` fetches to a hidden temporary name
+    and moves it into place only once it is whole.
+    """
+    present = set(ssh(f"ls {ozroot.data_dir()} 2>/dev/null", check=False).split())
+    need: dict[str, list[str]] = {}
+    for field, bands in by_field(names).items():
+        wanted = [manifest(n) for n in bands]
+        if any(m is None for m in wanted):
+            log.info("stage %-8s no local manifest; staging", field)
+            need[field] = bands
+            continue
+        inputs = {f for m in wanted for f in m}
+        missing = inputs - present
+        if missing:
+            log.info("stage %-8s %d of %d input(s) to copy from arc",
+                     field, len(missing), len(inputs))
+            need[field] = bands
+        else:
+            log.info("stage %-8s all %d input(s) already on /fred; skipping",
+                     field, len(inputs))
+    return need
+
+
 def stage(names: list[str], after: str | None = None,
-          walltime: str = "24:00:00") -> list[str]:
-    """One datamover job per field; returns the job ids.
+          walltime: str = "24:00:00") -> dict[str, str]:
+    """One datamover job per field that needs one; returns field -> job id.
 
     Per field, not per band: the bands of a field share the F444W mosaic, its
     weight map and the segmap, several GB each that would otherwise cross the
     Pacific once per band. Within a job the destination list is deduplicated,
     and files already present are skipped, so resubmitting after a timeout
     resumes rather than restarts.
+
+    A field whose inputs are all staged already gets no job at all, so the
+    result can be short of a field the caller asked for - callers hang their
+    fits off ``.get(field)``, which is then simply no dependency.
     """
-    return [sbatch("stage.sh", f"{JOB_PREFIX}-stage-{field}",
-                   {"CFGS": " ".join(bands)}, after=after,
-                   extra=[f"--partition={STAGE_PARTITION}", f"--time={walltime}"])
-            for field, bands in by_field(names).items()]
+    return {field: sbatch("stage.sh", f"{JOB_PREFIX}-stage-{field}",
+                          {"CFGS": " ".join(bands)}, after=after,
+                          extra=[f"--partition={STAGE_PARTITION}",
+                                 f"--time={walltime}"])
+            for field, bands in fields_needing_stage(names).items()}
 
 
 def run(names: list[str], after: str | None = None, cores: int = DEFAULT_CORES,
@@ -503,7 +558,7 @@ def do_cert(args: argparse.Namespace) -> None:
     """
     cert = Path.home() / ".ssl/cadcproxy.pem"
     if not cert.exists():
-        raise SystemExit(f"no certificate at {cert}; run ~/bin/remote/canfar-cert.sh")
+        raise SystemExit(f"no certificate at {cert}; run ../canfar/remote/canfar-cert.sh")
     ssh("mkdir -p ~/.ssl")
     proc = subprocess.run(["scp", "-q", str(cert),
                            f"{ozroot.ssh_target()}:.ssl/cadcproxy.pem"])

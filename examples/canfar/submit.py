@@ -807,7 +807,7 @@ def main() -> None:
 
     args = ap.parse_args()
     if not (Path.home() / ".ssl/cadcproxy.pem").exists():
-        sys.exit("no CADC certificate; run ~/bin/remote/canfar-cert.sh first")
+        sys.exit("no CADC certificate; run remote/canfar-cert.sh first")
     args.func(args)
 
 

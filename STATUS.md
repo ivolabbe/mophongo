@@ -30,6 +30,32 @@ This file records completed implementations, validation runs, and the current wo
   `release.sh` no longer refuses to start without a certificate — it warns —
   since only `ozify` and a staging job that has work to do need one.
 
+- [x] `ozify.py` reads arc only for an input it cannot already place
+  (2026-09-03). It indexed every relevant `arc:projects/minerva` subtree on
+  every run, which needed a live certificate, but arc answers exactly one
+  question: the source column of `<name>_stage.tsv`. The rewritten config is
+  `<base>/data/<basename>` throughout and never leaves the laptop. So
+  `known_sources()` reads the manifests already in the directory and
+  `wanted_inputs()` collects what the configs need; the index is built only for
+  the remainder, over the subtrees `roots_for` names for those files alone.
+  Basenames carry their release version
+  (`MINERVA-UDS_n3.0_v1.2_ACS+WEBB_SEGMAP.fits`), so a cache hit is a hit
+  against the same release; a release that moves on misses and is looked up.
+  `--reindex` forces the listing for a file that moved under an unchanged name.
+
+  Measured: the 17 release configs re-ozify in 0.15 s with no network and an
+  expired certificate, and all 34 generated files are byte-identical to the
+  arc-indexed ones in the tree. A partial cache (5 of 8 rows) indexed 1 subtree
+  instead of 9 and produced the same manifest.
+
+  Two expiry bugs surfaced while testing this, both from checking that the
+  certificate *exists*. `arc_index` warns per subtree and carries on, so an
+  expired certificate emptied the index and `ozify` reported "sci_hi not found
+  on arc" — a message that sends you to look at the release. And `submit.py
+  cert` would scp a dead certificate to the cluster for the staging job to fail
+  on. Both now run `openssl x509 -checkend 0`, and `ozify` additionally refuses
+  an index in which every subtree failed.
+
 - [x] run3: full MINERVA release on OzStar, all 17 bands (2026-08-20). Every
   job completed with exit 0: three staging jobs (3-4 s, inputs already on
   `/fred`), three per-field repairs (~6 min), and 17 full-field fits. Wall clock

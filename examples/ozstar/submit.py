@@ -559,6 +559,15 @@ def do_cert(args: argparse.Namespace) -> None:
     cert = Path.home() / ".ssl/cadcproxy.pem"
     if not cert.exists():
         raise SystemExit(f"no certificate at {cert}; run ../canfar/remote/canfar-cert.sh")
+    # Existing is not the same as valid, and pushing an expired one installs a
+    # staging failure ten minutes into the future rather than reporting it now.
+    expired = subprocess.run(["openssl", "x509", "-in", str(cert), "-noout",
+                              "-checkend", "0"], capture_output=True)
+    if expired.returncode != 0:
+        raise SystemExit(
+            f"{cert} has expired; run ../canfar/remote/canfar-cert.sh --force "
+            "before pushing it, or the staging job fails on every file"
+        )
     ssh("mkdir -p ~/.ssl")
     proc = subprocess.run(["scp", "-q", str(cert),
                            f"{ozroot.ssh_target()}:.ssl/cadcproxy.pem"])

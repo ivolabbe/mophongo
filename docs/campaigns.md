@@ -208,11 +208,16 @@ make one, alongside the CADC proxy certificate every arc read needs;
 `examples/canfar/README.md` has the setup.
 
 On OzStar the staged copies are what a campaign reads, so a re-fit needs
-neither. `campaign.py` lists `$OZSTAR_BASE/data` and submits a datamover job
-only for a field that is short of an input, and `jobs/stage.sh` repeats the
-check before it loads the transfer tools. Only the first campaign against a
-release copies anything; the ones after it never reach for CANFAR, or for a
-certificate that has since expired.
+neither. Both steps that would reach for CANFAR ask first whether they have to.
+`campaign.py` lists `$OZSTAR_BASE/data` and submits a datamover job only for a
+field short of an input, and `jobs/stage.sh` repeats the check before it loads
+the transfer tools. `ozify.py` needs arc for one thing — the source column of
+`<name>_stage.tsv`, the rewritten config being `<base>/data/<basename>`
+throughout — so it answers from the manifests it has already written and
+indexes arc only for a basename none of them names. Basenames carry their
+release version, so that means a new release rather than a re-run. Only the
+first campaign against a release touches CANFAR; the ones after it run on an
+expired certificate without noticing.
 
 ## Memory
 

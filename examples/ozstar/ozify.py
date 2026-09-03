@@ -27,8 +27,12 @@ Usage::
     python ozify.py ../minerva/uds_f770w.json --r-trial 1.5 --suffix _trial
     python ozify.py ../minerva/*.json --check-versions   # scan, rewrite nothing
 
-Needs a CADC proxy certificate locally (only to *list* arc; the copying itself
-happens on OzStar with the certificate pushed by ``submit.py cert``).
+arc is read only to find where an input lives, and only for an input no
+manifest here already names - so a release that has been ozified before is
+rewritten without touching CANFAR, and a release that has moved on costs a
+listing of the subtrees that changed. When there is a lookup to do it needs a
+CADC proxy certificate locally; the copying itself happens on OzStar, with the
+certificate pushed by ``submit.py cert``.
 """
 from __future__ import annotations
 
@@ -36,6 +40,7 @@ import argparse
 import json
 import logging
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -88,15 +93,61 @@ def vos_uri(arc_path: str) -> str:
     return "arc:" + arc_path[len("/arc/"):]
 
 
+def known_sources(out_dir: Path) -> dict[str, str]:
+    """``staged basename -> vospace source``, from the manifests already here.
+
+    Every basename carries the release version it belongs to
+    (``MINERVA-UDS_n3.0_v1.2_ACS+WEBB_SEGMAP.fits``), so a name that matches a
+    manifest row was resolved against the same release and its arc path is the
+    same path. Reusing those rows is what lets a re-run of ``ozify`` against a
+    release already worked on skip the arc index, and with it the certificate
+    and the network. A release that has moved on brings new basenames, misses,
+    and is looked up properly.
+
+    Only the source column comes from here. The rewritten config depends on
+    arc nowhere - every input path becomes ``<base>/data/<basename>`` - so this
+    is the whole of what the index was being read for.
+    """
+    sources: dict[str, str] = {}
+    for tsv in sorted(out_dir.glob("*_stage.tsv")):
+        for line in tsv.read_text().splitlines():
+            src, _, dst = line.partition("\t")
+            if src.strip() and dst.strip():
+                sources.setdefault(dst.strip(), src.strip())
+    return sources
+
+
+def wanted_inputs(cfg_paths: list[Path]) -> dict[str, str]:
+    """``basename -> the local path it came from`` over every config.
+
+    The local path is kept because :func:`roots_for` reads the field and the
+    release version off it to decide which arc subtrees would have to be
+    indexed for that file.
+    """
+    wanted: dict[str, str] = {}
+    for cfg_path in cfg_paths:
+        cfg = json.loads(re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text()))
+        for key in PATH_KEYS:
+            value = cfg.get(key) or ""
+            if value:
+                wanted.setdefault(Path(value).name, value)
+    return wanted
+
+
 def ozify(cfg_path: Path, index: dict[str, str], out_dir: Path,
-          r_trial: float | None = None, suffix: str = "") -> tuple[Path, Path]:
+          r_trial: float | None = None, suffix: str = "",
+          sources: dict[str, str] | None = None) -> tuple[Path, Path]:
     """Write the OzStar config and its staging list for one local config.
 
     ``r_trial`` overrides the trial-patch radius in arcmin (0 means the full
     field) and ``suffix`` keeps a trial run's outputs separate from the full
     one's. The config's own ``trial.center`` is kept - only the radius moves -
     so the patch stays where the source config put it.
+
+    ``sources`` is the cache from :func:`known_sources`, consulted before
+    ``index``; a basename it answers costs no arc lookup.
     """
+    sources = sources or {}
     raw = re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text())
     cfg = json.loads(raw)
     name = cfg.get("name", cfg_path.stem) + suffix
@@ -120,15 +171,17 @@ def ozify(cfg_path: Path, index: dict[str, str], out_dir: Path,
         if not value:
             continue
         basename = Path(value).name
-        hit = resolve(basename, index)
-        if hit is None:
-            raise SystemExit(f"{cfg_path.name}: {key} not found on arc: {basename}")
-        arc_path, _gzipped = hit
+        src = sources.get(basename)
+        if src is None:
+            hit = resolve(basename, index)
+            if hit is None:
+                raise SystemExit(f"{cfg_path.name}: {key} not found on arc: {basename}")
+            src = vos_uri(hit[0])
         # Everything is copied, compressed or not: /fred has no view of arc.
         # The destination carries the name the config expects, which also fixes
         # the f770 -> f770w frame-table spelling.
         cfg[key] = f"{ozroot.data_dir()}/{basename}"
-        stage.append((vos_uri(arc_path), basename))
+        stage.append((src, basename))
 
     # data/ and PSF/ live above the run directory: they are stable across
     # catalog versions, so a new run re-fits the same mosaics and reuses the
@@ -166,6 +219,9 @@ def main() -> None:
     ap.add_argument("--check-versions", action="store_true",
                     help="report configs pinned to an older release than arc "
                          "now holds, and rewrite nothing")
+    ap.add_argument("--reindex", action="store_true",
+                    help="list arc even for inputs an existing manifest already "
+                         "resolves; use if a file has moved on arc")
     args = ap.parse_args()
 
     # Reading arc is a laptop operation and needs only the certificate; the
@@ -189,25 +245,60 @@ def main() -> None:
 
     check_suffix(args.suffix)
 
-    cert = Path.home() / ".ssl/cadcproxy.pem"
-    if not cert.exists():
-        raise SystemExit(f"no CADC certificate at {cert}; run ../canfar/remote/canfar-cert.sh first")
+    # Only the source column of the staging manifest needs arc; the rewritten
+    # config points every input at <base>/data/<basename> and knows that
+    # without leaving the laptop. So resolve what the manifests already here
+    # can answer, and read arc for the rest - which is nothing at all when this
+    # release has been ozified before, and only the changed subtrees when it
+    # has moved on.
+    sources = {} if args.reindex else known_sources(args.out_dir)
+    wanted = wanted_inputs(args.configs)
+    unresolved = {b: v for b, v in wanted.items() if b not in sources}
 
-
-    # Collect the subtrees every config needs, then index each one once: the
-    # bands of a field overlap almost completely.
-    roots: list[str] = []
-    for cfg_path in args.configs:
-        cfg = json.loads(re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text()))
-        for key in PATH_KEYS:
-            for root in roots_for(cfg.get(key) or ""):
+    index: dict[str, str] = {}
+    if not unresolved:
+        log.info("all %d input(s) resolve from the manifests here; not reading arc",
+                 len(wanted))
+    else:
+        why = (f"{len(unresolved)} of {len(wanted)} input(s) are not in any "
+               "manifest here, so arc has to be listed to find them: "
+               + ", ".join(sorted(unresolved)[:3])
+               + (", ..." if len(unresolved) > 3 else ""))
+        cert = Path.home() / ".ssl/cadcproxy.pem"
+        if not cert.exists():
+            raise SystemExit(f"no CADC certificate at {cert}; run "
+                             f"../canfar/remote/canfar-cert.sh first. {why}")
+        # Present is not the same as valid. An expired certificate lists every
+        # subtree as a warning and leaves an empty index, which then reads as
+        # "not found on arc" against the release rather than against the cert.
+        if subprocess.run(["openssl", "x509", "-in", str(cert), "-noout",
+                           "-checkend", "0"], capture_output=True).returncode:
+            raise SystemExit(f"{cert} has expired; run "
+                             f"../canfar/remote/canfar-cert.sh --force. {why}")
+        # The subtrees those files could be in, each indexed once: the bands of
+        # a field overlap almost completely.
+        roots: list[str] = []
+        for value in unresolved.values():
+            for root in roots_for(value):
                 if root not in roots:
                     roots.append(root)
-    log.info("indexing %d arc subtrees:", len(roots))
-    index = arc_index(Client(vospace_certfile=str(cert)), roots)
+        log.info("%d of %d input(s) not in a manifest here; indexing %d arc subtrees:",
+                 len(unresolved), len(wanted), len(roots))
+        index = arc_index(Client(vospace_certfile=str(cert)), roots)
+        # arc_index warns per subtree and carries on, because one missing
+        # subtree is not fatal. Every subtree failing is a different thing -
+        # an expired certificate, usually - and without this it surfaces as
+        # "sci_hi not found on arc", which sends you looking at the release.
+        if not index:
+            raise SystemExit(
+                f"none of the {len(roots)} arc subtrees listed (see the "
+                "warnings above). The usual cause is an expired certificate: "
+                f"{cert} exists, which is all the check above can see. Run "
+                "../canfar/remote/canfar-cert.sh --force and try again."
+            )
 
     for cfg_path in args.configs:
-        ozify(cfg_path, index, args.out_dir, args.r_trial, args.suffix)
+        ozify(cfg_path, index, args.out_dir, args.r_trial, args.suffix, sources)
 
 
 if __name__ == "__main__":

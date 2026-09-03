@@ -73,12 +73,13 @@ one-time `canfar.conf`:
 $P submit.py cert                            # copy it to OzStar for the staging job
 ```
 
-Neither is needed once a release is staged. `data/` sits above the run
-directory and is shared by every run in the tree, so a second attempt at a
-release has nothing to copy: `campaign.py` lists what is already on `/fred` and
-submits no staging job for a field that is short of nothing. A campaign that
-skips `ozify` too — the configs having been rewritten already — touches CANFAR
-nowhere and runs with an expired certificate.
+Neither is needed once a release has been through the toolkit once. `data/`
+sits above the run directory and is shared by every run in the tree, so a
+second attempt at a release has nothing to copy: `campaign.py` lists what is
+already on `/fred` and submits no staging job for a field that is short of
+nothing. `ozify` likewise reads arc only for an input no manifest here already
+names, which for a release it has seen before is none of them. So a re-fit
+touches CANFAR nowhere, and runs with an expired certificate.
 
 `../canfar/remote/ozstar-mount.sh` mounts `/fred` over sshfs at `~/ozstar`,
 which is convenient for reading logs and fit tables directly. Nothing in the
@@ -185,9 +186,7 @@ imported; queued ones pick it up when they start.
 
 ## What ozify.py does
 
-It indexes the relevant `arc:projects/minerva` subtrees, reusing
-`../canfar/arcify.py` since finding the files is the same problem on both
-platforms, then rewrites every input path in a local `RunConfig` to
+It rewrites every input path in a local `RunConfig` to
 `$OZSTAR_BASE/data/<basename>`, writes the copy list to `<name>_stage.tsv`, and
 points `out_dir` at `$OZSTAR_RUN/<field>/<name>` with a per-field
 `repair_cache_path` one level above it. Unlike the CANFAR version it lists
@@ -197,6 +196,20 @@ Two mismatches it resolves on the way. Most files on arc are gzipped and the
 pipeline wants plain FITS, so `stage.sh` decompresses them. And MIRI frame
 tables ship as `*_f770_wcs.csv` while the filter parser expects `f770w`, so the
 staged copy carries the expected name.
+
+Only one column of one file needs CANFAR: the arc source in
+`<name>_stage.tsv`. The rewritten config is `<base>/data/<basename>` throughout
+and is known without leaving the laptop. So `ozify.py` answers from the
+manifests already in this directory first and indexes
+`arc:projects/minerva` — reusing `../canfar/arcify.py`, since finding the files
+is the same problem on both platforms — only for a basename none of them names.
+Every basename carries its release version
+(`MINERVA-UDS_n3.0_v1.2_ACS+WEBB_SEGMAP.fits`), so a match is a match against
+the same release and its arc path has not moved; a release that has moved on
+brings new names, misses, and is looked up properly. Re-running the 17 release
+configs costs no network at all, and works with an expired certificate.
+`--reindex` lists arc regardless, for the case where a file moved on arc under
+an unchanged name.
 
 ### Checking for a newer release
 

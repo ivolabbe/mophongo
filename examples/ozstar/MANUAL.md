@@ -85,10 +85,16 @@ Valid for ten days. The staging job authenticates with this and nothing else, so
 a campaign that has to stage after one expires needs both commands again. The
 symptom otherwise is a staging job failing immediately on every file.
 
-Only two things use it: `ozify.py`, which reads the release layout on arc, and
-the staging job. A campaign whose configs are written and whose inputs are on
-`/fred` submits no staging job at all — `campaign.py` lists what is there first
-— so it neither needs a certificate nor notices that one has expired.
+Only two things use it, and both ask first whether they have to. `ozify.py`
+reads arc to find an input no manifest here already names; the staging job
+copies an input that is not on `/fred` yet. For a release the toolkit has been
+through once, neither has anything to do, so a re-fit needs no certificate and
+does not notice that one has expired.
+
+A certificate that exists but has expired used to be the confusing case:
+`ozify.py` reported the release "not found on arc" and `submit.py cert`
+installed the dead certificate on the cluster for the staging job to fail on.
+Both now check the expiry rather than the file, and say so.
 
 ### 2.3 The run tree
 
@@ -148,6 +154,13 @@ $P ozify.py ../minerva/uds_f770w.json
 writes two files: `uds_f770w_ozstar.json`, the same config with every input path
 pointed at `$OZSTAR_BASE/data`, and `uds_f770w_stage.tsv`, the list of eight
 files to copy from arc.
+
+The first run of this lists `arc:projects/minerva` to find where those eight
+files live, and needs the certificate from 2.2. Later ones re-read the arc
+sources out of the manifests already in the directory and go nowhere: only a
+basename no manifest names sends it back to arc, and a basename carries its
+release version, so that means a genuinely new release. `--reindex` forces the
+listing if a file has moved on arc without being renamed.
 
 For a first pass use a small patch. It takes minutes rather than the better part
 of an hour, and reads only its own pixels off disk:
@@ -296,6 +309,7 @@ $P submit.py sync          # git pull; the venv and running jobs are untouched
 | Symptom | Cause and fix |
 |---|---|
 | `Lmod has detected the following error: Parent modules not loaded` | Lmod is hierarchical: `python/3.12.3` needs `gcccore/13.3.0` first. The error names the parent |
+| `ozify.py` says an input is `not found on arc`, or `none of the N arc subtrees listed` | usually an expired certificate rather than a missing file. `../canfar/remote/canfar-cert.sh --force`, then `submit.py cert` |
 | Every `vcp` dies in `ImportError: libssl.so.1.1` | the EasyBuild shim on `PYTHONPATH` shadowed the venv. The job scripts `unset PYTHONPATH`; if you run something by hand, do the same |
 | Staging job runs on a compute node and fails on every file | `--partition=datamover` was only in a `#SBATCH` directive, which a site plugin overrides. It has to be on the `sbatch` command line |
 | `Memory specification can not be satisfied` for a stage job | datamover nodes advertise 4000 MB, so `--mem=4g` (4096) is impossible. Ask for 3 GB |

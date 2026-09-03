@@ -1,0 +1,108 @@
+# mophongo default run config, written 2026-08-17 by
+# `mophongo config`. Every RunConfig, PsfConfig and FitConfig setting
+# is listed at its default value.
+#
+# The <angle bracket> entries have no default and must be filled in
+# before this will run. Paths are resolved relative to the config.
+#
+# Lines starting with '#' are comments and are stripped on load.
+{
+  "name": "<run name, used as the output filename prefix>",
+  "out_dir": "<output directory>",
+  "sci_hi": "<high-resolution detection mosaic .fits>",
+  "segmap": "<segmentation map .fits>",
+  "catalog": "<detection catalog .fits>",
+  "sci_lo": "<low-resolution science mosaic to fit .fits>",
+  "wht_lo": "<low-resolution weight (inverse variance) map .fits>",
+  "csv_hi": "<high-resolution exposure wcs .csv>",
+  "csv_lo": "<low-resolution exposure wcs .csv>",
+  "wht_hi": null,
+  "filter_lo": "",
+  "psf": {
+    "dir": "data/PSF",
+    "pattern_hi": "STDPSF_NRC.._F444W_MJD\\d+_GRID25_OS4",
+    "pattern_lo": "STDPSF_MIRI_F770W_MJD\\d+_GRID9_OS4",
+    "size": 4.0,
+    "autobuild": true,
+    "provenance": "warn",
+    "workers": 1,
+    "fov_arcsec": null,
+    "date_mode": "all",
+    "blur_fwhm": "default"
+  },
+  "repair_saturated": false,
+  "repair_kwargs": {},
+  "repair_psf_pattern": "",
+  "repair_reuse": true,
+  "repair_cache_path": "..",
+  "bg_filter_sigma": 64.0,
+  "footprint_filter": true,
+  "trial": null,
+  "minerva_viewer": null,
+  "minerva_release": "DR0",
+  "fit": {
+    "positivity": true,
+    "reg_flux": null,
+    "bad_value": NaN,
+    "cg_kwargs": {
+      "M": null,
+      "maxiter": 500,
+      "atol": 1e-06
+    },
+    "fit_astrometry_niter": 5,
+    "astrom_shift_tol": 0.1,
+    "astrom_damping": 0.8,
+    "fit_astrometry_joint": true,
+    "astrom_reg": 0.0001,
+    "astrom_minimum_snr": 15.0,
+    "astrom_isolation_thresh": 0.7,
+    "astrom_exclude_stars": false,
+    "astrom_leverage_cap": 0.9,
+    "astrom_robust": true,
+    "astrom_model": "poly",
+    "astrom_centroid": "centroid",
+    "astrom_kwargs": {
+      "poly": {
+        "order": 0
+      },
+      "gp": {
+        "length_scale": 400
+      }
+    },
+    "multi_resolution_method": "upsample",
+    "normal": "tree",
+    "scene_minimum_anchors": 10,
+    "phot": {
+      "aperture_diam": null,
+      "aperture_ee": 0.7,
+      "aperture_catalog": null,
+      "units": "arcsec",
+      "kron_flux_col": null,
+      "aper_flux_col": null,
+      "kron_radius_col": null,
+      "kron_k": 2.5
+    },
+    "template_dilate_segmap": 0,
+    "skip_template_extension_for_deblended": false,
+    "extend_wings_background_only": true,
+    "extend_mode": "psf_wings",
+    "psf_wings_snrlo": 5.0,
+    "psf_wings_blend_p": 2.0,
+    "psf_wings_rms": null,
+    "wren_ee_fraction": 0.95,
+    "wren_fit_snrlo_psf": 10.0,
+    "wren_wings_snr_psf": 3.0,
+    "wren_blend_p": 2.0,
+    "wren_blend_annulus": 0.15,
+    "wren_bg_rms": null,
+    "classic_tmpl_snrlo": 15.0,
+    "classic_rms": null,
+    "run_scene_solver": true,
+    "scene_coupling_thresh": 0.001,
+    "scene_max_size": 1000,
+    "scene_max_merge_radius": 1500.0,
+    "generate_scene_catalog": false
+  },
+  "scene_plots": true,
+  "save_stamps": true
+}

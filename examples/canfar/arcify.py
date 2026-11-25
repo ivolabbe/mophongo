@@ -19,6 +19,13 @@ Usage::
 
 writes ``<name>_canfar.json`` and ``<name>_stage.tsv`` next to this script. The
 TSV is the copy list consumed by ``jobs/stage.sh`` inside the container.
+
+arc is read only to place an input no generated pair here already places, so a
+release that has been arcified before is rewritten without touching CANFAR, and
+a release that has moved on costs a listing of the subtrees that changed.
+Asking whether the release itself has moved on is a separate, deliberate act:
+``--check-versions`` does it and rewrites nothing, and ``--reindex`` forces the
+listing for a file that moved under an unchanged name.
 """
 from __future__ import annotations
 
@@ -26,6 +33,7 @@ import argparse
 import json
 import logging
 import re
+import subprocess
 from pathlib import Path
 
 from vos import Client
@@ -255,6 +263,64 @@ def resolve(basename: str, index: dict[str, str]) -> tuple[str, bool] | None:
     return None
 
 
+def known_placements(out_dir: Path) -> dict[str, tuple[str, str]]:
+    """``basename -> ("stage", arc source) | ("inplace", arc path)``.
+
+    What arc is actually consulted for is where each input lives and whether it
+    has to be decompressed or renamed on the way in. Both answers are already
+    written down here by a previous run: ``<name>_stage.tsv`` names every file
+    that gets staged and the arc path it comes from, and ``<name>_canfar.json``
+    carries the arc path of every file read in place. Reading them back is what
+    lets a release already arcified be rewritten with no certificate and no
+    network.
+
+    Basenames carry their release version
+    (``MINERVA-UDS_n3.0_v1.2_ACS+WEBB_SEGMAP.fits``), so a hit is a hit against
+    the same release; a release that has moved on brings new basenames, misses,
+    and is looked up. ``--reindex`` skips this for a file that moved on arc
+    under an unchanged name.
+
+    A staged file's rewritten value is ``<run>/data/<basename>``, which is not
+    a source and must not be read back as one. It is excluded twice over: its
+    basename is already in the manifest, and the run's data directory is the
+    only place an input sits directly under a directory called ``data``.
+    """
+    placements: dict[str, tuple[str, str]] = {}
+    for tsv in sorted(out_dir.glob("*_stage.tsv")):
+        for line in tsv.read_text().splitlines():
+            src, _, dst = line.partition("\t")
+            if src.strip() and dst.strip():
+                placements.setdefault(dst.strip(), ("stage", src.strip()))
+    for generated in sorted(out_dir.glob("*_canfar.json")):
+        try:
+            cfg = json.loads(generated.read_text())
+        except json.JSONDecodeError:  # a half-written file is not a cache
+            continue
+        for key in PATH_KEYS:
+            value = str(cfg.get(key) or "")
+            if not value.startswith("/arc/") or Path(value).parent.name == "data":
+                continue
+            placements.setdefault(Path(value).name, ("inplace", value))
+    return placements
+
+
+def wanted_inputs(cfg_paths: list[Path]) -> dict[str, str]:
+    """``basename -> the local path it came from`` over every config.
+
+    The local path is kept because :func:`roots_for` reads the field and the
+    release version off it to decide which arc subtrees would have to be
+    indexed for that file.
+    """
+    wanted: dict[str, str] = {}
+    for cfg_path in cfg_paths:
+        cfg = json.loads(re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text()))
+        for key in PATH_KEYS:
+            value = cfg.get(key) or ""
+            if value:
+                wanted.setdefault(Path(value).name, value)
+    return wanted
+
+
 def _repair_cache_name(cfg: dict) -> str:
     """Filename for the shared saturation-repair cache of one config.
 
@@ -284,7 +350,9 @@ def _repair_cache_name(cfg: dict) -> str:
 
 
 def arcify(cfg_path: Path, index: dict[str, str], out_dir: Path,
-           r_trial: float | None = None, suffix: str = "") -> tuple[Path, Path]:
+           r_trial: float | None = None, suffix: str = "",
+           placements: dict[str, tuple[str, str]] | None = None,
+           ) -> tuple[Path, Path]:
     """Write the arc-path config and its staging list for one local config.
 
     ``r_trial`` overrides the trial-patch radius (in arcmin) so a cheap smoke
@@ -292,6 +360,9 @@ def arcify(cfg_path: Path, index: dict[str, str], out_dir: Path,
     outputs separate from the full run's. The config's own ``trial.center``
     is kept — only the radius is overridden — so the patch stays where the
     source config put it.
+
+    ``placements`` is the cache from :func:`known_placements`, consulted before
+    ``index``; a basename it answers costs no arc lookup.
     """
     run = arc_run()
     raw = re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text())
@@ -312,26 +383,32 @@ def arcify(cfg_path: Path, index: dict[str, str], out_dir: Path,
     cfg["name"] = name
 
     stage: list[tuple[str, str]] = []  # (arc source, staged basename)
+    placements = placements or {}
     for key in PATH_KEYS:
         value = cfg.get(key)
         if not value:
             continue
         basename = Path(value).name
-        hit = resolve(basename, index)
-        if hit is None:
-            raise SystemExit(f"{cfg_path.name}: {key} not found on arc: {basename}")
-        arc_path, gzipped = hit
-        if gzipped:
-            # decompress once into the run's data dir, under the name the
-            # config expects (which also fixes the f770 -> f770w spelling)
-            cfg[key] = f"{run}/data/{basename}"
-            stage.append((arc_path, basename))
-        elif Path(arc_path).name != basename:
-            # uncompressed but misnamed: copy rather than decompress
-            cfg[key] = f"{run}/data/{basename}"
-            stage.append((arc_path, basename))
+        known = placements.get(basename)
+        if known is not None:
+            how, source = known
         else:
-            cfg[key] = arc_path  # read in place, no copy
+            hit = resolve(basename, index)
+            if hit is None:
+                raise SystemExit(f"{cfg_path.name}: {key} not found on arc: {basename}")
+            source, gzipped = hit
+            # gzipped files are decompressed into the run's data dir, and an
+            # uncompressed one whose arc name differs is copied there rather
+            # than decompressed; both land under the name the config expects,
+            # which is also what fixes the f770 -> f770w spelling. Anything
+            # else is read in place and never copied.
+            how = ("stage" if gzipped or Path(source).name != basename
+                   else "inplace")
+        if how == "stage":
+            cfg[key] = f"{run}/data/{basename}"
+            stage.append((source, basename))
+        else:
+            cfg[key] = source
 
     # Release layout: inputs and grids at the release root, products under a
     # numbered run and grouped by field. `..` from out_dir is the field
@@ -362,6 +439,10 @@ def main() -> None:
     ap.add_argument("--check-versions", action="store_true",
                     help="report configs pinned to an older release than arc "
                          "now holds, and rewrite nothing")
+    ap.add_argument("--reindex", action="store_true",
+                    help="list arc even for inputs the generated configs and "
+                         "manifests here already place; use if a file has "
+                         "moved on arc under the same name")
     args = ap.parse_args()
 
     if args.check_versions:
@@ -380,24 +461,60 @@ def main() -> None:
 
     check_suffix(args.suffix)
 
-    cert = Path.home() / ".ssl/cadcproxy.pem"
-    if not cert.exists():
-        raise SystemExit(f"no CADC certificate at {cert}; run remote/canfar-cert.sh first")
+    # arc answers two questions per input - where it lives, and whether it is
+    # staged or read in place - and a previous run wrote both answers down
+    # here. So place what the generated configs and manifests can place, and
+    # list arc for the rest: nothing at all when this release has been arcified
+    # before, and only the changed subtrees when it has moved on.
+    placements = {} if args.reindex else known_placements(args.out_dir)
+    wanted = wanted_inputs(args.configs)
+    unresolved = {b: v for b, v in wanted.items() if b not in placements}
 
-    # Collect the subtrees every config needs, then index each one once: the
-    # bands of a field overlap almost completely.
-    roots: list[str] = []
-    for cfg_path in args.configs:
-        cfg = json.loads(re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text()))
-        for key in PATH_KEYS:
-            for root in roots_for(cfg.get(key) or ""):
+    index: dict[str, str] = {}
+    if not unresolved:
+        log.info("all %d input(s) are placed by the configs and manifests here; "
+                 "not reading arc", len(wanted))
+    else:
+        why = (f"{len(unresolved)} of {len(wanted)} input(s) are not placed by "
+               "anything here, so arc has to be listed to find them: "
+               + ", ".join(sorted(unresolved)[:3])
+               + (", ..." if len(unresolved) > 3 else ""))
+        cert = Path.home() / ".ssl/cadcproxy.pem"
+        if not cert.exists():
+            raise SystemExit(f"no CADC certificate at {cert}; run "
+                             f"remote/canfar-cert.sh first. {why}")
+        # Present is not the same as valid. An expired certificate lists every
+        # subtree as a warning and leaves an empty index, which then reads as
+        # "not found on arc" against the release rather than against the cert.
+        if subprocess.run(["openssl", "x509", "-in", str(cert), "-noout",
+                           "-checkend", "0"], capture_output=True).returncode:
+            raise SystemExit(f"{cert} has expired; run "
+                             f"remote/canfar-cert.sh --force. {why}")
+        # The subtrees those files could be in, each indexed once: the bands of
+        # a field overlap almost completely.
+        roots: list[str] = []
+        for value in unresolved.values():
+            for root in roots_for(value):
                 if root not in roots:
                     roots.append(root)
-    log.info("indexing %d arc subtrees:", len(roots))
-    index = arc_index(Client(vospace_certfile=str(cert)), roots)
+        log.info("%d of %d input(s) not placed here; indexing %d arc subtrees:",
+                 len(unresolved), len(wanted), len(roots))
+        index = arc_index(Client(vospace_certfile=str(cert)), roots)
+        # arc_index warns per subtree and carries on, because one missing
+        # subtree is not fatal. Every subtree failing is a different thing -
+        # an expired certificate, usually - and without this it surfaces as
+        # "sci_hi not found on arc", which sends you looking at the release.
+        if not index:
+            raise SystemExit(
+                f"none of the {len(roots)} arc subtrees listed (see the "
+                "warnings above). The usual cause is an expired certificate: "
+                f"{cert} exists, which is all the check above can see. Run "
+                "remote/canfar-cert.sh --force and try again."
+            )
 
     for cfg_path in args.configs:
-        arcify(cfg_path, index, args.out_dir, args.r_trial, args.suffix)
+        arcify(cfg_path, index, args.out_dir, args.r_trial, args.suffix,
+               placements)
 
 
 if __name__ == "__main__":

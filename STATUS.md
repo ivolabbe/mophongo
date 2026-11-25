@@ -3,6 +3,39 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] `arcify.py` reads arc only to place an input it cannot already place
+  (2026-09-03). The same change `ozify.py` had in `9d8e0b2`, which `arcify.py`
+  was left out of: it indexed every relevant `arc:projects/minerva` subtree on
+  every run, so a config rewrite needed a live certificate and, against a slow
+  VOSpace, minutes — the CANFAR run3 launch spent about fifteen of them and
+  failed outright once on a 120 s read timeout.
+
+  arc answers two questions per input here rather than ozify's one. Where the
+  file lives, and whether it is staged (gzipped, or uncompressed under a
+  different name) or read in place. Both answers are already written down by a
+  previous run: `<name>_stage.tsv` names every staged file and its arc source,
+  and `<name>_canfar.json` carries the arc path of every file read in place. So
+  `known_placements()` reads them back into `basename -> ("stage", source) |
+  ("inplace", path)` and `wanted_inputs()` collects what the configs need; the
+  index is built only for the remainder, over the subtrees `roots_for` names
+  for those files alone. A staged file's rewritten value is
+  `<run>/data/<basename>`, which is not a source and is excluded twice over:
+  its basename is already in the manifest, and the run's data directory is the
+  only place an input sits directly under a directory called `data`.
+
+  Basenames carry their release version, so a hit is a hit against the same
+  release; a release that has moved on brings new basenames and is looked up.
+  Asking whether the release *itself* has moved on stays a separate, deliberate
+  act — `--check-versions`, which rewrites nothing — and `--reindex` forces the
+  listing for a file that moved under an unchanged name.
+
+  Measured: the 17 release configs re-arcify in 0.18 s with no network, and all
+  34 generated files are byte-identical to the arc-indexed ones. A partial
+  cache (the manifest but not the config, so the 6 staged inputs place and the
+  2 read-in-place ones do not) indexed 5 subtrees instead of 9 and produced the
+  same pair. `wanted_inputs` now lives here and `ozify` imports it, since the
+  two copies were identical.
+
 - [x] The CANFAR access toolkit is in the repo, and OzStar staging asks before
   it reaches for CANFAR (2026-09-03). `examples/canfar/remote/` now ships the
   shell helpers that get a machine onto CANFAR — `canfar-cert.sh` for the CADC

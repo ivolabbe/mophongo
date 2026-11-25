@@ -55,7 +55,7 @@ sys.path.append(str(HERE.parent / "canfar"))
 
 from arcify import (  # noqa: E402
     PATH_KEYS, _repair_cache_name, arc_index, check_release_versions, resolve,
-    roots_for,
+    roots_for, wanted_inputs,
 )
 
 import ozroot  # noqa: E402
@@ -115,23 +115,6 @@ def known_sources(out_dir: Path) -> dict[str, str]:
             if src.strip() and dst.strip():
                 sources.setdefault(dst.strip(), src.strip())
     return sources
-
-
-def wanted_inputs(cfg_paths: list[Path]) -> dict[str, str]:
-    """``basename -> the local path it came from`` over every config.
-
-    The local path is kept because :func:`roots_for` reads the field and the
-    release version off it to decide which arc subtrees would have to be
-    indexed for that file.
-    """
-    wanted: dict[str, str] = {}
-    for cfg_path in cfg_paths:
-        cfg = json.loads(re.sub(r"(?m)^\s*#.*$", "", cfg_path.read_text()))
-        for key in PATH_KEYS:
-            value = cfg.get(key) or ""
-            if value:
-                wanted.setdefault(Path(value).name, value)
-    return wanted
 
 
 def ozify(cfg_path: Path, index: dict[str, str], out_dir: Path,

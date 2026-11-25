@@ -37,9 +37,16 @@ This file tracks future desired features, checks, and investigations.
   written and `ap_flux_cat_<i>` and `ap_flux_est3_<i>` are NaN in all 17 run3
   tables. The SUPER catalogs have the inputs: `kron_flux_col="fauto_KRON"`,
   `aper_flux_col="faper_KRON"`, `kron_radius_col="kron_radius_circ"` (arcsec)
-  and `aperture_catalog="use_aper"` (arcsec diameter). Confirm first whether
-  `kron_radius_circ` is the unscaled Kron radius (`kron_k=2.5`) or the scaled
-  aperture radius (`kron_k=1`). A run that leaves the knobs unset should say
+  and `aperture_catalog="use_aper"` (arcsec diameter). `kron_radius_circ` is
+  already the Kron aperture radius, so the configs need `kron_k=1` and not
+  the default 2.5: on the COSMOS F770W trial patch
+  (`scratch/ap_err_check/v1`, 8153 sources)
+  `(fauto_KRON/faper_KRON) / EE_H(k * kron_radius_circ)` over the catalog's
+  own `tot_cor` is 0.954 with a 16-84% range of 0.953-0.957 for `k=1`, against
+  0.872 (0.778-0.894) for `k=2.5`. The constant 4.6% is not explained; a
+  guess is that the F444W PSF stamp is normalized to its finite support.
+  Settle it before trusting the absolute scale of `ap_flux_cat_<i>` and
+  `ap_flux_est3_<i>`. A run that leaves the knobs unset should say
   so once at INFO level, or omit the two columns, so that all-NaN columns do
   not read as measurements.
 

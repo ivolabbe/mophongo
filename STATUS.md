@@ -3,6 +3,34 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] The MINERVA configs set the catalog columns for the Kron-tied
+  estimators (2026-11-25). `make_minerva_configs.py` now writes
+  `aperture_catalog="use_aper"`, `kron_flux_col="fauto_KRON"`,
+  `aper_flux_col="faper_KRON"` and `kron_radius_col="kron_radius_circ"` into
+  the `phot` block, and the 17 configs in `examples/minerva` are regenerated;
+  nothing else in them changed. All three SUPER catalogs (UDS, COSMOS, EGS)
+  carry the four columns with the same units. A run from these configs writes
+  `totcor_cat`, `ap_flux_cat_<i>`, `ap_flux_est3_<i>` and their errors, which
+  were NaN in every run3 table, and measures each source in the larger of its
+  catalog aperture and the encircled-energy one, so `ap_flux_<i>` and
+  `ap_flux_corr_<i>` change for sources whose `use_aper` is the larger. The
+  generated cluster configs (`examples/ozstar`, `examples/canfar`) are not
+  tracked and have to be rewritten with `ozify.py` / `arcify.py` before the
+  next run. For run3 the `phot` step below applies the new settings without
+  a fit.
+- [x] `phot.kron_k` defaults to 1 (2026-11-25). It was 2.5, the
+  SExtractor AUTO factor, on the assumption that `kron_radius_col` holds the
+  unscaled Kron radius. The MINERVA SUPER catalogs give the radius of the Kron
+  aperture: `kron_radius_circ = kron_radius * sqrt(a_image * b_image) * 0.04"`
+  for all 294126 COSMOS rows to within 0.1%, with `kron_radius` the unitless
+  Kron factor (README_v5.4.1). The old default therefore applied the factor
+  twice, put the radius at the edge of the PSF and reduced `totcor_cat` to the
+  bare `fauto/faper`, about 13% below the catalog's `tot_cor`. With 1 the
+  ratio to `tot_cor` is 0.954 with 0.2% scatter. No released table is
+  affected: no MINERVA config sets the Kron columns, so `totcor_cat` was never
+  written. `fit.py`, the three docs that quote the default,
+  `examples/minerva/default.json`, and a test that pins the convention
+  (`test_kron_radius_column_is_used_as_the_kron_aperture_radius`).
 - [x] Error columns for the aperture fluxes (2026-11-25). `ap_err_<i>`,
   `ap_err_corr_<i>`, `ap_err_cat_<i>` and `ap_err_est3_<i>` accompany
   `ap_flux_<i>`, `ap_flux_corr_<i>`, `ap_flux_cat_<i>` and

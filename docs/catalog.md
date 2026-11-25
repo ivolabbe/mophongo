@@ -310,8 +310,9 @@ whatever the catalog already uses:
 
 `phot.kron_flux_col`, `phot.aper_flux_col`, `phot.kron_radius_col` : `float`
 : The detection catalog's Kron (AUTO) flux, its flux in its own aperture, and
-  its circularized Kron radius **in arcsec** (`phot.kron_k`, default 2.5,
-  scales that radius). All three must name existing columns or the catalog-side
+  the circularized radius of its Kron aperture **in arcsec**, Kron factor
+  included (`phot.kron_k`, default 1, multiplies a column that holds the
+  unscaled radius). All three must name existing columns or the catalog-side
   aperture-to-total `totcor_cat` is skipped with a warning. The two fluxes
   enter only as a ratio, so their unit is free as long as it is the same one.
 

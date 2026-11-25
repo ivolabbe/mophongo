@@ -246,8 +246,9 @@ which convention is meant and the bare name does not.
   Kron-to-aperture flux ratio times the inverse encircled energy of the
   high-resolution PSF at the scaled circularized Kron radius. Written only
   when `FitConfig.phot.kron_flux_col`, `phot.aper_flux_col` and
-  `phot.kron_radius_col` name existing catalog columns (`phot.kron_k` scales
-  the radius; SExtractor AUTO convention is 2.5). This is the quantity the
+  `phot.kron_radius_col` name existing catalog columns. The radius column is
+  taken as the radius of the Kron aperture; `phot.kron_k`, default 1,
+  multiplies a column that holds the unscaled radius. This is the quantity the
   flux-estimator report called `tcorH`.
 
 `ap_flux_cat_<i>`

@@ -345,7 +345,23 @@ def band_configs(rel: Release) -> list[dict]:
                     # APERTURE_DIAM_ARCSEC above stays as the record of the
                     # IDL-matched diameters, for runs that need to tie to
                     # Y. Asada's catalog with an explicit `aperture_diam`.
-                    "phot": {"aperture_ee": 0.7, "aperture_catalog": None},
+                    #
+                    # The four column names are the SUPER catalog's, the same
+                    # in UDS, COSMOS and EGS. `use_aper` is the catalog's own
+                    # aperture (arcsec diameter): a source is measured in the
+                    # larger of it and the encircled-energy aperture. The
+                    # other three give totcor_cat, which ap_flux_cat and
+                    # ap_flux_est3 need. `kron_radius_circ` is already the
+                    # radius of the Kron aperture in arcsec (kron_radius *
+                    # sqrt(a_image * b_image) * pixel scale), so kron_k stays
+                    # at its default of 1.
+                    "phot": {
+                        "aperture_ee": 0.7,
+                        "aperture_catalog": "use_aper",
+                        "kron_flux_col": "fauto_KRON",
+                        "aper_flux_col": "faper_KRON",
+                        "kron_radius_col": "kron_radius_circ",
+                    },
                 },
                 "scene_plots": True,
             }

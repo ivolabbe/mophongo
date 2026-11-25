@@ -80,7 +80,7 @@
       "kron_flux_col": null,
       "aper_flux_col": null,
       "kron_radius_col": null,
-      "kron_k": 2.5
+      "kron_k": 1.0
     },
     "template_dilate_segmap": 0,
     "skip_template_extension_for_deblended": false,

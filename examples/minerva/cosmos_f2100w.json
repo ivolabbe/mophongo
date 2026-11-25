@@ -49,7 +49,10 @@
     "scene_max_merge_radius": 1000,
     "phot": {
       "aperture_ee": 0.7,
-      "aperture_catalog": null
+      "aperture_catalog": "use_aper",
+      "kron_flux_col": "fauto_KRON",
+      "aper_flux_col": "faper_KRON",
+      "kron_radius_col": "kron_radius_circ"
     }
   },
   "scene_plots": true

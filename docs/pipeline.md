@@ -614,9 +614,11 @@ Apertures — all of these live in the `phot` block of `fit`, e.g.
   and circularized Kron radius (arcsec) columns. All three are needed for the
   catalog-side aperture-to-total `totcor_cat`; with any of them unset or
   absent from the table the column is skipped and a warning is logged.
-- `kron_k` (*float*, default `2.5`) — scaling of the Kron radius at which the
-  high-resolution PSF encircled energy is evaluated (SExtractor AUTO
-  convention).
+- `kron_k` (*float*, default `1.0`): multiplies the Kron radius column before
+  the high-resolution PSF encircled energy is evaluated there. Leave it at 1
+  when the column is already the radius of the Kron aperture, as
+  `kron_radius_circ` in the MINERVA SUPER catalogs is. Set the catalog's Kron
+  factor only for a column that holds the unscaled radius.
 
 Templates:
 

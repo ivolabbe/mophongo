@@ -4902,7 +4902,9 @@ class Pipeline:
         encircled energy of the high-resolution PSF at the scaled circularized
         Kron radius.  Computed only when the three ``phot`` column
         knobs name existing catalog columns; otherwise empty.  The Kron radius
-        column is in arcsec; ``phot.kron_k`` scales it (SExtractor AUTO: 2.5).
+        column is in arcsec and is taken as the radius of the Kron aperture;
+        ``phot.kron_k`` (default 1) multiplies a column that holds the
+        unscaled radius instead.
         Written once to the band-independent ``totcor_cat`` catalog column.
         """
         cfg = self.config

@@ -84,8 +84,14 @@ class PhotConfig:
     # prefix -- the block already says where they come from.
     kron_flux_col: str | None = None  # detection-catalog Kron (AUTO) flux
     aper_flux_col: str | None = None  # detection-catalog flux in the R_phi aperture
-    kron_radius_col: str | None = None  # circularized Kron radius [arcsec]
-    kron_k: float = 2.5  # Kron scaling: EE_H evaluated at k * R_kron
+    kron_radius_col: str | None = None  # circularized Kron aperture radius [arcsec]
+    # Multiplies the radius column; EE_H is evaluated at k * R_kron. 1 when the
+    # column is already the radius of the Kron aperture, as in the MINERVA
+    # SUPER catalogs (kron_radius_circ = kron_radius * sqrt(a_image * b_image)
+    # * pixel scale, the Kron factor included). Set the catalog's Kron factor
+    # here only for a column that holds the unscaled radius. Was 2.5 before
+    # 2026-11-25, which applied the factor twice to such a column.
+    kron_k: float = 1.0
 
 
 @dataclass

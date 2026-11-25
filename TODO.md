@@ -31,24 +31,31 @@ This file tracks future desired features, checks, and investigations.
   mosaic authors. Reproduce with `scratch/err_calib_check/pull_trend.py`
   (needs a residual image) and `table_pull.py` (fit tables only).
 
-- [ ] Set the catalog photometry knobs in the MINERVA configs (2026-11-25).
-  `make_minerva_configs.py` writes `phot = {aperture_ee: 0.7,
-  aperture_catalog: None}` and nothing else, so `totcor_cat` is never
-  written and `ap_flux_cat_<i>` and `ap_flux_est3_<i>` are NaN in all 17 run3
-  tables. The SUPER catalogs have the inputs: `kron_flux_col="fauto_KRON"`,
-  `aper_flux_col="faper_KRON"`, `kron_radius_col="kron_radius_circ"` (arcsec)
-  and `aperture_catalog="use_aper"` (arcsec diameter). `kron_radius_circ` is
-  already the Kron aperture radius, so the configs need `kron_k=1` and not
-  the default 2.5: on the COSMOS F770W trial patch
-  (`scratch/ap_err_check/v1`, 8153 sources)
-  `(fauto_KRON/faper_KRON) / EE_H(k * kron_radius_circ)` over the catalog's
-  own `tot_cor` is 0.954 with a 16-84% range of 0.953-0.957 for `k=1`, against
-  0.872 (0.778-0.894) for `k=2.5`. The constant 4.6% is not explained; a
-  guess is that the F444W PSF stamp is normalized to its finite support.
-  Settle it before trusting the absolute scale of `ap_flux_cat_<i>` and
-  `ap_flux_est3_<i>`. A run that leaves the knobs unset should say
-  so once at INFO level, or omit the two columns, so that all-NaN columns do
-  not read as measurements.
+- [ ] Use as few input-catalog columns as possible, and the simplest ones
+  (2026-11-25, Ivo). The catalog-tied photometry reads four columns through
+  four settings (`phot.aperture_catalog`, `kron_flux_col`, `aper_flux_col`,
+  `kron_radius_col`) plus the `kron_k` multiplier, and each one is a place
+  for a convention to go wrong, as `kron_k` did. Settle the smallest set that
+  still defines the estimators and drop the settings it makes redundant. One
+  candidate to weigh (a suggestion, not decided): the SUPER catalog's own
+  `tot_cor` together with `use_aper`. `tot_cor` already is
+  `(fauto_KRON/faper_KRON) / EE(kron_radius_circ)`, reproduced to a constant
+  0.954, so it would replace three columns and `kron_k` by one.
+
+- [ ] Explain the 4.6% between `totcor_cat` and the catalog's `tot_cor`
+  (2026-11-25). The MINERVA configs now set the catalog columns
+  (`aperture_catalog="use_aper"`, `kron_flux_col="fauto_KRON"`,
+  `aper_flux_col="faper_KRON"`, `kron_radius_col="kron_radius_circ"`), so
+  `totcor_cat`, `ap_flux_cat_<i>` and `ap_flux_est3_<i>` are written. On the
+  COSMOS F770W trial patch (`scratch/ap_err_check/v1`, 8153 sources)
+  `(fauto_KRON/faper_KRON) / EE_H(kron_radius_circ)` over the catalog's own
+  `tot_cor` is 0.954 with a 16-84% range of 0.953-0.957: the right radius, and
+  a constant that is not explained. A guess is that the F444W PSF stamp is
+  normalized to its finite support while the catalog's curve is not. Settle
+  it before trusting the absolute scale of the two catalog-tied columns.
+  Separately, a run that leaves the columns unset should say so once at INFO
+  level, or omit the two flux columns, so that all-NaN columns do not read as
+  measurements.
 
 - [ ] Check the aperture errors against empty apertures on full mosaics
   (2026-11-25). `ap_err_<i>` and its three companions are propagated from the

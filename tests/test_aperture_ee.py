@@ -385,3 +385,74 @@ def test_estimator3_and_ap_flux_cat_differ_once_there_is_a_residual():
     assert 0.0 * psfcor * tcc + ap_model * psfcor * tcc == pytest.approx(
         (ap_model + 0.0) * psfcor * tcc
     )
+
+
+def test_kron_radius_column_is_used_as_the_kron_aperture_radius():
+    """`totcor_cat` evaluates the PSF encircled energy at the column's radius.
+
+    The catalog's circularized Kron radius already contains the Kron factor,
+    so `phot.kron_k` defaults to 1. With the old default of 2.5 the radius
+    below would reach the edge of the PSF, the encircled energy would be 1 and
+    the correction would collapse to the bare flux ratio.
+    """
+    from astropy.table import Table
+    from photutils.aperture import CircularAperture, aperture_photometry
+
+    from mophongo import pipeline
+    from mophongo.templates import Templates
+
+    assert FitConfig().phot.kron_k == 1.0
+
+    shape = (120, 120)
+    positions = [(35.0, 60.0), (85.0, 60.0)]
+    psf = PSF.gaussian(41, fwhm=4.0).array
+    yy, xx = np.mgrid[: shape[0], : shape[1]]
+    image = np.zeros(shape)
+    segmap = np.zeros(shape, dtype=np.int32)
+    for sid, (px, py) in enumerate(positions, start=1):
+        r2 = (xx - px) ** 2 + (yy - py) ** 2
+        image += 100.0 * np.exp(-r2 / (2 * (4.0 / 2.3548) ** 2))
+        segmap[r2 < 25] = sid
+
+    r_kron = 0.4  # arcsec, 4 pixels: inside the PSF core
+    catalog = Table(
+        {
+            "id": [1, 2],
+            "x": [p[0] for p in positions],
+            "y": [p[1] for p in positions],
+            "kron_flux": [150.0, 150.0],
+            "aper_flux": [100.0, 100.0],
+            "kron_radius": [r_kron, r_kron],
+        }
+    )
+    tmpls = Templates.from_image(image, segmap, positions)
+    table, _res, _pipe = pipeline.run(
+        [image, image],
+        segmap,
+        catalog=catalog,
+        weights=[np.ones(shape), np.ones(shape)],
+        kernels=[None, None],
+        templates=tmpls,
+        wcs=[_wcs(shape), _wcs(shape)],
+        psfs=[psf, psf],
+        config=FitConfig(
+            reg_flux=0.0,
+            fit_astrometry_niter=0,
+            fit_astrometry_joint=False,
+            astrom_minimum_snr=0.0,
+            phot={
+                "aperture_ee": 0.70,
+                "units": "arcsec",
+                "kron_flux_col": "kron_flux",
+                "aper_flux_col": "aper_flux",
+                "kron_radius_col": "kron_radius",
+            },
+        ),
+    )
+
+    center = ((psf.shape[1] - 1) / 2.0, (psf.shape[0] - 1) / 2.0)
+    aper = CircularAperture(center, r=r_kron / PSCALE)
+    ee = float(aperture_photometry(psf, aper, method="exact")["aperture_sum"][0]) / psf.sum()
+    assert 0.9 < ee < 0.96  # the radius is well inside the stamp
+
+    np.testing.assert_allclose(table["totcor_cat"], 1.5 / ee, rtol=1e-6)

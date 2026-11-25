@@ -7,12 +7,15 @@ This file tracks future desired features, checks, and investigations.
   `ssh`/`scp` calls needs a code unless they share one master connection
   (`ControlMaster` block in `~/.ssh/config`, opened once with
   `ssh -fN nt.swin.edu.au`). Nothing in `examples/ozstar` has to change for
-  that, but two things should: `MANUAL.md` still says an ssh key is all the
-  setup, and `submit.ssh` reports a missing master as a bare
-  `Permission denied`. Add a preflight (`ssh -O check`) to `submit.py` and
-  `campaign.py` that names the command to run, and document the block. The
+  that, and `MANUAL.md` Part 1.2 now documents the block, the idle timer and
+  the credential policy. Still open: `submit.ssh` reports a missing master as
+  a bare `Permission denied`, so add a preflight (`ssh -O check`) to
+  `submit.py` and `campaign.py` that names the command to run. The
   `ozstar-mount.sh` reconnect path needs a look too: a reconnect after a
-  network drop cannot enter a code.
+  network drop cannot enter a code. And the policy bans sharing credentials
+  "including with AI agents", so whether a coding agent may issue commands
+  over the owner's open connection is a question for HPC support before the
+  toolkit is driven that way.
 
 - [ ] Calibrate the inverse variance per depth tier (2026-11-25).
   `get_bg_and_ivar` applies one global scale to the weight map, so the errors

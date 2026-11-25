@@ -26,10 +26,91 @@ ls -d /fred/<project>/<user>          # your directory in the allocation
 lfs quota -g <project> /fred          # what is left of the 10 TB
 ```
 
-Put an ssh key in place (`ssh-copy-id`). The toolkit runs many short ssh
-commands and a password prompt on each is unworkable.
+Put an ssh key in place (`ssh-copy-id`) and give it a passphrase: OzStar's
+policy forbids keys without one (see the end of 1.2).
 
-### 1.2 CADC and the MINERVA group
+### 1.2 Two-factor login: one code per work session
+
+A login to OzStar needs a six-digit code from an authenticator app after the
+key or password. Set it up once in the
+[accounts portal](https://supercomputing.swin.edu.au/account-management/)
+("Two-Factor Authentication") and keep the recovery codes.
+
+The toolkit runs many short `ssh` and `scp` commands, and a code prompt on
+each is unworkable. ssh can instead share one authenticated connection, the
+*master*, among all later commands to the same host. This is the route the
+OzStar documentation gives for interactive work
+([Access, "Reusing SSH connections"](https://supercomputing.swin.edu.au/docs/1-getting_started/Access.html)).
+
+**Once.** Add to `~/.ssh/config`:
+
+```
+Host nt nt.swin.edu.au ozstar.swin.edu.au *.hpc.swin.edu.au
+    User <user>
+    ControlMaster auto
+    ControlPath ~/.ssh/cm-%r@%h_%p
+    ControlPersist 24h
+    ServerAliveInterval 60
+
+Host nt
+    HostName nt.swin.edu.au
+```
+
+**Each work session**, in your own terminal:
+
+```bash
+ssh -fN nt.swin.edu.au        # key passphrase, then the code; the prompt returns
+ssh -O check nt.swin.edu.au   # "Master running (pid=...)"
+```
+
+After that every `submit.py` and `campaign.py` command, and `scp`, `rsync` or
+`sshfs` to `nt.swin.edu.au`, goes through the master with no prompt.
+`ssh -O exit nt.swin.edu.au` closes it.
+
+Checked on 2026-11-25 with the master open: three consecutive `ssh` commands
+took 0.45 s each with no prompt and reached the same login node, `scp` worked
+in both directions, and `submit.py status` ran.
+
+What the settings mean:
+
+- `ControlMaster auto` and `ControlPath`: a later connection finds the open
+  one through the socket file and reuses it.
+- `ControlPersist 24h` is an idle timer, not a session limit. The master
+  closes 24 hours after the last command that used it ends, and every use
+  restarts the clock, so a campaign that polls every few minutes keeps it open
+  for as long as it runs.
+- `ServerAliveInterval 60` sends a keepalive every minute, so an idle link is
+  not dropped and a dead one is noticed.
+- `nt.swin.edu.au` hands each new login to one of its login nodes. The master
+  stays on the node it landed on, so every command of a session reaches the
+  same node.
+
+The master ends early when the laptop sleeps, the network or VPN changes, or
+the machine restarts. Logins then need a code again: open the master afresh
+with `ssh -fN nt.swin.edu.au` before rerunning toolkit commands. A command
+with no terminal (a `nohup` job, a scheduled task, a coding agent) cannot be
+asked for a code and fails with
+`Permission denied (keyboard-interactive,hostbased)`.
+Jobs already in SLURM are not affected, only the commands on the
+laptop that watch them. On a Mac, `caffeinate -i <command>` keeps the machine
+awake for a long campaign.
+
+**Policy.** The OzStar login bulletin of 2026-09-21 reads: "Our security
+policy prohibits sharing of access credentials (including with AI agents),
+and the use of passphraseless SSH keys. All SSH keys must have a strong
+passphrase." Three consequences for this toolkit:
+
+- Running it yourself over a shared connection is ordinary interactive use and
+  needs no exemption.
+- While the master is open, any program running under your account on the
+  laptop can use it without a code. That includes an AI coding agent. Do not
+  let one use your key or your open connection unless HPC support has agreed;
+  close the master (`ssh -O exit`) when you are done.
+- A job that logs in with nobody present (a nightly `rsync`, a scheduled
+  campaign) cannot enter a code. It needs a separate, restricted key that HPC
+  support approves (hpc-support@swin.edu.au), never your own login key.
+
+### 1.3 CADC and the MINERVA group
 
 Inputs are copied from `arc:projects/minerva`, which needs a CADC account that
 is a member of the `minerva` group. `../canfar/MANUAL.md` Part 1 covers getting
@@ -182,8 +263,8 @@ minutes. Files already present are skipped, so the job can be resubmitted after
 a timeout and will resume.
 
 `stage` first lists `$OZSTAR_BASE/data` and submits nothing for a field whose
-inputs are all there — the usual case for every run after the first, since
-`data/` sits above the run directory and is shared. Nothing then contacts
+inputs are all there, which is the usual case for every run after the first,
+since `data/` sits above the run directory and is shared. Nothing then contacts
 CANFAR, which is why a re-fit works with an expired certificate. The job itself
 makes the same check before reaching for `vcp`.
 
@@ -308,6 +389,7 @@ $P submit.py sync          # git pull; the venv and running jobs are untouched
 
 | Symptom | Cause and fix |
 |---|---|
+| `ssh failed (255): ... Permission denied (keyboard-interactive,hostbased)`, or every command asks for a 2FA code | no shared connection is open. `ssh -fN nt.swin.edu.au` in your own terminal, then rerun (Part 1.2) |
 | `Lmod has detected the following error: Parent modules not loaded` | Lmod is hierarchical: `python/3.12.3` needs `gcccore/13.3.0` first. The error names the parent |
 | `ozify.py` says an input is `not found on arc`, or `none of the N arc subtrees listed` | usually an expired certificate rather than a missing file. `../canfar/remote/canfar-cert.sh --force`, then `submit.py cert` |
 | Every `vcp` dies in `ImportError: libssl.so.1.1` | the EasyBuild shim on `PYTHONPATH` shadowed the venv. The job scripts `unset PYTHONPATH`; if you run something by hand, do the same |

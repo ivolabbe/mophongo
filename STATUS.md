@@ -3,6 +3,15 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] The OzStar manual covers the two-factor login (2026-11-25).
+  `examples/ozstar/MANUAL.md` Part 1.2 is new: the `~/.ssh/config` block for
+  one shared connection, `ssh -fN nt.swin.edu.au` once per work session, what
+  `ControlPersist` (an idle timer) and `ServerAliveInterval` do, what ends the
+  master early, and the login bulletin's policy on passphrases, AI agents and
+  unattended jobs. Part 1.1 no longer says a key alone is enough, the CADC
+  section moves to 1.3, and Troubleshooting gains the
+  `Permission denied (keyboard-interactive,hostbased)` row. The toolkit code
+  is unchanged.
 - [x] The MINERVA configs set the catalog columns for the Kron-tied
   estimators (2026-11-25). `make_minerva_configs.py` now writes
   `aperture_catalog="use_aper"`, `kron_flux_col="fauto_KRON"`,

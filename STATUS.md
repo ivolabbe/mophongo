@@ -3,6 +3,43 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] `phot` step: redo the aperture photometry of a finished run without
+  refitting (2026-11-25). There was no such provision: `loadfit`
+  restored a finished fit but recomputed nothing.
+  * `Pipeline.rerun_photometry` calls `load_fit` (templates with their fitted
+    amplitudes and shifts from the stamps file, residual, inverse variance on
+    the fit grid), drops the columns the aperture pass writes
+    (`_aperture_column_names`, now the one list both places use, plus
+    `totcor_cat`), runs `_add_aperture_photometry` and rewrites the fit table.
+    The fit's own columns are not touched and the `SCENES` extension is
+    copied over.
+  * Tables are versioned, never overwritten. `<name>_fit_table.fits` is
+    always the current one, and the table a pass replaces is archived as
+    `<name>_fit_table.v<N>.fits` under the next free number (`v1` is the
+    fit's own). Header cards: `TABVER` (version of the table), `PHOTVER`
+    (code) and `PHOTCFG` (the `fit.phot` settings), since the config copy in
+    the output directory still describes the fit.
+  * A catalog aperture column the original run did not use is copied from the
+    input catalog by id, so `fit.phot` can gain `aperture_catalog` and the
+    Kron columns after the fit. That is the route to `ap_flux_cat` and
+    `ap_flux_est3` for run3 without a new fit.
+  * Registered as step `phot` (`python -m mophongo.pipeline cfg.json phot`,
+    `submit.py run <names> --step phot` on OzStar, which already passes any
+    step through).
+  * Checked on the COSMOS F770W trial patch of `scratch/ap_err_check/v1`
+    (8290 templates, no stamps file, so the templates were rebuilt): 1 min
+    against 14 for the full run, of which 13.5 s is the aperture pass. The
+    fit's columns come back bit-identical; the aperture columns agree with the
+    fit's own to 4e-5 at worst (median 1e-6 or better); the Kron-tied ones
+    moved by a median 10%, as they should with `kron_k` now 1. Not yet timed
+    on a full field.
+  * `tests/test_rerun_photometry.py`, 6 tests: same settings reproduce the
+    table, new settings change the apertures and nothing else, a catalog
+    aperture added after the fit is picked up, the replaced table is archived
+    and the scene extension carried over, two passes leave three tables, and
+    a stale catalog-tied value cannot outlive the pass.
+  * `docs/pipeline.md` has a how-to section, *Redoing the photometry without
+    refitting*, and `examples/ozstar/MANUAL.md` 3.6 the cluster commands.
 - [x] The OzStar manual covers the two-factor login (2026-11-25).
   `examples/ozstar/MANUAL.md` Part 1.2 is new: the `~/.ssh/config` block for
   one shared connection, `ssh -fN nt.swin.edu.au` once per work session, what

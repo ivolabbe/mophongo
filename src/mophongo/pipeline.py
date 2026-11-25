@@ -901,6 +901,24 @@ def _record_psf_ee(
     )
 
 
+def _aperture_column_names(idx: int) -> tuple[str, ...]:
+    """The per-band columns :meth:`Pipeline._add_aperture_photometry` writes.
+
+    One list, so that :meth:`Pipeline.rerun_photometry` drops exactly the
+    columns a new aperture pass will write again.
+    """
+    return (
+        f"ap_model_{idx}", f"ap_flux_{idx}", f"ee_psf_lo_{idx}",
+        f"stampcor_{idx}", f"totcor_{idx}", f"psfcor_{idx}",
+        f"ap_flux_corr_{idx}", f"ap_flux_cat_{idx}",
+        f"ap_flux_ee_{idx}", f"ap_flux_catap_{idx}",
+        f"aper_{idx}", f"aper_ee_{idx}",
+        f"ap_res_{idx}", f"ap_flux_est3_{idx}",
+        f"ap_err_{idx}", f"ap_err_corr_{idx}",
+        f"ap_err_cat_{idx}", f"ap_err_est3_{idx}",
+    )
+
+
 def _aperture_variances(
     v_disk: float,
     v_omega: float,
@@ -4136,6 +4154,104 @@ class Pipeline:
         logger.info("post-run state restored from %s", self.out_dir)
         return self
 
+    def rerun_photometry(self, ifilt: int = 1) -> "Pipeline":
+        """Redo the aperture photometry of a finished run without refitting.
+
+        The fit is the expensive part of a run and the aperture pass only reads
+        its products, so a change to the photometry code or to ``fit.phot``
+        does not need a new fit. This restores the fit with :meth:`load_fit`
+        (fitted templates with their amplitudes and shifts, residual, inverse
+        variance), runs :meth:`_add_aperture_photometry` again, and rewrites
+        ``<name>_fit_table.fits``.
+
+        Only the aperture columns and ``totcor_cat`` are replaced. The columns
+        the fit itself produced (``flux``, ``err``, ``err_pred``, the totals,
+        scene and astrometry flags) are kept as written, and the ``SCENES``
+        extension is carried over.
+
+        Tables are versioned, never overwritten. ``<name>_fit_table.fits`` is
+        always the current one; the table a pass replaces is archived beside it
+        as ``<name>_fit_table.v<N>.fits``, with ``v1`` the table the fit wrote
+        and ``N`` counting up with every pass. Each new table carries its own
+        number in the header card ``TABVER``, and ``PHOTVER`` and ``PHOTCFG``
+        record the code version and the ``fit.phot`` settings its aperture
+        columns were written with.
+
+        Args:
+            ifilt: Fitted image index (1-based, as elsewhere).
+
+        Returns:
+            self, in the post-run state with the new table.
+        """
+        from astropy.io import fits
+
+        self.load_fit(ifilt)
+        config = self.config
+        cat = self.table
+        templates = self.all_templates[0]
+
+        stale = [c for c in (*_aperture_column_names(ifilt), "totcor_cat")
+                 if c in cat.colnames]
+        cat.remove_columns(stale)
+        # a fit run without a catalog aperture never copied that column over
+        col = config.phot.aperture_catalog
+        if isinstance(col, str) and col not in cat.colnames:
+            by_id = {int(i): k for k, i in enumerate(self.catalog["id"])}
+            rows = [by_id[int(i)] for i in cat["id"]]
+            cat[col] = self.catalog[col][rows]
+
+        psf = self.psfs[ifilt] if self.psfs is not None else None
+        throughput = _filter_psf_throughput(
+            psf,
+            None if self.psf_throughputs is None else self.psf_throughputs[ifilt],
+        )
+        with self._phase("aperture photometry"):
+            self._add_aperture_photometry(
+                cat,
+                templates,
+                [t.flux for t in templates],
+                self.residuals[0],
+                psf,
+                ifilt,
+                throughput=throughput,
+                weights=self.weights[ifilt] if self.weights is not None else None,
+            )
+        # The config snapshot in out_dir still describes the fit, so the table
+        # itself says which code and which settings its aperture columns are from.
+        cat.meta["PHOTVER"] = (
+            source_version(), "mophongo that wrote the aperture columns"
+        )
+        cat.meta["PHOTCFG"] = (str(config.phot), "settings of the aperture pass")
+        logger.info("aperture pass settings: %s", config.phot)
+
+        # No table is ever overwritten: the one being replaced is archived under
+        # the next free version number, and the new one says which it is.
+        stem = self.f_fit_table.stem
+        pattern = re.compile(rf"{re.escape(stem)}\.v(\d+)\.fits")
+        archived = [
+            int(m.group(1))
+            for p in self.out_dir.glob(f"{stem}.v*.fits")
+            if (m := pattern.fullmatch(p.name))
+        ]
+        version = max(archived, default=0) + 1
+        previous = self.f_fit_table.with_name(f"{stem}.v{version}.fits")
+        cat.meta["TABVER"] = (version + 1, "table version; older: _fit_table.v<N>.fits")
+        os.replace(self.f_fit_table, previous)
+        with self._phase("write residual + tables"), _quiet_hierarch_warnings():
+            cat.write(self.f_fit_table, overwrite=True)
+            with fits.open(previous) as hdul:
+                if "SCENES" in hdul:
+                    fits.append(
+                        self.f_fit_table, hdul["SCENES"].data, hdul["SCENES"].header
+                    )
+        logger.info(
+            "aperture photometry redone for %d templates: %s is now version %d "
+            "(%d column(s) replaced), version %d archived as %s",
+            len(templates), self.f_fit_table.name, version + 1, len(stale),
+            version, previous.name,
+        )
+        return self
+
     @contextmanager
     def log_run(self, path: str | Path | None = None):
         """Capture everything the run emits into ``<out_dir>/<name>.log``.
@@ -5092,14 +5208,7 @@ class Pipeline:
             hi_by_id = {int(t.id): t for t in self.tmpls.templates}
 
         # ensure columns exist
-        for name in (f"ap_model_{idx}", f"ap_flux_{idx}", f"ee_psf_lo_{idx}",
-                     f"stampcor_{idx}", f"totcor_{idx}", f"psfcor_{idx}",
-                     f"ap_flux_corr_{idx}", f"ap_flux_cat_{idx}",
-                     f"ap_flux_ee_{idx}", f"ap_flux_catap_{idx}",
-                     f"aper_{idx}", f"aper_ee_{idx}",
-                     f"ap_res_{idx}", f"ap_flux_est3_{idx}",
-                     f"ap_err_{idx}", f"ap_err_corr_{idx}",
-                     f"ap_err_cat_{idx}", f"ap_err_est3_{idx}"):
+        for name in _aperture_column_names(idx):
             if name not in cat.colnames:
                 cat[name] = cfg.bad_value
         totcor_cat = self._totcor_cat(cat)
@@ -6913,6 +7022,9 @@ STEPS = {
     "info": "info",
     "fit": "run",
     "outputs": "write_outputs",
+    # after a finished fit: redo the aperture photometry alone, from the saved
+    # fit products, and rewrite the fit table
+    "phot": "rerun_photometry",
     "all": "run_all",
 }
 

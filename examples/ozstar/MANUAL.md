@@ -312,6 +312,49 @@ stamps:
 | `<name>_kernel.fits`, `<name>_psf_*.fits` | PSF and kernel maps |
 | `<name>.log` | the run log |
 
+### 3.6 Redo the photometry without refitting
+
+The fit takes nearly all of a run. The aperture photometry that follows only
+reads what the fit left on disk (templates, fitted amplitudes and shifts, the
+residual), so a fix to the photometry code, or a change to the `fit.phot` block
+of a config, does not need a new fit. The `phot` step redoes that pass alone:
+
+```bash
+$P submit.py run uds_f770w --step phot --time 01:00:00   # one band
+$P submit.py run uds_f770w uds_f1280w --step phot        # or several
+```
+
+Locally the same step is `python -m mophongo.pipeline <config>.json phot`.
+
+What it does:
+
+- Restores the finished fit from `<name>_stamps.h5`, `<name>_templates.fits`
+  and `<name>_residual.fits`. No scene is solved.
+- Recomputes every aperture column (`ap_*`, `aper_*`, `stampcor`, `totcor`,
+  `psfcor`, `ee_psf_lo`, `totcor_cat`) with the code and config now in place.
+- Leaves the columns the fit produced untouched: `flux`, `err`, `err_pred`,
+  the `_total` columns, scene and astrometry flags.
+- Versions the table instead of overwriting it. `<name>_fit_table.fits` is
+  always the current one; the table it replaces is archived as
+  `<name>_fit_table.v<N>.fits` (`v1` is the fit's own, `v2` the first redo,
+  and so on). The header cards `TABVER`, `PHOTVER` and `PHOTCFG` give each
+  table's version number, the code version and the `fit.phot` settings.
+
+Two typical uses:
+
+- **A code fix.** Commit and push it, then run the step: `submit.py run` pulls
+  the clone on `/fred` first, as for a fit.
+- **New photometry settings**, for example the catalog columns behind
+  `ap_flux_est3`: edit the `phot` block, then `ozify.py` and `submit.py push`
+  the config as in 3.1, then run the step.
+
+On a 1.5 arcmin COSMOS F770W patch (8290 sources) the step took 1 minute
+against 14 for the full run, and reproduced the fit's own aperture columns to
+4e-5. It has not been timed on a full field yet; expect minutes, and keep the
+fit's memory request until that is measured. If the stamps file is missing the
+templates are rebuilt through the fit's own template path and a stamps file is
+written, which costs the convolution time and the disk space of a normal run.
+
 ---
 
 ## Part 4. A whole campaign

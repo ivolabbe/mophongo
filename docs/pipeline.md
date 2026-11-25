@@ -22,7 +22,10 @@ python -m mophongo.pipeline run.json [steps]
 ```
 
 where `steps` is any of `psfs`, `kernels`, `load`, `loadfit`, `info`, `fit`,
-`outputs`, `all` (default `all`).
+`outputs`, `phot`, `all` (default `all`).
+
+`phot` redoes the aperture photometry of a finished run without refitting; see
+*Redoing the photometry without refitting* below.
 
 ## Processing flow
 
@@ -509,6 +512,9 @@ summary text). Expensive products are cached in `out_dir`:
   objects themselves are not persisted, so `all_scenes` stays empty; scene
   membership survives per template as `id_scene` and per source as the
   `scene_<i>` catalog column.
+- {meth}`~mophongo.pipeline.Pipeline.rerun_photometry` `(ifilt=1)`: redo the
+  aperture photometry of a finished run from its written products, without
+  refitting, and rewrite the fit table. See the next section.
 - {meth}`~mophongo.pipeline.Pipeline.info` — print a summary of config,
   inputs, cache state, loaded data, and results at any stage.
 
@@ -519,6 +525,88 @@ Inspection and diagnostic helpers
 {meth}`~mophongo.pipeline.Pipeline.source_products`,
 {meth}`~mophongo.pipeline.Pipeline.plot_subphot`) are described in
 {doc}`diagnostics`.
+
+### Redoing the photometry without refitting
+
+The fit takes nearly all of a run. The aperture photometry that follows it
+only reads what the fit wrote: the fitted templates with their amplitudes and
+shifts, and the residual image. So a fix to the photometry code, or a change
+to the `fit.phot` block of a config (aperture size, catalog aperture, the
+catalog columns behind `ap_flux_cat` and `ap_flux_est3`), does not need a new
+fit. The `phot` step redoes that pass alone on a finished run:
+
+```
+python -m mophongo.pipeline run.json phot
+mophongo run run.json phot                    # the same, through the console script
+```
+
+or from Python:
+
+```python
+from mophongo.pipeline import Pipeline
+
+pipe = Pipeline.from_config("run.json").rerun_photometry()
+pipe.table["ap_flux_1", "ap_err_1"]
+```
+
+`run.json` is the config of the finished run, with whatever changes to
+`fit.phot` you want applied. For example, to add the catalog-tied estimators
+to a run that was fitted without them:
+
+```json
+"fit": {
+  "phot": {
+    "aperture_ee": 0.7,
+    "aperture_catalog": "use_aper",
+    "kron_flux_col": "fauto_KRON",
+    "aper_flux_col": "faper_KRON",
+    "kron_radius_col": "kron_radius_circ"
+  }
+}
+```
+
+The step needs the run's output directory as the fit left it
+(`<name>_fit_table.fits`, `<name>_residual.fits`, and `<name>_stamps.h5` or
+`<name>_templates.fits` with the kernel map) and the inputs the config names,
+since the mosaics, segmentation map and catalog are read again.
+
+What it writes:
+
+- Every aperture column is recomputed: `ap_*`, `aper_*`, `stampcor`, `totcor`,
+  `psfcor`, `ee_psf_lo` and `totcor_cat` ({doc}`outputs`). A column the new
+  settings no longer produce is reset, so no value of an earlier pass is left
+  behind.
+- The columns the fit produced are not touched: `flux`, `err`, `err_pred`, the
+  `_total` columns, and the scene and astrometry columns. The `SCENES`
+  extension is carried over.
+- Tables are versioned and never overwritten. `<name>_fit_table.fits` is
+  always the current one. The table a pass replaces is archived beside it as
+  `<name>_fit_table.v<N>.fits`: `v1` is the table the fit wrote, `v2` the
+  result of the first `phot` pass, and so on. A before-and-after comparison is
+  then direct:
+
+  ```python
+  from astropy.table import Table
+
+  new = Table.read("out/run_fit_table.fits", hdu=1)
+  old = Table.read("out/run_fit_table.v1.fits", hdu=1)
+  ```
+
+- Each table says what it is in its header: `TABVER` is its version number,
+  and `PHOTVER` and `PHOTCFG` are the code version and the `fit.phot` settings
+  its aperture columns were written with. The config copy in the output
+  directory still describes the fit.
+
+With a stamps file the fitted templates are read back as they were. Without
+one they are rebuilt through the fit's own template path, with the fitted
+shifts reapplied, and a stamps file is written. On a 1.5 arcmin COSMOS F770W
+patch (8290 sources, templates rebuilt) the step took 1 minute against 14 for
+the full run, returned the fit's columns bit for bit, and reproduced the fit's
+own aperture columns to 4e-5.
+
+Two limits. The step redoes the aperture pass only, so `flux_<i>_total`, which
+is also derived after the fit, is kept as written. And it covers one fitted
+band, like {meth}`~mophongo.pipeline.Pipeline.load_fit`.
 
 ## `FitConfig` reference
 

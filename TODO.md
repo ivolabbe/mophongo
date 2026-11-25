@@ -34,6 +34,14 @@ This file tracks future desired features, checks, and investigations.
   mosaic authors. Reproduce with `scratch/err_calib_check/pull_trend.py`
   (needs a residual image) and `table_pull.py` (fit tables only).
 
+- [ ] Follow-ups to the `phot` step (2026-11-25). Time it and measure its
+  peak memory on a full field, then set a smaller default request for it in
+  `submit.py` than the fit's. It redoes the aperture pass only: the
+  `_total` columns and `throughput` are also derived after the fit, from the
+  amplitudes and `ee_psf_lo`, and are kept as written; redo them here too if
+  that correction ever changes. On CANFAR the same `--step phot` exists in
+  `examples/canfar/submit.py` but has not been tried.
+
 - [ ] Use as few input-catalog columns as possible, and the simplest ones
   (2026-11-25, Ivo). The catalog-tied photometry reads four columns through
   four settings (`phot.aperture_catalog`, `kron_flux_col`, `aper_flux_col`,

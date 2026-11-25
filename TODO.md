@@ -2,6 +2,52 @@
 
 This file tracks future desired features, checks, and investigations.
 
+- [ ] OzStar toolkit under two-factor login (2026-11-25). `nt.swin.edu.au` now
+  asks for a TOTP code after the ssh key, so each of the toolkit's short
+  `ssh`/`scp` calls needs a code unless they share one master connection
+  (`ControlMaster` block in `~/.ssh/config`, opened once with
+  `ssh -fN nt.swin.edu.au`). Nothing in `examples/ozstar` has to change for
+  that, but two things should: `MANUAL.md` still says an ssh key is all the
+  setup, and `submit.ssh` reports a missing master as a bare
+  `Permission denied`. Add a preflight (`ssh -O check`) to `submit.py` and
+  `campaign.py` that names the command to run, and document the block. The
+  `ozstar-mount.sh` reconnect path needs a look too: a reconnect after a
+  network drop cannot enter a code.
+
+- [ ] Calibrate the inverse variance per depth tier (2026-11-25).
+  `get_bg_and_ivar` applies one global scale to the weight map, so the errors
+  inherit the map's spatial contrast, and in the MIRI mosaics that contrast
+  does not match the noise. COSMOS F770W: the weights of programs 1727 and
+  1837 differ by about 25x while the point-source noise measured on the
+  residual differs by about 1.2x, which leaves `err_1` 1.7x too large in the
+  first tier and 2.0 to 2.9x too small in the second (the latter implies a
+  5 sigma depth near 27.0 AB against a measured 26.1). EGS F560W, F1500W,
+  F1800W and F2100W show the same step in the table-only proxy; the other 12
+  run3 bands vary by 1.3 to 1.9x across `err_1` quantiles, part of which is
+  source size. Options: fit the scale in bins of weight (or per exposure
+  group from the `_wcs.csv` table), or measure an empty-position scatter map
+  on the residual and rescale `err_<i>` after the fit. Whether the input
+  weights are read-noise-only is a guess and should be checked with the
+  mosaic authors. Reproduce with `scratch/err_calib_check/pull_trend.py`
+  (needs a residual image) and `table_pull.py` (fit tables only).
+
+- [ ] Set the catalog photometry knobs in the MINERVA configs (2026-11-25).
+  `make_minerva_configs.py` writes `phot = {aperture_ee: 0.7,
+  aperture_catalog: None}` and nothing else, so `totcor_cat` is never
+  written and `ap_flux_cat_<i>` and `ap_flux_est3_<i>` are NaN in all 17 run3
+  tables. The SUPER catalogs have the inputs: `kron_flux_col="fauto_KRON"`,
+  `aper_flux_col="faper_KRON"`, `kron_radius_col="kron_radius_circ"` (arcsec)
+  and `aperture_catalog="use_aper"` (arcsec diameter). Confirm first whether
+  `kron_radius_circ` is the unscaled Kron radius (`kron_k=2.5`) or the scaled
+  aperture radius (`kron_k=1`). A run that leaves the knobs unset should say
+  so once at INFO level, or omit the two columns, so that all-NaN columns do
+  not read as measurements.
+
+- [ ] A template with no weight gets `err_<i>` = 1000 (2026-11-25). run3
+  `egs_f2100w` id 3238797: `flux_1` = 0, `err_pred_1` = inf, `err_1` = 1000,
+  aperture columns NaN. The solver error should be inf or the row should be
+  left at `bad_value`, like the sources that never got a template.
+
 - [ ] Carry the shift covariance through the fit table (2026-08-17). The live
   run now reports a finite `sigma_shift`, but `restore_scene_fit` restores
   only the shift coefficients and their normalisation, so a scene catalog

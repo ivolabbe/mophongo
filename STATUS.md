@@ -3,6 +3,47 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Audit of the photometry and error columns in the MINERVA outputs
+  (2026-11-25). Checked the three local `examples/minerva/cosmos_f770w*` runs
+  and the 17 run3 tables in `scratch/ozstar/out`. Scripts and the per-block
+  table are in `scratch/err_calib_check/`. Open items are in `TODO.md`.
+  * Fitted fluxes: `flux_1`, `err_1`, `err_pred_1`, `throughput_1` and the
+    three `_total` columns are finite for every fitted source in all 20
+    tables (one exception: a zero-weight template in run3 `egs_f2100w` with
+    `err_pred_1` = inf), and the `_total` columns equal the raw ones divided
+    by `ee_psf_lo_1` to machine precision. `err_1 >= err_pred_1` holds to
+    better than 0.05% in run3.
+  * Aperture columns in run3 are measured in the 70% encircled-energy
+    aperture, 0.71" (F560W) to 1.67" (F2100W) in diameter, and
+    `ap_flux_corr_1 / flux_1_total` has a median of 0.97 to 0.99 at SNR > 20.
+  * `ap_flux_cat_1` and `ap_flux_est3_1` are NaN in every table and
+    `totcor_cat` is absent, because no MINERVA config sets
+    `phot.kron_flux_col`, `aper_flux_col` or `kron_radius_col`. With
+    `phot.aperture_catalog` also unset, `aper_1` equals `aper_ee_1` and
+    `ap_flux_catap_1` repeats `ap_flux_ee_1`. The SUPER catalogs do carry the
+    inputs (`fauto_KRON`, `faper_KRON`, `kron_radius_circ`, `use_aper`).
+  * `examples/minerva/cosmos_f770w-robust` and `-robust-fast` predate
+    `fb1e017` (run from `f82b012`), so every aperture column there was
+    measured in a 9.56" aperture and is unusable. Their fitted fluxes and
+    errors are unaffected. `examples/minerva/cosmos_f770w` (2026-08-16) used a
+    fixed 0.7" aperture and is fine.
+  * There is no aperture error column in any table.
+  * `err_1` does not follow the measured noise across depth. On the
+    `cosmos_f770w-robust-fast` residual, the PSF-weighted flux at 138537
+    source-free positions divided by its predicted error has a robust scatter
+    of 0.60 where the calibrated inverse variance is below 3.2 (program 1727)
+    and 2.0 to 2.6 above it (program 1837). The weight map differs by a factor
+    of about 25 between the two tiers; the measured point-source noise
+    differs by about 1.2. `get_bg_and_ivar` rescales the weight map by one
+    global factor (`sigma_true` = 1295), so the map's tier contrast passes
+    straight into the errors. A table-only proxy (the scatter of
+    `ap_res_1 / err_1` for sources with zero fitted flux, in `err_1`
+    quantiles) reproduces this on run3 `cosmos_f770w` (2.30 to 0.48) and shows
+    a spread of 2.8 to 4.8x in `egs_f560w`, `egs_f1500w`, `egs_f1800w` and
+    `egs_f2100w`, against 1.3 to 1.9x in the other 12 bands. Sampling the
+    calibrated weight at the exposure centers in the `_wcs.csv` table confirms
+    the tiers: about 1.7 where program 1727 (253 s exposures) is alone, 39 and
+    up wherever program 1837 (444 s) contributes.
 - [x] `arcify.py` reads arc only to place an input it cannot already place
   (2026-09-03). The same change `ozify.py` had in `9d8e0b2`, which `arcify.py`
   was left out of: it indexed every relevant `arc:projects/minerva` subtree on

@@ -901,6 +901,52 @@ def _record_psf_ee(
     )
 
 
+def _aperture_variances(
+    v_disk: float,
+    v_omega: float,
+    t_disk: float,
+    t_omega: float,
+    err: float,
+    err_pred: float,
+) -> tuple[float, float]:
+    """Variances of the two aperture sums the flux estimators are built from.
+
+    Every aperture estimator is ``alpha * A + sum_region(res)``: a multiple of
+    the fitted amplitude ``A`` plus the residual summed over a region. In a
+    weighted least-squares fit the residual is uncorrelated with every fitted
+    amplitude, so the two terms add in quadrature, and the residual sum has
+    the pixel variance of its region *minus* the variance of the model flux
+    the fit placed there. Keeping only this source's share of that model
+    variance, ``(t * err_pred)**2``, never over-subtracts, so both results are
+    exact for an isolated source and conservative for a blended one.
+
+    Args:
+        v_disk: Pixel variance of the aperture sum over the disk, the sum of
+            ``m**2 / w`` with ``m`` the fraction of each pixel covered.
+        v_omega: The same over Omega, the disk without other sources' segments.
+        t_disk: Aperture sum of this source's template over the disk.
+        t_omega: The same over Omega.
+        err: Solver error on the amplitude, including blending covariance.
+        err_pred: Covariance-free error on the amplitude, ``1/sqrt(sum w T^2)``.
+
+    Returns:
+        ``(var_ap, var_res)``: the variance of the raw aperture sum on model
+        plus residual, ``v_disk + t_disk**2 * (err**2 - err_pred**2)``, and of
+        the residual summed over Omega, ``v_omega - (t_omega * err_pred)**2``.
+        Both are NaN when an input is not finite or the disk holds no valid
+        pixel.
+    """
+    values = (v_disk, v_omega, t_disk, t_omega, err, err_pred)
+    if not all(np.isfinite(v) for v in values) or v_disk <= 0.0:
+        return np.nan, np.nan
+    # err < err_pred happens only at rounding level; clip rather than let it
+    # pull the aperture variance below its pixel noise
+    blend_var = max(err**2 - err_pred**2, 0.0)
+    var_ap = v_disk + t_disk**2 * blend_var
+    var_res = max(v_omega - (t_omega * err_pred) ** 2, 0.0)
+    return float(var_ap), float(var_res)
+
+
 def _bytscl(a: np.ndarray, mn: float, mx: float) -> np.ndarray:
     """IDL ``bytscl``: linear byte scale, ``floor(255.9999*(x-mn)/(mx-mn))``."""
     f = (np.clip(np.asarray(a, dtype=float), mn, mx) - mn) * (255.9999 / (mx - mn))
@@ -2779,8 +2825,8 @@ class Pipeline:
     def _release_scene_weights(self, scenes: Sequence["Scene"] | None = None) -> None:
         """Drop the band weight map from scenes once nothing reads it.
 
-        The weights are last read by ``Templates.predicted_errors`` and by the
-        scene figures; on the upsample path they are a full reference-grid
+        The weights are last read by the aperture errors and by the scene
+        figures; on the upsample path they are a full reference-grid
         array (3.5 GB on a MINERVA field) that every ``Scene`` holds a
         reference to, so without this they would stay alive to the end of the
         process. ``Scene.solve`` refuses to run without them, which is the
@@ -4933,6 +4979,7 @@ class Pipeline:
         psf: np.ndarray | PSFRegionMap | None,
         idx: int,  # current image index (>=1)
         throughput: float = np.nan,  # filter-mean EE fallback for ee_psf_lo
+        weights: np.ndarray | None = None,  # inverse variance on the residual's grid
     ) -> None:
         """
         Aperture photometry on (model + residual), with the classic-mophongo
@@ -4987,6 +5034,34 @@ class Pipeline:
                                the residual is added unscaled; that is what
                                separates it from ap_flux_cat_{idx}, which
                                scales the residual along with the model
+        ap_err_{idx}         – 1-sigma error on ap_flux_{idx}
+        ap_err_corr_{idx}    – ap_err * totcor: error on ap_flux_corr_{idx}
+        ap_err_cat_{idx}     – ap_err * psfcor * totcor_cat: error on
+                               ap_flux_cat_{idx}
+        ap_err_est3_{idx}    – error on ap_flux_est3_{idx}
+
+        **Errors.** Written only when ``weights`` (the band's inverse variance,
+        on the residual's grid) is given. With ``m`` the fraction of a pixel
+        the aperture covers, ``V`` the sum of ``m^2/w`` over a region, ``t``
+        the aperture sum of the source's own template over it, ``err`` the
+        solver error and ``err_pred`` the covariance-free one
+        (:func:`_aperture_variances`):
+
+            ap_err^2      = V_disk + t_disk^2 * (err^2 - err_pred^2)
+            ap_err_est3^2 = (ap_model/flux * psfcor * totcor_cat * err)^2
+                            + V_Omega - (t_Omega * err_pred)^2
+
+        The first is the pixel noise in the aperture plus the amplitude
+        uncertainty that blending adds; for an isolated source it is the pixel
+        noise alone. The second adds the error of the corrected model term to
+        that of the unscaled residual sum. The corrections are treated as
+        noiseless. Pixels without weight add no variance, as they add no flux,
+        and a source whose aperture holds no valid pixel gets no error. The
+        variances are sums over independent pixels of the same inverse
+        variance the fit used, so they share its calibration: correlated noise
+        enters only through the scale ``get_bg_and_ivar`` measured on block
+        sums. On an upsampled grid the replicated subpixels of an edge pixel
+        are counted as independent, which overstates ``V`` by a few percent.
 
         **Which radius is used.** Per source, the larger of the catalog
         aperture and the encircled-energy aperture. The two failure modes it
@@ -5020,7 +5095,9 @@ class Pipeline:
                      f"ap_flux_corr_{idx}", f"ap_flux_cat_{idx}",
                      f"ap_flux_ee_{idx}", f"ap_flux_catap_{idx}",
                      f"aper_{idx}", f"aper_ee_{idx}",
-                     f"ap_res_{idx}", f"ap_flux_est3_{idx}"):
+                     f"ap_res_{idx}", f"ap_flux_est3_{idx}",
+                     f"ap_err_{idx}", f"ap_err_corr_{idx}",
+                     f"ap_err_cat_{idx}", f"ap_err_est3_{idx}"):
             if name not in cat.colnames:
                 cat[name] = cfg.bad_value
         totcor_cat = self._totcor_cat(cat)
@@ -5051,6 +5128,7 @@ class Pipeline:
             # subtracted in the model, but their residuals are not this source's
             # to claim, and inside a shared aperture they would be.
             res_omega = res_patch
+            other_px = None  # other sources' segment pixels in the patch, if any
             if self.segmap is not None:
                 seg_patch = self.segmap[tmpl.slices_original]
                 if seg_patch.shape == res_patch.shape:
@@ -5058,6 +5136,7 @@ class Pipeline:
                     other = (seg_patch != 0) & ~mine
                     if other.any():
                         res_omega = np.where(other, 0.0, res_patch)
+                        other_px = other
 
             # Aperture at the *fitted* position: the astrometric passes moved
             # both the source and its resampled template off the catalog
@@ -5145,6 +5224,49 @@ class Pipeline:
             cat[f"ap_res_{idx}"][row] = ap_res
             if np.isfinite(psfcor) and np.isfinite(tcc):
                 cat[f"ap_flux_est3_{idx}"][row] = ap_model * psfcor * tcc + ap_res
+
+            # --- errors: see the docstring and _aperture_variances ---
+            if weights is not None:
+                w_patch = np.asarray(weights[tmpl.slices_original], dtype=float)
+                valid = np.isfinite(w_patch) & (w_patch > 0)
+                var_patch = np.zeros(w_patch.shape)
+                var_patch[valid] = 1.0 / w_patch[valid]
+                tmpl_patch = tmpl.data[tmpl.slices_cutout]
+                # One overlap mask for the four sums, all at the measured
+                # radius. A pixel the aperture covers by a fraction m enters
+                # the flux sum as m * value, so it enters the variance as
+                # m**2 / w: summing m / w instead overstates the noise of
+                # every edge pixel.
+                ap_mask = CircularAperture(
+                    (float(x0), float(y0)), r=float(r_img_pix)
+                ).to_mask(method="exact")
+                sl_patch, sl_mask = ap_mask.get_overlap_slices(var_patch.shape)
+                v_disk = v_omega = t_disk = t_omega = np.nan
+                if sl_patch is not None:
+                    m = ap_mask.data[sl_mask]
+                    v_px = m**2 * var_patch[sl_patch]
+                    t_px = m * tmpl_patch[sl_patch]
+                    v_disk = v_omega = float(v_px.sum())
+                    t_disk = t_omega = float(t_px.sum())
+                    if other_px is not None:
+                        keep = ~other_px[sl_patch]
+                        v_omega = float(v_px[keep].sum())
+                        t_omega = float(t_px[keep].sum())
+                err_fit = float(getattr(tmpl, "err", np.nan))
+                var_ap, var_res = _aperture_variances(
+                    v_disk, v_omega, t_disk, t_omega,
+                    err_fit, float(getattr(tmpl, "err_pred", np.nan)),
+                )
+                if np.isfinite(var_ap):
+                    ap_err = float(np.sqrt(var_ap))
+                    cat[f"ap_err_{idx}"][row] = ap_err
+                    cat[f"ap_err_corr_{idx}"][row] = ap_err * totcor
+                    if np.isfinite(psfcor) and np.isfinite(tcc):
+                        corr = abs(psfcor * tcc)
+                        cat[f"ap_err_cat_{idx}"][row] = ap_err * corr
+                        cat[f"ap_err_est3_{idx}"][row] = float(
+                            np.sqrt((den * corr * err_fit) ** 2 + var_res)
+                        )
 
     def _fit_catalog(self, config: _FitConfig) -> Table:
         """Output-catalog skeleton :meth:`run` fits into: id/x/y + provenance."""
@@ -5648,15 +5770,6 @@ class Pipeline:
             with self._phase("catalog update"):
                 err_pred = Templates.predicted_errors(templates, weights_i)
 
-            # Last read of the band's inverse variance in the fit itself.
-            # Nothing after this point -- residual, aperture photometry,
-            # catalog update, write_outputs -- touches it except the scene
-            # figures, so a run that draws none can drop it here already;
-            # write_outputs releases it for the rest, after the figures and
-            # before the stamps.
-            if not self._scene_pixels_needed():
-                weights_i = None
-                self._release_scene_weights(scenes)
             throughput = _filter_psf_throughput(
                 psfs[ifilt] if psfs is not None else None,
                 None if psf_throughputs is None else psf_throughputs[ifilt],
@@ -5713,7 +5826,19 @@ class Pipeline:
                 psfs[ifilt] if psfs is not None else None,
                 ifilt,
                 throughput=throughput,
+                weights=weights_i,
             )
+
+            # Last read of the band's inverse variance: the aperture errors
+            # above. Nothing after this point -- write_outputs -- touches it
+            # except the scene figures, so a run that draws none can drop it
+            # here already; write_outputs releases it for the rest, after the
+            # figures and before the stamps. Holding it through the aperture
+            # pass does not raise the peak: it was already alive next to the
+            # residual when the predicted errors were computed.
+            if not self._scene_pixels_needed():
+                weights_i = None
+                self._release_scene_weights(scenes)
 
             self.residuals.append(res)
             #            self.fit.append(fitter)

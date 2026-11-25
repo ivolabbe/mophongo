@@ -19,8 +19,8 @@ different questions and are not interchangeable.
 | `flux_<i>_total` | `flux_<i>` / PSF throughput | total source flux, compare to truth catalogs |
 | `ap_flux_corr_<i>` | aperture flux on (model + residual), corrected to the reference-band PSF | colours and SEDs against a matched-aperture catalog |
 
-`err_<i>` / `err_pred_<i>` accompany the first two. The aperture scheme has **no
-error column** — see §6.
+`err_<i>` / `err_pred_<i>` accompany the first two, and `ap_err_corr_<i>` the
+third (since 2026-11-25; see §6).
 
 Sources with no fitted template keep `FitConfig.bad_value`, which is `NaN`
 (`fit.py:54`).
@@ -42,7 +42,7 @@ For a lower-resolution band the pipeline defaults to
 1. the band image and its inverse variance are block-replicated onto the
    reference grid, science with `conserve_sum=True` and ivar copied then scaled
    by `k**2` (`pipeline.py:115-132`);
-2. **`wcs[ifilt] = wcs[0]`** (`pipeline.py:1207`) — the band's WCS is replaced
+2. **`wcs[ifilt] = wcs[0]`** (`pipeline.py:1207`): the band's WCS is replaced
    by the reference WCS, because the band image now lives on the reference grid;
 3. templates are convolved with the matching kernel and projected onto the same
    block-replicated grid (`pipeline.py:1228-1234`).
@@ -51,7 +51,7 @@ Consequence: after step 2, `self._pixel_scale_arcsec(self.wcs[ifilt])` returns
 the *reference* pixel scale, and every radius computed from it is in reference
 pixels. The image aperture and the catalog aperture end up on the same grid, so
 they are directly comparable. In the `downsample` path this rebinding does not
-happen and the two are on different grids — see §6.
+happen and the two are on different grids; see §6.
 
 ## 3. Scheme A — template-fit flux
 
@@ -87,9 +87,9 @@ otherwise the correction silently becomes 1.
 
 Two flavours:
 
-- `err_<i>` — from the solver, includes template covariance (neighbour
+- `err_<i>`: from the solver, includes template covariance (neighbour
   degeneracy inflates it);
-- `err_pred_<i>` — `Templates.predicted_errors` (`templates.py:1430-1445`),
+- `err_pred_<i>`: `Templates.predicted_errors` (`templates.py:1430-1445`),
   `1/sqrt(sum(w * T^2))`, ignoring covariance.
 
 Their ratio is the standard calibration diagnostic. On the MINERVA F770W trial
@@ -121,7 +121,7 @@ comparison.
 Read `corr` as: *rescale an aperture flux measured at this band's resolution
 into the aperture flux the same source would have at the reference band's
 resolution.* Both `T_ref` and `T_conv` are unit-sum, so `num` and `den` are
-encircled-energy fractions of the source model, not of a point-source PSF —
+encircled-energy fractions of the source model, not of a point-source PSF:
 morphology is included, which is the point.
 
 Worked numbers from the DR0.1 COSMOS F770W run (`flux_1 > 5`, n=119), recovered
@@ -135,7 +135,7 @@ from the output columns:
 
 ### The two radii
 
-`r_img` — `_resolve_image_ap_radius_pix` (`pipeline.py:831-875`). One value per
+`r_img`: `_resolve_image_ap_radius_pix` (`pipeline.py:831-875`). One value per
 band, from `FitConfig.aperture_diam`:
 
 - scalar → that diameter for all bands;
@@ -146,7 +146,7 @@ band, from `FitConfig.aperture_diam`:
 `aperture_units` ("arcsec" or "pix") controls the conversion. The resolved value
 is echoed as the column `aper_<i>` in arcsec diameter (`pipeline.py:1407-1413`).
 
-`r_cat` — `_resolve_catalog_ap_radius_pix` (`pipeline.py:877-929`). Per source,
+`r_cat`: `_resolve_catalog_ap_radius_pix` (`pipeline.py:877-929`). Per source,
 in reference-image pixels, from `FitConfig.aperture_catalog`:
 
 - `str` → a catalog column of per-source **diameters** (this is the aperpy hook);
@@ -168,9 +168,9 @@ Verified against `MINERVA-COSMOS_n3.0_v1.3_LW_Kf444w_SUPER_CATALOG.fits`
 
 | need | source | DR0.1 value |
 |---|---|---|
-| join key = segmap label | `id` | — |
-| reference-grid positions | `x`, `y` | — |
-| sky positions (footprint + trial-patch cuts, `pipeline.py:562-585`) | `ra`, `dec` | — |
+| join key = segmap label | `id` | - |
+| reference-grid positions | `x`, `y` | - |
+| sky positions (footprint + trial-patch cuts, `pipeline.py:562-585`) | `ra`, `dec` | - |
 
 ### Required to reconstruct matched-aperture photometry
 
@@ -181,7 +181,7 @@ Verified against `MINERVA-COSMOS_n3.0_v1.3_LW_Kf444w_SUPER_CATALOG.fits`
 | arcsec ↔ pixel tie | meta `PIXSCALE` | 0.04 |
 | aperture → total | `tot_cor` | median 2.147 |
 | flux scale | meta `PHOT_ZP`, `PHOT_UNIT` | 28.9, `10*nJy` |
-| usable subset | `use_phot`, `flag_star`, `flag_artifact`, `flag_kron`, `flag_lowsnr` | — |
+| usable subset | `use_phot`, `flag_star`, `flag_artifact`, `flag_kron`, `flag_lowsnr` | - |
 
 Two notes on these:
 
@@ -235,9 +235,12 @@ scale and is safe either way.
 promises 1.5 × FWHM of `PSF[0]`, but the only caller always passes a non-`None`
 `r_default`, so that branch never runs.
 
-**No aperture errors.** `ap_flux_<i>` and `ap_flux_corr_<i>` have no companion
-uncertainty. The residual inside the aperture is correlated (block-replicated
-ivar, neighbour models), so `err_pred` is not a valid substitute.
+**Aperture errors (resolved 2026-11-25).** `ap_flux_<i>`, `ap_flux_corr_<i>`,
+`ap_flux_cat_<i>` and `ap_flux_est3_<i>` now have `ap_err_*` companions, built
+from the pixel variance in the aperture, the template's share of it, and the
+two amplitude errors. `err_pred` alone was never a valid substitute: it is the
+error of a fitted amplitude, and an aperture sum also carries the pixel noise
+of the residual. The budget is in `docs/outputs.md`, *Aperture errors*.
 
 **`num` is recomputed per band.** It depends only on the reference template and
 `r_cat`, both band-independent, yet it sits inside the per-band source loop

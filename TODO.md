@@ -43,6 +43,19 @@ This file tracks future desired features, checks, and investigations.
   so once at INFO level, or omit the two columns, so that all-NaN columns do
   not read as measurements.
 
+- [ ] Check the aperture errors against empty apertures on full mosaics
+  (2026-11-25). `ap_err_<i>` and its three companions are propagated from the
+  fit's inverse variance, so they inherit the depth-tier miscalibration above.
+  On one single-tier COSMOS F770W patch, calibrated on itself, empty apertures
+  on the residual scatter by 1.015 times the predicted error
+  (`scratch/ap_err_check/empty_apertures.py`). Once the inverse variance is
+  calibrated per tier, repeat that on full fields and in the other bands, at
+  each band's `aper_<i>`. Two smaller things to settle with the same data: the
+  few percent by which counting replicated edge subpixels as independent
+  overstates the variance on an upsampled grid, and whether `ap_flux_ee_<i>`
+  and `ap_flux_catap_<i>` need errors of their own when a catalog aperture is
+  configured.
+
 - [ ] A template with no weight gets `err_<i>` = 1000 (2026-11-25). run3
   `egs_f2100w` id 3238797: `flux_1` = 0, `err_pred_1` = inf, `err_1` = 1000,
   aperture columns NaN. The solver error should be inf or the row should be

@@ -28,7 +28,7 @@ config-driven run fits one band, so its columns end in `_1`.
 
 `<name>_fit_table.fits` (in memory: `Pipeline.table`) holds one row per input
 catalog source that survived preprocessing (footprint and trial-region cuts).
-Fluxes are in the pixel units of the fitted image — check the mosaic's
+Fluxes are in the pixel units of the fitted image; check the mosaic's
 `BUNIT` header keyword for the physical conversion (e.g. a mosaic in units
 of 10 nJy per pixel yields fluxes in the same 10 nJy unit). Sources for
 which no template was fitted keep `FitConfig.bad_value` (default `NaN`) in
@@ -59,7 +59,7 @@ copied through.
   with no correction for flux outside the finite PSF stamp. Templates and
   matching kernels are unit-sum, which puts the amplitude on that scale; under
   the default `"psf_wings"` scheme a template sums to slightly less than one
-  and the amplitude is not rescaled for it — the *Normalization order* section
+  and the amplitude is not rescaled for it; the *Normalization order* section
   of {doc}`templates` gives the reason. Each amplitude is written to the
   catalog row carrying the template's `id`; catalog deblend children are rows
   of their own, so a child keeps its own flux instead of having it folded into
@@ -113,8 +113,8 @@ copied through.
 : The scene-level astrometry verdict, inherited by every source fitted in
   that scene: `0` when the scene's shifts converged, `1` when it was still
   moving after `FitConfig.fit_astrometry_niter` passes, `-1` for sources with
-  no template. Convergence is a property of the scene — all its members came
-  out of the same solve/apply passes — so a `1` marks the whole group whose
+  no template. Convergence is a property of the scene (all its members came
+  out of the same solve/apply passes), so a `1` marks the whole group whose
   positions, and therefore fluxes, are the last iterate rather than a
   converged solution. The run logs a warning naming the worst offenders, and
   `<name>_scene_catalog.csv` carries the same verdict per scene along with
@@ -124,7 +124,7 @@ copied through.
 : The weight this source carried as an astrometric anchor, from
   `FitConfig.astrom_robust`: `1.0` when the robust pass is off, declined the
   scene, or found nothing to downweight, and `0.0` for a rejected anchor.
-  Non-anchors read `1.0` — they never had a vote to lose. Where a source has
+  Non-anchors read `1.0`: they never had a vote to lose. Where a source has
   several templates the weakest is taken, so the column answers "was any part
   of this source thrown out of the shift fit". The column is written whether
   or not the pass is enabled, so an A/B pair of runs differs in the values
@@ -134,13 +134,13 @@ copied through.
 
 Aperture photometry on the model-plus-residual image is always attempted; the
 aperture radius comes from `FitConfig.phot.aperture_diam` (a fixed diameter in
-`phot.units`, or one value per band as an array). Left at `None` — the default
-— the aperture is instead sized by encircled energy through
+`phot.units`, or one value per band as an array). Left at `None`, the default,
+the aperture is instead sized by encircled energy through
 `FitConfig.phot.aperture_ee`, default `0.70`: the diameter enclosing that
 fraction of the band's *model* PSF, meaning the drizzled stamp after the
 Gaussian diffusion blur, which is the PSF the matching kernel was built
 against. Sizing by EE is what keeps a colour free of aperture corrections to
-first order — the same EE in every band is the same correction factor in every
+first order: the same EE in every band is the same correction factor in every
 band, and it cancels in the ratio, which a fixed angular diameter cannot do
 because the PSF width runs with wavelength. It also sits near the SNR optimum:
 for a background-limited point source `SNR ~ EE(r)/r`, which for a Gaussian
@@ -161,7 +161,7 @@ the floor that catches it near maximum SNR. Both raw sums are written whichever
 way the rule falls, so the choice is auditable per source.
 
 `aper_<i>`
-: The aperture diameter actually used, in arcsec, per source — the larger of
+: The aperture diameter actually used, in arcsec, per source: the larger of
   the two. Always written. Under `aperture_ee` the diameter is derived from the
   band's model PSF rather than configured, so this column is the only record of
   the realized size, and it is what you need to compare two bands or compare
@@ -216,12 +216,12 @@ which convention is meant and the bare name does not.
 `ee_psf_lo_<i>`
 : The per-source finite-support box encircled energy applied in
   `totcor_<i>` (filter-mean fallback where a template has no recorded
-  value) — the same factor `flux_<i>_total` divides by.
+  value), the same factor `flux_<i>_total` divides by.
 
 `stampcor_<i>`
 : `1 / ap_lo` alone: the aperture carried to the total of the model on its
   own finite stamp support, with **no** EE factor. Named `stampcor` rather
-  than `tot*` on purpose — see the naming rule below. This is the quantity
+  than `tot*` on purpose; see the naming rule below. This is the quantity
   classic IDL releases as `totcor`, which is misnamed by the same rule;
   compare the two only when both runs use the same PSF support. (Written as
   `tot_stamp_<i>` before 2026-08-12.)
@@ -267,8 +267,8 @@ Omega  = disk(R), other sources' segment pixels zeroed
 ```
 
 `R` is `aper_<i>`, the band's own measurement aperture after the max rule
-below. The aperture-to-total is built as `psfcor * totcor_cat` — the
-high-res→low-res band correction times the high-res aperture-to-total — rather
+below. The aperture-to-total is built as `psfcor * totcor_cat` (the
+high-res→low-res band correction times the high-res aperture-to-total) rather
 than from a bare `1/ap_lo`, which avoids the name `totcor` entirely; that name
 has meant both the with-EE and the without-EE convention in different
 codebases. `f3` is a total in the full sense, because `totcor_cat` carries the
@@ -276,18 +276,18 @@ encircled-energy term.
 
 read left to right as three separate jobs:
 
-- `aper(model - model_nn, R) * psfcor` — the best-fit model, with the
+- `aper(model - model_nn, R) * psfcor`: the best-fit model, with the
   neighbours' models subtracted, summed in the measurement aperture and then
   carried onto the high-resolution template's PSF. This is one joint
   aperture-and-PSF correction rather than two: `psfcor` is a ratio of two
   encircled energies at the *same* radius, so the aperture size cancels out of
   it and only the hi/lo PSF difference remains. Written as `ap_model_<i>`.
-- `totcor_cat` — the correction to a genuine total, taken from the detection
+- `totcor_cat`: the correction to a genuine total, taken from the detection
   catalog: the F444W Kron-to-aperture ratio times the inverse encircled energy
   outside the scaled Kron radius. Catalog-tied, so results on this estimator
   compare only against the release catalog, never against the internal
   `totcor_<i>` convention.
-- `sum_Omega(res)` — the residual summed over the same disk, with other
+- `sum_Omega(res)`: the residual summed over the same disk, with other
   sources' segment pixels zeroed, written as `ap_res_<i>`. **Added unscaled.**
   The neighbours are already subtracted in the model, but their residuals are
   not this source's to claim, and inside a shared aperture they would be. This
@@ -303,7 +303,7 @@ residual vanishes. They are different estimators, not two spellings of one.
 
 The aperture rule is what makes the first two terms compose cleanly. When the
 catalog aperture wins, the band is measured at the catalog's own `R_phi`, and
-`totcor_cat` — which was itself defined at that radius on the detection band —
+`totcor_cat`, which was itself defined at that radius on the detection band,
 needs no aperture-size adjustment at all: `psfcor` is left doing pure PSF work.
 When the source sits on the catalog's aperture floor, that radius is far inside
 the MIRI core and the encircled-energy aperture takes over, trading an exactly
@@ -315,12 +315,76 @@ visible per source.
 The residual term is why the floor should not simply be made large: it grows
 with aperture area, so a wide aperture admits more noise and more of any
 neighbour the fit failed to subtract. The model term is already corrected, so
-buying wing-insensitivity with a wide floor mostly buys noise in `res` — which
+buying wing-insensitivity with a wide floor mostly buys noise in `res`, which
 is why `aperture_ee` defaults near the SNR optimum rather than to a near-total
 aperture.
 
 `aper_<i>` records the realized diameter per source, which is the number to
 quote when reporting any of this.
+
+### Aperture errors
+
+Each aperture flux has a 1-sigma error column, named by replacing `flux` with
+`err`. They are written when the band has a weight map.
+
+`ap_err_<i>`
+: Error on `ap_flux_<i>`.
+
+`ap_err_corr_<i>`
+: `ap_err_<i> * totcor_<i>`, the error on `ap_flux_corr_<i>`.
+
+`ap_err_cat_<i>`
+: `ap_err_<i> * psfcor_<i> * totcor_cat`, the error on `ap_flux_cat_<i>`.
+  Written where that flux is.
+
+`ap_err_est3_<i>`
+: Error on `ap_flux_est3_<i>`. Written where that flux is.
+
+`ap_flux_ee_<i>` and `ap_flux_catap_<i>` have no error column of their own.
+Whichever of the two the aperture rule selected is `ap_flux_<i>`, and
+`ap_err_<i>` belongs to it.
+
+Every aperture estimator is a multiple of the fitted amplitude plus the
+residual summed over a region. In a weighted least-squares fit the residual is
+uncorrelated with the fitted amplitudes, so the two terms add in quadrature:
+
+```
+ap_err^2      = V_disk + t_disk^2 * (err^2 - err_pred^2)
+ap_err_est3^2 = (ap_model/flux * psfcor * totcor_cat * err)^2
+                + V_Omega - (t_Omega * err_pred)^2
+```
+
+Here `m` is the fraction of a pixel inside the aperture, `V = sum(m^2 / w)` is
+the pixel variance of the aperture sum over a region (the full disk, or
+`Omega`, the disk without other sources' segments), `t = sum(m * T)` is the
+source's own template summed the same way, and `err` and `err_pred` are the
+two amplitude errors of the fit.
+
+- The raw sum `ap_flux_<i>` is the data minus the neighbors' models, so for an
+  isolated source (`err = err_pred`) its error is the pixel noise in the
+  aperture and nothing else. Blending adds the amplitude uncertainty it causes.
+- The residual sum has less variance than the pixels it covers, because the
+  fit absorbed `(t * err_pred)^2` of it. `ap_err_est3_<i>` is therefore smaller
+  than the quadrature sum of the model error and the aperture noise.
+- `totcor`, `psfcor` and `totcor_cat` are treated as noiseless.
+- A pixel without weight adds no variance, as it adds no flux. A source whose
+  aperture holds no valid pixel gets no error.
+
+The expressions are exact for an isolated source and an upper bound for a
+blended one, where only the source's own share of the model variance is
+subtracted. On mock images the scatter of each of the four fluxes over
+independent noise realizations is 1.00 times its error column for isolated
+sources and 0.96 for pairs 0.75 FWHM apart (`tests/test_aperture_errors.py`).
+On a real upsampled mosaic, a single-depth COSMOS F770W patch, the aperture
+sums of the residual at 14252 source-free positions scatter by 1.02 times the
+predicted error.
+
+Two limits apply to real mosaics. The errors are sums over independent pixels
+of the inverse variance the fit used, so they share its calibration: correlated
+noise enters only through the single scale factor measured on block sums, and
+where the weight map misstates the depth, `err_<i>` and the aperture errors are
+off by the same factor. On an upsampled grid the replicated subpixels of an
+edge pixel are counted as independent, which overstates `V` by a few percent.
 
 ### Header metadata
 
@@ -328,7 +392,7 @@ The table's FITS header records the realized PSF encircled energies used for
 the total-flux correction, per band `<i>`:
 
 `EEBOX<i>`
-: Realized encircled energy of the full square PSF stamp — the value written
+: Realized encircled energy of the full square PSF stamp: the value written
   as `throughput_<i>`.
 
 `PSFSZ<i>`
@@ -356,13 +420,13 @@ high-resolution science header. The matching model images are in
 
 `<name>_scene_catalog.csv` has one row per fitted scene ({doc}`fitting`):
 `id` (scene id), `n_templates`, `n_anchor` (sources that passed the
-astrometric anchor cuts — SNR, isolation, and optional star exclusion — so it
+astrometric anchor cuts (SNR, isolation, and optional star exclusion), so it
 counts more than brightness despite the older `is_bright` spelling), `ra`,
 `dec` of the scene center, the total astrometric shift `dx`, `dy` at that
 center in reference-grid pixels (NaN where the scene solved no astrometry),
 `sigma_shift`, `shift_rms`, `chi2_dof`, and a `minerva_link` column linking
 each position to an external sky viewer. That column is written only when
-`RunConfig.fitsmap_url` gives a FITSMap root — a full URL, or a bare
+`RunConfig.fitsmap_url` gives a FITSMap root: a full URL, or a bare
 `<field>/<release>` which gets the default host in front. Unset or empty drops
 the column, since a guessed link is worse than none.
 
@@ -488,8 +552,8 @@ scene id labels each scene in light gray next to its first arrow.
 Positions and arrows are in RA/Dec degrees, drawn with aspect `1/cos(dec)` so
 angles are undistorted, RA increasing to the left. Shifts are sub-pixel, so
 arrows carry a common magnification set from the 90th percentile of their
-length — a single runaway scene would otherwise shrink every other arrow to
-nothing — and the legend arrow gives that percentile in pixels and arcsec.
+length (a single runaway scene would otherwise shrink every other arrow to
+nothing), and the legend arrow gives that percentile in pixels and arcsec.
 
 `Scene.shifts` holds the coefficients of the *last* astrometric iteration
 only, so the plotted field is refit at the same order to the accumulated
@@ -520,7 +584,7 @@ JSON file.
 
 ### Layout
 
-- **Primary HDU** — header only:
+- **Primary HDU**, header only:
   - `NSRC`: number of `SOURCES` rows
   - `IFILT`: fitted image index the `*_lo` columns belong to
   - `RUNNAME`: run name, pointing at the JSON/geojson files of the run
@@ -530,7 +594,7 @@ JSON file.
   `load_fit` compares the grid shapes against the loaded images and rejects a
   stale stamps file.
 
-- **`SOURCES`** — one binary-table row per fitted template:
+- **`SOURCES`**, one binary-table row per fitted template:
 
   `id`, `x`, `y`
   : Source id and reference-grid position.
@@ -566,7 +630,7 @@ JSON file.
     the `scene_<i>` column of the fit table.
 
   `ee_psf_lo`
-  : Encircled energy of the low-resolution PSF stamp at this position — the
+  : Encircled energy of the low-resolution PSF stamp at this position: the
     per-source divisor behind `flux_<i>_total`.
 
   `ee_tmpl`
@@ -684,7 +748,7 @@ needed, reads the written products through
 {meth}`~mophongo.pipeline.Pipeline.load_outputs`, rebuilds the fitted
 templates from `<name>_stamps.fits`, and recreates the derived state (grid
 upsampling, model image) so the instance matches a completed `run()` without
-refitting — the diagnostic methods in {doc}`diagnostics` then work as usual.
+refitting; the diagnostic methods in {doc}`diagnostics` then work as usual.
 Requires a config-driven pipeline; returns `self`.
 
 Not restored: the scene objects (`all_scenes` stays empty; membership
@@ -721,8 +785,8 @@ silently mixing configurations:
 - **The stamps header** names the run (`RUNNAME`) and records the grid shapes
   that `load_fit` validates against the loaded images.
 - **The run log** (`<name>.log`, written by `run_all` or the
-  `Pipeline.log_run` context manager) captures everything the run emits —
-  logging records, warnings, and progress output — with a timestamped banner
+  `Pipeline.log_run` context manager) captures everything the run emits
+  (logging records, warnings, and progress output) with a timestamped banner
   recording the Python version and platform. Successive runs append.
 - **The residual FITS** inherits the full header, including the WCS, of the
   high-resolution science image.

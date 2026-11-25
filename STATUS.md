@@ -3,6 +3,51 @@
 This file records completed implementations, validation runs, and the current work state.
 
 ## Current Work
+- [x] Error columns for the aperture fluxes (2026-11-25). `ap_err_<i>`,
+  `ap_err_corr_<i>`, `ap_err_cat_<i>` and `ap_err_est3_<i>` accompany
+  `ap_flux_<i>`, `ap_flux_corr_<i>`, `ap_flux_cat_<i>` and
+  `ap_flux_est3_<i>`.
+  * Budget. Each estimator is a multiple of the fitted amplitude plus a
+    residual sum, and the residual of a weighted least-squares fit is
+    uncorrelated with the amplitudes, so the two add in quadrature:
+    `ap_err^2 = V_disk + t_disk^2 (err^2 - err_pred^2)` and
+    `ap_err_est3^2 = (ap_model/flux * psfcor * totcor_cat * err)^2 + V_Omega -
+    (t_Omega * err_pred)^2`, with `V = sum(m^2/w)` over the aperture (`m` the
+    covered fraction of a pixel) and `t` the template's aperture sum. Exact
+    for an isolated source, an upper bound for a blended one. The arithmetic
+    is the pure function `_aperture_variances`; the sums are taken in
+    `_add_aperture_photometry` from one overlap mask per source.
+  * The first version summed `m/w`, the photutils convention. The Monte Carlo
+    caught it: the residual sum then came out with twice its measured
+    variance, because every edge pixel was overcounted and the template term
+    is subtracted from the total.
+  * `run()` now releases the band's inverse variance after the aperture pass
+    instead of before it. The peak is unchanged: the map was already alive
+    next to the residual when `predicted_errors` ran.
+  * Validation on mocks (`tests/test_aperture_errors.py`, 12 tests): over
+    1024 isolated sources the scatter of each flux is 1.000 to 1.003 times its
+    error column, and the residual sum alone 1.04 times its predicted error;
+    for pairs 0.75 FWHM apart, where `err/err_pred` = 1.065, the ratio is
+    0.96. Under NNLS a source pinned at zero keeps a correct `ap_err`
+    (1.003) and a conservative `ap_err_est3` (0.85).
+  * Validation on real data: a trial run on a 1.5 arcmin COSMOS F770W patch
+    (`scratch/ap_err_check/v1`, 8301 sources, fit grid upsampled 2x, catalog
+    photometry knobs set). Every aperture flux has a finite, positive error
+    (8290 of 8290, and 8142 of 8142 for the two catalog-tied ones). At 14252
+    source-free positions the aperture sum of the residual divided by
+    `sqrt(sum(m^2/w))` has a robust scatter of 1.015 (0.99, 1.01 and 1.05 in
+    terciles of weight), and the median `ap_err_1 / err_1` is 1.11. The patch
+    sits in one depth tier and its inverse variance was calibrated on the
+    patch itself (`sigma_true` 2907 against 1295 for the full field), so this
+    confirms the implementation on real pixels, not the full-field
+    calibration. The aperture pass took 12.7 s for 8290 templates.
+  * `ap_flux_ee_<i>` and `ap_flux_catap_<i>` have no column of their own; the
+    one the aperture rule selected is `ap_flux_<i>`.
+  * The errors use the fit's inverse variance, so on real mosaics they carry
+    the depth-tier miscalibration recorded in the audit below.
+  * `docs/outputs.md` has a new *Aperture errors* section, and the two
+    statements in `docs/PHOTOMETRY_APERTURES.md` that no aperture error exists
+    are corrected. Full suite: 515 passed, the 12 new tests included.
 - [x] Audit of the photometry and error columns in the MINERVA outputs
   (2026-11-25). Checked the three local `examples/minerva/cosmos_f770w*` runs
   and the 17 run3 tables in `scratch/ozstar/out`. Scripts and the per-block

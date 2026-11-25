@@ -220,6 +220,46 @@ def do_upload_cfg(names: list[str]) -> None:
                 f"run{run_number()}/config/{suffix}")
 
 
+def sessions_named(name: str) -> set[str]:
+    """Ids the service currently lists under this session name.
+
+    Skaha appends a ``-1`` replica index, so a job submitted as
+    ``mophongo-uds-f770w`` lists as ``mophongo-uds-f770w-1``; both spellings
+    count. An unreadable listing answers "none", which only costs a retry.
+    """
+    try:
+        rows = session().fetch(kind="headless")
+    except Exception:  # noqa: BLE001 - transient API errors mean "unknown"
+        return set()
+    return {i["id"] for i in rows
+            if i.get("name", "") in (name, f"{name}-1") and i.get("id")}
+
+
+def adopt_lost(name: str, before: set[str], window: int = 120,
+               poll: int = 15) -> str:
+    """Id of a session this launch created but was not told about, or ``""``.
+
+    A read timeout on the submit POST is not evidence the submit failed. The
+    service creates the session and drops the reply, so a retry starts a
+    *second* job under the same name -- and two full-field fits sharing one
+    ``out_dir`` is not something the outputs show afterwards. Measured: three
+    consecutive "empty response" timeouts produced three running sessions.
+
+    A session is not listed the moment it is accepted, so this polls rather
+    than asking once; ``before`` is the listing from ahead of the attempt, so
+    only an id that appeared since counts and a completed job of the same name
+    from an earlier campaign is not adopted.
+    """
+    deadline = time.time() + window
+    while True:
+        new = sessions_named(name) - before
+        if new:
+            return sorted(new)[0]
+        if time.time() >= deadline:
+            return ""
+        time.sleep(poll)
+
+
 def launch(name: str, script: str, cores: int, ram: int, env: dict[str, str],
            tries: int = 3) -> str:
     """Start one headless job and return its session id, or ``""``.
@@ -234,8 +274,13 @@ def launch(name: str, script: str, cores: int, ram: int, env: dict[str, str],
     ``JedisDataException: ERR max number of clients reached``. skaha swallows
     those and returns an empty list, so an unretried failure is a job that
     silently never existed.
+
+    But a retry is only safe when the submit really was lost, and a read
+    timeout does not say that: see :func:`adopt_lost`, which is consulted
+    before every retry.
     """
     env = {"RUNNUM": str(run_number()), **env}
+    before = sessions_named(name)
     for attempt in range(1, tries + 1):
         try:
             ids = session().create(
@@ -249,9 +294,17 @@ def launch(name: str, script: str, cores: int, ram: int, env: dict[str, str],
         if ids and ids[0]:
             log.info("%-24s %s", name, ids[0])
             return ids[0]
+        # Look before retrying: the submit may have been accepted and only the
+        # reply lost, in which case retrying duplicates the job rather than
+        # replacing it.
+        sid = adopt_lost(name, before)
+        if sid:
+            log.warning("%-24s %s (submit reply lost after %s; the session "
+                        "exists, adopting it)", name, sid, why)
+            return sid
         if attempt < tries:
-            log.warning("%-24s submit failed (%s), retry %d/%d",
-                        name, why, attempt, tries)
+            log.warning("%-24s submit failed (%s) and no session appeared, "
+                        "retry %d/%d", name, why, attempt, tries)
             time.sleep(10)
     log.error("%-24s FAILED after %d attempts", name, tries)
     return ""

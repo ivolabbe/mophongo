@@ -36,6 +36,29 @@ This file records completed implementations, validation runs, and the current wo
   same pair. `wanted_inputs` now lives here and `ozify` imports it, since the
   two copies were identical.
 
+- [x] A lost submit reply started a second job under the same name
+  (2026-09-03). `launch()` retried whenever skaha answered with an empty list,
+  on the reasoning that the service drops submissions under load and an
+  unretried failure is a job that silently never existed. That holds for the
+  HTTP 500 it was written for, but not for a read timeout: the session is
+  created and only the reply is lost, so the retry starts a *second* job under
+  the same name. The CANFAR run3 launch measured it — three consecutive
+  "empty response" timeouts on `mophongo-repair-cosmos-f770w` left three
+  sessions running, and the same happened for egs, so two of the three fields
+  had three jobs writing one `<field>_repair_cache.fits`. That is the race the
+  campaign's phase split exists to prevent, arrived at from the other side.
+
+  `sessions_named()` lists the ids under a name (both spellings, since skaha
+  appends the `-1` replica index) and `adopt_lost()` polls it for up to two
+  minutes after a failed-looking attempt, against a listing taken before the
+  attempt. A session that appeared is adopted and returned; only a name that
+  stays absent is retried. Registration lag is why it polls rather than asking
+  once — the run3 sessions were listed within about a minute of the timeout
+  that reported them lost.
+
+  Left alone at 17 full-field bands this would have been 17 pairs of jobs
+  writing one `out_dir` each, which the outputs do not show afterwards.
+
 - [x] The CANFAR access toolkit is in the repo, and OzStar staging asks before
   it reaches for CANFAR (2026-09-03). `examples/canfar/remote/` now ships the
   shell helpers that get a machine onto CANFAR — `canfar-cert.sh` for the CADC
